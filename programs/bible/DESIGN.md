@@ -8284,6 +8284,9 @@ simulator took the app's install but then called it "unknown to FrontBoard", so 
 and every step of the read group timed out until the job's 30 minutes ran out; the other jobs were
 green. A runner's fault, not the app's. `simulate.sh`'s launch now installs the app again and
 launches it once more when the simulator says that (its data kept), and timing.txt says so.
+Run 39594407578 (5fc833f78, every job green, no step timed out): read/help/original/plans 26.4
+minutes, notes/listen/ipad 28.6, ribbons/study/ios18 19.8, store/memory/more 17.6,
+languages/versions 12.5, frames 9.6; the original group 297 s.
 
 **What needs a real phone:** the Hebrew's points and the dotted lines under them in SF Hebrew at
 every text size (the simulator's fonts are the phone's, but the eye should judge); the apparatus
