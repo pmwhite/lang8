@@ -123,6 +123,21 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   pages with search, symbols drawn inline, links between parts) and Show
   Tips. The words are `data/help.txt`: every round that changes a feature,
   a control's title or a place updates it (DESIGN.md §15.6).
+- iPad, and any width (§17): one app for the iPhone and the iPad, every
+  orientation (an iPhone not upside down), any window from 320 × 480,
+  following the window's size class: a narrow window is the iPhone's app.
+  The text is a column of at most 34 em (about 70 characters), centred; the
+  place (chapter, verse, how far into it) is measured before a width
+  changes and put back after, through rotation and resizing. In a wide
+  window the sheets are form sheets and Reading settings a popover from
+  Aa; the tray, capsules and mini player sit over the column. Keys: ⌘L Go
+  To, ⌘F Search, ⌘] and ⌘[ chapters, ⌘← back, ⌘⇧B Library, ⌘, settings,
+  ⌘⇧P Listen, ⌥⌘I Study, Space a page (the menu bar's Go and View menus);
+  Practice's Return and ⌘1–⌘3. Study beside the text: on a wide window
+  (from about 980 points) Study opens in a 390 point panel beside the page
+  and stays on its verse while you read; a verse selected shows there; its
+  bar has Show in Text and a close; the bar's Study button or ⌥⌘I shows
+  and hides it, and it is remembered.
 - A link opens a chapter: `bsb://JHN/3` (or a verse, `bsb://JHN/3/16`).
 
 ## Files
@@ -184,8 +199,13 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   `data/help.txt` read and checked, the tips' order and the rule that picks
   one, the Manual's search; tested in `test_help.l8`, which fails on a
   broken link or anchor, an unknown condition, action or symbol, or a tip
-  out of the house style); `ios_demo.l8` (and `ios_demo3.l8` to
-  `ios_demo16.l8`) the demo CI runs.
+  out of the house style); `ios_ipad.l8` the window's root (a container of the reader's navigation
+  controller and, beside it, Study's), the width's changes and the place
+  kept through them, the floating controls over the column, form sheets
+  and popovers, the keys and the menu bar, and hover; `ios_beside.l8`
+  Study beside the text (`text.l8`'s `column_width` is the column, tested
+  in `test_text.l8`); `ios_demo.l8` (and `ios_demo3.l8` to
+  `ios_demo17.l8`) the demo CI runs.
 - The web (`WEB.md`): `html.l8` writes a chapter as HTML (tested in
   `test_html.l8`); `estimate.l8` estimates a chapter's height from its
   records (or counts its blocks for `tools/sizes.l8`'s sizes table, which
@@ -285,7 +305,9 @@ about 27 when each group had a Mac of its own; see the workflow's header):
   follows ribbons and study on an iOS 18 iPhone of its own; languages
   (Round 10, about 3 minutes) goes first on the versions job's iPhone,
   more last; help (§15, about 3 minutes) third after notes and listen,
-  and plans (grown by §16's day's reader) after read. Every group but help turns Show Tips off before its first
+  and plans (grown by §16's day's reader) after read; ipad (§17, on the
+  13-inch iPad Pro) fourth on the notes job, its iPad booted while help
+  runs (`SIM_KEEP` keeps it booted). Every group but help and ipad turns Show Tips off before its first
   launch, so its shots of Go To have no tip. Each group is uploaded (`shots-GROUP`) as it ends,
   and `timing.txt` says when its boot, install, launch and settling came.
 - The groups are paired by their times so the jobs end together (a group
