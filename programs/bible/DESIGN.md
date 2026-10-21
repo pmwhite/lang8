@@ -9051,6 +9051,10 @@ with **Mark Read** always on screen. Days can now be any passages (verse ranges,
 books), so the app can ship M'Cheyne's calendar, a chronological plan and both testaments
 together. Everything not named here stays as §10 and §11 have it.
 
+**Owner amendment (2026-10-21), §16.13:** Mark Read marks the whole day and is the only
+way the day's reader marks it; nothing marks itself; the end panel has no Mark Day as Read.
+It replaces decisions 5 and 6 and the parts of §16.2.3, §16.3.2 and §16.3.3 they named.
+
 ### 16.0 Decisions (the designer's, with reasons)
 1. **The day's reader is the reader in a mode, not a second app.** It's presented over
    the reader as a full-screen view (`UIModalPresentationFullScreen`, the system's push-up),
@@ -9545,6 +9549,38 @@ rest of §16 holds for each plan.
 - **More listed plans** (a Psalm a day with a Proverb, a Gospel and its letters): one data
   file each, once their order is settled.
 - **A shared plan** with friends.
+
+### 16.13 Owner amendment (2026-10-21): one Mark Read, no automatic marks
+The owner, after reading a day on a phone: "There is a button on the side, the pill to mark
+the day as read, and there is a button on the bottom. They don't both seem necessary. I think
+having the button on the side makes sense. But then when you get to the bottom, you don't
+need to have another button there as well because the one on the bottom right is
+sufficient. Also, I think it's not great to automark as read after some time. I think it
+should be explicit, and it should also be a toggle so that the user can mark it as read and
+then mark it as unread if they tap it again."
+1. **Nothing marks a day by itself:** not reading to a passage's end with time spent, not
+   Listen reading a passage to its end. Marking is explicit: the capsule, or Go To's and the
+   plan's days' circles as before. (Decision 6 and §16.3.3's "Marking" go.)
+2. **Mark Read marks the whole day,** as the owner reads it, a toggle: not read, `circle` and
+   **Mark Read** (ink); read, `checkmark.circle.fill` and **Read** (accent); a tap marks every
+   passage of the day read, a tap on Read marks them all unread. Day Done's toast comes as
+   before when it finishes today's day. VoiceOver: "Mark Day 32 as read" / "Day 32, read",
+   hint "Double-tap to mark it unread." The capsule doesn't change as you cross passages.
+   (Decision 5's "the passage you're in" goes.) Why the day and not the passage: the owner
+   names it "the pill to mark the day as read"; one control for one thing is plainer than a
+   capsule whose meaning changes under the finger; a day of six short passages would ask six
+   taps; and a day is what Go To's row, the reminder and Day Done count. Progress stays kept
+   by passage in `plan-N.tsv` (DONE/UNDONE a passage), so the data model is unchanged: the
+   day's toggle writes a line for each passage.
+3. **The day's end** has no Mark Day N as Read: "End of Day 32", then, once the day is read,
+   a quiet line "Day 32 is read" (the subheadline's size, faint, after an accent check),
+   then Next and the Also today rows as §16.11.4 has them.
+4. **help.txt:** the Plans page's Marking part and the plan-mark tip say the capsule marks
+   the day and unmarks it, and that nothing is marked for you.
+5. **CI:** 435 Mark Read (the day read, Day Done); 436 the end with "Day 122 is read" and no
+   button; 437 (`437-mark-unread`, was `437-day-done`) Mark Read again: the day unread; 443
+   Listen crosses a passage and marks nothing; `days.txt` fails if any line says a passage
+   was marked without a tap (`(by itself)`, `day passage read`).
 
 ### 16.12 Builder notes (as built)
 Where the build differs from the text above, and why:

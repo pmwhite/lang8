@@ -868,7 +868,7 @@ plans)
   step 485 434-day-scrolled 6
   step 486 435-mark-read 6
   step 487 436-day-end 6
-  step 488 437-day-done 6
+  step 488 437-mark-unread 6
   step 489 438-next-day 8
   step 490 439-tray-in-day 6
   step 491 440-preview-leave 10
@@ -931,14 +931,19 @@ plans)
   cat "$out/console.txt" "$out/console-again.txt" 2>/dev/null | grep -a "bible: day \|bible: demo chronological\|bible: left the day\|bible: ribbon \|bible: 1.0 day state\|bible: sequence 21\|bible: started\|bible: plans migrated\|bible: reminder first\|bible: also today\|bible: plan started\|bible: plan archived" > "$out/days.txt"
   cat "$out/days.txt"
   for want in "bible: demo chronological, today day 122" "bible: day open 6 122" "bible: day title " \
-    "bible: day passage read .* (by hand)" "bible: day marked read 122" "bible: day replaced 6 123" \
-    "bible: left the day for .*, the capsule to its day" "bible: day passage heard " "bible: day passage read .* (by itself)" \
+    "bible: day marked read 122 (by hand)" "bible: day marked unread 122 (by hand)" "bible: day replaced 6 123" \
+    "bible: left the day for .*, the capsule to its day" "bible: day passage heard " \
     "bible: day replaced 6 109" "bible: day esv rows filled" "bible: 1.0 day state x10 11" "bible: 1.0 day state x10 22" \
     "bible: 1.0 day state x10 31" "bible: ribbon unmoved by the day, the reader where it was" "bible: day reopened at launch" \
     "bible: sequence 21 part 5" "bible: plans migrated 1" "bible: day also today, plan 5" \
     "bible: also today from the Chronological 1" "bible: reminder first: Today’s Reading | Chronological: "; do
     grep -q "$want" "$out/days.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/days.txt"; failed=1; }
   done
+  # (Nothing marks a day but a tap: no line of a passage marked by itself,
+  # by rest or by Listen; DESIGN.md §16.13.)
+  if cat "$out/console.txt" "$out/console-again.txt" 2>/dev/null | grep -a -q "(by itself)\|bible: day passage read "; then
+    echo "FAILED: a day marked without a tap" | tee -a "$out/days.txt"; failed=1
+  fi
   # The Daily Reminder turned on, its authorization alert: last, as the
   # system's alert outlives the app and can't be answered here (the Time
   # row's shot, before, had the shim's answer forced by the demo).
