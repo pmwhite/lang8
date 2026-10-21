@@ -306,8 +306,9 @@ about 27 when each group had a Mac of its own; see the workflow's header):
   (Round 10, about 3 minutes) goes first on the versions job's iPhone,
   more last; help (§15, about 3 minutes) third after notes and listen,
   and plans (grown by §16's day's reader) after read; ipad (§17, on the
-  13-inch iPad Pro) fourth on the notes job, its iPad booted while help
-  runs (`SIM_KEEP` keeps it booted). Every group but help and ipad turns Show Tips off before its first
+  13-inch iPad Pro) fourth on the notes job, its iPad booted when its
+  turn comes (booted beside the others, it slowed them more than its boot
+  costs; `simulate.sh`'s `SIM_KEEP` would leave one booted ahead). Every group but help and ipad turns Show Tips off before its first
   launch, so its shots of Go To have no tip. Each group is uploaded (`shots-GROUP`) as it ends,
   and `timing.txt` says when its boot, install, launch and settling came.
 - The groups are paired by their times so the jobs end together (a group
