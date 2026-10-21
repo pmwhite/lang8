@@ -9289,6 +9289,108 @@ rest of §16 holds for each plan.
   file each, once their order is settled.
 - **A shared plan** with friends.
 
+### 16.12 Builder notes (as built)
+Where the build differs from the text above, and why:
+1. **The day's reader is the reader's own navigation controller in a mode,** not a controller
+   presented with `UIModalPresentationFullScreen` (decision 1's "the same code" taken
+   literally). While it is up, the reader's globals (`table`, `cur`, the bar's title and
+   buttons) are the day's: its table is a second `UITableView` in the navigation
+   controller's view, under the bar, its rows a chapter's part each (`plans.l8`'s
+   `day_rows`, `layout_day_row`), so the tray, marks, footnotes, previews, Study, Aa, Listen
+   and every sheet (presented from the same controller) work unchanged; the reader's table
+   is left where it was, hidden under it, and laid out again by Done. A presented controller
+   would have put the bar, tray, capsules and mini player (views of the window and the
+   navigation controller) under it, or needed second copies. It looks as the system's
+   presentation does: the screen before it, as a snapshot, under the navigation
+   controller's view, which slides up on §0's panel spring; Done takes a snapshot of the day
+   and slides it down (0.35 s, ease in and out) off the reader; with Reduce Motion, a
+   0.25 s cross-fade of the window.
+2. **A chapter can be read in two places of one day** (the Chronological's day 3: Genesis
+   11:1–9, Genesis 10, Genesis 11:10–26; often in Samuel, Kings and Chronicles), so a row's
+   text view says its row as well as its chapter (its tag), and "chapter c's row" is the
+   row last named (a tap's, a cell's, the verse's, the top's), else its first; a repaint
+   paints every row of the chapter.
+3. **The first chapter of a passage begun at verse 1 shows its numeral** (standing for verse
+   1, as in the reader) but not its book's label or name: the passage's heading names it.
+   The heading is a reference (`STYLE_PASSAGE`, `run_arg` as `STYLE_XREF`'s): a tap previews
+   the passage (shot 440's "heading's reference").
+4. **The Chronological's balance** (`tools/chrono.py`): with each of Robertson's sections a
+   block, and at most 6 passages a day, the Gospels' 39 days of words need 69 days (the
+   Passion's sections are four short passages each); ending each day at the boundary nearest
+   `total·d/365` then falls behind through the Gospels and can't catch up (its last day 9.7
+   times the mean). So the 365 ends are chosen together, by dynamic programming over the
+   blocks, to make the days as even as they can be (the least sum of squares) within the 6
+   passages and 2.2 times the mean; where neither binds it is about the nearest-boundary
+   rule. The longest day is 1.78 of the mean, the shortest 0.14 (day 320, the burial and
+   the empty tomb); 38 Gospel days are under half the mean; ends run up to 24 days' mean
+   ahead of `total·d/365`. The tool's summary is in the commit (2a0186f18).
+5. **The Chronological's departures** from Townsend and the skeleton are noted line by line
+   in `data/plans/chrono-order.txt` (its header and each block's comment); the larger ones:
+   Townsend's places kept for Psalm 90 (after Numbers 14), 88 (Exodus 2), the return psalms
+   (126 and 85 with Ezra 1, 1 and 119 with Nehemiah 12–13; none is left over for after
+   Malachi), the Asaph and Korah psalms; David's psalms Townsend sets before 1 Chronicles 16
+   or after David read together after it (22, in the Psalter's order); 1 Chronicles 1–9
+   after Ruth; Judges 17–21 after Judges 2:13; Ezekiel and then Daniel after Lamentations;
+   Townsend's verse-by-verse weaving within an event not kept (parallels read whole as one
+   block); Acts and the letters at the skeleton's places. Robertson: 16 overlapping verses
+   kept in their first section, Luke 2:52 read with 2:51, his §20's misprint "Luke 2:1-2"
+   read as 3:1–2, Matthew 26:58 and Mark 14:54 moved into §155 (else 7 passages), his Acts
+   and 1 Corinthians verses read in their own books (§182 empty), parallels in the order
+   Matthew, Mark, Luke, John. Its sources and their sha256 are in the file's header.
+6. **M'Cheyne's day 220** (8 August) reads "Jer. 36, 45" in its Secret column: two passages,
+   so that day has five; `test_plans.l8` checks 364 days of four. The two rounds of the
+   Psalms split 142–150 differently, as the scan does. No misprint needed fixing (31
+   January's "Genesis 32" is broken type that reads like 52).
+7. **Old and New Together** is three passages every day: the Old Testament (but the Psalms)
+   balanced by its words with each day in one book (so it is always one passage), the New
+   by its words with days ending at a chapter or a section heading, and the Psalms by
+   verses, ending at a psalm's start, a heading, a stanza's break or an acrostic's letter
+   ("Psalm 2:1–6", "Psalms 85:10–86:4").
+8. **1.0's READ lines:** a passage all of whose chapters they name becomes DONE when the file
+   is read (its time the latest); they are written again only for a passage they leave
+   partly read, so its half circle stays (none is ever made). A day of the plan's days
+   shows 1.0's states (shot 448).
+9. **A day of a plan not followed** (opened from its days before Start Plan) is read, not
+   marked: no Mark Read capsule, and no Mark Day in its end.
+10. **The demo's day is 114, not 32:** the Chronological's day 32 is Exodus 21–23, one
+    passage, so 434's crossing could not be shown. Day 114 is Psalms 22, 16, 118 and 110, 2
+    Samuel 8 and 1 Chronicles 18; day 115 (438 on) Psalms 60 and 108, 2 Samuel 9–10, 1
+    Chronicles 19, Psalms 20–21. The days before it are seeded read, so Go To's row has no
+    "unfinished". 444 starts M'Cheyne's beside it (Start Plan: §16.11); 445's partial passage
+    is the Chronological's day 102's "1 Samuel 23:24–24:22"; 447 is M'Cheyne's day 1 under
+    the ESV. 447 uses the ESV's fixture, now
+    installed in the plans group too (Genesis 1 comes; Matthew 1, which the fixture has
+    not, keeps its placeholder; the server stays off). 442–443 use the iPhone's voice with
+    the demo's short verses; 443 restarts at Psalm 60's last verse and the wash crosses
+    into Psalm 108 by Listen's own path.
+11. **Listen** stops when the day is put away (Done, or a reference left for), and the
+    reader's own Listen stops when a day comes up.
+12. **The tips' conditions** gain three used flags, `plan-day`, `plan-mark` and
+    `plan-listen` (set the first time a day is opened, Mark Read tapped, a day listened
+    to), so those tips are skipped once done (§15's "skipping what you already do");
+    `help.l8` lists them after `unbuilt`.
+13. **CI's layout:** help moves to the notes job (notes, listen, help), plans (now about 7
+    minutes) follows read alone.
+14. **Several plans at once (§16.11):**
+    - A Chapter a Day is eight plans (`PLAN_DAY1` to `PLAN_ALL`), each from its own chapter,
+      its days and passages in a place of their own (150 each), so a plan's passage indices
+      never move and its marks (by passage) stay its own; at most eight at once.
+    - The reminder's lines name each plan in full ("M'Cheyne's Calendar: Genesis 1; …"), not
+      a short name. The plans' part is cut at 178 characters, or at 120 with Memory's part
+      after it (Memory's keeps its own rule); a plan whose first passage doesn't fit is left
+      out whole, counted in "… and N more".
+    - `userInfo`'s `plans` are the files' numbers (N of `plan-N.tsv`), which name a plan
+      followed exactly (two A Chapter a Days share an id's prefix); an older build's
+      `{"day": N}` opens the first plan followed's today.
+    - The tip `plan-more` (level 3, `-`, `plans#about`) is added; `test_help.l8`'s counts
+      are 52 tips, 25 at level 3.
+    - The plans group's 148 (the authorization alert, last) now shows the Chronological's
+      days (the first plan followed then); 150 opens day 2 of Bible in a Year in the day's
+      reader as the reminder did (a reminder now opens a plan's today).
+15. **Earlier plan shots:** 144 and 145 read Genesis in the reader by the demo's dwell hook,
+    which no longer marks a plan (decision 7): 144 shows no half circle and 145 no Day Done
+    toast. Starting a plan (143, 149b, 182) brings up its day 1 in the day's reader.
+
 ---
 
 ## 17. iPad (owner request 2026-10-20; built after §15 and §16, before Round 11)
