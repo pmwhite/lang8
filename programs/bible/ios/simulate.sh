@@ -371,17 +371,32 @@ wait_done() {
   fi
   wait "$waiter" 2>/dev/null
 }
+launch_app() {
+  SIMCTL_CHILD_L8_DEMO=1 SIMCTL_CHILD_L8_ESV_FIXTURE=$fixture SIMCTL_CHILD_L8_ESV_OFF=$esv_off SIMCTL_CHILD_L8_AUDIO_FIXTURE=$audio_fixture xcrun simctl launch --console-pty "$dev" "$id" > "$out/$1" 2>&1 &
+  console=$!
+}
 launch() {
   events=$((events + 1))
   wait_start
-  SIMCTL_CHILD_L8_DEMO=1 SIMCTL_CHILD_L8_ESV_FIXTURE=$fixture SIMCTL_CHILD_L8_ESV_OFF=$esv_off SIMCTL_CHILD_L8_AUDIO_FIXTURE=$audio_fixture xcrun simctl launch --console-pty "$dev" "$id" > "$out/$1" 2>&1 &
-  console=$!
+  launch_app "$1"
   # (The first launch may take minutes.)
   # (Or until the app says it has settled, should its console be late; and
   # when the console said it was up, and when it settled, in timing.txt.)
   i=0
   t_up=
+  relaunched=
   while [ "$i" -lt 2400 ]; do
+    # (The simulator took the install and then forgot it, "unknown to
+    # FrontBoard": run 39583129288's read group never launched, and every
+    # step timed out. Installed again, its data kept, and launched again,
+    # once.)
+    if [ -z "$relaunched" ] && grep -q "unknown to FrontBoard" "$out/$1" 2>/dev/null; then
+      relaunched=1
+      echo "$1: the app unknown to FrontBoard at $(python3 -c "print(round($(now) - $start))") s; installed again" >> "$out/timing.txt"
+      kill "$console" 2>/dev/null || true
+      xcrun simctl install "$dev" "$app" >> "$out/timing.txt" 2>&1 || true
+      launch_app "$1"
+    fi
     if [ -z "$t_up" ] && grep -q "bible: up\|Terminating app" "$out/$1" 2>/dev/null; then
       t_up=$(python3 -c "print(round($(now) - $start))")
     fi

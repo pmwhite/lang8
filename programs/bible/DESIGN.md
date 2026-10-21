@@ -8282,7 +8282,8 @@ minutes on two jobs that changed nothing between the runs: the runners' speed va
 from run to run, more than these shots add.) Run 39583129288 (648de2ce8) lost its read job: the
 simulator took the app's install but then called it "unknown to FrontBoard", so it never launched
 and every step of the read group timed out until the job's 30 minutes ran out; the other jobs were
-green. A runner's fault, not the app's: run again.
+green. A runner's fault, not the app's. `simulate.sh`'s launch now installs the app again and
+launches it once more when the simulator says that (its data kept), and timing.txt says so.
 
 **What needs a real phone:** the Hebrew's points and the dotted lines under them in SF Hebrew at
 every text size (the simulator's fonts are the phone's, but the eye should judge); the apparatus
