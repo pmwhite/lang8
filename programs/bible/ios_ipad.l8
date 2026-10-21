@@ -1,0 +1,383 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// The app at any width, and on an iPad (DESIGN.md §17). It follows the
+// window's size class, not the device: a narrow window (Split View, Slide
+// Over, a small Stage Manager window) is the iPhone's app, and a wide one
+// (regular both ways) has form sheets, Reading settings in a popover, and
+// Study beside the text where it fits (ios_beside.l8). The page's text is
+// a column of at most 34 em (about 70 characters), centred (text.l8's
+// column_width). The window's root is a container (L8Root) of the reader's
+// navigation controller and, while it is beside, Study's, laid out by
+// frames: so the page's width changes only when the container says, and
+// the place is measured at the old width first, then the rows made again
+// at the new one with the same verse at the top (§17.2.2). The floating
+// controls (the tray, the back capsule, Mark Read, the mini player and
+// toasts) follow the column. The keys and the menu bar (§17.4) and the
+// pointer's hover (§17.5) are here too.
+import "../ios/objc.l8";
+
+import "text.l8";
+
+// ---- the device and the window ----
+// Whether this is an iPad, whatever its window.
+is_ipad(): bool {
+    msg(msg(cls("UIDevice"), sel("currentDevice")), sel("userInterfaceIdiom")) == 1
+}
+
+// Whether the window is wide: regular both ways (an iPad's full or a wide
+// window; never an iPhone, not even a Max held sideways).
+wide(): bool {
+    if (window == 0) return false;
+    t: int = msg(window, sel("traitCollection"));
+    msg(t, sel("horizontalSizeClass")) == 2 && msg(t, sel("verticalSizeClass")) == 2
+}
+
+// The margins of a view w wide, its text the column's (no safe area: a
+// sheet's, a preview's).
+margin_for(w: f64): f64 {
+    m: f64 = margins[set_margins];
+    cw: f64 = column_width(w, m, em);
+    if (cw < w - 2.0f64 * m) m = (w - cw) / 2.0f64;
+    m
+}
+
+// ---- the root: the page, and Study beside it ----
+root_class: int = 0;
+
+root_vc: int = 0;
+
+// The reader's navigation controller made the root's child, the root the
+// window's.
+root_attach() {
+    root_vc = keep(msg(make("L8Root"), sel("autorelease")));
+    view: int = msg(root_vc, sel("view"));
+    msg1(view, sel("setBackgroundColor:"), c_bg);
+    msg1(root_vc, sel("addChildViewController:"), nav);
+    nv: int = msg(nav, sel("view"));
+    // (Its frame the root's to set, never the autoresizing's: so it is
+    // still at its old width when the root lays out, to measure the place.)
+    msg1(nv, sel("setAutoresizingMask:"), 0);
+    l8_msg_hfa(hfa, view, sel("bounds"), 0, 0, 0);
+    msg_rect(nv, sel("setFrame:"), 0.0f64, 0.0f64, hfa[2], hfa[3]);
+    msg1(view, sel("addSubview:"), nv);
+    msg1(nav, sel("didMoveToParentViewController:"), root_vc);
+    msg1(window, sel("setRootViewController:"), root_vc)
+}
+
+root_laid_out(self: int, cmd: int): int {
+    super0(self, root_class, cmd);
+    root_place();
+    0
+}
+
+// The page (and Study's panel while it is beside), by frames.
+root_place() {
+    if (root_vc == 0 || nav == 0) return;
+    view: int = msg(root_vc, sel("view"));
+    l8_msg_hfa(hfa, view, sel("bounds"), 0, 0, 0);
+    W: f64 = hfa[2];
+    H: f64 = hfa[3];
+    if (W <= 0.0f64) return;
+    beside: bool = beside_wanted(W);
+    pw: f64 = if (beside) W - PANEL_W - 1.0f64 else W;
+    nv: int = msg(nav, sel("view"));
+    l8_msg_hfa(hfa, nv, sel("frame"), 0, 0, 0);
+    was: f64 = hfa[2];
+    was_h: f64 = hfa[3];
+    if (was != pw) width_will_change(was);
+    if (was != pw || was_h != H) msg_rect(nv, sel("setFrame:"), 0.0f64, 0.0f64, pw,
+        H);
+    beside_place(beside, pw, W, H);
+    if (was != pw) width_changed(was, pw);
+    float_layout()
+}
+
+// The status bar as the reader's navigation controller has it.
+root_status_child(_self: int, _cmd: int): int {
+    nav
+}
+
+// Every orientation on an iPad; all but upside down on an iPhone (§17.1).
+root_orientations(_self: int, _cmd: int): int {
+    if (is_ipad()) 30 else 26
+}
+
+// ---- keeping the place as the width changes (§17.2.2) ----
+// The place measured at the old width (its chapter, verse and thousandths
+// of em into it), kept until the reader moves the text: each relayout of a
+// resize goes back to it, never to one measured on rows laid out for a
+// width they no longer have.
+wk_on: bool = false;
+
+wk_c: int = 0;
+
+wk_v: int = 0;
+
+wk_f: int = 0;
+
+// The width it was measured at, and when the rows were last made again.
+wk_from: f64 = 0.0f64;
+
+wk_at: f64 = 0.0f64;
+
+// A relayout waiting: for the reader to rest, or the resize's next 0.1 s.
+wk_due: bool = false;
+
+wk_timer: int = 0;
+
+// While the rows are made again (go and set_offset keep the place then).
+wk_restoring: bool = false;
+
+// The window being resized by hand (iOS 26: the scene's geometry says so).
+resize_live: bool = false;
+
+width_will_change(was: f64) {
+    if (wk_on || !restored || table == 0 || was <= 0.0f64) return;
+    measure_place();
+    wk_c = cur;
+    wk_v = place_v;
+    wk_f = place_frac;
+    wk_from = was;
+    wk_on = true
+}
+
+// The text moved by the reader, or by a jump: the place kept is not where
+// the reader is any more.
+width_place_moved() {
+    if (!wk_restoring) wk_on = false
+}
+
+width_changed(was: f64, _now: f64) {
+    if (!restored || table == 0 || was <= 0.0f64) return;
+    if (resize_live && CACurrentMediaTime() - wk_at < 0.1f64) {
+        wk_due = true;
+        if (wk_timer == 0) wk_timer = after_common(0.1f64, "widthTick:");
+        return
+    }
+    width_relayout()
+}
+
+width_tick(_self: int, _cmd: int, _timer: int): int {
+    wk_timer = 0;
+    if (wk_due) width_relayout();
+    0
+}
+
+// The rows made again at the page's width now, the place kept put back.
+width_relayout() {
+    wk_due = false;
+    if (table == 0 || !restored) return;
+    if (reader_moving()) {
+        // (At rest: reader_rested.)
+        wk_due = true;
+        return
+    }
+    if (!wk_on) {
+        measure_place();
+        wk_c = cur;
+        wk_v = place_v;
+        wk_f = place_frac;
+        wk_from = view_width(table);
+        wk_on = true
+    }
+    wk_at = CACurrentMediaTime();
+    wk_restoring = true;
+    set_insets();
+    msg(table, sel("reloadData"));
+    msg(table, sel("layoutIfNeeded"));
+    go_place(wk_c, wk_v, wk_f);
+    if (day_on) day_restyle();
+    layout_bar();
+    wk_restoring = false;
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: width ");
+        fput_int(wk_from as int);
+        fput_str(" \�\�\� ");
+        fput_int(view_width(table) as int);
+        fput_str(", kept ");
+        fput_code_ref(wk_c, wk_v);
+        fput_str(" +");
+        f: int = if (wk_f < 0) 0 else wk_f;
+        fput_int(f / 1000);
+        fput(46);
+        fput(48 + f / 100 % 10);
+        fput(48 + f / 10 % 10);
+        fput_str(", column ");
+        fput_int(((view_width(table) - 2.0f64 * side_margin()) * 10.0f64 / em) as int);
+        fput_str(" tenths of an em");
+        note_ns(fstring())
+    }
+    wk_from = view_width(table)
+}
+
+// iOS 26: the window's geometry changed (a resize, by hand or done).
+scene_geometry(
+    _self: int,
+    _cmd: int,
+    scene: int,
+    _previous: int
+): int {
+    g: int = if (responds(scene, "effectiveGeometry")) msg(scene, sel("effectiveGeometry")) else 0;
+    live: bool = g != 0 && responds(g, "isInteractivelyResizing") && (msg(g, sel("isInteractivelyResizing")) & 255) != 0;
+    if (live != resize_live) {
+        resize_live = live;
+        note_num("bible: resizing by hand ", if (live) 1 else 0)
+    }
+    // (The resize over: the rows made once more, for the width it ended at.)
+    if (!live && wk_due) width_relayout();
+    0
+}
+
+// Before iOS 26: the same, as the coordinate space changed.
+scene_space(
+    _self: int,
+    _cmd: int,
+    _scene: int,
+    _space: int,
+    _orientation: int,
+    _traits: int
+): int {
+    if (wk_due) width_relayout();
+    0
+}
+
+// The scene's least size (§17.1): 320 by 480, where it can be set.
+scene_least(scene: int) {
+    if (!responds(scene, "sizeRestrictions")) return;
+    r: int = msg(scene, sel("sizeRestrictions"));
+    if (r != 0) msg_ff(r, sel("setMinimumSize:"), 320.0f64, 480.0f64)
+}
+
+// ---- the floating controls, over the column (§17.2.3) ----
+// The page's column in the window (fl_l to fl_r, its middle fl_cx), the
+// page's width, and whether the column is narrower than the page less its
+// margins (fl_capped: an iPad's page, an iPhone held sideways). Where it
+// is not, and the window is not wide, they are as on the iPhone.
+fl_l: f64 = 0.0f64;
+
+fl_r: f64 = 0.0f64;
+
+fl_cx: f64 = 0.0f64;
+
+fl_pw: f64 = 0.0f64;
+
+fl_capped: bool = false;
+
+float_measure() {
+    if (nav == 0 || table == 0) return;
+    fl_pw = view_width(msg(nav, sel("view")));
+    l8_msg_hfa(hfa, table, sel("safeAreaInsets"), 0, 0, 0);
+    sl: f64 = hfa[1];
+    sr: f64 = hfa[3];
+    m: f64 = side_margin();
+    fl_l = sl + m;
+    fl_r = fl_pw - sr - m;
+    fl_cx = (fl_l + fl_r) / 2.0f64;
+    fl_capped = m > margins[set_margins] + 0.5f64
+}
+
+// Whether the controls go by the column (else the iPhone's places).
+float_by_column(): bool {
+    fl_capped || wide()
+}
+
+// The tray's width now, and its edges' constraints.
+tray_w_now: f64 = 0.0f64;
+
+tray_lead: int = 0;
+
+tray_trail: int = 0;
+
+// Everything floating placed for the page now.
+float_layout() {
+    if (window == 0 || table == 0) return;
+    float_measure();
+    W: f64 = view_width(window);
+    // The tray: 12 points from the window's edges; or at most 560 wide,
+    // centred over the column.
+    a: f64 = 12.0f64;
+    b: f64 = -12.0f64;
+    tray_w_now = W - 24.0f64;
+    if (float_by_column()) {
+        tw: f64 = fl_pw - 24.0f64;
+        if (tw > 560.0f64) tw = 560.0f64;
+        a = fl_cx - tw / 2.0f64;
+        b = fl_cx + tw / 2.0f64 - W;
+        tray_w_now = tw
+    }
+    if (tray_lead != 0 && msg_f(tray_lead, sel("constant")) != a) {
+        msg_set_f(tray_lead, sel("setConstant:"), a);
+        msg_set_f(tray_trail, sel("setConstant:"), b);
+        if (tray_shown) update_tray()
+    }
+    // (The rest only when the column or the window has moved.)
+    if (fl_l == fl_last_l && fl_r == fl_last_r && W == fl_last_w) return;
+    fl_last_l = fl_l;
+    fl_last_r = fl_r;
+    fl_last_w = W;
+    if (back_shown) style_back();
+    if (day_on && mark_shown) mark_place(false);
+    if (listen_shown) layout_player()
+}
+
+fl_last_l: f64 = -1.0f64;
+
+fl_last_r: f64 = -1.0f64;
+
+fl_last_w: f64 = -1.0f64;
+
+// The back capsule's left edge: the column's, or 16 from the window's.
+back_x(): f64 {
+    float_measure();
+    if (float_by_column()) fl_l else 16.0f64
+}
+
+// Mark Read's right edge: the column's, or 16 from the window's.
+mark_right(W: f64): f64 {
+    float_measure();
+    if (float_by_column()) fl_r else W - 16.0f64
+}
+
+// The middle the mini player and toasts are centred on, and the room.
+float_cx(W: f64): f64 {
+    float_measure();
+    if (float_by_column()) fl_cx else W / 2.0f64
+}
+
+float_room(W: f64): f64 {
+    float_measure();
+    if (float_by_column()) fl_pw else W
+}
+
+// ---- the pointer (§17.5) ----
+// The system's hover on one of our own controls (iOS 17; none before).
+hover(v: int) {
+    if (v == 0 || cls("UIHoverStyle") == 0 || !responds(v, "setHoverStyle:")) return;
+    msg1(v, sel("setHoverStyle:"), msg(cls("UIHoverStyle"), sel("automaticStyle")))
+}
+
+make_ipad_classes() {
+    root_class = objc_allocateClassPair(cls("UIViewController"), "L8Root", 0);
+    add_method0(root_class, sel("viewDidLayoutSubviews"), &root_laid_out, "v@:");
+    add_method0(root_class, sel("childViewControllerForStatusBarStyle"), &root_status_child,
+        "@@:");
+    add_method0(root_class, sel("childViewControllerForStatusBarHidden"), &root_status_child,
+        "@@:");
+    add_method0(root_class, sel("supportedInterfaceOrientations"), &root_orientations,
+        "Q@:");
+    objc_registerClassPair(root_class)
+}
+
+add_ipad_methods(app: int) {
+    add_method1(app, sel("widthTick:"), &width_tick, "v@:@")
+}
+
+add_ipad_scene_methods(scene: int) {
+    add_method2(scene, sel("windowScene:didUpdateEffectiveGeometry:"), &scene_geometry,
+        "v@:@@");
+    add_method4(scene, sel("windowScene:didUpdateCoordinateSpace:interfaceOrientation:traitCollection:"),
+        &scene_space, "v@:@@q@")
+}
