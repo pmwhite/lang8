@@ -12,13 +12,13 @@ read aloud by VoiceOver as it would be in the phone's own apps.
 - `core/`: what every platform shares, with no platform code: the text and
   its layout, the study data, plans, Memory, learning, ribbons, what is
   kept, the ESV's cache rules, the Manual, recorded readings and the Hebrew
-  and Greek, with their tests (`test_*.l8`).
+  and Greek.
 - `ios/`: the iPhone and iPad app (`app.l8` and its screens, in UIKit), and
   what goes into its bundle (Info.plist, icons, colors, frameworks,
-  resources) and the simulator scripts.
+  resources).
 - `web/`: the reader on the web (`app.l8`, `reader.l8`, `table.l8`, `web/html.l8`,
-  `web/estimate.l8`, tested in `test_html.l8`), and `web/page/`, its page,
-  styles, boot script, fonts, site build (`build.py`) and browser tests.
+  `web/estimate.l8`), and `web/page/`, its page,
+  styles, boot script, fonts, site build (`build.py`) and local server.
 - `data/`: the texts and the study, plan and audio data the apps read.
 - `tools/`: the scripts that made the data, and `sizes.l8` (the web's
   sizes tables) and `spoken.l8` (the spoken text, for the aligner).
@@ -218,7 +218,16 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   The BSB, KJV, WEB, ASV, YLT and the commentary are in the public domain;
   the cross references and STEP's texts are CC BY 4.0; UBS's meanings CC
   BY-SA 4.0.
-- `core/text.l8` indexes it and lays a chapter out as runs of styled text.
+- `core/text.l8` indexes the texts and exposes borrowed `TextSource` views.
+  `core/layout.l8` renders a source into a `ChapterLayout` with its own byte,
+  run, verse and original-word buffers; `core/chapter_ranges.l8` measures it
+  into separate `ChapterRanges` (UTF-16, bookmarks, notes and glosses).
+  Allocate these with `chapter_layout()` and `chapter_ranges()` inside
+  a `region`, reuse them for successive chapters, and consume their buffers
+  before the region ends. `layout_chapter_from(source, layout, chapter)`
+  and `measure_chapter(layout, ranges, chapter)` leave the selected version
+  and reader buffers alone. Compare and previews use this path; the
+  reader's existing `layout_chapter` API uses a compatibility view.
 - `ios/app.l8` is the app: the reader and its classes; `ios/look.l8` the themes,
   fonts and styles; `ios/store.l8` what is kept; `ios/select.l8` selection,
   the tray, the edit menu and jumps; `ios/sheets.l8` the sheets;
