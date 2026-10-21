@@ -55,8 +55,8 @@ const footnotes = (html) => {
   const notes = {};
   const block = html.match(/<div class="footnotes[^"]*">([\s\S]*?)<\/div>/);
   if (!block) return notes;
-  // (An entry from each footnote mark to the next: the API puts them all in
-  // one <p>, a <br /> apart; the fixtures, a <p> each.)
+  // Each entry runs from one footnote mark to the next; the API can put
+  // multiple entries in one paragraph, separated by line breaks.
   for (const p of block[1].split(/(?=<span class="footnote">)/)) {
     const id = p.match(/<span class="footnote">\s*<a[^>]*\bid="f(\d+)/);
     if (!id) continue;

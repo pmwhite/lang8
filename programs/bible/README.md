@@ -291,9 +291,10 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   `demo/audio/` holds the demo audio fixture (`make_fixture.sh`: a tone,
   its timings, the ESV's answers), enabled by `L8_AUDIO_FIXTURE`.
 - `worker/` is the ESV proxy, a Cloudflare Worker (`worker.js`; `esv.js`
-  turns the ESV API's HTML into our records), and `make_fixtures.mjs`, which writes the
-  app's fixture (`ios/esv-fixture/`) for demos. It is deployed at
+  turns the ESV API's HTML into our records). It is deployed at
   smoothbible.com (below), with `/api/v1/esv/audio` (Round 7).
+  ESV chapters and search use the live proxy; the former ESV fixture data,
+  generators, client fixture mode and scripted ESV demos have been removed.
 - `ios/` also holds what goes into the app besides its code: its Info.plist, icon
   (`AppIcon.svg`, drawn to `AppIcon.png` in Chromium, and as
   `AppIcon.svg#dark` and `#tinted` to `AppIcon-dark.png` and

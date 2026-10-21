@@ -2696,11 +2696,9 @@ reference is the place.
 #### 9.4.2 The proxy: `programs/bible/worker/` (Cloudflare Worker `smooth-bible-api`)
 Files:
 - `worker.js` (ES module, no dependencies).
-- `esv.js` (the HTML→records converter, a pure function, also imported by tests).
+- `esv.js` (the HTML→records converter, a pure function).
 - `wrangler.toml`.
 - `schema.sql`.
-- `test.mjs` (`node --test`).
-- `fixtures/` (§9.4.10).
 
 Its configuration follows `web/tempo-log` in the main repo:
 ```toml
@@ -2833,11 +2831,6 @@ A tolerant tag scanner over the API's known output (no DOM library in Workers):
   `X-Smooth-Bible: 1.0 (12)` (from the bundle).
 - **One chapter request in flight at a time.** A newer wanted chapter replaces a queued
   one. A running one is never cancelled, because its result is still useful.
-- **Fixture mode (CI, §9.4.10):** when the environment has `L8_ESV_FIXTURE` (a path
-  relative to the app's home), the client reads `<path>/<BOOK>-<C>.json` (or
-  `search-<q>.json`) after a delay the demo sets (default 0.6 s), instead of using the
-  network. `<path>/mode` (`ok`, `offline`, `busy` or `daily`) makes it answer with that
-  error instead.
 
 #### 9.4.5 The cache: never more than the terms allow
 - **Where:** `Library/Caches/SmoothBible/esv/`. It's the system's purgeable place and
@@ -2954,28 +2947,11 @@ consent):
 - If others appear, add them to the mapping in `esv.js` and to the Worker's verse
   counts, and say so in the commit.
 
-#### 9.4.10 Fixtures and tests (no key in CI, no ESV text in the repo)
-- **`worker/fixtures/*.html`** are hand-written in **the ESV API's HTML structure**:
-  - The same tags and classes as §9.4.3, with **WEB words** (public domain).
-  - Their first heading reads "Fixture: …", so no screenshot can be mistaken for real
-    ESV text.
-  - Chapters: JHN 3, JHN 4, PSA 23, GEN 1, 3JN 1 (with a verse 15, to exercise
-    `V15>14`), and REV 12 (with an 18).
-  - Plus `search-born-again.json`, in the upstream search shape.
-- **`node --test programs/bible/worker/test.mjs`** (added to the Linux CI job):
-  - The converter turns each fixture into the expected records
-    (`fixtures/*.records`), and the words-unchanged assertion passes.
-  - With `UPSTREAM` pointed at an in-test mock `fetch`:
-    - Each limit gives its error code.
-    - `count` is reduced for Joel 2–3.
-    - Missing headers give 400.
-    - The day bucket reset works.
-    - Responses carry `no-store`.
-- **`worker/make_fixtures.mjs`** runs the converter over the fixtures and writes the
-  app's fixture JSON to `programs/bible/ios/esv-fixture/` (committed, WEB text).
-  `simulate.sh` copies that directory into the app's data container (`xcrun simctl
-  get_app_container … data`) under `Library/esv-fixture`, and launches with
-  `SIMCTL_CHILD_L8_ESV_FIXTURE=Library/esv-fixture`.
+#### 9.4.10 Fixture mode (retired)
+The application and UI tests were removed at the owner's request. On 2026-10-21,
+the ESV fixture data, generators, client fixture mode and dependent scripted demos
+were removed too. Chapter and search requests use the live proxy. References to
+ESV fixtures in historical round notes below describe the retired tooling.
 
 #### 9.4.11 Scrolling through chapters that haven't arrived (owner report 2026-10-18)
 **The report** (a real iPhone, the ESV live): "sometimes the scrolling stops suddenly, I'm
@@ -5616,7 +5592,7 @@ Its shape, place and motion are §8.7's. Its **second label** changes:
   - **`esv-audio-JHN-3.json` and `esv-audio-JHN-4.json`:** `{"v":1,"url":"file:…/tone.mp3"}`
     (the path filled in by the demo).
 - **Fixture mode:** when the environment has `L8_AUDIO_FIXTURE` (a path relative to the
-  app's home, like `L8_ESV_FIXTURE`):
+  app's home):
   - every recording address becomes the fixture's file URL;
   - timings come from `fixture.tim`;
   - downloads copy the fixture after a 0.3 s delay per chapter;

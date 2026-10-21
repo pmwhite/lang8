@@ -1991,6 +1991,10 @@ Compare's five versions 22 MB more. All well inside a phone browser's limits.
 
 ## W14. Testing and CI
 
+**Historical plan:** the application/UI suites, browser driver and ESV fixture
+data described here have been removed. Current CI builds the web site and iOS
+artifacts; only compiler test suites remain.
+
 ### W14.1 Unit tests
 - `test_html.l8` (new): the markup for Genesis 1, Psalm 23, Psalm 119:1–8, John 3 and
   Jude (openers, poetry, footnotes, small caps, red letters, a verse across paragraphs);
@@ -2011,7 +2015,7 @@ dependencies), after the rig the repo used for Better and the race game (`drive.
 - It starts headless Chrome (`--headless=new`, the runner's preinstalled Google Chrome in
   CI) and `web/bible/test/serve.mjs`, which **runs the real `worker.js`** in Node with an
   `ASSETS` stand-in reading `.build/bible-site/` and `UPSTREAM` pointed at a mock ESV API
-  serving the worker's existing fixtures (as `test.mjs` does), plus fixture recordings in
+  serving the worker's former fixtures (as the former `test.mjs` did), plus fixture recordings in
   place of the audio hosts. So the CI tests the Worker's routing, headers and budget as
   deployed, with no key and no network.
 - Each flow is one CDP session, with `Emulation.setDeviceMetricsOverride` set first, the
