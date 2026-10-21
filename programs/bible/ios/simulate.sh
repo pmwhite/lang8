@@ -495,7 +495,11 @@ read)
   shot 30-opened-again
   step 30 31-link-romans-8
   # (DESIGN.md §17.8.3: the iPhone held sideways, John 3 in a column of 34
-  # em or less, centred; the tray; then upright again.)
+  # em or less, centred, light and at the default size; the tray; then
+  # upright again.)
+  xcrun simctl ui "$dev" appearance light 2>/dev/null || true
+  xcrun simctl ui "$dev" content_size large 2>/dev/null || true
+  sleep 2
   step 590 "" 8
   sleep 1
   shot 490-iphone-landscape
@@ -1330,12 +1334,37 @@ help)
   ;;
 ipad)
   # (DESIGN.md §17.8.2: shots 460 to 489 and 492 to 503, landscape unless
-  # in portrait; landscape.txt names those turned, to be set upright.)
-  land() { echo "$1" >> "$out/landscape.txt"; }
+  # in portrait; landscape.txt names those turned, to be set upright.) The
+  # iPad is turned through Simulator's Device menu (an app that supports
+  # multitasking can't turn an iPad itself): Simulator opened on it, and
+  # its Rotate Left or Rotate Right clicked (System Events); rotate.txt
+  # says how each went. A shot is named in landscape.txt only if the turn
+  # to landscape went.
+  sim_open=
+  turned=
+  rotate() {
+    if [ -z "$sim_open" ]; then
+      sim_open=1
+      open -a Simulator --args -CurrentDeviceUDID "$dev" >> "$out/rotate.txt" 2>&1
+      i=0
+      while ! pgrep -xq Simulator && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+      sleep 5
+    fi
+    item="Rotate Left"
+    [ "$1" = right ] && item="Rotate Right"
+    if osascript -e 'tell application "Simulator" to activate' \
+        -e "tell application \"System Events\" to tell process \"Simulator\" to click menu item \"$item\" of menu \"Device\" of menu bar item \"Device\" of menu bar 1" >> "$out/rotate.txt" 2>&1; then
+      echo "rotated $1 at $(python3 -c "print(round($(now) - $start))") s" >> "$out/rotate.txt"
+      if [ "$1" = left ]; then turned=1; else turned=; fi
+    else
+      echo "rotate $1 failed" >> "$out/rotate.txt"
+    fi
+    sleep 2
+  }
+  land() { [ -n "$turned" ] && echo "$1" >> "$out/landscape.txt"; }
   step 520 460-ipad-portrait 10
-  step 521 "" 8
-  sleep 1
-  shot 461-ipad-landscape; land 461-ipad-landscape
+  rotate left
+  step 521 461-ipad-landscape 8; land 461-ipad-landscape
   ui_size accessibility-extra-large
   step 522 462-ipad-largest-text 8; land 462-ipad-largest-text
   ui_size large
@@ -1376,20 +1405,19 @@ ipad)
   step 554 496-beside-scroll 8; land 496-beside-scroll
   step 555 497-beside-show-in-text 10; land 497-beside-show-in-text
   step 556 498-beside-references 8; land 498-beside-references
-  step 557 "" 8
-  sleep 1
-  shot 499-beside-portrait
+  rotate right
+  step 557 499-beside-portrait 8
   step 558 500-beside-narrowed 10
   step 559 501-beside-back 10
-  step 560 "" 10
-  sleep 1.5
-  shot 502-beside-day; land 502-beside-day
+  rotate left
+  step 560 502-beside-day 12; land 502-beside-day
   step 561 503-beside-closed 10; land 503-beside-closed
   # The 13-inch App Store screenshots (§17.8.4), from these.
   for pair in 1:461-ipad-landscape 2:464-ipad-goto 3:492-beside-open 4:473-ipad-practice 5:475-ipad-greek-page; do
     cp "$out/${pair#*:}.png" "$out/store-ipad-${pair%%:*}.png" 2>/dev/null && land "store-ipad-${pair%%:*}"
   done
   # The screen recording of sequences 22 and 23 (its setup before each mark).
+  rotate right
   step 565 "" 8
   rec0=$(now)
   xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
@@ -1402,12 +1430,17 @@ ipad)
   rec1=$(now)
   sleep 2
   : > "$out/transitions.txt"
-  # (Each settles once its last move is made.)
+  # (22: turned to landscape and back, then the app's steps, which settle
+  # once the last is made.)
+  a=$(now)
+  rotate left
+  sleep 1
+  rotate right
   step 562 "" 30
-  a=$(step_at 562)
   sleep 1
   b=$(now)
   echo "22 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
+  rotate left
   step 563 "" 10
   sleep 1
   step 564 "" 30
