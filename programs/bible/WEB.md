@@ -12,7 +12,7 @@ allows L8 to control the content of a page". This document is that design.
 
 **How it relates to DESIGN.md.** DESIGN.md stays the specification of every feature: what
 it does, its words, its rules (a ribbon's carrying, the ESV's limits, Practice's levels,
-the tips' order). WEB.md says how each feature takes its web form, and what is different
+the Manual's pages). WEB.md says how each feature takes its web form, and what is different
 on the web and why. **Where WEB.md is silent, DESIGN.md's behaviour and wording hold**,
 with three standing translations: "tap" in the copy becomes "click or tap" only where a
 mouse is likely (the manual's web text, §W14.4); UIKit's controls become the HTML
@@ -153,7 +153,7 @@ says so in one plain line (§W1.8).
 
 **Moving shared screen logic.** When a web screen needs logic the iPhone keeps inside an
 `ios_*.l8` file (the copy and share format of §3.3.6, the reference label "John 3:16, 18",
-which tray actions show, Go To's sections and their order, the tip rule's inputs, a
+which tray actions show, Go To's sections and their order, a
 Practice session's sequence, the day reader's passage list), the builder moves it into a
 portable module (an existing one, or `shared.l8`), with a test, and changes the iPhone to
 call it. Rules:
@@ -432,7 +432,6 @@ own (§11.2.6), its path redrawn as SVG. Each §2.6 row maps:
 | `character.book.closed` | `book-a` |
 | `brain` | `brain` |
 | `globe` | `globe` |
-| `lightbulb` | `lightbulb` |
 | `book.closed` | `book` |
 | `calendar` | `calendar` |
 | `circle` / `checkmark.circle.fill` / `circle.lefthalf.filled` | `circle` / `circle-check` (filled) / `circle-half` (our own, a half-filled circle) |
@@ -518,7 +517,7 @@ gzipped, too much to wait for. So each version is also served **book by book**:
 
 **Go To in (a).** Without book index pages, phase (a) needs a way to go to a chapter. The
 title opens a first Go To: the books with their chapters (§W5.2's list, without the
-field, Recent or the tip), which (b) completes.
+field or Recent), which (b) completes.
 
 ### W1.9 Files and building
 
@@ -1060,8 +1059,8 @@ The Aa button opens Reading settings (§3.7) as a non-modal sheet (narrow) or a 
 7. The footer: the version's line ("Berean Standard Bible · Public Domain"), and **About
    Smooth Bible** (a link to `/read/about`).
 
-Phases add their rows in the iPhone's places: Listen first (d), Version (b), Help with Show
-Tips and the Manual (c), and This Browser (§W12.4, c).
+Phases add their rows in the iPhone's places: Listen first (d), Version (b), Help with the
+Manual and Keyboard Shortcuts' list (c), and This Browser (§W12.4, c).
 
 Every change is applied by setting an attribute on `<html>` (except verse-per-line), saved
 to `localStorage` at once, and the place is restored (§W3.5). A theme change cross-fades
@@ -1116,8 +1115,8 @@ then notes, then language tools) with what a web reader needs first:
 | Phase | What | Needs | Specified |
 |---|---|---|---|
 | **(a) The reader alone** | The five bundled versions as a continuous page, first paint from the place's book, URLs, the bar, the place, footnotes, settings, print, a first Go To | The bridge, `html.l8` | §W3 |
-| **(b) Navigation, search and versions** | Go To with Recent and the tip row's place reserved, the back capsule, passage previews, History, Search, verse selection and the tray (Copy, Share, Compare), version switching, the ESV, Compare | Storage of history (IndexedDB from here) | §W5 |
-| **(c) Marks, notes and the rest** | Highlights, bookmarks, notes and chapter notes, the Library, export and backup and restore, ribbons, plans and the day reader, the manual and tips, multi-tab safety | §W12.2–§W12.4 | §W6 |
+| **(b) Navigation, search and versions** | Go To with Recent, the back capsule, passage previews, History, Search, verse selection and the tray (Copy, Share, Compare), version switching, the ESV, Compare | Storage of history (IndexedDB from here) | §W5 |
+| **(c) Marks, notes and the rest** | Highlights, bookmarks, notes and chapter notes, the Library, export and backup and restore, ribbons, plans and the day reader, the Manual, multi-tab safety | §W12.2–§W12.4 | §W6 |
 | **(d) Listen and Study** | Recordings with verse following, the device's voice, the ESV's audio, Media Session, the mini player; Study (Words, References, Commentary), word study, definition, concordance, Study beside the text | The language data (§W12.1) | §W7 |
 | **(e) Memory and languages** | Memorize, Practice, the Library's Memory; Greek and Hebrew foundations as §14.10b has them | (d)'s data | §W8 |
 | **(f) Offline and installing** | The Service Worker, the manifest, installing, storage persistence, quiet updates | Everything before | §W9 |
@@ -1151,13 +1150,13 @@ recent searches.
 ### W5.2 Go To
 
 A dialog (§W1.4: a full-screen sheet when narrow, a centred panel otherwise), title "Go
-To", Done on the right, opened by the title, by **G** and from the tips (c).
+To", Done on the right, opened by the title and by **G**.
 - **The field** (`<input type=search>`, placeholder `Book, chapter or verse — "jn 3:16"`,
   no autocorrect or capitalisation, `enterkeyhint="go"`) sits at the top, under the title,
   always visible. It takes focus when the dialog opens on a device with a fine pointer
   (a keyboard is likely); on touch it doesn't, so the keyboard doesn't cover the list
   (§3.2's iPhone sheet doesn't raise it either).
-- **Sections with an empty query,** in §11.2.1's order: (the tip, c) · Ribbons (c) ·
+- **Sections with an empty query,** in §11.2.1's order: Ribbons (c) ·
   Reading Plan (c) · Recent · Old Testament · New Testament. Recent as §3.2 and §8.3 (up to
   4, Show All pushes History).
 - **Books** are rows that open in place: a book's row is a `<details>` whose `<summary>`
@@ -1169,7 +1168,7 @@ To", Done on the right, opened by the title, by **G** and from the tips (c).
   chapter is a link that can be opened in a new tab. On widths of 900 px and more the
   dialog is 720 px wide and the two testaments sit side by side as two columns.
 - **On opening,** the current book's row is open and scrolled to the middle, unless
-  §15.0.2's rule keeps Go To at its top (tips on, or a ribbon or a plan).
+  there is a ribbon or a plan, which keeps Go To at its top (§11.2.1).
 - **With a query:** "Go to" (one row, §3.2) and up to 8 matching books (§3.2's matching),
   each a link. **Enter** goes to the first row; **↓/↑** move a highlight through the rows
   (the field is a combobox: `role="combobox"`, `aria-activedescendant` on the
@@ -1333,7 +1332,7 @@ fetched only the first time Compare is used). The ESV section follows §9.5's st
 ## W6. Phase (c): marks, notes, ribbons, plans and the rest
 
 **What it adds:** everything of the reader's own: highlights, bookmarks, notes and chapter
-notes, the Library, ribbons, reading plans and the day reader, the manual and tips, and
+notes, the Library, ribbons, reading plans and the day reader, the Manual, and
 the ways to take it all out and back in. **Worth having alone:** the owner's second
 priority, notes, complete.
 
@@ -1345,7 +1344,7 @@ priority, notes, complete.
 4. The Library (§3.5, §7.9, §8.5, §8.6).
 5. Ribbons (§11).
 6. Plans, a plan's days and the day reader (§10.1, §11.3, §16).
-7. The manual and tips (§15) with the web's words (§W14.4).
+7. The Manual (§15.3) with the web's words (§W14.4); no quick tips (owner, 2026-10-21).
 8. Reading settings' Help and This Browser sections.
 
 ### W6.2 Highlights and bookmarks
@@ -1431,17 +1430,17 @@ New Ribbon…:
   "‹ Day 32", and Back reopens the day at the same place.
 - **No reminder** on the web (§W15.1).
 
-### W6.7 The manual and quick tips
-- **The tip** is Go To's first row as §15.1, with Next, More and its action. "Once a day"
-  and "skipping what you already do" use the same `help_tip_for(today, state)`; the state
-  is the web's own (a highlight made here, a ribbon here…).
-- **The manual** is a dialog (the contents, a page, its search field, as §15.3) written by
-  `html.l8` from `help.txt` with the web's paragraphs (§W14.4), opened by More and Help
-  without leaving the reader; each page has its address (`/read/manual/<page>`), which
+### W6.7 The Manual (no quick tips)
+- **No quick tips.** The owner removed them from the app on 2026-10-21 ("it's clutter"),
+  so the web has none: no tip row in Go To, no Show Tips setting, no tip conditions or
+  "once a day" state. `help.txt`'s `tip` lines, while they remain in the file, are
+  ignored by the web.
+- **The Manual stays,** as a dialog (the contents, a page, its search field, as §15.3)
+  written by `html.l8` from `help.txt` with the web's paragraphs (§W14.4), opened from
+  Reading settings' Help without leaving the reader; each page has its address (`/read/manual/<page>`), which
   opens the dialog over the place; the page's address is shown as a link
   "Open in a new tab".
-- **Reading settings' Help section:** Manual, Show Tips (on), Keyboard Shortcuts (the list,
-  §W10.1).
+- **Reading settings' Help section:** Manual, and Keyboard Shortcuts (the list, §W10.1).
 
 ### W6.8 Phase (c) acceptance
 1. Highlights, bookmarks and notes are made, shown, edited, deleted with Undo, survive a
@@ -1456,8 +1455,9 @@ New Ribbon…:
    capsule, Leave Here, the limit of 12.
 6. A plan started, a day opened by its URL, Mark Read, the page's end, the day's ESV
    passages against the mock, Done and Back returning to the main reader's exact place.
-7. The tip changes once a day (the CI sets the date), skips what is done, and More opens
-   the right manual part; the manual's pages pass the accessibility checks.
+7. The Manual opens from Help and from its address, its search finds a word on every page,
+   its links move between pages, and its pages pass the accessibility checks; nothing of
+   the quick tips appears anywhere.
 
 ---
 
@@ -2034,7 +2034,8 @@ Per phase, at least:
 - **(c)** Highlights in five colours and a run; bookmark and note glyphs; the note editor,
   read mode, chapter note; the Library's tabs, filter, search, empty states, the delete
   Undo; ribbons in Go To and New Ribbon; Plans, a plan's days, the day reader with Mark
-  Read and the day's end; the tip; the manual; This Browser; the restore sheet.
+  Read and the day's end; the Manual (contents, a page, its search); This Browser; the
+  restore sheet.
 - **(d)** The mini player in each state; Voice; Study's three tabs; word study, definition,
   concordance in Greek and Hebrew; Study beside the text at 1440 px.
 - **(e)** Memory tab; Practice at each level and Type; a word card's answer; the language
