@@ -10034,14 +10034,19 @@ Where the build differs from the text above, and why:
    first build's root container did, and an iPhone then showed its keyboard under context
    menus. The menu bar and these keys are an iPad's only, so an iPhone is as it was.
    Reading Settings (⌘,) is in the View menu with Listen / Pause and Show Study, not the
-   app menu. Space and ⇧Space are our own on every iOS (not `allowsKeyboardScrolling`); ↑
-   and ↓ by a line are not built (the table would have to be focused). ⌘] in a day's
-   reader is the next day wherever you are in it.
+   app menu. ⌘] in a day's reader is the next day wherever you are in it. (Review s17-1,
+   Minor 3:) the reader's and the day's tables scroll by the keys themselves
+   (`allowsKeyboardScrolling`, iOS 17; ↑ and ↓ a line), the root naming the page's table
+   its preferred focus while no sheet is up (`preferredFocusEnvironments`, updated as a
+   sheet goes or a day opens or closes), with no focus ring. Our own Space and ⇧Space stay:
+   they page whatever has the focus, and on iOS 16.
 4. **Study beside the text's stack is not moved to a sheet.** When the window is too narrow
    for the panel and Study is opened as a sheet, the panel's stack is let go (one Study at a
    time) and the sheet is a new Study at the verse asked for; the panel comes back at its
    verse (not its stack) when the window widens again and the sheet has gone. Without a
-   sheet in between, it comes back as it was, stack and all (501).
+   sheet in between, it comes back as it was, stack and all: its navigation controller is
+   only taken out of the root while the window is narrow (review s17-1, Minor 2: 499
+   pushes θεός's word study, 500 hides it, 501 shows it again, log "screens 2").
 5. **The panel's title is the verse** (its back buttons and VoiceOver's "Study, John
    3:16"), the segments its title view, each as wide as its title at 12.5 points so
    "Commentary" is whole in 390 points. The tray's Study, beside, opens at Words.
@@ -10088,3 +10093,8 @@ Where the build differs from the text above, and why:
     changed in layout; the shots that differ do so by the run's timing as two runs before
     §17 also did (scroll indicators, a toast's moment, Listen's verse and progress, a
     keyboard's moment, a cursor), and 410 and 418 (the Memory page) not at all.
+18. **Reading settings' popover in the theme's appearance** (review s17-1, Major): its
+    navigation controller's `overrideUserInterfaceStyle` and its presentation's trait
+    overrides (iOS 17) are the theme's before it is shown and again at every theme change
+    while it is open (and, before iOS 26's glass, its background the sheets' color); 468
+    (Night) and 468b (Black) show it dark.

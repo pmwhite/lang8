@@ -1374,6 +1374,7 @@ ipad)
   step 526 466-ipad-search 10; land 466-ipad-search
   step 527 467-ipad-settings-popover 10; land 467-ipad-settings-popover
   step 528 468-ipad-theme-live 8; land 468-ipad-theme-live
+  step 566 468b-ipad-settings-black 8; land 468b-ipad-settings-black
   step 529 469-ipad-study 12; land 469-ipad-study
   step 530 470-ipad-word-study 8; land 470-ipad-word-study
   step 531 471-ipad-compare 10; land 471-ipad-compare
@@ -1453,12 +1454,12 @@ ipad)
   wait "$recorder" 2>/dev/null
   # The log's checks (§17.8.2): the place kept at each turn, the forms of
   # the sheets, the menu's commands, Study beside the text's states.
-  grep -h "bible: width\|bible: column\|bible: sheet as\|bible: menu\|bible: demo menu\|bible: study beside\|bible: demo rotate\|bible: demo narrow\|bible:   wide\|bible: key\|bible: go to field\|bible: demo step\|bible: demo sequence" \
+  grep -h "bible: width\|bible: column\|bible: sheet as\|bible: menu\|bible: demo menu\|bible: study beside\|bible: demo rotate\|bible: demo narrow\|bible:   wide\|bible: key\|bible: go to field\|bible: demo step\|bible: demo sequence\|bible: popover style" \
     "$out/console.txt" > "$out/ipad.txt" 2>/dev/null
   for want in "kept JHN 3:16" "sheet as a form sheet 540 x 720" "sheet as a popover 375 x 640" "sheet as a form sheet 700 x 860" \
       "demo menu Go: Go To…, Search…, Next Chapter, Previous Chapter, Back, Library" "key go to" "go to field active" \
       "study beside: shown John 3:16" "study beside: verse John 3:17" "study beside: show in text" \
-      "study beside: hidden (width)" "study beside: closed" "demo sequence 22 done" "demo sequence 23 done"; do
+      "study beside: hidden (width)" "study beside: screens 2" "popover style 2" "study beside: closed" "demo sequence 22 done" "demo sequence 23 done"; do
     grep -qF "$want" "$out/ipad.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/ipad.txt"; failed=1; }
   done
   tail -5 "$out/ipad.txt"

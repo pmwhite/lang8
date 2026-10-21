@@ -301,14 +301,14 @@ about 27 when each group had a Mac of its own; see the workflow's header):
   between them (the app and its defaults, permissions, keychain,
   pasteboard, status bar, notification state); a group that leaves
   something outside the app (plans' alert, more's share sheet) goes
-  second. store and memory share a Mac, each on its own simulator; ios18
-  follows ribbons and study on an iOS 18 iPhone of its own; languages
-  (Round 10, about 3 minutes) goes first on the versions job's iPhone,
-  more last; help (§15, about 3 minutes) third after notes and listen,
-  and plans (grown by §16's day's reader) after read; ipad (§17, on the
-  13-inch iPad Pro) fourth on the notes job, its iPad booted when its
-  turn comes (booted beside the others, it slowed them more than its boot
-  costs; `simulate.sh`'s `SIM_KEEP` would leave one booted ahead). Every group but help and ipad turns Show Tips off before its first
+  last. store and memory share a Mac, each on its own simulator, more
+  third on memory's; ios18 follows ribbons and study on an iOS 18 iPhone of
+  its own; languages (Round 10) goes first on the versions job's iPhone;
+  help (§15) second on the read job's, before plans (grown by §16's day's
+  reader); ipad (§17, on the 13-inch iPad Pro) third on the notes job, its
+  iPad booted when its turn comes (booted beside the others, it slowed them
+  more than its boot costs; `simulate.sh`'s `SIM_KEEP` would leave one
+  booted ahead). Every group but help and ipad turns Show Tips off before its first
   launch, so its shots of Go To have no tip. Each group is uploaded (`shots-GROUP`) as it ends,
   and `timing.txt` says when its boot, install, launch and settling came.
 - The groups are paired by their times so the jobs end together (a group
