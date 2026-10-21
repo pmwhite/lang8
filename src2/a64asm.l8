@@ -1,0 +1,1686 @@
+tag compiler_internal;
+
+// An AArch64 assembler for the text `l8 arm64` writes (see arm64.l8): the
+// program, its runtime (runtime-arm64-linux.s or runtime-arm64-darwin.s)
+// and its native pieces, assembled in memory into sections, symbols and
+// relocations, which a64link.l8 links into an executable without another
+// toolchain: a static ELF for Linux, or a Mach-O for iOS and its simulator.
+//
+// It reads the subset of GNU and Apple assembly those files use, and stops
+// with the line on anything else: labels (numbered ones too, as 1f and 1b),
+// .section, .text, .data, .bss, .globl, .p2align, .align, .byte, .short,
+// .word, .long, .quad, .space, .zero, .ascii, .asciz; and the integer,
+// load and store, branch and scalar float instructions, with the
+// relocations sym@PAGE, sym@PAGEOFF, sym@GOTPAGE, sym@GOTPAGEOFF (Apple's)
+// and :lo12:sym (ELF's). Every instruction encodes as the LLVM assembler
+// encodes it (tools/arm64/check.py compares the two).
+
+// Sections.
+const A64_TEXT: int = 0;
+
+const A64_CONST: int = 1;
+
+const A64_DATA: int = 2;
+
+const A64_BSS: int = 3;
+
+// Relocation kinds.
+const A64R_BRANCH26: int = 1;
+
+const A64R_COND19: int = 2;
+
+const A64R_PAGE21: int = 3;
+
+const A64R_PAGEOFF12: int = 4;
+
+const A64R_GOTPAGE21: int = 5;
+
+const A64R_GOTPAGEOFF12: int = 6;
+
+const A64R_ABS64: int = 7;
+
+const A64R_ADR21: int = 8;
+
+type A64Sym = {
+    name: []i8;
+    // A64_TEXT.., or -1 while undefined.
+    sec: int;
+    off: int;
+    global: bool;
+    // An assembler-local label (L..., .L..., a numbered one): not in the
+    // symbol table.
+    temp: bool;
+    // For the linker: an import's index, its stub's and its GOT slot's, and
+    // its symbol table index (-1 when none).
+    imp: int;
+    stub: int;
+    got: int;
+    index: int;
+    lib: int;
+    hash_next: ?*A64Sym;
+    next: ?*A64Sym
+}
+
+type A64Rel = {
+    sec: int;
+    off: int;
+    kind: int;
+    // For PAGEOFF12 in a load or store: log2 of the access's size.
+    scale: int;
+    sym: *A64Sym;
+    addend: int;
+    line: int;
+    next: ?*A64Rel
+}
+
+a64_text: *StrBuf = sb_new();
+
+a64_const: *StrBuf = sb_new();
+
+a64_data: *StrBuf = sb_new();
+
+a64_bss_size: int = 0;
+
+// Each section's alignment (bytes).
+a64_align: []int = new int[4](1);
+
+a64_cur: int = 0;
+
+a64_buckets: []?*A64Sym = new ?*A64Sym[16384](null);
+
+// All symbols, newest first.
+a64_syms: ?*A64Sym = null;
+
+a64_nsyms: int = 0;
+
+a64_rels: ?*A64Rel = null;
+
+a64_nrels: int = 0;
+
+a64_darwin: bool = false;
+
+// The text being assembled, and the current line (for messages).
+a64_src: []i8 = "";
+
+a64_line_no: int = 0;
+
+a64_line_start: int = 0;
+
+a64_line_end: int = 0;
+
+// Numbered labels: each number's last definition (for Nb), and the symbol
+// its next definition will be (for Nf), made when first referred to.
+a64_num_back: []?*A64Sym = new ?*A64Sym[100](null);
+
+a64_num_fwd: []?*A64Sym = new ?*A64Sym[100](null);
+
+a64_num_count: int = 0;
+
+a64_fail(msg: []i8): noreturn {
+    raw::raw_write(2, "error: arm64 assembler: ");
+    if (a64_line_no > 0) {
+        sb: *StrBuf = sb_new();
+        try {
+            sb_puts(sb, "line ");
+            sb_uint(sb, a64_line_no);
+            sb_puts(sb, ": ")
+        } with Error _e -> { }
+        raw::raw_write_bytes(2, sb_finish(sb))
+    }
+    raw::raw_write_bytes(2, msg);
+    if (a64_line_no > 0 && a64_line_end > a64_line_start) {
+        raw::raw_write(2, ": ");
+        raw::raw_write_some(2, a64_src, a64_line_start, a64_line_end - a64_line_start)
+    }
+    raw::raw_write(2, "\n");
+    exit(1)
+}
+
+a64_buf(sec: int): *StrBuf {
+    if (sec == A64_TEXT) a64_text else if (sec == A64_CONST) a64_const else a64_data
+}
+
+// The current offset in the current section.
+a64_here(): int {
+    if (a64_cur == A64_BSS) a64_bss_size else a64_buf(a64_cur).used
+}
+
+a64_byte(v: int) {
+    if (a64_cur == A64_BSS) {
+        if ((v & 255) != 0) a64_fail("data in .bss");
+        a64_bss_size = a64_bss_size + 1;
+        return
+    }
+    try {
+        sb_putc(a64_buf(a64_cur), (v & 255) trunc i8)
+    } with Error _e -> {
+        a64_fail("out of memory")
+    }
+}
+
+a64_le(v: int, n: int) {
+    for k in 0..n a64_byte(v >> 8 * k)
+}
+
+a64_word(v: int) {
+    if (a64_cur != A64_TEXT && a64_cur != A64_CONST && a64_cur != A64_DATA) a64_fail("an instruction outside .text");
+    a64_le(v, 4)
+}
+
+// ---- symbols ----
+a64_hash(s: []i8, b: int, n: int): int {
+    h: int = 5381;
+    for i in b..b + n h = h * 33 + (s[i] as int & 255) & 16383;
+    h
+}
+
+a64_find(s: []i8, b: int, n: int): ?*A64Sym {
+    e: ?*A64Sym = a64_buckets[a64_hash(s, b, n)];
+    while (e != null) {
+        if (len(e.name) == n && streq_n(e.name, 0, s, b, n)) return e;
+        e = e.hash_next
+    }
+    null
+}
+
+// (Mach-O's assembler-local names start with L, ELF's with .L.)
+a64_is_temp(name: []i8): bool {
+    if (a64_darwin) return len(name) >= 1 && name[0] == 'L';
+    len(name) >= 2 && name[0] == '.' && name[1] == 'L'
+}
+
+a64_new_sym(name: []i8@new) noregion: *A64Sym@new {
+    h: int = a64_hash(name, 0, len(name));
+    sym: *A64Sym = new A64Sym {
+        name: name,
+        sec: 0 - 1,
+        off: 0,
+        global: false,
+        temp: a64_is_temp(name),
+        imp: 0 - 1,
+        stub: 0 - 1,
+        got: 0 - 1,
+        index: 0 - 1,
+        lib: 0,
+        hash_next: a64_buckets[h],
+        next: a64_syms
+    };
+    a64_buckets[h] = sym;
+    a64_syms = sym;
+    a64_nsyms = a64_nsyms + 1;
+    sym
+}
+
+// The symbol named by s[b, b + n), made if new.
+a64_sym(s: []i8, b: int, n: int) noregion: *A64Sym@new {
+    found: ?*A64Sym = a64_find(s, b, n);
+    if (found != null) return found;
+    a64_new_sym(strdup_n(s, b, n))
+}
+
+a64_define(sym: *A64Sym) {
+    if (sym.sec >= 0) a64_fail("a label defined twice");
+    sym.sec = a64_cur;
+    sym.off = a64_here()
+}
+
+// A numbered label's symbol: Nb the last N defined, Nf the next.
+a64_num_ref(n: int, forward: bool) noregion: *A64Sym@new {
+    if (n < 0 || n >= 100) a64_fail("a numbered label past 99");
+    if (!forward) {
+        back: ?*A64Sym = a64_num_back[n];
+        if (back == null) a64_fail("no such numbered label before");
+        return back
+    }
+    fwd: ?*A64Sym = a64_num_fwd[n];
+    if (fwd != null) return fwd;
+    made: *A64Sym = a64_num_sym();
+    a64_num_fwd[n] = made;
+    made
+}
+
+a64_num_sym() noregion: *A64Sym@new {
+    sb: *StrBuf = sb_new();
+    try {
+        sb_puts(sb, ".L8num.");
+        sb_uint(sb, a64_num_count)
+    } with Error _e -> {
+        a64_fail("out of memory")
+    }
+    a64_num_count = a64_num_count + 1;
+    sym: *A64Sym = a64_new_sym(sb_finish(sb));
+    sym.temp = true;
+    sym
+}
+
+a64_define_num(n: int) noregion {
+    if (n < 0 || n >= 100) a64_fail("a numbered label past 99");
+    fwd: ?*A64Sym = a64_num_fwd[n];
+    sym: *A64Sym = if (fwd != null) fwd else a64_num_sym();
+    a64_num_fwd[n] = null;
+    a64_define(sym);
+    a64_num_back[n] = sym
+}
+
+a64_reloc(
+    kind: int,
+    scale: int,
+    sym: *A64Sym@immortal,
+    addend: int
+) noregion {
+    a64_rels = new A64Rel {
+        sec: a64_cur,
+        off: a64_here(),
+        kind: kind,
+        scale: scale,
+        sym: sym,
+        addend: addend,
+        line: a64_line_no,
+        next: a64_rels
+    };
+    a64_nrels = a64_nrels + 1
+}
+
+// ---- operands ----
+// Kinds.
+const A64O_REG: int = 1;
+
+const A64O_IMM: int = 2;
+
+const A64O_MEM: int = 3;
+
+const A64O_SYM: int = 4;
+
+const A64O_SHIFT: int = 5;
+
+// Register classes: x, w, d, s, q, h, b.
+const A64C_X: int = 0;
+
+const A64C_W: int = 1;
+
+const A64C_D: int = 2;
+
+const A64C_S: int = 3;
+
+const A64C_Q: int = 4;
+
+const A64C_H: int = 5;
+
+const A64C_B: int = 6;
+
+// Symbol modifiers.
+const A64M_NONE: int = 0;
+
+const A64M_PAGE: int = 1;
+
+const A64M_PAGEOFF: int = 2;
+
+const A64M_GOTPAGE: int = 3;
+
+const A64M_GOTPAGEOFF: int = 4;
+
+const A64M_LO12: int = 5;
+
+// Memory operand forms: [base], [base, #imm], [base, reg...], [base, sym].
+const A64A_BASE: int = 0;
+
+const A64A_IMM: int = 1;
+
+const A64A_REG: int = 2;
+
+const A64A_SYM: int = 3;
+
+type A64Ops = {
+    kind: []int;
+    reg: []int;
+    cls: []int;
+    // 1 for sp (or wsp), 2 for the zero register.
+    special: []int;
+    imm: []int;
+    sym: []?*A64Sym;
+    modifier: []int;
+    // Memory: its form, '!' (pre-index), the index register, its class,
+    // its extend (0 lsl, 2 uxtw, 6 sxtw, 7 sxtx) and shift.
+    form: []int;
+    pre: []bool;
+    index: []int;
+    index_cls: []int;
+    extend: []int;
+    shift: []int;
+    has_shift: []bool;
+    // The operand's own text (for condition names).
+    text_b: []int;
+    text_e: []int
+}
+
+// The current instruction's operands: how many, and each one's parts.
+a64_nops: int = 0;
+
+a64_ops: A64Ops = A64Ops {
+    kind: new int[8](0),
+    reg: new int[8](0),
+    cls: new int[8](0),
+    special: new int[8](0),
+    imm: new int[8](0),
+    sym: new ?*A64Sym[8](null),
+    modifier: new int[8](0),
+    form: new int[8](0),
+    pre: new bool[8](false),
+    index: new int[8](0),
+    index_cls: new int[8](0),
+    extend: new int[8](0),
+    shift: new int[8](0),
+    has_shift: new bool[8](false),
+    text_b: new int[8](0),
+    text_e: new int[8](0)
+};
+
+a64_is_space(c: i8): bool {
+    c == ' ' || c == '\t' || c == '\r'
+}
+
+a64_is_ident(c: i8): bool {
+    c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '$'
+}
+
+a64_is_digit(c: i8): bool {
+    c >= '0' && c <= '9'
+}
+
+a64_skip(s: []i8, p: int, e: int): int {
+    q: int = p;
+    while (q < e && a64_is_space(s[q])) q = q + 1;
+    q
+}
+
+a64_lower(c: i8): i8 {
+    if (c >= 'A' && c <= 'Z') (c as int + 32) trunc i8 else c
+}
+
+// Whether s[b, e) is the word w (case-insensitively).
+a64_word_is(
+    s: []i8,
+    b: int,
+    e: int,
+    w: []i8
+): bool {
+    if (e - b != len(w)) return false;
+    for i in 0..len(w) {
+        if (a64_lower(s[b + i]) != w[i]) return false
+    }
+    true
+}
+
+// A register named by s[b, e): its number, class and kind (1 sp, 2 zr),
+// as (number + 64 * class + 4096 * special), or -1.
+a64_reg_name(s: []i8, b: int, e: int): int {
+    n: int = e - b;
+    if (n < 2) return 0 - 1;
+    if (a64_word_is(s, b, e, "sp")) return 31 + 4096;
+    if (a64_word_is(s, b, e, "wsp")) return 31 + 64 * A64C_W + 4096;
+    if (a64_word_is(s, b, e, "xzr")) return 31 + 8192;
+    if (a64_word_is(s, b, e, "wzr")) return 31 + 64 * A64C_W + 8192;
+    if (a64_word_is(s, b, e, "lr")) return 30;
+    if (a64_word_is(s, b, e, "fp")) return 29;
+    c: i8 = a64_lower(s[b]);
+    cls: int = if (c == 'x') A64C_X else if (c == 'w') A64C_W else if (c == 'd') A64C_D else if (c == 's') A64C_S else if (c == 'q') A64C_Q else if (c == 'h') A64C_H else if (c == 'b') A64C_B else 0 - 1;
+    if (cls < 0 || n > 3) return 0 - 1;
+    v: int = 0;
+    for i in b + 1..e {
+        if (!a64_is_digit(s[i])) return 0 - 1;
+        v = v * 10 + (s[i] as int - '0' as int)
+    }
+    if (n == 3 && s[b + 1] == '0') return 0 - 1;
+    if (v > 31 || v == 31 && (cls == A64C_X || cls == A64C_W)) return 0 - 1;
+    v + 64 * cls
+}
+
+// A number at s[p..e): decimal, 0x hex, or a character 'c'; its value and
+// where it ends (as a pair through a64_num_end).
+a64_num_end: int = 0;
+
+a64_number(s: []i8, p: int, e: int): int {
+    q: int = p;
+    neg: bool = false;
+    if (q < e && (s[q] == '-' || s[q] == '+')) {
+        neg = s[q] == '-';
+        q = q + 1
+    }
+    if (q >= e) a64_fail("a number expected");
+    v: int = 0;
+    if (s[q] == '\'' && q + 2 < e && s[q + 2] == '\'') {
+        v = s[q + 1] as int & 255;
+        q = q + 3
+    } else if (q + 1 < e && s[q] == '0' && (s[q + 1] == 'x' || s[q + 1] == 'X')) {
+        q = q + 2;
+        start: int = q;
+        while (q < e && a64_hex_digit(s[q]) >= 0) {
+            v = v * 16 + a64_hex_digit(s[q]);
+            q = q + 1
+        }
+        if (q == start) a64_fail("a hex number expected")
+    } else {
+        if (!a64_is_digit(s[q])) a64_fail("a number expected");
+        while (q < e && a64_is_digit(s[q])) {
+            v = v * 10 + (s[q] as int - '0' as int);
+            q = q + 1
+        }
+    }
+    a64_num_end = q;
+    if (neg) 0 - v else v
+}
+
+a64_hex_digit(c: i8): int {
+    if (c >= '0' && c <= '9') c as int - '0' as int else if (c >= 'a' && c <= 'f') c as int - 'a' as int + 10 else if (c >= 'A' && c <= 'F') c as int - 'A' as int + 10 else 0 - 1
+}
+
+// A symbol reference at s[p..e): a name (quoted or not, or a numbered
+// label's Nf or Nb), an optional @MODIFIER, and an optional +N or -N.
+// Sets operand i's sym, modifier and imm (the addend); returns its end.
+a64_symref(
+    i: int,
+    s: []i8,
+    p: int,
+    e: int
+) noregion: int {
+    q: int = p;
+    ops: A64Ops = a64_ops;
+    ops.modifier[i] = A64M_NONE;
+    if (q < e && s[q] == ':') {
+        m: int = q + 1;
+        while (m < e && s[m] != ':') m = m + 1;
+        if (m >= e) a64_fail("a bad :modifier:");
+        if (a64_word_is(s, q + 1, m, "lo12")) ops.modifier[i] = A64M_LO12 else a64_fail("an unknown :modifier:");
+        q = m + 1
+    }
+    sym: ?*A64Sym = null;
+    if (q < e && s[q] == '"') {
+        b: int = q + 1;
+        q = b;
+        while (q < e && s[q] != '"') q = q + 1;
+        if (q >= e) a64_fail("an unended quoted name");
+        sym = a64_sym(s, b, q - b);
+        q = q + 1
+    } else {
+        b: int = q;
+        while (q < e && a64_is_ident(s[q])) q = q + 1;
+        if (q == b) a64_fail("a symbol expected");
+        if (a64_is_digit(s[b])) {
+            last: i8 = s[q - 1];
+            if (last != 'f' && last != 'b') a64_fail("a symbol expected");
+            n: int = 0;
+            for k in b..q - 1 {
+                if (!a64_is_digit(s[k])) a64_fail("a bad numbered label");
+                n = n * 10 + (s[k] as int - '0' as int)
+            }
+            sym = a64_num_ref(n, last == 'f')
+        } else sym = a64_sym(s, b, q - b)
+    }
+    if (q < e && s[q] == '@') {
+        b: int = q + 1;
+        q = b;
+        while (q < e && a64_is_ident(s[q])) q = q + 1;
+        if (a64_word_is(s, b, q, "page")) ops.modifier[i] = A64M_PAGE else if (a64_word_is(s,
+            b, q, "pageoff")) ops.modifier[i] = A64M_PAGEOFF else if (a64_word_is(s,
+            b, q, "gotpage")) ops.modifier[i] = A64M_GOTPAGE else if (a64_word_is(s,
+            b, q, "gotpageoff")) ops.modifier[i] = A64M_GOTPAGEOFF else a64_fail("an unknown @modifier")
+    }
+    q = a64_skip(s, q, e);
+    ops.imm[i] = 0;
+    if (q < e && (s[q] == '+' || s[q] == '-')) {
+        ops.imm[i] = a64_number(s, q, e);
+        q = a64_num_end
+    }
+    ops.sym[i] = sym;
+    q
+}
+
+// The end of the operand starting at p (its comma at depth 0, or e).
+a64_operand_end(s: []i8, p: int, e: int): int {
+    q: int = p;
+    depth: int = 0;
+    while (q < e) {
+        c: i8 = s[q];
+        if (c == '[') depth = depth + 1;
+        if (c == ']') depth = depth - 1;
+        if (c == '"') {
+            q = q + 1;
+            while (q < e && s[q] != '"') q = q + 1
+        }
+        if (c == ',' && depth == 0) return q;
+        q = q + 1
+    }
+    e
+}
+
+// The trimmed end of s[b, e).
+a64_trim_end(s: []i8, b: int, e: int): int {
+    q: int = e;
+    while (q > b && a64_is_space(s[q - 1])) q = q - 1;
+    q
+}
+
+// Operand i from s[b, e) (trimmed): a register, #imm, [memory], a shift
+// (lsl #n...) or extend, or a symbol.
+a64_operand(
+    i: int,
+    s: []i8,
+    b: int,
+    e: int
+) noregion {
+    ops: A64Ops = a64_ops;
+    ops.text_b[i] = b;
+    ops.text_e[i] = e;
+    ops.has_shift[i] = false;
+    ops.special[i] = 0;
+    if (b >= e) a64_fail("an empty operand");
+    c: i8 = s[b];
+    if (c == '#') {
+        ops.kind[i] = A64O_IMM;
+        p: int = a64_skip(s, b + 1, e);
+        // (#:lo12:sym is a symbol's low bits.)
+        if (p < e && s[p] == ':') {
+            ops.kind[i] = A64O_SYM;
+            q: int = a64_symref(i, s, p, e);
+            if (q != e) a64_fail("junk after a symbol");
+            return
+        }
+        ops.imm[i] = a64_number(s, p, e);
+        if (a64_skip(s, a64_num_end, e) != e) a64_fail("junk after a number");
+        return
+    }
+    if (c == '[') {
+        a64_mem_operand(i, s, b, e);
+        return
+    }
+    // A word: a register, a shift or extend, or a symbol.
+    w: int = b;
+    while (w < e && a64_is_ident(s[w])) w = w + 1;
+    r: int = a64_reg_name(s, b, w);
+    if (r >= 0 && a64_skip(s, w, e) == e) {
+        ops.kind[i] = A64O_REG;
+        ops.reg[i] = r & 63;
+        ops.cls[i] = r >> 6 & 63;
+        ops.special[i] = r >> 12;
+        return
+    }
+    st: int = a64_shift_name(s, b, w);
+    if (st >= 0) {
+        ops.kind[i] = A64O_SHIFT;
+        ops.reg[i] = st;
+        p: int = a64_skip(s, w, e);
+        ops.imm[i] = 0;
+        if (p < e) {
+            if (s[p] != '#') a64_fail("a shift's amount expected");
+            ops.imm[i] = a64_number(s, a64_skip(s, p + 1, e), e);
+            if (a64_skip(s, a64_num_end, e) != e) a64_fail("junk after a shift")
+        }
+        ops.has_shift[i] = p < e;
+        return
+    }
+    ops.kind[i] = A64O_SYM;
+    q: int = a64_symref(i, s, b, e);
+    if (q != e) a64_fail("junk after a symbol")
+}
+
+// A shift's or extend's name: lsl 0, lsr 1, asr 2, ror 3 (shifts); uxtw
+// 10+2, sxtw 10+6, sxtx 10+7, uxtx 10+3 (extends); else -1.
+a64_shift_name(s: []i8, b: int, e: int): int {
+    if (a64_word_is(s, b, e, "lsl")) return 0;
+    if (a64_word_is(s, b, e, "lsr")) return 1;
+    if (a64_word_is(s, b, e, "asr")) return 2;
+    if (a64_word_is(s, b, e, "ror")) return 3;
+    if (a64_word_is(s, b, e, "uxtw")) return 12;
+    if (a64_word_is(s, b, e, "uxtx")) return 13;
+    if (a64_word_is(s, b, e, "sxtw")) return 16;
+    if (a64_word_is(s, b, e, "sxtx")) return 17;
+    0 - 1
+}
+
+a64_mem_operand(
+    i: int,
+    s: []i8,
+    b: int,
+    e: int
+) noregion {
+    ops: A64Ops = a64_ops;
+    ops.kind[i] = A64O_MEM;
+    ops.pre[i] = false;
+    ops.form[i] = A64A_BASE;
+    ops.imm[i] = 0;
+    ops.extend[i] = 0;
+    ops.shift[i] = 0;
+    ops.has_shift[i] = false;
+    close: int = e;
+    if (s[close - 1] == '!') {
+        ops.pre[i] = true;
+        close = a64_trim_end(s, b, close - 1)
+    }
+    if (close <= b || s[close - 1] != ']') a64_fail("a bad memory operand");
+    close = close - 1;
+    p: int = a64_skip(s, b + 1, close);
+    w: int = p;
+    while (w < close && a64_is_ident(s[w])) w = w + 1;
+    r: int = a64_reg_name(s, p, w);
+    if (r < 0 || (r >> 6 & 63) != A64C_X) a64_fail("a base register expected");
+    ops.reg[i] = r & 63;
+    ops.special[i] = r >> 12;
+    p = a64_skip(s, w, close);
+    if (p >= close) return;
+    if (s[p] != ',') a64_fail("a comma expected in a memory operand");
+    p = a64_skip(s, p + 1, close);
+    if (p < close && s[p] == '#') {
+        q: int = a64_skip(s, p + 1, close);
+        if (q < close && s[q] == ':') {
+            ops.form[i] = A64A_SYM;
+            end: int = a64_symref(i, s, q, close);
+            if (a64_skip(s, end, close) != close) a64_fail("junk in a memory operand");
+            return
+        }
+        ops.form[i] = A64A_IMM;
+        ops.imm[i] = a64_number(s, q, close);
+        if (a64_skip(s, a64_num_end, close) != close) a64_fail("junk in a memory operand");
+        return
+    }
+    w = p;
+    while (w < close && a64_is_ident(s[w])) w = w + 1;
+    x: int = a64_reg_name(s, p, w);
+    if (x >= 0) {
+        ops.form[i] = A64A_REG;
+        ops.index[i] = x & 63;
+        ops.index_cls[i] = x >> 6 & 63;
+        if (x >> 12 == 1) a64_fail("sp as an index");
+        ops.extend[i] = (if (ops.index_cls[i] == A64C_W) 2 else 3);
+        p = a64_skip(s, w, close);
+        if (p < close) {
+            if (s[p] != ',') a64_fail("a comma expected in a memory operand");
+            p = a64_skip(s, p + 1, close);
+            w = p;
+            while (w < close && a64_is_ident(s[w])) w = w + 1;
+            st: int = a64_shift_name(s, p, w);
+            if (st != 0 && st < 12) a64_fail("a bad index shift");
+            if (st >= 12) ops.extend[i] = st - 10;
+            p = a64_skip(s, w, close);
+            if (p < close) {
+                if (s[p] != '#') a64_fail("a shift amount expected");
+                ops.shift[i] = a64_number(s, a64_skip(s, p + 1, close), close);
+                ops.has_shift[i] = true;
+                if (a64_skip(s, a64_num_end, close) != close) a64_fail("junk in a memory operand")
+            } else if (st == 0) a64_fail("lsl without an amount")
+        }
+        return
+    }
+    ops.form[i] = A64A_SYM;
+    end: int = a64_symref(i, s, p, close);
+    if (a64_skip(s, end, close) != close) a64_fail("junk in a memory operand")
+}
+
+// ---- encodings ----
+a64_need(n: int) {
+    if (a64_nops != n) a64_fail("the wrong number of operands")
+}
+
+a64_is_reg(i: int): bool {
+    a64_ops.kind[i] == A64O_REG
+}
+
+// Operand i as a general register: its number, and whether it is 64-bit.
+a64_gpr(i: int): int {
+    if (a64_ops.kind[i] != A64O_REG) a64_fail("a register expected");
+    c: int = a64_ops.cls[i];
+    if (c != A64C_X && c != A64C_W) a64_fail("a general register expected");
+    a64_ops.reg[i]
+}
+
+a64_wide(i: int): bool {
+    a64_ops.cls[i] == A64C_X
+}
+
+a64_sf(i: int): int {
+    if (a64_ops.cls[i] == A64C_X) 1 << 31 else 0
+}
+
+a64_same_width(i: int, j: int) {
+    if (a64_ops.cls[i] != a64_ops.cls[j]) a64_fail("registers of different widths")
+}
+
+a64_not_sp(i: int) {
+    if (a64_ops.special[i] == 1) a64_fail("sp here")
+}
+
+a64_not_zr(i: int) {
+    if (a64_ops.special[i] == 2) a64_fail("the zero register here")
+}
+
+// Operand i as a float register (d or s): its number; its type as the
+// encodings number it (0 single, 1 double) in a64_ftype.
+a64_fpr(i: int): int {
+    if (a64_ops.kind[i] != A64O_REG) a64_fail("a register expected");
+    c: int = a64_ops.cls[i];
+    if (c != A64C_D && c != A64C_S) a64_fail("a float register expected");
+    a64_ops.reg[i]
+}
+
+a64_ftype(i: int): int {
+    if (a64_ops.cls[i] == A64C_D) 1 else 0
+}
+
+a64_imm(i: int): int {
+    if (a64_ops.kind[i] != A64O_IMM) a64_fail("an immediate expected");
+    a64_ops.imm[i]
+}
+
+// A logical immediate's N:immr:imms (13 bits), or -1 if v cannot be one.
+a64_logical_imm(v: int, wide: bool): int {
+    width: int = if (wide) 64 else 32;
+    x: int = if (wide) v else v & 4294967295;
+    if (!wide && (v >> 32 != 0 && v >> 32 != 0 - 1)) return 0 - 1;
+    if (x == 0 || wide && x == 0 - 1 || !wide && x == 4294967295) return 0 - 1;
+    // The smallest element that repeats to make x.
+    size: int = width;
+    done: bool = false;
+    while (!done && size > 2) {
+        half: int = size / 2;
+        mask: int = (1 << half) - 1;
+        if ((x & mask) == (x >> half & mask)) size = half else done = true
+    }
+    emask: int = if (size == 64) 0 - 1 else (1 << size) - 1;
+    elt: int = x & emask;
+    // Rotate the element right until its ones are at the bottom, contiguous.
+    ones: int = 0;
+    for k in 0..size {
+        if ((elt >> k & 1) != 0) ones = ones + 1
+    }
+    rot: int = 0 - 1;
+    want: int = if (ones == 64) 0 - 1 else (1 << ones) - 1;
+    for r in 0..size {
+        rotated: int = a64_ror(elt, r, size);
+        if (rot < 0 && rotated == want) rot = r
+    }
+    if (rot < 0) return 0 - 1;
+    // elt = ror(want, size - rot): immr is that rotation.
+    immr: int = (size - rot) % size;
+    nbit: int = if (size == 64) 1 else 0;
+    imms: int = (0 - size << 1 | ones - 1) & 63;
+    nbit << 12 | immr << 6 | imms
+}
+
+// v (size bits) rotated right by r.
+a64_ror(v: int, r: int, size: int): int {
+    if (r == 0) return v;
+    mask: int = if (size == 64) 0 - 1 else (1 << size) - 1;
+    low: int = v >> r & (1 << size - r) - 1;
+    (low | v << size - r) & mask
+}
+
+// Branch and relocated operands: a symbol, recorded as a relocation of
+// the instruction about to be written.
+a64_sym_operand(i: int, kind: int, scale: int) noregion {
+    sym: ?*A64Sym = a64_ops.sym[i];
+    if (sym == null) a64_fail("a symbol expected");
+    a64_reloc(kind, scale, sym, a64_ops.imm[i])
+}
+
+// The relocation for a symbol in an adrp, add or load/store offset.
+a64_page_kind(i: int): int {
+    m: int = a64_ops.modifier[i];
+    if (m == A64M_PAGE || m == A64M_NONE) A64R_PAGE21 else if (m == A64M_GOTPAGE) A64R_GOTPAGE21 else {
+        a64_fail("a page's symbol expected");
+        0
+    }
+}
+
+a64_pageoff_kind(i: int): int {
+    m: int = a64_ops.modifier[i];
+    if (m == A64M_PAGEOFF || m == A64M_LO12) A64R_PAGEOFF12 else if (m == A64M_GOTPAGEOFF) A64R_GOTPAGEOFF12 else {
+        a64_fail("a page offset's symbol expected");
+        0
+    }
+}
+
+a64_cond_code(s: []i8, b: int, e: int): int {
+    if (a64_word_is(s, b, e, "eq")) return 0;
+    if (a64_word_is(s, b, e, "ne")) return 1;
+    if (a64_word_is(s, b, e, "hs") || a64_word_is(s, b, e, "cs")) return 2;
+    if (a64_word_is(s, b, e, "lo") || a64_word_is(s, b, e, "cc")) return 3;
+    if (a64_word_is(s, b, e, "mi")) return 4;
+    if (a64_word_is(s, b, e, "pl")) return 5;
+    if (a64_word_is(s, b, e, "vs")) return 6;
+    if (a64_word_is(s, b, e, "vc")) return 7;
+    if (a64_word_is(s, b, e, "hi")) return 8;
+    if (a64_word_is(s, b, e, "ls")) return 9;
+    if (a64_word_is(s, b, e, "ge")) return 10;
+    if (a64_word_is(s, b, e, "lt")) return 11;
+    if (a64_word_is(s, b, e, "gt")) return 12;
+    if (a64_word_is(s, b, e, "le")) return 13;
+    if (a64_word_is(s, b, e, "al")) return 14;
+    0 - 1
+}
+
+// mov, movz, movn, movk: the wide immediate forms.
+a64_movw(opc: int) {
+    ops: A64Ops = a64_ops;
+    if (a64_nops != 2 && a64_nops != 3) a64_fail("the wrong number of operands");
+    d: int = a64_gpr(0);
+    a64_not_sp(0);
+    v: int = a64_imm(1);
+    hw: int = 0;
+    if (a64_nops == 3) {
+        if (ops.kind[2] != A64O_SHIFT || ops.reg[2] != 0) a64_fail("lsl expected");
+        sh: int = ops.imm[2];
+        if (sh % 16 != 0 || sh > 48 || !a64_wide(0) && sh > 16) a64_fail("a bad wide shift");
+        hw = sh / 16
+    }
+    if (v < 0 || v > 65535) a64_fail("a wide immediate out of range");
+    a64_word(a64_sf(0) | opc << 29 | 37 << 23 | hw << 21 | v << 5 | d)
+}
+
+// mov xd, #imm: movz, movn or orr, as the LLVM assembler picks.
+a64_mov_imm(d: int, wide: bool, v: int) {
+    sf: int = if (wide) 1 << 31 else 0;
+    x: int = if (wide) v else v & 4294967295;
+    if (!wide && (v >> 32 != 0 && v >> 32 != 0 - 1)) a64_fail("an immediate out of range");
+    chunks: int = if (wide) 4 else 2;
+    for k in 0..chunks {
+        if ((x & ~(65535 << 16 * k)) == 0) {
+            a64_word(sf | 2 << 29 | 37 << 23 | k << 21 | (x >> 16 * k & 65535) << 5 | d);
+            return
+        }
+    }
+    nx: int = if (wide) ~x else ~x & 4294967295;
+    for k in 0..chunks {
+        if ((nx & ~(65535 << 16 * k)) == 0) {
+            // (movn of 0xffff..., for a 32-bit one, is movz's; the LLVM
+            // assembler writes movn only when its chunk is not all ones.)
+            a64_word(sf | 0 << 29 | 37 << 23 | k << 21 | (nx >> 16 * k & 65535) << 5 | d);
+            return
+        }
+    }
+    li: int = a64_logical_imm(v, wide);
+    if (li < 0) a64_fail("an immediate mov cannot make");
+    a64_word(sf | 1 << 29 | 36 << 23 | li << 10 | 31 << 5 | d)
+}
+
+a64_mov() {
+    a64_need(2);
+    ops: A64Ops = a64_ops;
+    d: int = a64_gpr(0);
+    if (ops.kind[1] == A64O_IMM) {
+        a64_not_sp(0);
+        a64_mov_imm(d, a64_wide(0), ops.imm[1]);
+        return
+    }
+    m: int = a64_gpr(1);
+    a64_same_width(0, 1);
+    if (ops.special[0] == 1 || ops.special[1] == 1) {
+        // add d, n, #0
+        a64_word(a64_sf(0) | 17 << 24 | m << 5 | d);
+        return
+    }
+    // orr d, zr, m
+    a64_word(a64_sf(0) | 1 << 29 | 10 << 24 | m << 16 | 31 << 5 | d)
+}
+
+// add, adds, sub, subs (op 0 add, 1 sub; s sets flags); cmp and cmn are
+// subs and adds to the zero register.
+a64_addsub(sub: int, s: int, d_index: int) noregion {
+    ops: A64Ops = a64_ops;
+    // Operands: d (or none, for cmp), n, then #imm, reg, or a symbol.
+    base: int = if (d_index < 0) 0 else 1;
+    if (a64_nops < base + 2) a64_fail("too few operands");
+    d: int = if (d_index < 0) 31 else a64_gpr(0);
+    n: int = a64_gpr(base);
+    wide: bool = a64_wide(base);
+    if (d_index >= 0) a64_same_width(0, base);
+    sf: int = if (wide) 1 << 31 else 0;
+    third: int = base + 1;
+    if (ops.kind[third] == A64O_IMM || ops.kind[third] == A64O_SYM) {
+        if (s == 1 && d_index >= 0) a64_not_sp(0);
+        if (s == 0 && d_index >= 0 && ops.special[0] == 2) a64_fail("the zero register here");
+        if (ops.special[base] == 2) a64_fail("the zero register here");
+        sh: int = 0;
+        v: int = 0;
+        op: int = sub;
+        if (ops.kind[third] == A64O_SYM) {
+            if (a64_nops != third + 1) a64_fail("too many operands");
+            a64_sym_operand(third, a64_pageoff_kind(third), 0)
+        } else {
+            v = ops.imm[third];
+            if (a64_nops == third + 2) {
+                if (ops.kind[third + 1] != A64O_SHIFT || ops.reg[third + 1] != 0 || ops.imm[third + 1] != 0 && ops.imm[third + 1] != 12) a64_fail("a bad add shift");
+                if (ops.imm[third + 1] == 12) sh = 1
+            } else if (a64_nops != third + 1) a64_fail("too many operands");
+            if (v < 0) {
+                v = 0 - v;
+                op = 1 - op
+            }
+            if (sh == 0 && v >= 4096 && (v & 4095) == 0 && v < 16777216) {
+                sh = 1;
+                v = v >> 12
+            }
+            if (v >= 4096) a64_fail("an add immediate out of range")
+        }
+        a64_word(sf | op << 30 | s << 29 | 17 << 24 | sh << 22 | v << 10 | n << 5 | d);
+        return
+    }
+    m: int = a64_gpr(third);
+    a64_same_width(base, third);
+    shift_type: int = 0;
+    amount: int = 0;
+    if (a64_nops == third + 2) {
+        k: int = third + 1;
+        if (ops.kind[k] != A64O_SHIFT) a64_fail("a shift expected");
+        shift_type = ops.reg[k];
+        amount = ops.imm[k]
+    } else if (a64_nops != third + 1) a64_fail("too many operands");
+    sp_used: bool = ops.special[base] == 1 || d_index >= 0 && ops.special[0] == 1 && s == 0;
+    if (sp_used || shift_type >= 10) {
+        // The extended register form: uxtx (or the extend given).
+        option: int = if (shift_type >= 10) shift_type - 10 else if (wide) 3 else 2;
+        if (shift_type < 10 && shift_type != 0) a64_fail("a shift with sp");
+        if (amount > 4) a64_fail("an extend's shift past 4");
+        a64_word(sf | sub << 30 | s << 29 | 11 << 24 | 1 << 21 | m << 16 | option << 13 | amount << 10 | n << 5 | d);
+        return
+    }
+    if (shift_type == 3) a64_fail("ror in an add");
+    a64_not_sp(third);
+    a64_word(sf | sub << 30 | s << 29 | 11 << 24 | shift_type << 22 | m << 16 | amount << 10 | n << 5 | d)
+}
+
+// and, orr, eor, ands (opc 0-3), and tst (ands to zr); n_bit for bic,
+// orn, eon (register forms only).
+a64_logical(opc: int, n_bit: int, only_flags: bool) {
+    ops: A64Ops = a64_ops;
+    base: int = if (only_flags) 0 else 1;
+    d: int = if (only_flags) 31 else a64_gpr(0);
+    n: int = a64_gpr(base);
+    a64_not_sp(base);
+    if (!only_flags) a64_same_width(0, base);
+    wide: bool = a64_wide(base);
+    sf: int = if (wide) 1 << 31 else 0;
+    third: int = base + 1;
+    if (a64_nops < third + 1) a64_fail("too few operands");
+    if (ops.kind[third] == A64O_IMM) {
+        if (a64_nops != third + 1) a64_fail("too many operands");
+        if (n_bit != 0) a64_fail("an immediate here");
+        if (opc == 3 && !only_flags) a64_not_sp(0);
+        if (!only_flags && ops.special[0] == 2) a64_fail("the zero register here");
+        li: int = a64_logical_imm(ops.imm[third], wide);
+        if (li < 0) a64_fail("not a logical immediate");
+        a64_word(sf | opc << 29 | 36 << 23 | li << 10 | n << 5 | d);
+        return
+    }
+    m: int = a64_gpr(third);
+    if (!only_flags) a64_not_sp(0);
+    a64_not_sp(third);
+    a64_same_width(base, third);
+    shift_type: int = 0;
+    amount: int = 0;
+    if (a64_nops == third + 2) {
+        k: int = third + 1;
+        if (ops.kind[k] != A64O_SHIFT || ops.reg[k] > 3) a64_fail("a shift expected");
+        shift_type = ops.reg[k];
+        amount = ops.imm[k]
+    } else if (a64_nops != third + 1) a64_fail("too many operands");
+    a64_word(sf | opc << 29 | 10 << 24 | shift_type << 22 | n_bit << 21 | m << 16 | amount << 10 | n << 5 | d)
+}
+
+// lsl, lsr, asr: by an immediate (ubfm, sbfm) or a register (lslv...).
+a64_shift(kind: int) {
+    a64_need(3);
+    ops: A64Ops = a64_ops;
+    d: int = a64_gpr(0);
+    n: int = a64_gpr(1);
+    a64_same_width(0, 1);
+    a64_not_sp(0);
+    a64_not_sp(1);
+    wide: bool = a64_wide(0);
+    sf: int = if (wide) 1 << 31 else 0;
+    size: int = if (wide) 64 else 32;
+    nbit: int = if (wide) 1 << 22 else 0;
+    if (ops.kind[2] == A64O_REG) {
+        m: int = a64_gpr(2);
+        a64_word(sf | 214 << 21 | m << 16 | 8 + kind << 10 | n << 5 | d);
+        return
+    }
+    sh: int = a64_imm(2);
+    if (sh < 0 || sh >= size) a64_fail("a shift out of range");
+    if (kind == 0) {
+        // ubfm d, n, #(-sh mod size), #(size - 1 - sh)
+        a64_word(sf | 2 << 29 | 38 << 23 | nbit | (size - sh) % size << 16 | size - 1 - sh << 10 | n << 5 | d);
+        return
+    }
+    opc: int = if (kind == 1) 2 else 0;
+    a64_word(sf | opc << 29 | 38 << 23 | nbit | sh << 16 | size - 1 << 10 | n << 5 | d)
+}
+
+// A three-register data-processing instruction: madd-family (mul, madd,
+// msub) or two-source (sdiv, udiv).
+a64_mul(o0: int, has_a: bool) {
+    a64_need(if (has_a) 4 else 3);
+    d: int = a64_gpr(0);
+    n: int = a64_gpr(1);
+    m: int = a64_gpr(2);
+    a: int = if (has_a) a64_gpr(3) else 31;
+    for k in 0..a64_nops a64_not_sp(k);
+    a64_same_width(0, 1);
+    a64_same_width(0, 2);
+    a64_word(a64_sf(0) | 27 << 24 | m << 16 | o0 << 15 | a << 10 | n << 5 | d)
+}
+
+a64_div(opcode: int) {
+    a64_need(3);
+    d: int = a64_gpr(0);
+    n: int = a64_gpr(1);
+    m: int = a64_gpr(2);
+    for k in 0..3 a64_not_sp(k);
+    a64_same_width(0, 1);
+    a64_same_width(0, 2);
+    a64_word(a64_sf(0) | 214 << 21 | m << 16 | opcode << 10 | n << 5 | d)
+}
+
+// b and bl to a symbol.
+a64_branch(link: bool) noregion {
+    a64_need(1);
+    if (a64_ops.kind[0] != A64O_SYM) a64_fail("a branch target expected");
+    a64_sym_operand(0, A64R_BRANCH26, 0);
+    a64_word(if (link) 37 << 26 else 5 << 26)
+}
+
+a64_bcond(cond: int) noregion {
+    a64_need(1);
+    if (a64_ops.kind[0] != A64O_SYM) a64_fail("a branch target expected");
+    a64_sym_operand(0, A64R_COND19, 0);
+    a64_word(84 << 24 | cond)
+}
+
+a64_cbz(op: int) noregion {
+    a64_need(2);
+    t: int = a64_gpr(0);
+    a64_not_sp(0);
+    if (a64_ops.kind[1] != A64O_SYM) a64_fail("a branch target expected");
+    a64_sym_operand(1, A64R_COND19, 0);
+    a64_word(a64_sf(0) | 26 << 25 | op << 24 | t)
+}
+
+// Loads and stores. size is log2 of the access's bytes; opc as the
+// encodings number it (0 store, 1 load, 2 load signed to 64 bits, 3 load
+// signed to 32); v for float registers. unscaled: ldur and stur.
+a64_ldst(
+    size: int,
+    opc: int,
+    v: int,
+    unscaled: bool
+) noregion {
+    ops: A64Ops = a64_ops;
+    if (a64_nops != 2 && a64_nops != 3) a64_fail("the wrong number of operands");
+    t: int = ops.reg[0];
+    if (ops.kind[0] != A64O_REG) a64_fail("a register expected");
+    if (ops.kind[1] != A64O_MEM) a64_fail("a memory operand expected");
+    a64_not_sp(0);
+    n: int = ops.reg[1];
+    top: int = size << 30 | 7 << 27 | v << 26 | opc << 22;
+    if (a64_nops == 3) {
+        // Post-index: [n], #imm
+        if (ops.form[1] != A64A_BASE || ops.pre[1]) a64_fail("a bad post-index");
+        imm: int = a64_imm(2);
+        if (imm < -256 || imm > 255) a64_fail("a post-index out of range");
+        a64_word(top | (imm & 511) << 12 | 1 << 10 | n << 5 | t);
+        return
+    }
+    form: int = ops.form[1];
+    if (ops.pre[1]) {
+        if (form != A64A_IMM) a64_fail("a bad pre-index");
+        imm: int = ops.imm[1];
+        if (imm < -256 || imm > 255) a64_fail("a pre-index out of range");
+        a64_word(top | (imm & 511) << 12 | 3 << 10 | n << 5 | t);
+        return
+    }
+    if (form == A64A_REG) {
+        if (unscaled) a64_fail("ldur with an index");
+        s: int = 0;
+        if (ops.has_shift[1]) {
+            if (ops.shift[1] == size) s = 1 else if (ops.shift[1] != 0) a64_fail("a bad index shift")
+        }
+        ext: int = ops.extend[1];
+        if (ext == 3 && ops.index_cls[1] != A64C_X || (ext == 2 || ext == 6) && ops.index_cls[1] != A64C_W) a64_fail("a bad index register");
+        a64_word(top | 1 << 21 | ops.index[1] << 16 | ext << 13 | s << 12 | 2 << 10 | n << 5 | t);
+        return
+    }
+    if (form == A64A_SYM) {
+        if (unscaled) a64_fail("ldur with a symbol");
+        a64_sym_operand(1, a64_pageoff_kind(1), size);
+        a64_word(top | 1 << 24 | n << 5 | t);
+        return
+    }
+    imm: int = if (form == A64A_IMM) ops.imm[1] else 0;
+    scaled_ok: bool = imm >= 0 && (imm & (1 << size) - 1) == 0 && imm >> size < 4096;
+    if (!unscaled && scaled_ok) {
+        a64_word(top | 1 << 24 | imm >> size << 10 | n << 5 | t);
+        return
+    }
+    if (imm < -256 || imm > 255) a64_fail("an offset out of range");
+    a64_word(top | (imm & 511) << 12 | n << 5 | t)
+}
+
+// The size and opc of a load or store of register operand 0: ldr, str.
+a64_ldr(load: bool, unscaled: bool) noregion {
+    if (a64_ops.kind[0] != A64O_REG) a64_fail("a register expected");
+    c: int = a64_ops.cls[0];
+    opc: int = if (load) 1 else 0;
+    if (c == A64C_X) a64_ldst(3, opc, 0, unscaled) else if (c == A64C_W) a64_ldst(2,
+        opc, 0, unscaled) else if (c == A64C_D) a64_ldst(3, opc, 1, unscaled) else if (c == A64C_S) a64_ldst(2,
+        opc, 1, unscaled) else if (c == A64C_H) a64_ldst(1, opc, 1, unscaled) else if (c == A64C_B) a64_ldst(0,
+        opc, 1, unscaled) else a64_fail("a q register load or store")
+}
+
+// ldp and stp.
+a64_pair(load: bool) {
+    ops: A64Ops = a64_ops;
+    if (a64_nops != 3 && a64_nops != 4) a64_fail("the wrong number of operands");
+    if (ops.kind[0] != A64O_REG || ops.kind[1] != A64O_REG) a64_fail("registers expected");
+    a64_same_width(0, 1);
+    a64_not_sp(0);
+    a64_not_sp(1);
+    if (ops.kind[2] != A64O_MEM) a64_fail("a memory operand expected");
+    c: int = ops.cls[0];
+    v: int = if (c == A64C_X || c == A64C_W) 0 else 1;
+    opc: int = if (c == A64C_X || c == A64C_Q) 2 else if (c == A64C_D) 1 else 0;
+    scale: int = if (c == A64C_X || c == A64C_D) 3 else if (c == A64C_Q) 4 else 2;
+    mode: int = 2;
+    imm: int = 0;
+    if (a64_nops == 4) {
+        if (ops.form[2] != A64A_BASE || ops.pre[2]) a64_fail("a bad post-index");
+        mode = 1;
+        imm = a64_imm(3)
+    } else {
+        if (ops.form[2] == A64A_IMM) imm = ops.imm[2] else if (ops.form[2] != A64A_BASE) a64_fail("a bad pair address");
+        if (ops.pre[2]) mode = 3
+    }
+    if ((imm & (1 << scale) - 1) != 0) a64_fail("a pair offset not a multiple of its size");
+    k: int = imm >> scale;
+    if (k < -64 || k > 63) a64_fail("a pair offset out of range");
+    l: int = if (load) 1 else 0;
+    a64_word(opc << 30 | 5 << 27 | v << 26 | mode << 23 | l << 22 | (k & 127) << 15 | ops.reg[1] << 10 | ops.reg[2] << 5 | ops.reg[0])
+}
+
+// adrp and adr.
+a64_adr(page: bool) noregion {
+    a64_need(2);
+    d: int = a64_gpr(0);
+    a64_not_sp(0);
+    if (a64_ops.kind[1] != A64O_SYM) a64_fail("a symbol expected");
+    if (page) a64_sym_operand(1, a64_page_kind(1), 0) else a64_sym_operand(1, A64R_ADR21,
+        0);
+    a64_word((if (page) 1 << 31 else 0) | 16 << 24 | d)
+}
+
+// Float arithmetic: fadd, fsub, fmul, fdiv (two sources).
+a64_fop2(opcode: int) {
+    a64_need(3);
+    d: int = a64_fpr(0);
+    n: int = a64_fpr(1);
+    m: int = a64_fpr(2);
+    a64_same_width(0, 1);
+    a64_same_width(0, 2);
+    a64_word(30 << 24 | a64_ftype(0) << 22 | 1 << 21 | m << 16 | opcode << 12 | 2 << 10 | n << 5 | d)
+}
+
+// One source: fmov, fabs, fneg, fsqrt, frint*; fcvt (between widths).
+a64_fop1(opcode: int) {
+    a64_need(2);
+    d: int = a64_fpr(0);
+    n: int = a64_fpr(1);
+    a64_same_width(0, 1);
+    a64_word(30 << 24 | a64_ftype(0) << 22 | 1 << 21 | opcode << 15 | 16 << 10 | n << 5 | d)
+}
+
+a64_fcvt() {
+    a64_need(2);
+    d: int = a64_fpr(0);
+    n: int = a64_fpr(1);
+    if (a64_ops.cls[0] == a64_ops.cls[1]) a64_fail("fcvt between one width");
+    opcode: int = if (a64_ftype(0) == 1) 5 else 4;
+    a64_word(30 << 24 | a64_ftype(1) << 22 | 1 << 21 | opcode << 15 | 16 << 10 | n << 5 | d)
+}
+
+a64_fcmp() {
+    a64_need(2);
+    n: int = a64_fpr(0);
+    if (a64_ops.kind[1] == A64O_IMM) {
+        if (a64_ops.imm[1] != 0) a64_fail("fcmp with a constant other than 0");
+        a64_word(30 << 24 | a64_ftype(0) << 22 | 1 << 21 | 8 << 10 | n << 5 | 8);
+        return
+    }
+    m: int = a64_fpr(1);
+    a64_same_width(0, 1);
+    a64_word(30 << 24 | a64_ftype(0) << 22 | 1 << 21 | m << 16 | 8 << 10 | n << 5)
+}
+
+// Conversions between general and float registers: rmode and opcode as
+// the encodings number them; to_float when the float register is first.
+a64_fconv(rmode: int, opcode: int, to_float: bool) {
+    a64_need(2);
+    fi: int = if (to_float) 0 else 1;
+    gi: int = 1 - fi;
+    f: int = a64_fpr(fi);
+    g: int = a64_gpr(gi);
+    a64_not_sp(gi);
+    d: int = if (to_float) f else g;
+    n: int = if (to_float) g else f;
+    a64_word(a64_sf(gi) | 30 << 24 | a64_ftype(fi) << 22 | 1 << 21 | rmode << 19 | opcode << 16 | n << 5 | d)
+}
+
+a64_fmov() {
+    a64_need(2);
+    ops: A64Ops = a64_ops;
+    c0: int = ops.cls[0];
+    c1: int = ops.cls[1];
+    f0: bool = c0 == A64C_D || c0 == A64C_S;
+    f1: bool = c1 == A64C_D || c1 == A64C_S;
+    if (f0 && f1) {
+        a64_fop1(0);
+        return
+    }
+    if (f0 && !f1) {
+        if (c0 == A64C_D != (c1 == A64C_X)) a64_fail("fmov between widths");
+        a64_fconv(0, 7, true);
+        return
+    }
+    if (!f0 && f1) {
+        if (c1 == A64C_D != (c0 == A64C_X)) a64_fail("fmov between widths");
+        a64_fconv(0, 6, false);
+        return
+    }
+    a64_fail("fmov needs a float register")
+}
+
+// cset d, cond (csinc d, zr, zr, !cond); csel and csinc.
+a64_csel(op: int, op2: int) {
+    a64_need(4);
+    ops: A64Ops = a64_ops;
+    d: int = a64_gpr(0);
+    n: int = a64_gpr(1);
+    m: int = a64_gpr(2);
+    for k in 0..3 a64_not_sp(k);
+    a64_same_width(0, 1);
+    a64_same_width(0, 2);
+    cond: int = a64_cond_code(a64_src, ops.text_b[3], ops.text_e[3]);
+    if (cond < 0) a64_fail("a condition expected");
+    a64_word(a64_sf(0) | op << 30 | 212 << 21 | m << 16 | cond << 12 | op2 << 10 | n << 5 | d)
+}
+
+a64_cset(invert: bool) {
+    a64_need(2);
+    ops: A64Ops = a64_ops;
+    d: int = a64_gpr(0);
+    a64_not_sp(0);
+    cond: int = a64_cond_code(a64_src, ops.text_b[1], ops.text_e[1]);
+    if (cond < 0 || cond >= 14) a64_fail("a condition expected");
+    // (csinc, or csinv for csetm.)
+    op: int = if (invert) 1 else 0;
+    op2: int = if (invert) 0 else 1;
+    a64_word(a64_sf(0) | op << 30 | 212 << 21 | 31 << 16 | (cond ^ 1) << 12 | op2 << 10 | 31 << 5 | d)
+}
+
+// sxtw, sxtb, sxth, uxtb, uxth (sbfm and ubfm).
+a64_extend(signed: bool, bits: int) {
+    a64_need(2);
+    d: int = a64_gpr(0);
+    n: int = a64_gpr(1);
+    a64_not_sp(0);
+    a64_not_sp(1);
+    wide: bool = a64_wide(0);
+    if (!signed && wide) a64_fail("uxt to a 64-bit register");
+    if (bits == 32 && !wide) a64_fail("sxtw to a 32-bit register");
+    sf: int = if (wide) 1 << 31 | 1 << 22 else 0;
+    opc: int = if (signed) 0 else 2;
+    a64_word(sf | opc << 29 | 38 << 23 | bits - 1 << 10 | n << 5 | d)
+}
+
+a64_mrs() {
+    a64_need(2);
+    t: int = a64_gpr(0);
+    ops: A64Ops = a64_ops;
+    b: int = ops.text_b[1];
+    e: int = ops.text_e[1];
+    // (op0 - 2) << 19 | op1 << 16 | CRn << 12 | CRm << 8 | op2 << 5
+    sys: int = if (a64_word_is(a64_src, b, e, "cntvct_el0")) 1 << 19 | 3 << 16 | 14 << 12 | 2 << 5 else if (a64_word_is(a64_src,
+        b, e, "cntfrq_el0")) 1 << 19 | 3 << 16 | 14 << 12 else if (a64_word_is(a64_src,
+        b, e, "tpidr_el0")) 1 << 19 | 3 << 16 | 13 << 12 | 2 << 5 else if (a64_word_is(a64_src,
+        b, e, "nzcv")) 1 << 19 | 3 << 16 | 4 << 12 | 2 << 8 else 0 - 1;
+    if (sys < 0) a64_fail("an unknown system register");
+    a64_word(213 << 24 | 1 << 21 | 1 << 20 | sys | t)
+}
+
+// One instruction, its mnemonic s[mb, me).
+a64_instruction(s: []i8, mb: int, me: int) noregion {
+    n: int = me - mb;
+    c: i8 = a64_lower(s[mb]);
+    // (Branches on a condition, b.eq...)
+    if (n >= 3 && c == 'b' && s[mb + 1] == '.') {
+        cond: int = a64_cond_code(s, mb + 2, me);
+        if (cond < 0) a64_fail("an unknown condition");
+        a64_bcond(cond);
+        return
+    }
+    if (a64_word_is(s, mb, me, "mov")) a64_mov() else if (a64_word_is(s, mb, me, "add")) a64_addsub(0,
+        0, 0) else if (a64_word_is(s, mb, me, "sub")) a64_addsub(1, 0, 0) else if (a64_word_is(s,
+        mb, me, "ldr")) a64_ldr(true, false) else if (a64_word_is(s, mb, me, "str")) a64_ldr(false,
+        false) else if (a64_word_is(s, mb, me, "and")) a64_logical(0, 0, false) else if (a64_word_is(s,
+        mb, me, "adrp")) a64_adr(true) else if (a64_word_is(s, mb, me, "bl")) a64_branch(true) else if (a64_word_is(s,
+        mb, me, "ldur")) a64_ldr(true, true) else if (a64_word_is(s, mb, me, "stur")) a64_ldr(false,
+        true) else if (a64_word_is(s, mb, me, "cmp")) a64_addsub(1, 1, 0 - 1) else if (a64_word_is(s,
+        mb, me, "movz")) a64_movw(2) else if (a64_word_is(s, mb, me, "fmov")) a64_fmov() else if (a64_word_is(s,
+        mb, me, "b")) a64_branch(false) else if (a64_word_is(s, mb, me, "movk")) a64_movw(3) else if (a64_word_is(s,
+        mb, me, "movn")) a64_movw(0) else if (a64_word_is(s, mb, me, "lsl")) a64_shift(0) else if (a64_word_is(s,
+        mb, me, "lsr")) a64_shift(1) else if (a64_word_is(s, mb, me, "asr")) a64_shift(2) else if (a64_word_is(s,
+        mb, me, "ret")) {
+        r: int = 30;
+        if (a64_nops == 1) r = a64_gpr(0) else a64_need(0);
+        a64_word(3596550144 | r << 5)
+    } else if (a64_word_is(s, mb, me, "br") || a64_word_is(s, mb, me, "blr")) {
+        a64_need(1);
+        r: int = a64_gpr(0);
+        a64_word((if (n == 2) 3592355840 else 3594452992) | r << 5)
+    } else if (a64_word_is(s, mb, me, "eor")) a64_logical(2, 0, false) else if (a64_word_is(s,
+        mb, me, "orr")) a64_logical(1, 0, false) else if (a64_word_is(s, mb, me, "ands")) a64_logical(3,
+        0, false) else if (a64_word_is(s, mb, me, "tst")) a64_logical(3, 0, true) else if (a64_word_is(s,
+        mb, me, "bic")) a64_logical(0, 1, false) else if (a64_word_is(s, mb, me, "orn")) a64_logical(1,
+        1, false) else if (a64_word_is(s, mb, me, "eon")) a64_logical(2, 1, false) else if (a64_word_is(s,
+        mb, me, "mvn")) {
+        // orn d, zr, m
+        a64_need(2);
+        d: int = a64_gpr(0);
+        m: int = a64_gpr(1);
+        a64_same_width(0, 1);
+        a64_word(a64_sf(0) | 1 << 29 | 10 << 24 | 1 << 21 | m << 16 | 31 << 5 | d)
+    } else if (a64_word_is(s, mb, me, "fadd")) a64_fop2(2) else if (a64_word_is(s,
+        mb, me, "fsub")) a64_fop2(3) else if (a64_word_is(s, mb, me, "fmul")) a64_fop2(0) else if (a64_word_is(s,
+        mb, me, "fdiv")) a64_fop2(1) else if (a64_word_is(s, mb, me, "fmax")) a64_fop2(4) else if (a64_word_is(s,
+        mb, me, "fmin")) a64_fop2(5) else if (a64_word_is(s, mb, me, "fabs")) a64_fop1(1) else if (a64_word_is(s,
+        mb, me, "fneg")) a64_fop1(2) else if (a64_word_is(s, mb, me, "fsqrt")) a64_fop1(3) else if (a64_word_is(s,
+        mb, me, "frintn")) a64_fop1(8) else if (a64_word_is(s, mb, me, "frintp")) a64_fop1(9) else if (a64_word_is(s,
+        mb, me, "frintm")) a64_fop1(10) else if (a64_word_is(s, mb, me, "frintz")) a64_fop1(11) else if (a64_word_is(s,
+        mb, me, "frinta")) a64_fop1(12) else if (a64_word_is(s, mb, me, "fcvt")) a64_fcvt() else if (a64_word_is(s,
+        mb, me, "fcmp")) a64_fcmp() else if (a64_word_is(s, mb, me, "scvtf")) a64_fconv(0,
+        2, true) else if (a64_word_is(s, mb, me, "ucvtf")) a64_fconv(0, 3, true) else if (a64_word_is(s,
+        mb, me, "fcvtzs")) a64_fconv(3, 0, false) else if (a64_word_is(s, mb, me,
+        "fcvtzu")) a64_fconv(3, 1, false) else if (a64_word_is(s, mb, me, "ldrb")) a64_ldst(0,
+        1, 0, false) else if (a64_word_is(s, mb, me, "strb")) a64_ldst(0, 0, 0, false) else if (a64_word_is(s,
+        mb, me, "ldurb")) a64_ldst(0, 1, 0, true) else if (a64_word_is(s, mb, me,
+        "sturb")) a64_ldst(0, 0, 0, true) else if (a64_word_is(s, mb, me, "ldrh")) a64_ldst(1,
+        1, 0, false) else if (a64_word_is(s, mb, me, "strh")) a64_ldst(1, 0, 0, false) else if (a64_word_is(s,
+        mb, me, "ldurh")) a64_ldst(1, 1, 0, true) else if (a64_word_is(s, mb, me,
+        "sturh")) a64_ldst(1, 0, 0, true) else if (a64_word_is(s, mb, me, "ldrsw")) a64_ldst(2,
+        2, 0, false) else if (a64_word_is(s, mb, me, "ldursw")) a64_ldst(2, 2, 0,
+        true) else if (a64_word_is(s, mb, me, "ldrsb")) a64_ldst(0, if (a64_wide(0)) 2 else 3,
+        0, false) else if (a64_word_is(s, mb, me, "ldrsh")) a64_ldst(1, if (a64_wide(0)) 2 else 3,
+        0, false) else if (a64_word_is(s, mb, me, "stp")) a64_pair(false) else if (a64_word_is(s,
+        mb, me, "ldp")) a64_pair(true) else if (a64_word_is(s, mb, me, "cbz")) a64_cbz(0) else if (a64_word_is(s,
+        mb, me, "cbnz")) a64_cbz(1) else if (a64_word_is(s, mb, me, "subs")) a64_addsub(1,
+        1, 0) else if (a64_word_is(s, mb, me, "adds")) a64_addsub(0, 1, 0) else if (a64_word_is(s,
+        mb, me, "cmn")) a64_addsub(0, 1, 0 - 1) else if (a64_word_is(s, mb, me, "neg") || a64_word_is(s,
+        mb, me, "negs")) {
+        // sub d, zr, m
+        a64_need(2);
+        d: int = a64_gpr(0);
+        m: int = a64_gpr(1);
+        a64_same_width(0, 1);
+        a64_not_sp(1);
+        flags: int = if (n == 4) 1 << 29 else 0;
+        a64_word(a64_sf(0) | 1 << 30 | flags | 11 << 24 | m << 16 | 31 << 5 | d)
+    } else if (a64_word_is(s, mb, me, "mul")) a64_mul(0, false) else if (a64_word_is(s,
+        mb, me, "madd")) a64_mul(0, true) else if (a64_word_is(s, mb, me, "msub")) a64_mul(1,
+        true) else if (a64_word_is(s, mb, me, "sdiv")) a64_div(3) else if (a64_word_is(s,
+        mb, me, "udiv")) a64_div(2) else if (a64_word_is(s, mb, me, "cset")) a64_cset(false) else if (a64_word_is(s,
+        mb, me, "csetm")) a64_cset(true) else if (a64_word_is(s, mb, me, "csel")) a64_csel(0,
+        0) else if (a64_word_is(s, mb, me, "csinc")) a64_csel(0, 1) else if (a64_word_is(s,
+        mb, me, "csinv")) a64_csel(1, 0) else if (a64_word_is(s, mb, me, "csneg")) a64_csel(1,
+        1) else if (a64_word_is(s, mb, me, "sxtw")) a64_extend(true, 32) else if (a64_word_is(s,
+        mb, me, "sxth")) a64_extend(true, 16) else if (a64_word_is(s, mb, me, "sxtb")) a64_extend(true,
+        8) else if (a64_word_is(s, mb, me, "uxth")) a64_extend(false, 16) else if (a64_word_is(s,
+        mb, me, "uxtb")) a64_extend(false, 8) else if (a64_word_is(s, mb, me, "adr")) a64_adr(false) else if (a64_word_is(s,
+        mb, me, "svc")) {
+        a64_need(1);
+        a64_word(3556769793 | (a64_imm(0) & 65535) << 5)
+    } else if (a64_word_is(s, mb, me, "brk")) {
+        a64_need(1);
+        a64_word(3558866944 | (a64_imm(0) & 65535) << 5)
+    } else if (a64_word_is(s, mb, me, "nop")) {
+        a64_need(0);
+        a64_word(3573751839)
+    } else if (a64_word_is(s, mb, me, "mrs")) a64_mrs() else a64_fail("an unknown instruction")
+}
+
+// ---- directives ----
+a64_section(s: []i8, b: int, e: int) {
+    // (The name up to its first comma, or the whole of it.)
+    ne: int = b;
+    while (ne < e && s[ne] != ',' && !a64_is_space(s[ne])) ne = ne + 1;
+    if (a64_darwin) {
+        // SEGMENT,SECTION[,...]
+        sect: int = if (ne < e && s[ne] == ',') ne + 1 else ne;
+        q: int = sect;
+        while (q < e && s[q] != ',' && !a64_is_space(s[q])) q = q + 1;
+        if (streq_n(s, b, "__TEXT", 0, 6) && ne == b + 6) {
+            if (a64_word_is(s, sect, q, "__text")) a64_cur = A64_TEXT else if (a64_word_is(s,
+                sect, q, "__const") || a64_word_is(s, sect, q, "__cstring")) a64_cur = A64_CONST else a64_fail("an unknown section");
+            return
+        }
+        if (streq_n(s, b, "__DATA", 0, 6) && ne == b + 6) {
+            if (a64_word_is(s, sect, q, "__bss")) a64_cur = A64_BSS else a64_cur = A64_DATA;
+            return
+        }
+        a64_fail("an unknown section")
+    }
+    if (a64_word_is(s, b, ne, ".text")) a64_cur = A64_TEXT else if (a64_word_is(s,
+        b, ne, ".rodata")) a64_cur = A64_CONST else if (a64_word_is(s, b, ne, ".data")) a64_cur = A64_DATA else if (a64_word_is(s,
+        b, ne, ".bss")) a64_cur = A64_BSS else a64_fail("an unknown section")
+}
+
+a64_align_to(bytes: int) {
+    if (bytes > a64_align[a64_cur]) a64_align[a64_cur] = bytes;
+    while (a64_here() % bytes != 0) {
+        if (a64_cur == A64_TEXT && a64_here() % 4 == 0) a64_word(3573751839) else a64_byte(0)
+    }
+}
+
+// .byte, .short, .word, .long, .quad: values (numbers or, for .quad,
+// symbols) of size bytes each, comma-separated.
+a64_values(
+    size: int,
+    s: []i8,
+    b: int,
+    e: int
+) noregion {
+    p: int = b;
+    while (p < e) {
+        q: int = a64_operand_end(s, p, e);
+        vb: int = a64_skip(s, p, q);
+        ve: int = a64_trim_end(s, vb, q);
+        if (vb >= ve) a64_fail("a value expected");
+        c: i8 = s[vb];
+        if (a64_is_digit(c) || c == '-' || c == '+' || c == '\'') {
+            v: int = a64_number(s, vb, ve);
+            if (a64_skip(s, a64_num_end, ve) != ve) a64_fail("junk after a value");
+            a64_le(v, size)
+        } else {
+            if (size != 8) a64_fail("a symbol's address in less than 8 bytes");
+            end: int = a64_symref(0, s, vb, ve);
+            if (end != ve) a64_fail("junk after a symbol");
+            a64_sym_operand(0, A64R_ABS64, 0);
+            a64_le(0, 8)
+        }
+        p = (if (q < e) q + 1 else e)
+    }
+}
+
+a64_string(
+    s: []i8,
+    b: int,
+    e: int,
+    nul: bool
+) {
+    p: int = a64_skip(s, b, e);
+    if (p >= e || s[p] != '"') a64_fail("a string expected");
+    p = p + 1;
+    while (p < e && s[p] != '"') {
+        c: i8 = s[p];
+        if (c == '\\' && p + 1 < e) {
+            p = p + 1;
+            d: i8 = s[p];
+            if (d == 'n') a64_byte(10) else if (d == 't') a64_byte(9) else if (d == '0') a64_byte(0) else a64_byte(d as int)
+        } else a64_byte(c as int);
+        p = p + 1
+    }
+    if (p >= e) a64_fail("an unended string");
+    if (nul) a64_byte(0)
+}
+
+a64_directive(
+    s: []i8,
+    db: int,
+    de: int,
+    b: int,
+    e: int
+) noregion {
+    if (a64_word_is(s, db, de, ".section")) a64_section(s, b, e) else if (a64_word_is(s,
+        db, de, ".text")) a64_cur = A64_TEXT else if (a64_word_is(s, db, de, ".data")) a64_cur = A64_DATA else if (a64_word_is(s,
+        db, de, ".bss")) a64_cur = A64_BSS else if (a64_word_is(s, db, de, ".globl") || a64_word_is(s,
+        db, de, ".global")) {
+        end: int = a64_symref(0, s, b, e);
+        if (end != e) a64_fail("junk after a name");
+        sym: ?*A64Sym = a64_ops.sym[0];
+        if (sym != null) sym.global = true
+    } else if (a64_word_is(s, db, de, ".p2align") || a64_word_is(s, db, de, ".align") && a64_darwin) {
+        k: int = a64_number(s, b, e);
+        if (k < 0 || k > 14) a64_fail("a bad alignment");
+        a64_align_to(1 << k)
+    } else if (a64_word_is(s, db, de, ".align") || a64_word_is(s, db, de, ".balign")) {
+        k: int = a64_number(s, b, e);
+        if (k <= 0 || (k & k - 1) != 0) a64_fail("a bad alignment");
+        a64_align_to(k)
+    } else if (a64_word_is(s, db, de, ".byte")) a64_values(1, s, b, e) else if (a64_word_is(s,
+        db, de, ".short") || a64_word_is(s, db, de, ".hword")) a64_values(2, s, b,
+        e) else if (a64_word_is(s, db, de, ".word") || a64_word_is(s, db, de, ".long")) a64_values(4,
+        s, b, e) else if (a64_word_is(s, db, de, ".quad") || a64_word_is(s, db, de,
+        ".xword")) a64_values(8, s, b, e) else if (a64_word_is(s, db, de, ".space") || a64_word_is(s,
+        db, de, ".zero") || a64_word_is(s, db, de, ".skip")) {
+        n: int = a64_number(s, b, e);
+        fill: int = 0;
+        p: int = a64_skip(s, a64_num_end, e);
+        if (p < e && s[p] == ',') fill = a64_number(s, a64_skip(s, p + 1, e), e);
+        if (n < 0) a64_fail("a negative .space");
+        if (a64_cur == A64_BSS) {
+            if (fill != 0) a64_fail("data in .bss");
+            a64_bss_size = a64_bss_size + n
+        } else {
+            for _k in 0..n a64_byte(fill)
+        }
+    } else if (a64_word_is(s, db, de, ".ascii")) a64_string(s, b, e, false) else if (a64_word_is(s,
+        db, de, ".asciz") || a64_word_is(s, db, de, ".string")) a64_string(s, b, e,
+        true) else if (a64_word_is(s, db, de, ".subsections_via_symbols") || a64_word_is(s,
+        db, de, ".build_version") || a64_word_is(s, db, de, ".type") || a64_word_is(s,
+        db, de, ".size") || a64_word_is(s, db, de, ".file") || a64_word_is(s, db,
+        de, ".ident")) { } else a64_fail("an unknown directive")
+}
+
+// ---- lines ----
+// The end of s[b, e) before a comment (//, or # at the start of a line).
+a64_code_end(s: []i8, b: int, e: int): int {
+    q: int = b;
+    while (q < e) {
+        c: i8 = s[q];
+        if (c == '"') {
+            q = q + 1;
+            while (q < e && s[q] != '"') {
+                if (s[q] == '\\') q = q + 1;
+                q = q + 1
+            }
+        } else if (c == '/' && q + 1 < e && s[q + 1] == '/') return q;
+        q = q + 1
+    }
+    e
+}
+
+a64_statement(s: []i8, b: int, e: int) noregion {
+    p: int = a64_skip(s, b, e);
+    if (p >= e) return;
+    // Labels: name:, "name":, N:
+    w: int = p;
+    if (s[p] == '"') {
+        w = p + 1;
+        while (w < e && s[w] != '"') w = w + 1;
+        if (w < e) w = w + 1
+    } else {
+        while (w < e && a64_is_ident(s[w])) w = w + 1
+    }
+    if (w < e && s[w] == ':' && w > p) {
+        if (a64_is_digit(s[p])) {
+            n: int = a64_number(s, p, w);
+            if (a64_num_end != w) a64_fail("a bad label");
+            a64_define_num(n)
+        } else if (s[p] == '"') a64_define(a64_sym(s, p + 1, w - p - 2)) else a64_define(a64_sym(s,
+            p, w - p));
+        a64_statement(s, w + 1, e);
+        return
+    }
+    rest: int = a64_skip(s, w, e);
+    end: int = a64_trim_end(s, rest, e);
+    if (s[p] == '.' && !(w - p >= 2 && s[p + 1] == 'L')) {
+        a64_directive(s, p, w, rest, end);
+        return
+    }
+    // An instruction: mnemonic, then operands.
+    a64_nops = 0;
+    q: int = rest;
+    while (q < end) {
+        oe: int = a64_operand_end(s, q, end);
+        if (a64_nops >= 8) a64_fail("too many operands");
+        a64_operand(a64_nops, s, a64_skip(s, q, oe), a64_trim_end(s, q, oe));
+        a64_nops = a64_nops + 1;
+        q = (if (oe < end) oe + 1 else end)
+    }
+    a64_instruction(s, p, w)
+}
+
+a64_reset(darwin: bool) noregion {
+    a64_text = sb_new();
+    a64_const = sb_new();
+    a64_data = sb_new();
+    a64_bss_size = 0;
+    for k in 0..4 a64_align[k] = 1;
+    a64_align[A64_TEXT] = 4;
+    a64_cur = A64_TEXT;
+    for k in 0..len(a64_buckets) a64_buckets[k] = null;
+    a64_syms = null;
+    a64_nsyms = 0;
+    a64_rels = null;
+    a64_nrels = 0;
+    a64_darwin = darwin;
+    for k in 0..100 {
+        a64_num_back[k] = null;
+        a64_num_fwd[k] = null
+    }
+}
+
+// Assemble text (all of it, one file after another): into a64_text,
+// a64_const, a64_data, a64_bss_size, a64_syms and a64_rels.
+a64_assemble(text: []i8@immortal, n: int) noregion {
+    a64_src = text;
+    a64_line_no = 0;
+    p: int = 0;
+    while (p < n) {
+        e: int = p;
+        while (e < n && text[e] != '\n') e = e + 1;
+        a64_line_no = a64_line_no + 1;
+        a64_line_start = p;
+        a64_line_end = e;
+        // (A line between files resets the numbered labels? No: as GNU as
+        // does, they continue.)
+        a64_statement(text, p, a64_code_end(text, p, e));
+        p = e + 1
+    }
+    a64_line_no = 0
+}

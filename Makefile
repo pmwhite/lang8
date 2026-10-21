@@ -48,7 +48,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test game skate malton race race-test character character-test cad cad-test recipes recipes-test stdlib-test \
+.PHONY: all check fmt selfhost compiler-test game skate malton race race-test character character-test cad cad-test recipes recipes-test tempo tempo-test bible-test bible-wasm-test bible-web bible-spoken stdlib-test \
 	terminal terminal-test callback-test http http-test websocket websocket-test wasm-test web \
 	profile-explorer profile-explorer-test \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
@@ -59,7 +59,8 @@ all:
 	@$(MAKE) -s check
 
 check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/character $(OK)/character-tests $(BUILD)/cad $(OK)/cad-tests $(BUILD)/recipes $(OK)/recipes-tests \
-	$(BUILD)/profile-explorer $(OK)/profile-explorer-tests
+	$(BUILD)/profile-explorer $(OK)/profile-explorer-tests \
+	$(BUILD)/tempo $(OK)/tempo-tests $(BUILD)/tempo-ios.s $(BUILD)/ios-check.s $(BUILD)/tempo-ios-sim $(OK)/bible-tests $(OK)/bible-wasm-tests $(OK)/bible-web $(OK)/dom-test-site $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim
 
 # ---- compiler stages ----
 
@@ -204,6 +205,89 @@ $(OK)/race-tests: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 
 race-test: $(OK)/race-tests
 
+$(BUILD)/tempo: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'tempo' sh -c '$(call build,l8c3,programs/tempo/main.l8)'
+
+tempo: $(BUILD)/tempo
+
+$(OK)/tempo-tests: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	+@$(STEP) 'tempo tests' ./l8c3 test programs/tempo/test_tempo.l8
+	@touch $@
+
+tempo-test: $(OK)/tempo-tests
+
+# Tempo as an iPhone app, and the arm64 runtime's check, as arm64 assembly
+# for iOS (built into an app on a Mac: see programs/tempo/README.md).
+$(BUILD)/tempo-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
+	@$(STEP) 'tempo for iOS' sh -c './l8c3 arm64 --target ios programs/tempo/ios.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+$(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
+	@$(STEP) 'iOS check' sh -c './l8c3 arm64 --target ios programs/ios/check.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+# The same, assembled and linked by the compiler into Mach-O executables
+# for the simulator (see src2/a64link.l8), whose code signatures and fixups
+# tools/ios/macho.py checks.
+IOS_LINK = ./l8c3 arm64 --target ios-sim --exe --imports tools/ios/imports.txt
+$(BUILD)/tempo-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt | $(OK)
+	@$(STEP) 'tempo for the simulator' sh -c '$(IOS_LINK) $(foreach f,UIKit Foundation CoreLocation QuartzCore OpenGLES,--framework $(f)) programs/tempo/ios.l8 -o $@.tmp && python3 -I tools/ios/macho.py check $@.tmp && mv -f $@.tmp $@'
+
+# The Bible app: its text's layout, tested; and the app, as arm64 assembly
+# for iOS (see programs/bible/README.md).
+$(OK)/bible-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(wildcard programs/bible/tools/*.py programs/bible/tools/*.l8 programs/bible/data/*.txt programs/bible/data/*.bin programs/bible/data/plans/* programs/bible/data/lang/* programs/bible/data/audio/* programs/bible/worker/*.js programs/bible/worker/*.mjs programs/bible/worker/fixtures/*) | $(OK)
+	+@$(STEP) 'bible tests' ./l8c3 test programs/bible/test_text.l8 programs/bible/test_lang.l8 programs/bible/test_store.l8 programs/bible/test_plans.l8 programs/bible/test_ribbons.l8 programs/bible/test_audio.l8 programs/bible/test_memory.l8 programs/bible/test_learn.l8 programs/bible/test_help.l8 programs/bible/test_html.l8
+	+@$(STEP) 'bible worker tests' node --test programs/bible/worker/test.mjs
+	+@$(STEP) 'bible data checks' sh -c 'for t in senses related learn orig ubs; do python3 -I programs/bible/tools/$$t.py --check programs/bible/data || exit 1; done; python3 -I programs/bible/tools/web_audio_manifest.py --check programs/bible/data && python3 -I programs/bible/tools/chrono.py --check programs/bible/data >/dev/null'
+	+@$(STEP) 'bible spoken text' sh -c './l8c3 build programs/bible/tools/spoken.l8 -o $(BUILD)/bible-spoken.tmp && mv -f $(BUILD)/bible-spoken.tmp $(BUILD)/bible-spoken'
+	@touch $@
+
+bible-test: $(OK)/bible-tests
+
+# The same tests built as WebAssembly and run under Node (the modules the
+# web app shares with the iPhone's), and the web app's module.
+BIBLE_TESTS := $(wildcard programs/bible/test_*.l8)
+$(OK)/bible-wasm-tests: l8c3 $(PROGRAMS) web/l8-runtime.js web/run.mjs $(wildcard programs/bible/data/*.txt programs/bible/data/plans/* programs/bible/data/lang/* programs/bible/data/audio/*) | $(OK)
+	+@$(STEP) 'bible wasm tests' ./l8c3 test --wasm $(BIBLE_TESTS)
+	@touch $@
+
+bible-wasm-test: $(OK)/bible-wasm-tests
+
+$(BUILD)/bible.wasm: l8c3 $(PROGRAMS) | $(OK)
+	@$(STEP) 'bible wasm' sh -c './l8c3 wasm programs/bible/web.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+# The web reader's site (WEB.md §W1.9) in .build/bible-site: the marketing
+# pages, and read/: the shell, About, the app and its assets under hashed
+# names, the texts whole and by book with their sizes tables (tools/sizes.l8),
+# then checked (web/bible/build.py).
+# Serve it as smoothbible.com does: node web/bible/test/serve.mjs.
+$(BUILD)/bible-sizes: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'bible sizes tool' sh -c '$(call build,l8c3,programs/bible/tools/sizes.l8)'
+
+$(OK)/bible-web: $(BUILD)/bible-sizes $(BUILD)/bible.wasm web/l8-runtime.js web/dom.js $(wildcard web/bible/* web/bible/fonts/* programs/bible/site/* programs/bible/site/*/*) programs/bible/data/bsb.txt | $(OK)
+	@$(STEP) 'bible web site' python3 -I web/bible/build.py $(BUILD)/bible-sizes $(BUILD)/bible.wasm $(BUILD)/bible-site
+	@$(STEP) 'bible web check' python3 -I web/bible/build.py --check $(BUILD)/bible-site
+	@touch $@
+
+bible-web: $(OK)/bible-web
+
+# The page bridge's own checks (web/tests/dom.l8), as a site in
+# .build/dom-test: open dom.html and read window.l8_results.
+$(OK)/dom-test-site: l8c3 $(PROGRAMS) web/tests/dom.l8 web/tests/dom.html web/l8-runtime.js web/dom.js | $(OK)
+	@$(STEP) 'dom test site' sh -c 'mkdir -p $(BUILD)/dom-test && ./l8c3 wasm web/tests/dom.l8 -o $(BUILD)/dom-test/dom.wasm && \
+		cp web/tests/dom.html web/l8-runtime.js web/dom.js $(BUILD)/dom-test/ && gzip -9nkf $(BUILD)/dom-test/dom.html'
+	@touch $@
+
+# What the app says aloud, a verse a line (DESIGN.md §12.2.3), for the
+# aligner: make bible-spoken VERSION=bsb (or web).
+VERSION ?= bsb
+bible-spoken: l8c3 $(PROGRAMS) $(RUNTIME)
+	@./l8c3 build programs/bible/tools/spoken.l8 -o $(BUILD)/bible-spoken && $(BUILD)/bible-spoken programs/bible/data/$(VERSION).txt
+
+$(BUILD)/bible-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
+	@$(STEP) 'bible for iOS' sh -c './l8c3 arm64 --target ios programs/bible/ios.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+$(BUILD)/bible-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt programs/bible/ios/frameworks | $(OK)
+	@$(STEP) 'bible for the simulator' sh -c '$(IOS_LINK) $(foreach f,$(shell cat programs/bible/ios/frameworks),--framework $(f)) programs/bible/ios.l8 -o $@.tmp && python3 -I tools/ios/macho.py check $@.tmp && mv -f $@.tmp $@'
+
 # A terminal may be running from the previous output; `mv` replaces the
 # directory entry instead of rewriting its live inode.
 $(BUILD)/terminal: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
@@ -307,7 +391,7 @@ wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume
 # The playground: a static site in .build/web with the compiler as a module.
 # Serve it with `python3 -m http.server -d .build/web`.
 WEB_SITE := $(BUILD)/web
-WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/* web/malton/* web/race/* web/character/* web/cad/* web/recipes/* web/people/*) programs/cad/handheld.pcb programs/cad/dock.pcb programs/recipes/recipes.txt programs/block-game/world.txt \
+WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/* web/malton/* web/race/* web/character/* web/cad/* web/recipes/* web/tempo/* web/people/*) programs/cad/handheld.pcb programs/cad/dock.pcb programs/recipes/recipes.txt programs/block-game/world.txt \
 	programs/block-game/garden.txt programs/character/running-back.txt $(wildcard programs/character/motion/*.txt)
 
 $(BUILD)/block-game.wasm: l8c3 $(PROGRAMS) | $(OK)
@@ -328,11 +412,14 @@ $(BUILD)/cad.wasm: l8c3 $(PROGRAMS) | $(OK)
 $(BUILD)/recipes.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'recipes wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/recipes/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
+$(BUILD)/tempo.wasm: l8c3 $(PROGRAMS) | $(OK)
+	@$(STEP) 'tempo wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/tempo/main.l8 -o $@.tmp && mv -f $@.tmp $@'
+
 $(BUILD)/race.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'race wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/race/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
-$(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD)/malton.wasm $(BUILD)/race.wasm $(BUILD)/character.wasm $(BUILD)/cad.wasm $(BUILD)/recipes.wasm $(WEB_FILES) $(STDLIB) | $(OK)
-	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game $(WEB_SITE)/skate $(WEB_SITE)/malton $(WEB_SITE)/race $(WEB_SITE)/character $(WEB_SITE)/cad $(WEB_SITE)/recipes $(WEB_SITE)/people && \
+$(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD)/malton.wasm $(BUILD)/race.wasm $(BUILD)/character.wasm $(BUILD)/cad.wasm $(BUILD)/recipes.wasm $(BUILD)/tempo.wasm $(WEB_FILES) $(STDLIB) | $(OK)
+	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game $(WEB_SITE)/skate $(WEB_SITE)/malton $(WEB_SITE)/race $(WEB_SITE)/character $(WEB_SITE)/cad $(WEB_SITE)/recipes $(WEB_SITE)/tempo $(WEB_SITE)/people && \
 		cp web/index.html web/*.js $(WEB_SITE)/ && cp web/examples/*.l8 $(WEB_SITE)/examples/ && \
 		cp $(STDLIB) $(WEB_SITE)/stdlib/ && cp $(BUILD)/l8.wasm $(WEB_SITE)/ && \
 		cp web/game/* $(BUILD)/block-game.wasm programs/block-game/world.txt programs/block-game/garden.txt $(WEB_SITE)/game/ && \
@@ -341,6 +428,7 @@ $(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD
 		cp web/race/* $(BUILD)/race.wasm $(WEB_SITE)/race/ && \
 		cp web/cad/* $(BUILD)/cad.wasm programs/cad/handheld.pcb programs/cad/dock.pcb $(WEB_SITE)/cad/ && \
 		cp web/recipes/* $(BUILD)/recipes.wasm programs/recipes/recipes.txt $(WEB_SITE)/recipes/ && \
+		cp web/tempo/* $(BUILD)/tempo.wasm $(WEB_SITE)/tempo/ && \
 		cp web/people/* $(WEB_SITE)/people/ && \
 		cp web/character/* $(BUILD)/character.wasm programs/character/running-back.txt $(WEB_SITE)/character/ && \
 		mkdir -p $(WEB_SITE)/character/motion && cp programs/character/motion/*.txt $(WEB_SITE)/character/motion/'
@@ -380,7 +468,9 @@ help:
 	@echo '  fmt             format src2 with the stage-2 compiler'
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
-	@echo '  stdlib-test, game, skate, race, race-test, character, character-test, cad, cad-test, recipes, recipes-test, terminal, terminal-test, callback-test'
+	@echo '  stdlib-test, game, skate, race, race-test, character, character-test, cad, cad-test, recipes, recipes-test'
+	@echo '  tempo, tempo-test, bible-test, bible-wasm-test, bible-web'
+	@echo '  terminal, terminal-test, callback-test'
 	@echo '  http, http-test, websocket, websocket-test, profile-explorer, profile-explorer-test'
 	@echo '  wasm-test       run the tests as WebAssembly under Node; check the wasm compiler fixpoint'
 	@echo '  web             build the playground site in .build/web'

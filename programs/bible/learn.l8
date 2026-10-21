@@ -1,0 +1,1898 @@
+tag bible;
+
+use_tag std;
+
+// Learning Greek and Hebrew (DESIGN.md §14.1), apart from any platform:
+// how often each word occurs (vocab.bin, tools/learn.py's) and the letter
+// cards (letters.txt, written by hand); cards on memory.l8's schedule,
+// cards.tsv's lines and cards-log.tsv's; what is known (a word of the
+// text, by its lemma's card, a name once the alphabet is, and Hebrew's
+// joined words); coverage in plain figures; the words of a passage; the
+// verses you can read; the verse a card is shown in, the verses you care
+// about first; what a word card answers (the BSB's words for it in its
+// verse, the sense there, related words known) and the words related to
+// those known (§14.10b.2); words to read to yourself; and the words the
+// screens say.
+// test_learn.l8 tests it.
+import "text.l8";
+
+import "store.l8";
+
+import "lang.l8";
+
+import "memory.l8";
+
+import "ribbons.l8";
+
+// ---- the files, given by the platform ----
+lvoc: []i8 = new i8[1](0i8);
+
+lvoc_n: int = 0;
+
+llet: []i8 = new i8[1](0i8);
+
+llet_n: int = 0;
+
+learn_ready: bool = false;
+
+// ---- vocab.bin: each language's numbers, most common first ----
+// Per language (0 Greek, 1 Hebrew): how many words its text has (names in,
+// Aramaic out), its records (vk_first, vk_n of them), and of those the
+// ones that may be learned (not names, not Aramaic: vl_first, vl_n, by
+// rank). By number: its record (vk_at, -1 none) and rank (vk_rank, from 1;
+// 0 not learnable).
+VK_MOST: int = 20000;
+
+vk_total: []int = new int[2](0);
+
+vk_first: []int = new int[2](0);
+
+vk_n: []int = new int[2](0);
+
+vk_num: []int = new int[20000](0);
+
+vk_flags: []int = new int[20000](0);
+
+vk_count: []int = new int[20000](0);
+
+vl: []int = new int[20000](0);
+
+vl_first: []int = new int[2](0);
+
+vl_n: []int = new int[2](0);
+
+vk_at: []int = new int[20000](-1);
+
+vk_rank: []int = new int[20000](0);
+
+FL_NAME: int = 1;
+
+FL_ARAMAIC: int = 2;
+
+// A number's slot in the by-number tables.
+vslot(lang: int, num: int): int {
+    if (num <= 0 || num >= STRONGS_MAX) -1 else lang * STRONGS_MAX + num
+}
+
+// Its record (-1: none).
+vk_of(lang: int, num: int): int {
+    s: int = vslot(lang, num);
+    if (s < 0) -1 else vk_at[s]
+}
+
+vk_flags_of(lang: int, num: int): int {
+    r: int = vk_of(lang, num);
+    if (r < 0) 0 else vk_flags[r]
+}
+
+vk_count_of(lang: int, num: int): int {
+    r: int = vk_of(lang, num);
+    if (r < 0) 0 else vk_count[r]
+}
+
+vk_rank_of(lang: int, num: int): int {
+    s: int = vslot(lang, num);
+    if (s < 0) 0 else vk_rank[s]
+}
+
+// The k-th (from 0) most common learnable number of a language.
+vl_num(lang: int, k: int): int {
+    vk_num[vl[vl_first[lang] + k]]
+}
+
+vocab_index() {
+    for i in 0..len(vk_at) {
+        vk_at[i] = -1;
+        vk_rank[i] = 0
+    }
+    if (lvoc_n < 12) return;
+    vk_total[0] = le32(lvoc, 0);
+    vk_total[1] = le32(lvoc, 4);
+    vk_n[0] = le16(lvoc, 8);
+    vk_n[1] = le16(lvoc, 10);
+    vk_first[0] = 0;
+    vk_first[1] = vk_n[0];
+    n: int = vk_n[0] + vk_n[1];
+    if (n > VK_MOST || 12 + n * 8 > lvoc_n) {
+        vk_n[0] = 0;
+        vk_n[1] = 0;
+        return
+    }
+    m: int = 0;
+    for lang in 0..2 {
+        vl_first[lang] = m;
+        for r in vk_first[lang]..vk_first[lang] + vk_n[lang] {
+            p: int = 12 + r * 8;
+            vk_num[r] = le16(lvoc, p);
+            vk_flags[r] = le16(lvoc, p + 2);
+            vk_count[r] = le32(lvoc, p + 4);
+            s: int = vslot(lang, vk_num[r]);
+            if (s >= 0) vk_at[s] = r;
+            if (vk_flags[r] == 0 && s >= 0) {
+                vl[m] = r;
+                m = m + 1;
+                vk_rank[s] = m - vl_first[lang]
+            }
+        }
+        vl_n[lang] = m - vl_first[lang]
+    }
+}
+
+// Whether a number may be learned (a card made for it).
+learnable(lang: int, num: int): bool {
+    vk_rank_of(lang, num) > 0
+}
+
+// ---- letters.txt: the letter cards, and Hebrew's joined words ----
+// Each line's language, kind (a letter or a joined word), section (of
+// ltsec_*), joined word (of the 16, or -1), its fields' places in llet
+// (lt_fb, lt_fe: nine a line), its example's number and verse (vi, -1 if
+// not found).
+LT_MOST: int = 128;
+
+lt_n: int = 0;
+
+lt_lang: []int = new int[128](0);
+
+lt_kind: []int = new int[128](0);
+
+lt_sec: []int = new int[128](0);
+
+lt_part: []int = new int[128](-1);
+
+lt_fb: []int = new int[1152](0);
+
+lt_fe: []int = new int[1152](0);
+
+lt_key: []int = new int[128](0);
+
+lt_vi: []int = new int[128](-1);
+
+LF_ID: int = 1;
+
+LF_GLYPH: int = 2;
+
+LF_NAME: int = 3;
+
+LF_SOUNDS: int = 4;
+
+LF_SPEAK: int = 5;
+
+LF_KEY: int = 6;
+
+LF_FORM: int = 7;
+
+LF_REF: int = 8;
+
+// The sections ("#\tLetters"): each one's language and name.
+ltsec_n: int = 0;
+
+ltsec_lang: []int = new int[16](0);
+
+ltsec_b: []int = new int[16](0);
+
+ltsec_e: []int = new int[16](0);
+
+// The joined words (§14.1.2): their ids, after "j-", and lines.
+jp_ids: []str = ["w", "art", "b", "l", "k", "m", "1cs", "2ms", "2fs", "3ms", "3fs",
+    "1cp", "2mp", "2fp", "3mp", "3fp"];
+
+JP_N: int = 16;
+
+jp_lt: []int = new int[16](-1);
+
+// Each language's pronunciations (§14.0.4), in SOUNDS's order.
+pron_names: []str = ["Erasmian", "Koine (Reconstructed)", "Modern Greek", "Israeli",
+    "Tiberian (Reconstructed)"];
+
+pron_lines: []str = ["Taught in most grammars and seminaries. Every letter has its own sound.",
+    "The Greek of the first century, as historians now reconstruct it.", "The Greek spoken today, and in the Greek Orthodox Church.",
+    "Modern Israeli Hebrew, as most courses read the pointed text.", "The Masoretes' own reading, as Geoffrey Khan describes it."];
+
+pron_first: []int = [0, 3];
+
+pron_count: []int = [3, 2];
+
+lt_field_is(i: int, f: int, s: str): bool {
+    a: int = lt_fb[i * 9 + f];
+    e: int = lt_fe[i * 9 + f];
+    if (e - a != len(s)) return false;
+    for x in 0..e - a
+        if (llet[a + x] != s[x]) return false;
+    true
+}
+
+// The line of language lang whose id is s (-1: none).
+lt_find(lang: int, s: str): int {
+    for i in 0..lt_n
+        if (lt_lang[i] == lang && lt_field_is(i, LF_ID, s)) return i;
+    -1
+}
+
+letters_index() {
+    lt_n = 0;
+    ltsec_n = 0;
+    for j in 0..JP_N jp_lt[j] = -1;
+    p: int = 0;
+    while (p < llet_n) {
+        e: int = p;
+        while (e < llet_n && llet[e] as int != 10) e = e + 1;
+        k: int = if (p < e) llet[p] as int else 0;
+        if (k == 35 && p + 1 < e && llet[p + 1] as int == 9 && ltsec_n < len(ltsec_b)) {
+            // A section, of the language of the line after it.
+            ltsec_b[ltsec_n] = p + 2;
+            ltsec_e[ltsec_n] = e;
+            ltsec_lang[ltsec_n] = (if (e + 1 < llet_n && llet[e + 1] as int == 72) 1 else 0);
+            ltsec_n = ltsec_n + 1
+        } else if ((k == 71 || k == 72) && lt_n < LT_MOST) {
+            i: int = lt_n;
+            q: int = p;
+            f: int = 0;
+            while (f < 9) {
+                t: int = q;
+                while (t < e && llet[t] as int != 9) t = t + 1;
+                lt_fb[i * 9 + f] = q;
+                lt_fe[i * 9 + f] = t;
+                q = t + 1;
+                f = f + 1
+            }
+            lt_lang[i] = (if (k == 72) 1 else 0);
+            lt_sec[i] = ltsec_n - 1;
+            idb: int = lt_fb[i * 9 + LF_ID];
+            joined: bool = lt_fe[i * 9 + LF_ID] - idb > 2 && llet[idb] as int == 106 && llet[idb + 1] as int == 45;
+            lt_kind[i] = (if (joined) CK_JOINED else CK_LETTER);
+            lt_part[i] = -1;
+            if (joined) {
+                for j in 0..len(jp_ids) {
+                    s: str = jp_ids[j];
+                    if (lt_fe[i * 9 + LF_ID] - idb - 2 == len(s)) {
+                        same: bool = true;
+                        for x in 0..len(s)
+                            if (llet[idb + 2 + x] != s[x]) same = false;
+                        if (same) {
+                            lt_part[i] = j;
+                            jp_lt[j] = i
+                        }
+                    }
+                }
+            }
+            // The example's number, and its verse (BOOK.C.V).
+            kb: int = lt_fb[i * 9 + LF_KEY];
+            n: int = 0;
+            for x in kb + 1..lt_fe[i * 9 + LF_KEY]
+                if (is_digit(llet[x] as int)) n = n * 10 + llet[x] as int - 48;
+            lt_key[i] = n;
+            lt_vi[i] = -1;
+            lt_n = lt_n + 1
+        }
+        p = e + 1
+    }
+}
+
+// Line i's example verse (BOOK.C.V): its index in verses.bin, or -1.
+lt_ref_verse(i: int): int {
+    if (!lang_ready) return -1;
+    a: int = lt_fb[i * 9 + LF_REF];
+    e: int = lt_fe[i * 9 + LF_REF];
+    if (e - a < 7) return -1;
+    bk: int = -1;
+    for b in 0..books {
+        if (bsb[book_line[b] + 1] == llet[a] && bsb[book_line[b] + 2] == llet[a + 1] && bsb[book_line[b] + 3] == llet[a + 2]) bk = b
+    }
+    if (bk < 0) return -1;
+    c: int = 0;
+    q: int = a + 4;
+    while (q < e && is_digit(llet[q] as int)) {
+        c = c * 10 + llet[q] as int - 48;
+        q = q + 1
+    }
+    v: int = 0;
+    q = q + 1;
+    while (q < e && is_digit(llet[q] as int)) {
+        v = v * 10 + llet[q] as int - 48;
+        q = q + 1
+    }
+    if (c < 1 || c > book_count[bk]) return -1;
+    lang_verse(book_first[bk] + c - 1, v)
+}
+
+// How many lines of a language are letters (not joined words).
+letters_of(lang: int): int {
+    n: int = 0;
+    for i in 0..lt_n
+        if (lt_lang[i] == lang && lt_kind[i] == CK_LETTER) n = n + 1;
+    n
+}
+
+// A line's example form with its mark ([ἀ]γάπη): where the mark is (as
+// bytes of the form without its brackets: exm_b to exm_e), into exm, the form.
+exm: []i8 = new i8[256](0i8);
+
+exm_n: int = 0;
+
+exm_b: int = 0;
+
+exm_e: int = 0;
+
+lt_example(i: int) {
+    exm_n = 0;
+    exm_b = 0;
+    exm_e = 0;
+    for x in lt_fb[i * 9 + LF_FORM]..lt_fe[i * 9 + LF_FORM] {
+        k: int = llet[x] as int;
+        if (k == 91) exm_b = exm_n else if (k == 93) exm_e = exm_n else if (exm_n < len(exm)) {
+            exm[exm_n] = k trunc i8;
+            exm_n = exm_n + 1
+        }
+    }
+}
+
+// ---- Hebrew's joined words of a parsing (§14.1.2) ----
+// Per morph.txt line: a bit for each of the 16 joined words it has (bit
+// 16: a bare preposition, read from the form's letter for a word of no
+// number).
+mp_bits: []int = new int[8192](0);
+
+// Bytes a to b of lmorph are s.
+morph_is(a: int, b: int, s: str): bool {
+    if (b - a != len(s)) return false;
+    for i in 0..len(s)
+        if (lmorph[a + i] != s[i]) return false;
+    true
+}
+
+// The joined word whose code is lmorph[a..b] ("Conj-w", "Art", "Prep-l";
+// "3ms", "Pro-3ms"), or -1.
+jp_of_code(a: int, b: int): int {
+    if (morph_is(a, b, "Conj-w")) return 0;
+    if (morph_is(a, b, "Art")) return 1;
+    if (morph_is(a, b, "Prep-b")) return 2;
+    if (morph_is(a, b, "Prep-l")) return 3;
+    if (morph_is(a, b, "Prep-k")) return 4;
+    if (morph_is(a, b, "Prep-m")) return 5;
+    x: int = a;
+    if (b - a == 7 && morph_is(a, a + 4, "Pro-")) x = a + 4;
+    for j in 6..JP_N
+        if (morph_is(x, b, jp_ids[j])) return j;
+    -1
+}
+
+morph_bits(m: int): int {
+    parse_parts(m);
+    morph_of(m);
+    bits: int = 0;
+    // The parts before the main one: each a list of codes (", ").
+    k: int = 0;
+    more: bool = true;
+    while (more && split_part(mc_b, mc_e, k)) {
+        a: int = sp_b;
+        e: int = sp_e;
+        if (a >= pm_b) more = false else {
+            q: int = a;
+            i: int = a;
+            while (i <= e) {
+                if (i == e || i + 1 < e && lmorph[i] as int == 44 && lmorph[i + 1] as int == 32) {
+                    j: int = jp_of_code(q, i);
+                    if (j >= 0 && j < 6) bits = bits | 1 << j;
+                    if (morph_is(q, i, "Prep")) bits = bits | 65536;
+                    i = i + 2;
+                    q = i
+                } else i = i + 1
+            }
+            k = k + 1
+        }
+    }
+    // The ending after it; or the main part an ending of its own (Prep-l |
+    // Pro-3mp).
+    if (pe_e > pe_b) {
+        j: int = jp_of_code(pe_b, pe_e);
+        if (j >= 6) bits = bits | 1 << j
+    }
+    if (pm_b > mc_b) {
+        j: int = jp_of_code(pm_b, pm_e);
+        if (j >= 6) bits = bits | 1 << j
+    }
+    bits
+}
+
+parts_index() {
+    for m in 0..morph_n
+        if (m < len(mp_bits)) mp_bits[m] = morph_bits(m)
+}
+
+// Word w's joined words (a bit each). A word of no number with a bare
+// preposition: the preposition read from its first letter (past a ו of
+// "and"): ב, ל, כ, מ.
+word_parts(w: int): int {
+    if (w_greek(w)) return 0;
+    m: int = w_morph(w);
+    if (m < 0 || m >= len(mp_bits)) return 0;
+    bits: int = mp_bits[m] & 65535;
+    if ((mp_bits[m] & 65536) != 0 && w_strongs(w) == 0) {
+        form_of(w);
+        skip: bool = (bits & 1) != 0;
+        p: int = wf_b;
+        found: bool = false;
+        while (p < wf_e && !found) {
+            cp: int = cp_at(lforms, p, wf_e);
+            if (cp >= 1488 && cp <= 1514) {
+                if (skip) skip = false else {
+                    found = true;
+                    if (cp == 1489) bits = bits | 4;
+                    if (cp == 1500) bits = bits | 8;
+                    if (cp == 1499) bits = bits | 16;
+                    if (cp == 1502) bits = bits | 32
+                }
+            }
+            p = p + cp_len
+        }
+    }
+    bits
+}
+
+// ---- made ready, once the data is read ----
+// vocab.bin and letters.txt: enough for the cards (cards.tsv read, Today,
+// the reminder). Then, once the language data is (lang.l8's), the joined
+// words of each parsing and the letters' example verses.
+learn_index() {
+    learn_index_files();
+    learn_index_lang()
+}
+
+learn_index_files() {
+    vocab_index();
+    letters_index();
+    learn_ready = true;
+    learn_refresh()
+}
+
+learn_lang_ready: bool = false;
+
+learn_index_lang() {
+    if (!lang_ready || !learn_ready) return;
+    parts_index();
+    for i in 0..lt_n lt_vi[i] = lt_ref_verse(i);
+    learn_lang_ready = true
+}
+
+// ---- the cards' indexes, and what is known (§14.1.3), made again after
+// any change ----
+// By number: its card (-1: none), and whether that card is known. Per
+// letters.txt line: its card. The joined words known, and each language's
+// alphabet (every letter card known).
+cw_of: []int = new int[20000](-1);
+
+kn_word: []bool = new bool[20000](false);
+
+cl_of: []int = new int[128](-1);
+
+kn_part: []bool = new bool[16](false);
+
+kn_alpha: []bool = new bool[2](false);
+
+// A count bumped by each change, so what is made from the cards (the
+// verses you can read) is made again.
+cd_gen: int = 0;
+
+learn_refresh() {
+    cd_gen = cd_gen + 1;
+    for i in 0..len(cw_of) {
+        cw_of[i] = -1;
+        kn_word[i] = false
+    }
+    for i in 0..len(cl_of) cl_of[i] = -1;
+    for k in 0..cd_n {
+        if (cd_kind[k] == CK_WORD) {
+            s: int = vslot(cd_lang[k], cd_key[k]);
+            if (s >= 0) {
+                cw_of[s] = k;
+                kn_word[s] = cd_known(k)
+            }
+            cd_rank[k] = vk_rank_of(cd_lang[k], cd_key[k])
+        } else if (cd_key[k] >= 0 && cd_key[k] < lt_n) {
+            cl_of[cd_key[k]] = k;
+            cd_rank[k] = 0
+        }
+    }
+    for j in 0..JP_N kn_part[j] = jp_lt[j] >= 0 && cd_known(cl_of[jp_lt[j]]);
+    for lang in 0..2 {
+        all: bool = letters_of(lang) > 0;
+        for i in 0..lt_n
+            if (lt_lang[i] == lang && lt_kind[i] == CK_LETTER && !cd_known(cl_of[i])) all = false;
+        kn_alpha[lang] = all
+    }
+}
+
+// The card of a number (-1: none).
+card_of_word(lang: int, num: int): int {
+    s: int = vslot(lang, num);
+    if (s < 0) -1 else cw_of[s]
+}
+
+word_card_known(lang: int, num: int): bool {
+    s: int = vslot(lang, num);
+    s >= 0 && kn_word[s]
+}
+
+// A word of the text known (§14.1.3): its lemma's card known, or its
+// lemma a name and the alphabet known, or it has no number; and (Hebrew)
+// its joined words known. Aramaic: never.
+word_lang(w: int): int {
+    if (w_greek(w)) 0 else 1
+}
+
+word_known(w: int): bool {
+    lang: int = word_lang(w);
+    num: int = w_strongs(w);
+    if (num > 0) {
+        fl: int = vk_flags_of(lang, num);
+        if ((fl & FL_ARAMAIC) != 0) return false;
+        if (!(word_card_known(lang, num) || (fl & FL_NAME) != 0 && kn_alpha[lang])) return false
+    }
+    if (lang == 1) {
+        bits: int = word_parts(w);
+        for j in 0..len(jp_ids)
+            if ((bits & 1 << j) != 0 && !kn_part[j]) return false
+    }
+    true
+}
+
+// Whether a word is Aramaic (its English always shows).
+word_aramaic(w: int): bool {
+    num: int = w_strongs(w);
+    num > 0 && (vk_flags_of(word_lang(w), num) & FL_ARAMAIC) != 0
+}
+
+// Whether a word is a name.
+word_name(w: int): bool {
+    num: int = w_strongs(w);
+    num > 0 && (vk_flags_of(word_lang(w), num) & FL_NAME) != 0
+}
+
+// Whether a language has been started (it has a card).
+learn_started(lang: int): bool {
+    for k in 0..cd_n
+        if (cd_lang[k] == lang) return true;
+    false
+}
+
+// How many of a language's word cards are known.
+words_known(lang: int): int {
+    n: int = 0;
+    for k in 0..cd_n
+        if (cd_lang[k] == lang && cd_kind[k] == CK_WORD && cd_known(k)) n = n + 1;
+    n
+}
+
+// How many word cards a language has (any state).
+words_carded(lang: int): int {
+    n: int = 0;
+    for k in 0..cd_n
+        if (cd_lang[k] == lang && cd_kind[k] == CK_WORD) n = n + 1;
+    n
+}
+
+// How many of a language's letters (not joined words) are known, and have
+// cards.
+letters_known(lang: int): int {
+    n: int = 0;
+    for i in 0..lt_n
+        if (lt_lang[i] == lang && lt_kind[i] == CK_LETTER && cd_known(cl_of[i])) n = n + 1;
+    n
+}
+
+letters_carded(lang: int, kind: int): int {
+    n: int = 0;
+    for i in 0..lt_n
+        if (lt_lang[i] == lang && lt_kind[i] == kind && cl_of[i] >= 0) n = n + 1;
+    n
+}
+
+// ---- coverage (§14.1.4) ----
+// What the words known cover: the occurrences of every known word's lemma
+// over all the language's words, a whole percent rounded down. Names are
+// never counted.
+learn_coverage(lang: int): int {
+    t: int = vk_total[lang];
+    if (t <= 0) return 0;
+    n: int = 0;
+    for k in 0..cd_n
+        if (cd_lang[k] == lang && cd_kind[k] == CK_WORD && cd_known(k)) n = n + vk_count_of(lang,
+            cd_key[k]);
+    n * 100 / t
+}
+
+// What a set of numbers (ln_set, ln_set_n of them) would cover.
+learn_set_coverage(lang: int, nums: []int, n: int): int {
+    t: int = vk_total[lang];
+    if (t <= 0) return 0;
+    c: int = 0;
+    for i in 0..n c = c + vk_count_of(lang, nums[i]);
+    c * 100 / t
+}
+
+// Of the words of chapters (n of them), how many are known, word by word
+// (names known with the alphabet): a whole percent, rounded down; -1 if
+// they have no words of the language.
+learn_coverage_of(lang: int, chs: []int, n: int): int {
+    all: int = 0;
+    known: int = 0;
+    for x in 0..n {
+        c: int = chs[x];
+        if (c >= 0 && c < chapters) {
+            vi: int = ch_vi[c];
+            while (vi < lv_n && v_chapter(vi) == c) {
+                for w in v_first(vi)..v_end(vi) {
+                    if (word_lang(w) == lang && !word_aramaic(w)) {
+                        all = all + 1;
+                        if (word_known(w)) known = known + 1
+                    }
+                }
+                vi = vi + 1
+            }
+        }
+    }
+    if (all == 0) -1 else known * 100 / all
+}
+
+// Whether a chapter is in a language's testament (the New's Greek).
+ch_lang(c: int): int {
+    if (ch_book[c] >= 39) 0 else 1
+}
+
+// The chapters of a language's testament read in the last 30 days
+// (History), most recent first: into rc (rc_n).
+rc: []int = new int[256](0);
+
+rc_n: int = 0;
+
+recent_chapters(lang: int, now: int) {
+    rc_n = 0;
+    i: int = hs_n - 1;
+    while (i >= 0) {
+        c: int = hs_ch[i];
+        if (hs_time[i] >= now - 30 * DAY_S && c >= 0 && c < chapters && ch_lang(c) == lang) {
+            dup: bool = false;
+            for x in 0..rc_n
+                if (rc[x] == c) dup = true;
+            if (!dup && rc_n < len(rc)) {
+                rc[rc_n] = c;
+                rc_n = rc_n + 1
+            }
+        }
+        i = i - 1
+    }
+}
+
+// ---- adding (§14.0.6 decision 4) ----
+// The next n most common words with no card (names left out): ln_next.
+ln_next: []int = new int[64](0);
+
+ln_next_n: int = 0;
+
+learn_next(lang: int, n: int) {
+    ln_next_n = 0;
+    k: int = 0;
+    while (k < vl_n[lang] && ln_next_n < n && ln_next_n < len(ln_next)) {
+        num: int = vl_num(lang, k);
+        if (card_of_word(lang, num) < 0) {
+            ln_next[ln_next_n] = num;
+            ln_next_n = ln_next_n + 1
+        }
+        k = k + 1
+    }
+}
+
+// Where a card came from, for the log.
+FROM_FREQ: int = 0;
+
+FROM_PASSAGE: int = 1;
+
+FROM_STUDY: int = 2;
+
+FROM_ALPHABET: int = 3;
+
+FROM_KNOWN: int = 4;
+
+FROM_RELATED: int = 5;
+
+from_ids: []str = ["freq", "passage", "study", "alphabet", "known", "related"];
+
+// A word's card added (now, due today): its index, or -1 (one already, or
+// not a word that may be learned).
+learn_add_word(
+    lang: int,
+    num: int,
+    from: int,
+    today: int,
+    now: int
+): int {
+    if (!learnable(lang, num) || card_of_word(lang, num) >= 0) return -1;
+    k: int = cd_put(lang, CK_WORD, num, now, today);
+    if (k < 0) return -1;
+    cd_rank[k] = vk_rank_of(lang, num);
+    s: int = vslot(lang, num);
+    cw_of[s] = k;
+    learn_logged(k, now, "added", 0, 0, from);
+    k
+}
+
+// A letter's or joined word's card (line i of letters.txt).
+learn_add_letter(
+    i: int,
+    from: int,
+    today: int,
+    now: int
+): int {
+    if (i < 0 || i >= lt_n || cl_of[i] >= 0) return -1;
+    k: int = cd_put(lt_lang[i], lt_kind[i], i, now, today);
+    if (k < 0) return -1;
+    cl_of[i] = k;
+    learn_logged(k, now, "added", 0, 0, from);
+    k
+}
+
+// Mark as Known (a card made first, if none).
+learn_mark_known(k: int, today: int, now: int) {
+    if (k < 0 || k >= cd_n) return;
+    b0: int = cd_box[k];
+    cd_mark_known(k, today);
+    learn_logged(k, now, "known", b0, cd_box[k], FROM_KNOWN);
+    learn_refresh()
+}
+
+learn_delete(k: int, now: int) {
+    if (k < 0 || k >= cd_n) return;
+    learn_logged(k, now, "deleted", cd_box[k], 0, -1);
+    cd_remove(k);
+    learn_refresh()
+}
+
+// A judgement of card k, shown in verse vi (seen: its showings before):
+// kept, logged.
+learn_grade(
+    k: int,
+    grade: int,
+    today: int,
+    now: int,
+    vi: int
+): bool {
+    if (k < 0 || k >= cd_n) return false;
+    b0: int = cd_box[k];
+    changed: bool = cd_grade(k, grade, today);
+    me_str("learn card ");
+    me_card_key(k);
+    me(32);
+    me_str(mem_grade_ids[grade]);
+    if (changed) {
+        me_str(" box ");
+        me_int(b0);
+        me_str("\�\�\�");
+        me_int(cd_box[k]);
+        me_str(" due ");
+        me_date(cd_due[k])
+    } else me_str(" early, nothing changed");
+    if (vi >= 0) {
+        me_str(" context ");
+        c: int = v_chapter(vi);
+        b: int = ch_book[c];
+        for x in 0..3 me(bsb_code_at(b, x));
+        me(32);
+        me_int(ch_num[c]);
+        me(58);
+        me_int(v_num(vi))
+    }
+    me_str(" (seen ");
+    me_int(cd_seen[k]);
+    me(41);
+    me(10);
+    cdl_add(k, now, mem_grade_ids[grade], b0, cd_box[k], -1);
+    learn_refresh();
+    changed
+}
+
+// A session's judgement of card k (review r10-1 Minor 1), by which showing
+// it is: RET_FIRST its first showing in the session (a card in review),
+// RET_NEW a new card's return for its first judgement (it was shown with
+// its answer), RET_RETRY a Not Yet's retry. The first two are graded and
+// come back once more at the end on Not Yet (RET_RETRY returned); a retry
+// changes nothing (as a passage's, review r9-1 Minor 12) and comes back no
+// more (RET_NONE).
+RET_NONE: int = -1;
+
+RET_FIRST: int = 0;
+
+RET_NEW: int = 1;
+
+RET_RETRY: int = 2;
+
+learn_judged(
+    k: int,
+    grade: int,
+    ret: int,
+    today: int,
+    now: int,
+    vi: int
+): int {
+    if (k < 0 || k >= cd_n) return RET_NONE;
+    if (ret == RET_RETRY) {
+        learn_grade_again(k, grade, now);
+        return RET_NONE
+    }
+    _c: bool = learn_grade(k, grade, today, now, vi);
+    if (grade == G_NOTYET) RET_RETRY else RET_NONE
+}
+
+// "learn card G25 notyet again, nothing changed", and its log's line.
+learn_grade_again(k: int, grade: int, now: int) {
+    me_str("learn card ");
+    me_card_key(k);
+    me(32);
+    me_str(mem_grade_ids[grade]);
+    me_str(" again, nothing changed");
+    me(10);
+    cdl_add(k, now, mem_grade_ids[grade], cd_box[k], cd_box[k], -1)
+}
+
+// "learn added G25 from freq" (the console's), and cards-log.tsv's line.
+learn_logged(
+    k: int,
+    now: int,
+    what: str,
+    b0: int,
+    b1: int,
+    from: int
+) {
+    me_str("learn ");
+    me_str(what);
+    me(32);
+    me_card_key(k);
+    if (what[0] as int == 97) {
+        me_str(" from ");
+        me_str(from_ids[from])
+    } else if (what[0] as int == 107) {
+        me_str(" box 4 due ");
+        me_date(cd_due[k])
+    }
+    me(10);
+    cdl_add(k, now, what, b0, b1, from)
+}
+
+// A card's key: G25, G:alpha, H:w.
+me_card_key(k: int) {
+    fbuf_mark: int = fbuf_n;
+    fput_card_key(k);
+    for x in fbuf_mark..fbuf_n me(fbuf[x] as int);
+    fbuf_n = fbuf_mark
+}
+
+fput_card_key(k: int) {
+    fput(if (cd_lang[k] == 0) 71 else 72);
+    if (cd_kind[k] == CK_WORD) {
+        fput_int(cd_key[k]);
+        return
+    }
+    fput(58);
+    i: int = cd_key[k];
+    if (i < 0 || i >= lt_n) return;
+    a: int = lt_fb[i * 9 + LF_ID];
+    if (cd_kind[k] == CK_JOINED) a = a + 2;
+    for x in a..lt_fe[i * 9 + LF_ID] fput(llet[x] as int)
+}
+
+// ---- cards-log.tsv's lines (appended by the platform, never read) ----
+// KEY UNIXTIME WHAT BOX_BEFORE BOX_AFTER FROM.
+cdl: []i8 = new i8[65536](0i8);
+
+cdl_n: int = 0;
+
+cdl_put(k: int) {
+    if (cdl_n < len(cdl)) {
+        cdl[cdl_n] = k trunc i8;
+        cdl_n = cdl_n + 1
+    }
+}
+
+cdl_int(n: int) {
+    if (n < 0) {
+        cdl_put(45);
+        cdl_int(-n);
+        return
+    }
+    if (n >= 10) cdl_int(n / 10);
+    cdl_put(48 + n % 10)
+}
+
+cdl_add(
+    k: int,
+    now: int,
+    what: str,
+    b0: int,
+    b1: int,
+    from: int
+) {
+    at: int = fbuf_n;
+    fput_card_key(k);
+    for x in at..fbuf_n cdl_put(fbuf[x] as int);
+    fbuf_n = at;
+    cdl_put(9);
+    cdl_int(now);
+    cdl_put(9);
+    for c in what cdl_put(c as int);
+    cdl_put(9);
+    cdl_int(b0);
+    cdl_put(9);
+    cdl_int(b1);
+    cdl_put(9);
+    if (from >= 0) {
+        for c in from_ids[from] cdl_put(c as int)
+    } else cdl_put(45);
+    cdl_put(10)
+}
+
+// ---- cards.tsv (§14.1.9), in fbuf ----
+// CARD LANG KIND KEY STATE BOX DUE ADDED SEEN, in the order added.
+cd_kind_ids: []str = ["word", "letter", "joined"];
+
+format_cards() {
+    fbuf_n = 0;
+    for k in 0..cd_n {
+        fput_str("CARD\t");
+        fput(if (cd_lang[k] == 0) 71 else 72);
+        fput(9);
+        fput_str(cd_kind_ids[cd_kind[k]]);
+        fput(9);
+        fput_card_key(k);
+        fput(9);
+        fput_str(if (cd_state[k] == MS_NEW) "new" else "review");
+        fput(9);
+        fput_int(cd_box[k]);
+        fput(9);
+        if (cd_due[k] >= 0) fput_iso_date(cd_due[k]) else fput(45);
+        fput(9);
+        fput_int(cd_added[k]);
+        fput(9);
+        fput_int(cd_seen[k]);
+        fput(10)
+    }
+}
+
+// Malformed lines, unknown kinds and keys, and a key's second line,
+// skipped (the first kept).
+parse_cards(today: int) {
+    begin_lines();
+    cd_n = 0;
+    lines_read = 0;
+    lines_skipped = 0;
+    for i in 0..len(cw_of) cw_of[i] = -1;
+    for i in 0..len(cl_of) cl_of[i] = -1;
+    while (next_line()) {
+        if (line_e > fpos) {
+            lines_read = lines_read + 1;
+            f2: int = field_after(fpos);
+            f3: int = field_after(f2);
+            f4: int = field_after(f3);
+            f5: int = field_after(f4);
+            f6: int = field_after(f5);
+            f7: int = field_after(f6);
+            f8: int = field_after(f7);
+            f9: int = field_after(f8);
+            lang: int = if (field_is(f2, "G")) 0 else if (field_is(f2, "H")) 1 else -1;
+            kind: int = field_word(f3, cd_kind_ids);
+            state: int = if (field_is(f5, "new")) MS_NEW else if (field_is(f5, "review")) MS_REVIEW else -1;
+            box: int = field_num(f6, false);
+            due: int = if (field_is(f7, "-")) -1 else field_iso_day(f7);
+            added: int = field_num(f8, false);
+            seen: int = field_num(f9, false);
+            key: int = if (lang >= 0 && kind >= 0) card_key_field(f4, lang, kind) else -1;
+            good: bool = field_is(fpos, "CARD") && lang >= 0 && kind >= 0 && key >= 0 && state >= 0 && box >= 0 && box <= 8 && added >= 0 && seen >= 0;
+            if (good && state == MS_REVIEW && (box < 1 || due < 0)) good = false;
+            if (good && state == MS_NEW && due < 0) due = today;
+            // (A key's first line kept.)
+            if (good && kind == CK_WORD && cw_of[vslot(lang, key)] >= 0) good = false;
+            if (good && kind != CK_WORD && cl_of[key] >= 0) good = false;
+            if (good) {
+                k: int = cd_put(lang, kind, key, added, today);
+                if (k >= 0) {
+                    cd_state[k] = state;
+                    cd_box[k] = box;
+                    cd_due[k] = due;
+                    cd_seen[k] = seen;
+                    if (kind == CK_WORD) cw_of[vslot(lang, key)] = k else cl_of[key] = k
+                }
+            } else skip_line()
+        }
+    }
+    learn_refresh()
+}
+
+// A KEY field of a language and kind: a learnable word's number (G25), or
+// a letters.txt line (G:alpha; H:w for j-w); -1 if not one.
+card_key_field(p: int, lang: int, kind: int): int {
+    e: int = field_end(p);
+    if (e - p < 2 || fbuf[p] as int != (if (lang == 0) 71 else 72)) return -1;
+    if (kind == CK_WORD) {
+        n: int = 0;
+        for x in p + 1..e {
+            k: int = fbuf[x] as int;
+            if (!is_digit(k)) return -1;
+            n = n * 10 + k - 48
+        }
+        if (!learnable(lang, n)) return -1;
+        return n
+    }
+    if (fbuf[p + 1] as int != 58) return -1;
+    for i in 0..lt_n {
+        if (lt_lang[i] == lang && lt_kind[i] == kind) {
+            a: int = lt_fb[i * 9 + LF_ID] + (if (kind == CK_JOINED) 2 else 0);
+            b: int = lt_fe[i * 9 + LF_ID];
+            if (b - a == e - p - 2) {
+                same: bool = true;
+                for x in 0..b - a
+                    if (llet[a + x] != fbuf[p + 2 + x]) same = false;
+                if (same) return i
+            }
+        }
+    }
+    -1
+}
+
+// ---- the words of a passage (§14.1.5) ----
+// The distinct learnable lemmas of the BSB's words of c1:v1 to c2:v2 (one
+// language), most common first, each with its count there (wo_*); those
+// with no card (wu_*). Its language in wo_lang (-1: no words).
+WO_MOST: int = 1024;
+
+wo_n: int = 0;
+
+wo_lang: int = -1;
+
+wo_num: []int = new int[1024](0);
+
+wo_count: []int = new int[1024](0);
+
+wu_n: int = 0;
+
+wu_num: []int = new int[1024](0);
+
+wu_count: []int = new int[1024](0);
+
+learn_words_of(
+    c1: int,
+    v1: int,
+    c2: int,
+    v2: int
+) {
+    wo_n = 0;
+    wu_n = 0;
+    wo_lang = -1;
+    a: int = lang_verse(c1, v1);
+    b: int = lang_verse(c2, v2);
+    if (a < 0 || b < a) return;
+    for vi in a..b + 1 {
+        for w in v_first(vi)..v_end(vi) {
+            lang: int = word_lang(w);
+            num: int = w_strongs(w);
+            if (learnable(lang, num)) {
+                wo_lang = lang;
+                at: int = -1;
+                for x in 0..wo_n
+                    if (wo_num[x] == num) at = x;
+                if (at < 0 && wo_n < WO_MOST) {
+                    at = wo_n;
+                    wo_num[at] = num;
+                    wo_count[at] = 0;
+                    wo_n = wo_n + 1
+                }
+                if (at >= 0) wo_count[at] = wo_count[at] + 1
+            }
+        }
+    }
+    // Most common first (by rank).
+    for i in 1..wo_n {
+        j: int = i;
+        while (j > 0 && vk_rank_of(wo_lang, wo_num[j - 1]) > vk_rank_of(wo_lang, wo_num[j])) {
+            swap(wo_num, j);
+            swap(wo_count, j);
+            j = j - 1
+        }
+    }
+    for x in 0..wo_n {
+        if (card_of_word(wo_lang, wo_num[x]) < 0) {
+            wu_num[wu_n] = wo_num[x];
+            wu_count[wu_n] = wo_count[x];
+            wu_n = wu_n + 1
+        }
+    }
+}
+
+// ---- where a verse comes from (§14.1.7, §14.3.7) ----
+// 0 a Memory passage's verse; 1 highlighted, bookmarked or noted; 2 in a
+// chapter read in the last 30 days, or a ribbon's; 3 elsewhere.
+in_memory(c: int, v: int): bool {
+    for i in 0..mq_n {
+        after_start: bool = c > mq_c1[i] || c == mq_c1[i] && v >= mq_v1[i];
+        before_end: bool = c < mq_c2[i] || c == mq_c2[i] && v <= mq_v2[i];
+        if (after_start && before_end) return true
+    }
+    false
+}
+
+in_marks(c: int, v: int): bool {
+    highlight_of(c, v) >= 0 || is_bookmarked(c, v) || note_of(c, v) >= 0
+}
+
+// The chapters read lately, and the ribbons' (made by source_ready): a
+// flag a chapter.
+rd_ch: []bool = new bool[1200](false);
+
+source_ready(now: int) {
+    for c in 0..len(rd_ch) rd_ch[c] = false;
+    for i in 0..hs_n {
+        c: int = hs_ch[i];
+        if (c >= 0 && c < len(rd_ch) && hs_time[i] >= now - 30 * DAY_S) rd_ch[c] = true
+    }
+    for i in 0..rb_n {
+        c: int = rb_c[i];
+        if (c >= 0 && c < len(rd_ch)) rd_ch[c] = true
+    }
+}
+
+source_of(vi: int): int {
+    c: int = v_chapter(vi);
+    v: int = v_num(vi);
+    if (in_memory(c, v)) return 0;
+    if (in_marks(c, v)) return 1;
+    if (c >= 0 && c < len(rd_ch) && rd_ch[c]) return 2;
+    3
+}
+
+// ---- verses you can read (§14.1.6) ----
+// Of a language's testament: the verses where every word is known (at
+// least 3), and those where all but one are (the one in crv_word), each
+// with its section (§14.3.7: 0 Memory, 1 marks, 2 read, 3 elsewhere, 4
+// one word to learn), in sections' order, then Bible order; at most 200
+// elsewhere and 100 with a word to learn. crv_readable counts them all.
+RV_MOST: int = 4096;
+
+crv_n: int = 0;
+
+crv_vi: []int = new int[4096](0);
+
+crv_sec: []int = new int[4096](0);
+
+crv_word: []int = new int[4096](-1);
+
+crv_count: []int = new int[5](0);
+
+crv_readable: int = 0;
+
+crv_nearly: int = 0;
+
+// (The scan's: every verse's unknown count, kept until a card changes.)
+crv_unknown: []int = new int[32000](0);
+
+crv_gen: []int = [-1, -1];
+
+learn_readable(lang: int, now: int) {
+    if (crv_gen[lang] != cd_gen) {
+        crv_gen[1 - lang] = -1;
+        crv_gen[lang] = cd_gen;
+        for vi in 0..lv_n {
+            a: int = v_first(vi);
+            b: int = v_end(vi);
+            if (b - a < 3 || word_lang(a) != lang) crv_unknown[vi] = -1 else {
+                u: int = 0;
+                w: int = a;
+                while (w < b && u < 2) {
+                    if (!word_known(w)) u = u + 1;
+                    w = w + 1
+                }
+                crv_unknown[vi] = u
+            }
+        }
+    }
+    source_ready(now);
+    crv_n = 0;
+    crv_readable = 0;
+    crv_nearly = 0;
+    for s in 0..5 crv_count[s] = 0;
+    for sec in 0..5 {
+        for vi in 0..lv_n {
+            u: int = crv_unknown[vi];
+            if (u == 0 && sec < 4) {
+                if (sec == 0) crv_readable = crv_readable + 1;
+                if (source_of(vi) == sec && (sec < 3 || crv_count[3] < 200)) crv_put(vi,
+                    sec, -1)
+            } else if (u == 1 && sec == 4) {
+                crv_nearly = crv_nearly + 1;
+                if (crv_count[4] < 100) {
+                    unknown: int = -1;
+                    for w in v_first(vi)..v_end(vi)
+                        if (unknown < 0 && !word_known(w)) unknown = w;
+                    crv_put(vi, 4, unknown)
+                }
+            }
+        }
+    }
+}
+
+crv_put(vi: int, sec: int, w: int) {
+    if (crv_n >= RV_MOST) return;
+    crv_vi[crv_n] = vi;
+    crv_sec[crv_n] = sec;
+    crv_word[crv_n] = w;
+    crv_count[sec] = crv_count[sec] + 1;
+    crv_n = crv_n + 1
+}
+
+// ---- a card's verse (§14.1.7) ----
+// A number's verses in Bible order, decoded from conc.bin here (not into
+// lang.l8's cc_*, which a concordance shown may be using): lc_vi.
+lc_vi: []int = new int[16384](0);
+
+lc_n: int = 0;
+
+lc_at: int = 0;
+
+lc_leb(): int {
+    n: int = 0;
+    shift: int = 0;
+    more: bool = true;
+    while (more && lc_at < lconc_len) {
+        x: int = byte_of(lconc, lc_at);
+        lc_at = lc_at + 1;
+        n = n | (x & 127) << shift;
+        shift = shift + 7;
+        more = x >= 128
+    }
+    n
+}
+
+learn_verses_of(lang: int, num: int) {
+    lc_n = 0;
+    if (!lang_ready || num <= 0 || num >= STRONGS_MAX) return;
+    p: int = if (lang == 0) conc_g[num] else conc_h[num];
+    if (p < 0) return;
+    while (lconc[p] as int != 0) p = p + 1;
+    lc_at = p + 1;
+    _words: int = lc_leb();
+    at: int = 0;
+    more: bool = true;
+    while (more) {
+        d: int = lc_leb();
+        if (d == 0) more = false else {
+            at = at + d;
+            if (lc_n < len(lc_vi)) {
+                lc_vi[lc_n] = at - 1;
+                lc_n = lc_n + 1
+            }
+        }
+    }
+}
+
+// The word of number num translated in verse vi (its first), or -1.
+translated_in(vi: int, lang: int, num: int): int {
+    for w in v_first(vi)..v_end(vi)
+        if (w_strongs(w) == num && word_lang(w) == lang && w_ntok(w) > 0) return w;
+    -1
+}
+
+// The k-th showing of card k: its verse (ctx_vi) and the word in it
+// (ctx_w): the candidates (verses you care about first, then all, each
+// once, in Bible order within each; only where the word is translated and
+// the verse has 40 words or fewer), the seen-th taken, wrapping round.
+// Letters and joined words: their example's. False if none.
+ctx_vi: int = -1;
+
+ctx_w: int = -1;
+
+ctx_cand: []int = new int[16384](0);
+
+ctx_n: int = 0;
+
+learn_context(k: int, now: int): bool {
+    ctx_vi = -1;
+    ctx_w = -1;
+    ctx_n = 0;
+    if (k < 0 || k >= cd_n) return false;
+    if (cd_kind[k] != CK_WORD) {
+        i: int = cd_key[k];
+        if (i < 0 || i >= lt_n || lt_vi[i] < 0) return false;
+        ctx_vi = lt_vi[i];
+        ctx_w = example_word(i);
+        return ctx_w >= 0
+    }
+    lang: int = cd_lang[k];
+    num: int = cd_key[k];
+    learn_verses_of(lang, num);
+    source_ready(now);
+    for sec in 0..4 {
+        for x in 0..lc_n {
+            vi: int = lc_vi[x];
+            if (v_end(vi) - v_first(vi) <= 40 && source_of(vi) == sec && translated_in(vi,
+                lang, num) >= 0 && ctx_n < len(ctx_cand)) {
+                ctx_cand[ctx_n] = vi;
+                ctx_n = ctx_n + 1
+            }
+        }
+    }
+    if (ctx_n == 0) return false;
+    ctx_vi = ctx_cand[cd_seen[k] % ctx_n];
+    ctx_w = translated_in(ctx_vi, lang, num);
+    true
+}
+
+// Line i's example word in its verse: the word of its number whose form is
+// the example's (-1: none).
+example_word(i: int): int {
+    vi: int = lt_vi[i];
+    if (vi < 0) return -1;
+    lt_example(i);
+    for w in v_first(vi)..v_end(vi) {
+        if (w_strongs(w) == lt_key[i] && word_lang(w) == lt_lang[i]) {
+            form_of(w);
+            if (wf_e - wf_b == exm_n) {
+                same: bool = true;
+                for x in 0..exm_n
+                    if (lforms[wf_b + x] != exm[x]) same = false;
+                if (same) return w
+            }
+        }
+    }
+    -1
+}
+
+// The window of up to 12 words of verse vi's original text around word w,
+// in the original order: its first and last positions (of the verse's
+// words in original order), into ow_from and ow_to; and whether cut at
+// either end.
+ow_from: int = 0;
+
+ow_to: int = 0;
+
+learn_window(vi: int, w: int) {
+    n: int = v_end(vi) - v_first(vi);
+    o: int = w_order(w);
+    ow_from = o - 5;
+    if (ow_from < 0) ow_from = 0;
+    ow_to = ow_from + 12;
+    if (ow_to > n) {
+        ow_to = n;
+        ow_from = (if (n > 12) n - 12 else 0)
+    }
+}
+
+// The word of verse vi at position o of the original order.
+word_at_order(vi: int, o: int): int {
+    for w in v_first(vi)..v_end(vi)
+        if (w_order(w) == o) return w;
+    -1
+}
+
+// A card shown: counted (its next showing takes the next verse), and a new
+// one put in review.
+learn_shown(k: int, today: int) {
+    if (k < 0 || k >= cd_n) return;
+    cd_seen[k] = cd_seen[k] + 1;
+    cd_first_shown(k, today)
+}
+
+// ---- letters known in a word: words to sound out (§14.3.3) ----
+// The Greek letters' ids, alpha to omega; the pairs; the Hebrew letters'
+// by consonant (U+05D0 on, finals as theirs); the vowels by point.
+greek_ids: []str = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+    "iota", "kappa", "lambda", "mu", "nu", "xi", "omicron", "pi", "rho", "sigma",
+    "tau", "upsilon", "phi", "chi", "psi", "omega"];
+
+greek_pairs: []str = ["ai", "ei", "oi", "ui", "au", "eu", "ou"];
+
+// (Each pair as its letters' indices: α ι, ε ι, ο ι, υ ι, α υ, ε υ, ο υ.)
+pair_a: []int = [1, 5, 15, 20, 1, 5, 15];
+
+pair_b: []int = [9, 9, 9, 9, 20, 20, 20];
+
+heb_ids: []str = ["alef", "bet", "gimel", "dalet", "he", "vav", "zayin", "het", "tet",
+    "yod", "kaf", "kaf", "lamed", "mem", "mem", "nun", "nun", "samekh", "ayin", "pe",
+    "pe", "tsade", "tsade", "qof", "resh", "shin", "tav"];
+
+// Whether line id of language lang is a known card (a missing line:
+// not).
+id_known(lang: int, id: str): bool {
+    i: int = lt_find(lang, id);
+    i >= 0 && cd_known(cl_of[i])
+}
+
+// Whether every letter of word w's form is known (its letters, pairs and
+// breathing; its consonants, dots and vowels).
+letters_known_in(w: int): bool {
+    form_of(w);
+    p: int = wf_b;
+    if (w_greek(w)) {
+        prev: int = 0;
+        while (p < wf_e) {
+            cp: int = cp_at(lforms, p, wf_e);
+            p = p + cp_len;
+            info: int = greek_info(cp);
+            l: int = info & 31;
+            if (l > 0) {
+                if (!id_known(0, greek_ids[l - 1])) return false;
+                if ((info & 32) != 0 && !id_known(0, "rough")) return false;
+                if ((info & 64) == 0) {
+                    for x in 0..7
+                        if (pair_a[x] == prev && pair_b[x] == l && !id_known(0, greek_pairs[x])) return false
+                }
+                prev = l
+            } else if (cp < 768 || cp > 879) prev = 0
+        }
+        return true
+    }
+    last: int = 0;
+    while (p < wf_e) {
+        cp: int = cp_at(lforms, p, wf_e);
+        p = p + cp_len;
+        // (Its marks: the next code points that are points.)
+        dagesh: bool = false;
+        sin: bool = false;
+        vowel: int = 0;
+        q: int = p;
+        more: bool = true;
+        while (more && q < wf_e) {
+            m: int = cp_at(lforms, q, wf_e);
+            if (m >= 1456 && m <= 1479 && m != 1470 && m != 1472 && m != 1475 && m != 1478) {
+                if (m == 1468) dagesh = true;
+                if (m == 1474) sin = true;
+                if (m >= 1456 && m <= 1467 || m == 1479) vowel = m;
+                q = q + cp_len
+            } else more = false
+        }
+        if (cp >= 1488 && cp <= 1514) {
+            id: str = heb_ids[cp - 1488];
+            if (cp == 1513 && sin) id = "sin";
+            vav_vowel: bool = cp == 1493 && (vowel == 1465 || vowel == 0 && dagesh);
+            if (vav_vowel) {
+                if (!id_known(1, if (vowel == 1465) "holem-vav" else "shureq")) return false
+            } else {
+                if (dagesh && (cp == 1489 || cp == 1499 || cp == 1508)) id = (if (cp == 1489) "bet-dagesh" else if (cp == 1499) "kaf-dagesh" else "pe-dagesh");
+                // (A yod after hireq or tsere, with no vowel of its own, is
+                // the vowel's.)
+                yod_vowel: bool = cp == 1497 && vowel == 0 && (last == 1460 || last == 1461);
+                if (yod_vowel) {
+                    if (!id_known(1, if (last == 1460) "hireq-yod" else "tsere-yod")) return false
+                } else if (!id_known(1, id)) return false;
+                if (vowel != 0 && !id_known(1, heb_vowel_id(vowel))) return false
+            }
+            last = vowel
+        }
+        p = q
+    }
+    true
+}
+
+heb_vowel_id(m: int): str {
+    if (m == 1456) return "sheva";
+    if (m == 1457) return "hatef-segol";
+    if (m == 1458) return "hatef-patach";
+    if (m == 1459) return "hatef-qamets";
+    if (m == 1460) return "hireq";
+    if (m == 1461) return "tsere";
+    if (m == 1462) return "segol";
+    if (m == 1463) return "patach";
+    if (m == 1464 || m == 1479) return "qamets";
+    if (m == 1465 || m == 1466) return "holem";
+    "qibbuts"
+}
+
+// Practise Reading's words: up to 10 common words (of the 500 most
+// common, names aside) made only of letters known, each form once, from
+// the verses you care about first, then the testament in order; the
+// first skip of those found passed over (Again's next ten). Into pr_w.
+pr_w: []int = new int[10](0);
+
+pr_n: int = 0;
+
+learn_reading_words(lang: int, skip: int, now: int) {
+    pr_n = 0;
+    rf_n = 0;
+    source_ready(now);
+    found: int = 0;
+    for sec in 0..4 {
+        vi: int = 0;
+        while (vi < lv_n && pr_n < 10) {
+            a: int = v_first(vi);
+            if (v_end(vi) > a && word_lang(a) == lang && source_of(vi) == sec) {
+                for o in 0..v_end(vi) - a {
+                    w: int = word_at_order(vi, o);
+                    if (w >= 0 && pr_n < 10 && reading_word_ok(w)) {
+                        if (found >= skip) {
+                            pr_w[pr_n] = w;
+                            pr_n = pr_n + 1
+                        }
+                        found = found + 1;
+                        rf_add(w)
+                    }
+                }
+            }
+            vi = vi + 1
+        }
+    }
+    rf_n = 0
+}
+
+// The forms taken so far (each once).
+rf_form: []int = new int[1024](0);
+
+rf_n: int = 0;
+
+rf_add(w: int) {
+    if (rf_n < len(rf_form)) {
+        rf_form[rf_n] = w_form(w);
+        rf_n = rf_n + 1
+    }
+}
+
+reading_word_ok(w: int): bool {
+    num: int = w_strongs(w);
+    lang: int = word_lang(w);
+    r: int = vk_rank_of(lang, num);
+    if (r <= 0 || r > 500 || word_parts(w) != 0) return false;
+    f: int = w_form(w);
+    for x in 0..rf_n
+        if (rf_form[x] == f) return false;
+    letters_known_in(w)
+}
+
+// ---- a word card's answer (§14.10b.2): what it means in its verse ----
+// The BSB's words for word w in verse vi (its chunk, as the verse has
+// it) into fbuf; false if it has none.
+fput_words_here(vi: int, w: int): bool {
+    if (vi < 0 || w < 0) return false;
+    study_load(vi);
+    chunk_of(w);
+    if (ch_e <= ch_b) return false;
+    for x in ch_b..ch_e fput(st[x] as int);
+    true
+}
+
+// "Here: child": word w's sense, when its lemma has more than one (a split
+// sense's part after its colon, "descendant/people"), unless it is the
+// BSB's words here again or the lemma's gloss that the card's faint line
+// shows (λέγω's "to say"; review r10-2); false if nothing is put.
+fput_sense_here(vi: int, w: int): bool {
+    if (vi < 0 || w < 0) return false;
+    greek: bool = w_greek(w);
+    p: int = lex_first(greek, w_strongs(w));
+    if (lex_count(p) <= 1) return false;
+    e: int = sense_entry(greek, w_strongs(w), w_sense(w));
+    if (e < 0) return false;
+    lex_field(e, 3);
+    a: int = lf_b;
+    b: int = lf_e;
+    c: int = a;
+    while (c < b && llex[c] as int != 58) c = c + 1;
+    if (c < b) a = c + 1;
+    while (a < b && llex[a] as int == 32) a = a + 1;
+    if (a >= b) return false;
+    // (Not when it says what the BSB's words say.)
+    study_load(vi);
+    chunk_of(w);
+    if (ch_e - ch_b == b - a) {
+        same: bool = true;
+        for x in 0..b - a
+            if (lower(st[ch_b + x] as int) != lower(llex[a + x] as int)) same = false;
+        if (same) return false
+    }
+    // (Nor the lemma's gloss, its first entry's part before a colon.)
+    lex_field(p, 3);
+    g: int = lf_b;
+    e: int = g;
+    while (e < lf_e && llex[e] as int != 58) e = e + 1;
+    while (e > g && llex[e - 1] as int == 32) e = e - 1;
+    if (e == g) e = lf_e;
+    if (e - g == b - a) {
+        same: bool = true;
+        for x in 0..b - a
+            if (lower(llex[g + x] as int) != lower(llex[a + x] as int)) same = false;
+        if (same) return false
+    }
+    fput_str("Here: ");
+    for x in a..b fput(llex[x] as int);
+    true
+}
+
+// "agapaō · to love · 143 times": the lemma's transliteration, its gloss
+// and how often it occurs.
+fput_card_meta(lang: int, num: int) {
+    fput_lemma(lang, num, 1);
+    fput_str(" \�\� ");
+    fput_lemma(lang, num, 3);
+    fput_str(" \�\� ");
+    n: int = vk_count_of(lang, num);
+    fput_count(n);
+    fput_str(if (n == 1) " time" else " times")
+}
+
+// Up to two words related to a number (§10.4's list, of its language)
+// that are known cards, nearest first: rk_num (rk_n).
+rk_num: []int = new int[2](0);
+
+rk_n: int = 0;
+
+learn_related_known(lang: int, num: int) {
+    rk_n = 0;
+    related_load(lang == 0, num);
+    for i in 0..rl_n {
+        if (rk_n < len(rk_num) && rl_greek[i] == (lang == 0) && rl_num[i] != num && word_card_known(lang,
+            rl_num[i])) {
+            rk_num[rk_n] = rl_num[i];
+            rk_n = rk_n + 1
+        }
+    }
+}
+
+// "Related: φιλέω to love, ἀγάπη love" (rk_num's); false if none.
+fput_related_known(lang: int, num: int): bool {
+    learn_related_known(lang, num);
+    if (rk_n == 0) return false;
+    fput_str("Related: ");
+    for i in 0..rk_n {
+        if (i > 0) fput_str(", ");
+        if (lang == 1) fput_rli();
+        fput_lemma(lang, rk_num[i], 0);
+        if (lang == 1) fput_pdi();
+        fput(32);
+        fput_lemma(lang, rk_num[i], 3)
+    }
+    true
+}
+
+// A Forms cell's English (§14.10b.2): parsing g's rendering into fbuf
+// (a capital kept); false if none.
+fput_form_rendering(g: int): bool {
+    if (g < 0 || g >= fo_n || fo_rend[g] < 0) return false;
+    p: int = fo_rend[g];
+    for i in 0..fx_len[p] {
+        k: int = fx_pool[fx_at[p] + i] as int;
+        fput(if (i == 0 && fx_cap[p] && !fx_low[p] && k >= 97 && k <= 122) k - 32 else k)
+    }
+    true
+}
+
+// ---- Add Words' Related to Words You Know (§14.10b.2) ----
+// The words with no card related to known words (§10.4's lists, each
+// known word card's, of its language), most common first: rel_new (rel_new_n).
+rel_new: []int = new int[2048](0);
+
+rel_new_n: int = 0;
+
+rel_seen: []bool = new bool[20000](false);
+
+learn_related_words(lang: int) {
+    rel_new_n = 0;
+    for i in 0..len(rel_seen) rel_seen[i] = false;
+    any: bool = false;
+    for k in 0..cd_n {
+        if (cd_lang[k] == lang && cd_kind[k] == CK_WORD && cd_known(k)) {
+            related_load(lang == 0, cd_key[k]);
+            for i in 0..rl_n {
+                num: int = rl_num[i];
+                if (rl_greek[i] == (lang == 0) && learnable(lang, num) && card_of_word(lang,
+                    num) < 0) {
+                    s: int = vslot(lang, num);
+                    if (s >= 0) {
+                        rel_seen[s] = true;
+                        any = true
+                    }
+                }
+            }
+        }
+    }
+    if (!any) return;
+    for x in 0..vl_n[lang] {
+        num: int = vl_num(lang, x);
+        s: int = vslot(lang, num);
+        if (s >= 0 && rel_seen[s] && rel_new_n < len(rel_new)) {
+            rel_new[rel_new_n] = num;
+            rel_new_n = rel_new_n + 1
+        }
+    }
+}
+
+// ---- words and their text ----
+// A lemma's first lexicon entry's field into fbuf (0 lemma, 1
+// transliteration, 3 gloss).
+fput_lemma(lang: int, num: int, f: int) {
+    p: int = lex_first(lang == 0, num);
+    if (p < 0) {
+        fput(if (lang == 0) 71 else 72);
+        fput_int(num);
+        return
+    }
+    lex_field(p, f);
+    if (f == 3) fput_gloss(lf_b, lf_e) else {
+        for x in lf_b..lf_e fput(llex[x] as int)
+    }
+}
+
+// A gloss as lists show it: STEP's "son: child" (a split sense) as its
+// part before the colon, "son"; the word study's Meaning keeps the whole
+// (review r10-1 Minor 4).
+fput_gloss(a: int, b: int) {
+    e: int = a;
+    while (e < b && llex[e] as int != 58) e = e + 1;
+    while (e > a && llex[e - 1] as int == 32) e = e - 1;
+    if (e == a) e = b;
+    for x in a..e fput(llex[x] as int)
+}
+
+// The isolates that keep Hebrew from reordering an English line (§14.8).
+fput_rli() {
+    fput_str("\�\�\�")
+}
+
+fput_pdi() {
+    fput_str("\�\�\�")
+}
+
+// ---- the words the screens say ----
+// A number with commas: 138,088.
+fput_count(n: int) {
+    if (n >= 1000) {
+        fput_count(n / 1000);
+        fput(44);
+        m: int = n % 1000;
+        if (m < 100) fput(48);
+        if (m < 10) fput(48);
+        fput_int(m)
+    } else fput_int(n)
+}
+
+testament_names: []str = ["New Testament", "Old Testament"];
+
+language_names: []str = ["Greek", "Hebrew"];
+
+// The language page's first paragraph (§14.3.2).
+fput_language_header(lang: int) {
+    known: int = words_known(lang);
+    if (known == 0) {
+        fput_str("The ");
+        fput_str(testament_names[lang]);
+        fput_str(" has ");
+        fput_count(vk_total[lang]);
+        fput_str(if (lang == 1) " Hebrew words, made from " else " words, made from ");
+        fput_count(vl_n[lang]);
+        fput_str(" different words (names aside). The 120 most common make up ");
+        top: int = 0;
+        for x in 0..120
+            if (x < vl_n[lang]) top = top + vk_count[vl[vl_first[lang] + x]];
+        fput_int(if (vk_total[lang] > 0) top * 100 / vk_total[lang] else 0);
+        fput_str("% of it.");
+        return
+    }
+    fput_str("You know ");
+    fput_count(known);
+    fput_str(if (known == 1) " word. It makes up " else " words. They make up ");
+    fput_int(learn_coverage(lang));
+    fput_str("% of the words of the ");
+    fput_str(testament_names[lang]);
+    fput(46)
+}
+
+// Its second (faint), only when History has chapters of the testament in
+// the last 30 days: false if none.
+fput_language_recent(lang: int, now: int): bool {
+    if (words_known(lang) == 0 && !kn_alpha[lang]) return false;
+    recent_chapters(lang, now);
+    if (rc_n == 0) return false;
+    pct: int = learn_coverage_of(lang, rc, rc_n);
+    if (pct < 0) return false;
+    fput_str("In the chapters you\�\�\�ve read this month, you know ");
+    fput_int(pct);
+    fput_str("% of the words.");
+    true
+}
+
+// Memory's Languages row (§14.3.1): "The language of the New Testament";
+// "120 words · 67% of the New Testament"; "Learning the alphabet".
+fput_language_row(lang: int) {
+    if (!learn_started(lang)) {
+        fput_str("The language of the ");
+        fput_str(testament_names[lang]);
+        return
+    }
+    known: int = words_known(lang);
+    if (known > 0) {
+        fput_count(known);
+        fput_str(if (known == 1) " word \�\� " else " words \�\� ");
+        fput_int(learn_coverage(lang));
+        fput_str("% of the ");
+        fput_str(testament_names[lang]);
+        return
+    }
+    if (!kn_alpha[lang]) {
+        fput_str("Learning the alphabet");
+        return
+    }
+    fput_str("Learning the first words")
+}
+
+// The Alphabet row's line: "24 letters · not started", "18 of 32 known",
+// "Known"; Hebrew's, before it is started, "22 letters and their vowels".
+fput_alphabet_row(lang: int) {
+    n: int = letters_of(lang);
+    if (letters_carded(lang, CK_LETTER) == 0) {
+        fput_str(if (lang == 0) "24 letters \�\� not started" else "22 letters and their vowels");
+        return
+    }
+    known: int = letters_known(lang);
+    if (known >= n) {
+        fput_str("Known");
+        return
+    }
+    fput_int(known);
+    fput_str(" of ");
+    fput_int(n);
+    fput_str(" known")
+}
+
+// A card's state, as Your Words and the word study say it: "New", "To
+// review", "Known · next review 2 November", "Next review Thursday".
+fput_card_state(k: int, today: int) {
+    if (cd_state[k] == MS_NEW) {
+        fput_str("New");
+        return
+    }
+    if (cd_due[k] <= today) {
+        fput_str("To review");
+        return
+    }
+    if (cd_known(k)) fput_str("Known \�\� next review ") else fput_str("Next review ");
+    fput_day_word(cd_due[k], today)
+}
+
+// What a grade would do to card k, under the finger (as fput_would).
+fput_card_would(k: int, grade: int, today: int) {
+    changed: bool = cd_would(k, grade, today);
+    if (grade == G_NOTYET) {
+        fput_str("Again tomorrow");
+        return
+    }
+    if (!changed) fput_str("No change: next review ") else fput_str("Next review ");
+    fput_day_word(gr_due, today)
+}
+
+// A line's field into fbuf.
+fput_lt(i: int, f: int) {
+    for x in lt_fb[i * 9 + f]..lt_fe[i * 9 + f] fput(llet[x] as int)
+}
+
+// Its sound in pronunciation pr (of its language's, from 0).
+fput_lt_sound(i: int, pr: int) {
+    a: int = lt_fb[i * 9 + LF_SOUNDS];
+    e: int = lt_fe[i * 9 + LF_SOUNDS];
+    k: int = 0;
+    for x in a..e {
+        c: int = llet[x] as int;
+        if (c == 124) k = k + 1 else if (k == pr) fput(c)
+    }
+}

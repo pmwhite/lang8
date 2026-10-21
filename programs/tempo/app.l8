@@ -1,0 +1,461 @@
+tag tempo;
+
+use_tag std, skate;
+
+// Tempo's state, and what each button does. Three tabs: Record (pick a
+// sport, and go), Log (what was done, by the week) and Settings (units,
+// light or dark, totals, records); over them, an activity's own page, which
+// slides in from the right; and over everything, while one is being
+// recorded, the recording, which comes up from below.
+const TABS: int = 3;
+
+// The buttons.
+const B_TAB: int = 10;
+
+const B_FIELD: int = 20;
+
+const B_CLEAR: int = 24;
+
+const B_BACK: int = 30;
+
+const B_SPORT: int = 40;
+
+const B_START: int = 45;
+
+const B_PAUSE: int = 46;
+
+const B_RESUME: int = 47;
+
+const B_FINISH: int = 48;
+
+const B_SAVE: int = 49;
+
+const B_DISCARD: int = 50;
+
+const B_UNFINISH: int = 51;
+
+const B_GPS_RETRY: int = 52;
+
+// (All, then each sport.)
+const B_LOG_SPORT: int = 60;
+
+const B_MILES: int = 70;
+
+const B_KMS: int = 71;
+
+// (Auto, light, dark.)
+const B_THEME: int = 72;
+
+const B_DELETE: int = 80;
+
+const B_WEEK: int = 100;
+
+const B_ACT: int = 1000;
+
+const B_RECORD_OF: int = 5000;
+
+// The tab, and where the tabs show (0 Record to 2 Settings: between while
+// they slide).
+tab: int = 0;
+
+tab_x: f32 = 0.0;
+
+// The activity on the page, whether the page is open, and how far in it
+// is; held by a finger, sliding it away.
+page_a: int = -1;
+
+page_open: bool = false;
+
+page_t: f32 = 0.0;
+
+page_held: bool = false;
+
+// How far up the recording is (0 down, 1 up), and whether it is being
+// finished (named, then saved or thrown away).
+rec_t: f32 = 0.0;
+
+finishing: bool = false;
+
+// Light or dark: as the phone is (0, auto), light (1) or dark (2), as
+// picked on this device (the page keeps it); whether the phone is dark;
+// and how dark the colors are (easing to it).
+theme_pick: int = 0;
+
+phone_dark: bool = false;
+
+theme_t: f32 = -1.0;
+
+theme_target(): f32 {
+    if (theme_pick == 2 || theme_pick == 0 && phone_dark) return 1.0;
+    0.0
+}
+
+// The sport to record, and the one the log shows (-1 all).
+pick_sport: int = 0;
+
+log_sport: int = -1;
+
+// The weeks the log's chart shows, and the one picked out (weeks back
+// from this one; -1 none).
+const WEEKS: int = 12;
+
+week_pick: int = -1;
+
+// When deleting an activity, or throwing a recording away, was asked
+// for (each is asked twice).
+delete_asked_t: f32 = -10.0;
+
+discard_asked_t: f32 = -10.0;
+
+// How the log is kept, as the page says: on this device only (0), saved
+// to the person's link (1), being saved (2), offline (3), or on this
+// device only, the link being unknown (4). And whether the page has put a
+// newer log in its file.
+sync_state: int = 0;
+
+// Whether Tempo keeps the log with the worker itself (on an iPhone; in a
+// page, the page does, see sync.l8).
+sync_native: bool = false;
+
+reload_wanted: bool = false;
+
+// Whether the page is to ask for the phone's location again (after it
+// was refused).
+gps_retry: bool = false;
+
+// When the log is to be saved, and the recording.
+wants_save: bool = false;
+
+live_now: bool = false;
+
+// What the page was last told: whether to watch where the phone is, and
+// to keep its screen on.
+told_gps: int = -1;
+
+told_wake: int = -1;
+
+go_tab(t: int) {
+    if (t == tab && !page_open) sc_home[t] = true;
+    tab = t;
+    field_blur();
+    if (page_open) close_page()
+}
+
+open_page(a: int) {
+    if (a != page_a) {
+        sc_pos[V_ACT] = 0.0;
+        sc_vel[V_ACT] = 0.0
+    }
+    page_a = a;
+    page_open = true;
+    delete_asked_t = -10.0;
+    field_blur()
+}
+
+close_page() {
+    page_open = false
+}
+
+start() {
+    rec_begin(pick_sport);
+    finishing = false;
+    live_now = true;
+    sc_pos[V_REC] = 0.0;
+    if (gps_state != GPS_GOOD) {
+        line_clear();
+        line_add("Distance counts once GPS is found");
+        toast_line()
+    }
+}
+
+// Finishing: it stops, and asks for a name.
+finish() {
+    if (!rec_on) return;
+    if (!rec_paused) rec_pause(true);
+    finishing = true;
+    rec_done_s = clock_ms() / 1000;
+    discard_asked_t = -10.0;
+    live_now = true;
+    sc_pos[V_REC] = 0.0;
+    line_clear();
+    line_auto_name(rec_sport, (rec_start / 60 + rec_tz) % 1440);
+    fq_n[0] = mini(line_n, FIELD_BYTES);
+    for i in 0..fq_n[0] fq[i] = line[i];
+    field_retell = true
+}
+
+save() {
+    field_blur();
+    n: int = fq_n[0];
+    while (n > 0 && fq[n - 1] as int == 32) n = n - 1;
+    if (n == 0) {
+        line_clear();
+        line_auto_name(rec_sport, (rec_start / 60 + rec_tz) % 1440);
+        for i in 0..mini(line_n, FIELD_BYTES) fq[i] = line[i];
+        n = mini(line_n, FIELD_BYTES)
+    }
+    a: int = rec_to_log(fq, 0, n);
+    if (a < 0) {
+        line_clear();
+        line_add("The log is full");
+        toast_line();
+        return
+    }
+    rec_end();
+    finishing = false;
+    live_now = true;
+    wants_save = true;
+    tab = 1;
+    tab_x = 1.0;
+    sc_pos[V_LOG] = 0.0;
+    open_page(a);
+    page_t = 1.0;
+    line_clear();
+    line_add("Saved");
+    line_dot();
+    line_dist(act_meters(a));
+    line_byte(32);
+    line_add(unit_word());
+    toast_line()
+}
+
+act(id: int) {
+    if (id >= B_TAB && id < B_TAB + TABS) go_tab(id - B_TAB);
+    if (id == B_FIELD) {
+        field_on = 0;
+        field_typed_t = now_t
+    }
+    if (id == B_CLEAR) field_clear(0);
+    if (id == B_BACK) close_page();
+    if (id >= B_SPORT && id < B_SPORT + SPORTS) pick_sport = id - B_SPORT;
+    if (id == B_START && !rec_on) start();
+    if (id == B_PAUSE && rec_on) {
+        rec_pause(true);
+        live_now = true
+    }
+    if (id == B_RESUME && rec_on) {
+        rec_pause(false);
+        live_now = true
+    }
+    if (id == B_FINISH) finish();
+    if (id == B_UNFINISH) {
+        finishing = false;
+        rec_done_s = 0;
+        field_blur();
+        rec_pause(false);
+        live_now = true
+    }
+    if (id == B_SAVE) save();
+    if (id == B_GPS_RETRY) {
+        gps_state = GPS_LOOKING;
+        gps_retry = true
+    }
+    if (id == B_DISCARD) {
+        if (now_t - discard_asked_t >= 3.0) discard_asked_t = now_t else {
+            discard_asked_t = -10.0;
+            field_blur();
+            rec_end();
+            finishing = false;
+            live_now = true;
+            line_clear();
+            line_add("Thrown away");
+            toast_line()
+        }
+    }
+    if (id >= B_LOG_SPORT && id <= B_LOG_SPORT + SPORTS) {
+        log_sport = id - B_LOG_SPORT - 1;
+        week_pick = -1
+    }
+    if (id == B_MILES || id == B_KMS) {
+        if (miles != (id == B_MILES)) {
+            miles = id == B_MILES;
+            wants_save = true
+        }
+    }
+    if (id >= B_THEME && id < B_THEME + 3) theme_pick = id - B_THEME;
+    if (id >= B_WEEK && id < B_WEEK + WEEKS) {
+        w: int = id - B_WEEK;
+        if (week_pick == w) week_pick = -1 else week_pick = w
+    }
+    if (id == B_DELETE && page_a >= 0) {
+        if (now_t - delete_asked_t >= 3.0) delete_asked_t = now_t else {
+            delete_asked_t = -10.0;
+            remove_act(page_a);
+            sort_log();
+            wants_save = true;
+            close_page();
+            line_clear();
+            line_add("Deleted");
+            toast_line()
+        }
+    }
+    if (id >= B_ACT && id < B_ACT + act_n) open_page(id - B_ACT);
+    if (id >= B_RECORD_OF && id < B_RECORD_OF + SPORTS * BESTS) {
+        k: int = id - B_RECORD_OF;
+        record_of(k / BESTS, k % BESTS);
+        if (record_act >= 0) open_page(record_act)
+    }
+}
+
+// ---- keys ----
+key_press(ks: int) {
+    // (From the page: 1000000000 + 1000 * what + how much.)
+    if (ks >= 1000000000) {
+        page_says((ks - 1000000000) / 1000, (ks - 1000000000) % 1000);
+        return
+    }
+    if (field_on >= 0) {
+        if (ks >= 32 && ks < 127) field_type(0, ks);
+        if (ks == 65288) field_back(0);
+        if (ks == 65293) field_blur();
+        return
+    }
+    // Space: start, pause, go on.
+    if (ks == 32) {
+        if (!rec_on && tab == 0 && !page_open) start() else if (rec_on && !finishing) {
+            rec_pause(!rec_paused);
+            live_now = true
+        }
+        return
+    }
+    if (ks == 65293 && finishing) save();
+    if (rec_t > 0.5) return;
+    if ((ks == 65288 || ks == 65361) && page_open) close_page();
+    if (ks == 65289) go_tab((tab + 1) % TABS);
+    if (ks == 49) go_tab(0);
+    if (ks == 50) go_tab(1);
+    if (ks == 51) go_tab(2)
+}
+
+// Escape: whether it meant something here (rather than quitting).
+esc_key(): bool {
+    if (field_on >= 0) {
+        field_blur();
+        return true
+    }
+    if (finishing) {
+        act(B_UNFINISH);
+        return true
+    }
+    if (page_open) {
+        close_page();
+        return true
+    }
+    rec_on
+}
+
+// What the page says: the phone's edges (1 to 4), Tempo's pixels to the
+// window's (5, in 500ths), whether its field has the keyboard (6), that
+// it has put a newer log in its file (10), how the log is kept (11),
+// whether the phone is set dark (12), and that it has written lines for
+// Tempo to read (20).
+inbox_wanted: bool = false;
+
+page_says(what: int, v: int) {
+    if (what == 1) safe_top = v as f32;
+    if (what == 2) safe_bottom = v as f32;
+    if (what == 3) safe_left = v as f32;
+    if (what == 4) safe_right = v as f32;
+    if (what == 5 && v > 0) p_ui = v as f32 / 500.0;
+    if (what == 6) {
+        if (v == 1) {
+            field_on = 0;
+            field_typed_t = now_t
+        } else field_on = -1
+    }
+    if (what == 10) reload_wanted = true;
+    if (what == 11) sync_state = v;
+    if (what == 12) phone_dark = v == 1;
+    if (what == 20) inbox_wanted = true
+}
+
+// Lines from the page, n bytes of them in lg_t:
+//
+//   fix T DX DY ACC SPEED DZ ZACC
+//                           a fix: T ms from 1970, DX and DY centimeters
+//                           east and north of the one before, ACC
+//                           decimeters, SPEED cm a second (-1 none), DZ
+//                           centimeters higher than the one before, ZACC
+//                           how sure, decimeters (-1: no height)
+//   now MS TZ               the time, and the minutes it is ahead of UTC
+//   gps on|denied|none      the phone's location: being looked for,
+//                           not allowed, not to be had
+read_inbox(n: int) {
+    lg_to = n;
+    lg_i = 0;
+    while (lg_i < lg_to) {
+        read_word();
+        if (word_is("fix")) {
+            t: int = read_int();
+            dx: int = read_int();
+            dy: int = read_int();
+            acc: int = read_int();
+            spd: int = read_int();
+            v: f32 = -1.0;
+            if (spd >= 0) v = spd as f32 * 0.01;
+            dz: int = 0;
+            zacc: int = -1;
+            if (!at_line_end()) {
+                dz = read_int();
+                zacc = read_int()
+            }
+            za: f32 = -1.0;
+            if (zacc >= 0) za = zacc as f32 * 0.1;
+            fix(t, dx as f32 * 0.01, dy as f32 * 0.01, acc as f32 * 0.1, v, dz as f32 * 0.01,
+                za)
+        }
+        if (word_is("now")) {
+            ms: int = read_int();
+            clock_set(ms, read_int())
+        }
+        if (word_is("gps")) {
+            read_word();
+            if (word_is("on") && gps_state != GPS_GOOD && gps_state != GPS_WEAK) gps_state = GPS_LOOKING;
+            if (word_is("denied")) gps_state = GPS_DENIED;
+            if (word_is("none")) gps_state = GPS_NONE;
+            if (word_is("insecure")) gps_state = GPS_INSECURE
+        }
+        next_line()
+    }
+}
+
+// Whether the phone's location is wanted: while recording, and while
+// ready to (so that it has been found by the time Start is tapped).
+gps_wanted(): bool {
+    rec_on || tab == 0 && !page_open && tab_x < 0.5
+}
+
+// ---- each frame ----
+rec_drawn: int = -1;
+
+step_app(dt: f32) {
+    frame_dt = dt;
+    sim_step();
+    step_fingers(dt);
+    if (!tabs_held) tab_x = ease_to(tab_x, tab as f32, 13.0);
+    target: f32 = 0.0;
+    if (page_open) target = 1.0;
+    if (!page_held) page_t = ease_to(page_t, target, 12.0);
+    if (!page_open && page_t < 0.002 && !page_held) page_t = 0.0;
+    up: f32 = 0.0;
+    if (rec_on) up = 1.0;
+    rec_t = ease_to(rec_t, up, 10.0);
+    // (Light or dark: at once to begin with, then easing.)
+    if (theme_t < 0.0) theme_t = theme_target() else theme_t = ease_to(theme_t, theme_target(),
+        7.0);
+    set_theme(theme_t);
+    // (A fix not heard of for a while: looking again.)
+    if ((gps_state == GPS_GOOD || gps_state == GPS_WEAK) && clock_ms() - gps_seen_ms > 30000) gps_state = GPS_LOOKING;
+    if (rec_on && live_dirty && clock_ms() - live_saved_ms > 5000) live_now = true;
+    // (While recording, the clocks go on: drawn when a second shown
+    // changes, and not between.)
+    if (rec_on) {
+        shown: int = rec_shown_ms() / 1000 * 100000 + rec_elapsed();
+        if (shown != rec_drawn) {
+            rec_drawn = shown;
+            busy = true
+        }
+    }
+    for v in 0..VIEWS step_scroll(v);
+    step_press()
+}

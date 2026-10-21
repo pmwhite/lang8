@@ -265,3 +265,86 @@ whoever plays, merged with those solved on their other devices. People and
 groups are made on `people/admin.html`, opened once with the admin secret
 after its `#` and kept on the device (`people-api/admin.sh link`).
 `?people=URL` points a page on localhost at a people worker run there.
+
+## Tempo
+
+The site's `tempo/` page runs `programs/tempo` (see its README) the same
+way, in the page's own pixels. Tempo says `L8GPS 1` while it wants the
+phone's location (on Record, and while recording) and `L8GPS 0` when not
+(`L8GPSRETRY` asks again after a refusal, `gps denied`); the page watches
+it only then, and writes each fix to `/inbox.txt` only as centimeters east
+and north of the one before, and how much higher (`fix T DX DY ACC SPEED
+DZ ZACC`), with the time (`now MS TZ`), then tells Tempo to read it (key
+20). The fix before is the only position the page holds, in memory,
+dropped at `L8GPS 0`; no position or height is passed on or saved.
+`L8WAKE 1` keeps the screen on while recording. Tempo writes its log to
+`/log.txt`, kept in IndexedDB (`tempo/store.js`) and, with a personal link
+(`#me=SECRET`), by the worker in `tempo-log/` (Cloudflare D1 at
+`trailingwhite.space/tempo/api`), which refuses a save made from an older
+log (409) so that the page puts the two together; a recording under way
+goes to `/live.txt`, kept in this browser only. `?sim=K` records a
+made-up course K times as fast as the clock; `?fresh` starts empty, kept
+nowhere; `?api=URL` uses another worker.
+
+## Pages from L8 (`dom.js`)
+
+`programs/web/dom.l8` lets a program build and run an ordinary page, as
+`programs/ios/objc.l8` lets one drive UIKit; `dom.js` is its host. Nodes
+and other host objects (the window, document, location) are handles, small
+ints in a table the host keeps. Text goes in as `str`, or as bytes of a
+`[]i8` (the `_of` calls, so a buffer of laid-out text needs no copies), and
+comes back into a `[]i8` the caller owns. Offsets in text are UTF-8 bytes.
+
+```js
+const dom = domHost();
+const { instance } = await instantiate(module, sys, dom.imports);
+dom.attach(instance);   // before _start
+runStart(instance);     // main sets the page up and returns
+```
+
+The program lives on in callbacks: `fn(data: int)` function values, called
+with the data given when they were set up, the event record (`dom_ev`,
+`dom_evf`, `dom_evs`: the target as the nearest node with a handle, the
+type, key, pointer, modifiers, a fetch's status and size, a frame's time)
+filled first. A callback cannot be `noregion`, so a fetched body it keeps
+comes as memory from the host (`dom_fetch_body`, `dom_bytes`), as a mapped
+file does on an iPhone. The calls, by group:
+
+| Group | Calls |
+|---|---|
+| Nodes | `dom_create`, `dom_create_svg`, `dom_text(_of)`, `dom_fragment`, `dom_by_id`, `dom_query(_of)`, `dom_parent`, `dom_append`, `dom_insert`, `dom_remove`, `dom_clear`, `dom_free`, `dom_free_tree`, `dom_handles` |
+| Content | `dom_set_text(_of)`, `dom_get_text`, `dom_set_html(_of)`, `dom_insert_html_of` (beside or inside a node; the first element put in) |
+| Attributes, classes, styles | `dom_set_attr(_of)`, `dom_set_attr_int`, `dom_remove_attr`, `dom_get_attr`, `dom_set_class`, `dom_add_class`, `dom_remove_class`, `dom_toggle_class`, `dom_class_all(_of)` (every match of a selector), `dom_count`, `dom_set_style(_of)`, `dom_children_px` (a px property on many children in one call), `dom_style_num` (a computed style as a number) |
+| Any property or method | `dom_set_prop`, `dom_set_prop_s`, `dom_set_prop_of`, `dom_get_prop`, `dom_get_prop_s`, `dom_has_prop`, `dom_prop_handle`, `dom_call`, `dom_call_s` (an `<audio>`'s `play`, a dialog's `showModal`) |
+| Boxes and scrolling | `dom_rect`, `dom_rects` (every box of a node), `dom_rects_all(_of)` (of every match), `dom_point` (the element at a point, or its nearest match), `dom_scroll`, `dom_scroll_to`, `dom_scroll_into_view` |
+| Events | `dom_listen`, `dom_unlisten`, `dom_event_is`, `dom_key_is`, `dom_event_attr` and `dom_event_closest` (from the event's own target: actions written into HTML as `data-act`), `dom_prevent_default`, `dom_stop_propagation` |
+| Selection | `dom_selection` (handles and UTF-8 offsets), `dom_selection_text`, `dom_select`, `dom_select_none` |
+| History | `dom_push_state(_of)`, `dom_replace_state(_of)`; `dom_push`, `dom_replace` and `dom_state`, with a state string; `popstate` is a window event |
+| Fetch | `dom_fetch`, `dom_fetch_gz(_of)` (unzipped), `dom_fetch_gz_low(_of)` (at low priority), `dom_fetch_take`, `dom_fetch_body`; a fetch the page began early for the same address (`window.l8Prefetch`) is taken up |
+| Memory | `dom_bytes` (new memory a callback can keep) |
+| Storage | `dom_store_get`, `dom_store_set(_s)`, `dom_store_remove`, `dom_store_count`, `dom_store_key` (`localStorage`) |
+| Time | `dom_now`, `dom_date_now`, `dom_timeout`, `dom_interval`, `dom_frame`, `dom_cancel` |
+| Media and device | `dom_media`, `dom_media_listen`, `dom_wake_lock`, `dom_log(_of)` |
+
+Calls cost about a microsecond each: Psalm 119 as 378 paragraphs and 608
+spans, built call by call, takes 14 ms with the browser's layout, against
+11 ms for the same nodes made by JavaScript alone and 14 ms as one string
+of HTML.
+
+## Smooth Bible
+
+`bible/` is the Bible reader on the web (`programs/bible/WEB.md`):
+`page.html` the shell every reader's address is answered with (the Worker
+fills its head for the address), `boot.js` its inline boot script (which
+fetches the place's book, the sizes table and the app at once), `read.css`,
+`icons.svg` (Lucide), `fonts/` (Source Serif 4 and Charis SIL, OFL),
+`about.html`, and `bible.js`, which starts `programs/bible/web.l8`. `make
+bible-web` builds the site in `.build/bible-site` (`bible/build.py`: the
+assets under hashed names; each version whole, book by book, and its sizes
+table, `programs/bible/tools/sizes.l8`); `node bible/test/serve.mjs` serves
+it as smoothbible.com does, through the real Worker. `node
+web/bible/test/drive.mjs` (after `npm ci` in `web/bible/test`, for axe-core)
+runs the reader's checks and shots in headless Chrome over CDP
+(`flows.mjs`; `--only scroll,keep`, `--no-shots`), writing them to
+`.build/bible-web-shots`; CI's `web` job runs it and pushes the shots to
+`ci-bible-web-shots`.

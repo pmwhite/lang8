@@ -1,0 +1,1458 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// Recorded readings' iPhone side (DESIGN.md ¬ß12.3.3, ¬ß12.4): the timing
+// files and eBible.org's paths from the bundle (audio.l8 reads them), the
+// reader chosen for each version, the iPhone's voices (the best one, or
+// the one chosen), the Voice screen and its voice list, Downloaded Books
+// and its Books list, and the chapters kept: fetched ahead into a cache
+// (Library/Caches/SmoothBible/audio/, 500 MB at most) or downloaded a book
+// at a time (Application Support/SmoothBible/audio/, never backed up), one
+// download at a time through a session of download tasks whose delegate is
+// L8Net's class (no blocks). With L8_AUDIO_FIXTURE in the environment (CI),
+// a directory under the app's home, every recording is its tone.mp3, the
+// timings its fixture.tim's, and a download a copy of it after 0.3 s.
+import "../ios/objc.l8";
+
+import "text.l8";
+
+import "audio.l8";
+
+extern add_method5(
+    cls: int,
+    selector: int,
+    imp: fn(self: int, cmd: int, a: int, b: int, c: int, d: int, e: int): int,
+    types: str
+): int = class_addMethod;
+
+extern msg_arc(
+    receiver: int,
+    selector: int,
+    x: f64,
+    y: f64,
+    r: f64,
+    a: f64,
+    b: f64,
+    clockwise: int
+): int = objc_msgSend;
+
+extern SCNetworkReachabilityCreateWithAddress(allocator: int, address: []i8): int;
+
+extern SCNetworkReachabilityGetFlags(target: int, flags: []i8): int;
+
+// ---- the fixture (CI) ----
+au_fixture: int = 0;
+
+au_fixture_checked: bool = false;
+
+// Its mode: 0 ok, 1 offline (every item fails), 2 slow (each starts after
+// 2 s of Loading‚Ä¶).
+au_fixture_mode: int = 0;
+
+au_fixture_dir(): int {
+    if (au_fixture_checked) return au_fixture;
+    au_fixture_checked = true;
+    p: int = getenv_address("L8_AUDIO_FIXTURE");
+    if (p == 0 || strlen(p) == 0) return 0;
+    rel: int = msg1(cls("NSString"), sel("stringWithUTF8String:"), p);
+    au_fixture = keep(msg1(NSHomeDirectory(), sel("stringByAppendingPathComponent:"),
+        rel));
+    au_fixture_read_mode();
+    note("bible: audio fixture");
+    au_fixture
+}
+
+au_fixture_read_mode() {
+    if (au_fixture == 0) return;
+    m: int = msg3(cls("NSString"), sel("stringWithContentsOfFile:encoding:error:"),
+        msg1(au_fixture, sel("stringByAppendingPathComponent:"), nsstring("mode")),
+        4, 0);
+    au_fixture_mode = 0;
+    if (m != 0 && (msg1(m, sel("hasPrefix:"), nsstring("offline")) & 255) != 0) au_fixture_mode = 1;
+    if (m != 0 && (msg1(m, sel("hasPrefix:"), nsstring("slow")) & 255) != 0) au_fixture_mode = 2
+}
+
+// The demo's own mode (written to the fixture's mode file, as the script
+// would).
+au_fixture_set_mode(mode: str) {
+    if (au_fixture_dir() == 0) return;
+    msg4(nsstring(mode), sel("writeToFile:atomically:encoding:error:"), msg1(au_fixture,
+        sel("stringByAppendingPathComponent:"), nsstring("mode")), 1, 4, 0);
+    au_fixture_read_mode();
+    note("bible: audio fixture mode ");
+    note(mode)
+}
+
+au_fixture_file(name: str): int {
+    msg1(au_fixture_dir(), sel("stringByAppendingPathComponent:"), nsstring(name))
+}
+
+// ---- the bundle's timings and paths ----
+au_loaded: bool = false;
+
+tim_names: []str = ["souer", "hays", "gilbert", "henson"];
+
+// (The fixture's timings, read into a buffer of their own.)
+au_fx: []i8 = new i8[16384](0i8);
+
+audio_load() {
+    if (au_loaded) return;
+    au_loaded = true;
+    t0: f64 = CFAbsoluteTimeGetCurrent();
+    got: int = 0;
+    for s in 0..4 {
+        buf: []i8 = lang_map(tim_names[s], "tim");
+        if (lang_mapped > 0) got = got + tim_load(s, buf, lang_mapped)
+    }
+    // (In the fixture, its JHN 3 and 4 over each file's own lines: theirs
+    // win, the bundled sizes kept.)
+    if (au_fixture_dir() != 0) {
+        fx: int = msg1(cls("NSData"), sel("dataWithContentsOfFile:"), au_fixture_file("fixture.tim"));
+        n: int = if (fx != 0) msg(fx, sel("length")) else 0;
+        if (n > len(au_fx)) n = len(au_fx);
+        if (n > 0) {
+            memcpy_from(au_fx, msg(fx, sel("bytes")), n);
+            // (Not Gilbert's: his John 3 stays without timings, so the
+            // listen group can change narrator into a chapter followed by
+            // its words' estimate.)
+            for s in 0..4
+                if (s != SRC_GILBERT) _k: int = tim_overlay(s, au_fx, n)
+        }
+    }
+    paths: []i8 = lang_map("henson", "paths");
+    hp: int = henson_paths_load(paths, lang_mapped);
+    note_num("bible: audio timings, chapter lines ", got);
+    note_num("bible: audio henson paths ", hp);
+    note_num("bible: audio loaded, ms ", ((CFAbsoluteTimeGetCurrent() - t0) * 1000.0f64) as int)
+}
+
+// ---- the reader chosen for each version ----
+src_buf: []i8 = new i8[32](0i8);
+
+// The ESV's recording offered: the fixture's, or the server said so.
+esv_audio_listed(): bool {
+    if (au_fixture_dir() != 0 || esv_fixture_dir() != 0) return esv_listed();
+    esv_listed() && def_bool("esvAudioAvailable")
+}
+
+// Text t's chosen source (the voice for the KJV, ASV and YLT).
+audio_source(t: int): int {
+    key: str = src_setting(t);
+    if (len(key) == 0) return SRC_VOICE;
+    if (t == TEXT_ESV && !esv_audio_listed()) return SRC_VOICE;
+    v: int = msg1(defaults(), sel("stringForKey:"), nsstring(key));
+    if (v == 0) return text_default_src(t);
+    n: int = nsstring_into(v, src_buf);
+    s: int = src_of_id(src_buf, n);
+    if (s == SRC_VOICE || s >= 0 && src_texts[s] == t) s else text_default_src(t)
+}
+
+set_audio_source(t: int, s: int) {
+    key: str = src_setting(t);
+    if (len(key) == 0) return;
+    msg2(defaults(), sel("setObject:forKey:"), nsstring(src_ids[s]), nsstring(key))
+}
+
+// ---- the iPhone's voices ----
+// The English voices installed (not novelty or personal ones), best first:
+// Premium, Enhanced, standard; en-US first at equal quality.
+VOICES_MOST: int = 96;
+
+vo_n: int = 0;
+
+vo_obj: []int = new int[96](0);
+
+vo_q: []int = new int[96](0);
+
+// Whether the voices have been read (an empty list is an answer too: the
+// speech service is asked again only when a screen of voices appears, not
+// at every cell; its query can be slow, and on a simulator with a damaged
+// voice database it fails every time).
+vo_read: bool = false;
+
+voices_read() {
+    vo_read = true;
+    for i in 0..vo_n release(vo_obj[i]);
+    vo_n = 0;
+    if (cls("AVSpeechSynthesisVoice") == 0) listen_frameworks();
+    all: int = msg(cls("AVSpeechSynthesisVoice"), sel("speechVoices"));
+    if (all == 0) return;
+    for i in 0..msg(all, sel("count")) {
+        v: int = msg1(all, sel("objectAtIndex:"), i);
+        lang: int = msg(v, sel("language"));
+        en: bool = lang != 0 && (msg1(lang, sel("hasPrefix:"), nsstring("en")) & 255) != 0;
+        // (voiceTraits: 1 a novelty voice, 2 a personal one.)
+        traits: int = if (responds(v, "voiceTraits")) msg(v, sel("voiceTraits")) else 0;
+        if (en && (traits & 3) == 0 && vo_n < VOICES_MOST) {
+            q: int = msg(v, sel("quality"));
+            us: bool = (msg1(lang, sel("isEqualToString:"), nsstring("en-US")) & 255) != 0;
+            score: int = q * 10 + (if (us) 1 else 0);
+            // (Kept in order: inserted after those as good or better.)
+            at: int = vo_n;
+            while (at > 0 && vo_q[at - 1] < score) {
+                vo_obj[at] = vo_obj[at - 1];
+                vo_q[at] = vo_q[at - 1];
+                at = at - 1
+            }
+            vo_obj[at] = keep(v);
+            vo_q[at] = score;
+            vo_n = vo_n + 1
+        }
+    }
+}
+
+// Whether an Enhanced or Premium English voice is installed.
+better_voice_installed(): bool {
+    if (!vo_read) voices_read();
+    vo_n > 0 && vo_q[0] >= 20
+}
+
+// The voice Listen speaks with: the one chosen (if it is still installed),
+// or the best available.
+chosen_voice(): int {
+    if (!vo_read) voices_read();
+    vid: int = msg1(defaults(), sel("stringForKey:"), nsstring("listenVoiceID"));
+    if (vid != 0) {
+        for i in 0..vo_n
+            if ((msg1(msg(vo_obj[i], sel("identifier")), sel("isEqualToString:"),
+                vid) & 255) != 0) return vo_obj[i]
+    }
+    if (vo_n > 0) return vo_obj[0];
+    msg1(cls("AVSpeechSynthesisVoice"), sel("voiceWithLanguage:"), nsstring("en-US"))
+}
+
+// "Ava ¬∑ United States": a voice's name and its country.
+fput_voice(v: int) {
+    n: int = nsstring_into(msg(v, sel("name")), number_buf);
+    for i in 0..n fput(number_buf[i] as int);
+    lang: int = msg(v, sel("language"));
+    if (lang == 0 || msg(lang, sel("length")) < 5) return;
+    country: int = msg1(lang, sel("substringFromIndex:"), 3);
+    name: int = msg1(msg(cls("NSLocale"), sel("currentLocale")), sel("localizedStringForCountryCode:"),
+        country);
+    if (name == 0) return;
+    fput_str(" \¬\∑ ");
+    m: int = nsstring_into(name, number_buf);
+    for i in 0..m fput(number_buf[i] as int)
+}
+
+// ---- the Voice screen (¬ß12.4.2) ----
+voice_table: int = 0;
+
+voice_vc: int = 0;
+
+voice_class: int = 0;
+
+vlist_table: int = 0;
+
+vlist_class: int = 0;
+
+open_voice() {
+    if (settings_nav == 0) return;
+    audio_load();
+    voices_read();
+    set_def_bool("voiceScreenSeen", true);
+    vc: int = msg(msg1(msg(voice_class, sel("alloc")), sel("initWithStyle:"), 2),
+        sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Voice"));
+    item: int = msg(vc, sel("navigationItem"));
+    msg1(item, sel("setLargeTitleDisplayMode:"), 2);
+    msg1(item, sel("setRightBarButtonItem:"), system_item(0, "closeSheet:"));
+    voice_vc = vc;
+    voice_table = held(voice_table, msg(vc, sel("tableView")));
+    msg1(voice_table, sel("setDataSource:"), app_obj);
+    msg1(voice_table, sel("setDelegate:"), app_obj);
+    style_table(voice_table, true);
+    msg2(settings_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+// Leaving it: a preview stops.
+voice_will_disappear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, voice_class, cmd, animated);
+    preview_stop();
+    0
+}
+
+// Back from the voice list or Downloads: the values again.
+voice_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, voice_class, cmd, animated);
+    if (voice_table != 0) msg(voice_table, sel("reloadData"));
+    0
+}
+
+// The sections: the BSB, the WEB, the ESV (while its recording is offered),
+// the iPhone's voice, Downloads.
+VS_BSB: int = 0;
+
+VS_WEB: int = 1;
+
+VS_ESV: int = 2;
+
+VS_VOICE: int = 3;
+
+VS_DL: int = 4;
+
+vs_kind(s: int): int {
+    if (s >= VS_ESV && !esv_audio_listed()) s + 1 else s
+}
+
+voice_sections(): int {
+    if (esv_audio_listed()) 5 else 4
+}
+
+vs_text(k: int): int {
+    if (k == VS_BSB) 0 else if (k == VS_WEB) 2 else 5
+}
+
+voice_rows(s: int): int {
+    k: int = vs_kind(s);
+    if (k == VS_BSB) return 4;
+    if (k == VS_WEB || k == VS_ESV) return 2;
+    if (k == VS_VOICE) return 1;
+    2
+}
+
+voice_header(s: int): int {
+    k: int = vs_kind(s);
+    if (k == VS_VOICE) return nsstring("iPhone Voice");
+    if (k == VS_DL) return nsstring("Downloads");
+    nsstring(text_names[vs_text(k)])
+}
+
+voice_footer(s: int): int {
+    k: int = vs_kind(s);
+    if (k == VS_BSB) return nsstring("Recordings dedicated to the public domain, streamed from OpenBible.com. About 85 MB an hour; Barry Hays about 45 MB.");
+    if (k == VS_WEB) return nsstring("A public-domain recording, streamed from eBible.org. It reads the Classic edition, which says \‚\Ä\úYahweh\‚\Ä\ù where this text says \‚\Ä\úLORD\‚\Ä\ù.");
+    if (k == VS_ESV) return nsstring("Streamed from esv.org through the ESV API. The ESV recording is followed chapter by chapter, not verse by verse.");
+    if (k == VS_VOICE) {
+        fbuf_n = 0;
+        fput_str("Reads the King James Version, the American Standard Version and Young\‚\Ä\ôs Literal Translation, and any version when a recording can\‚\Ä\ôt be reached.");
+        if (!better_voice_installed()) fput_str(" For a more natural voice, download an Enhanced or Premium English voice in the Settings app: Accessibility \‚\Ä\∫ Read & Speak \‚\Ä\∫ Voices \‚\Ä\∫ English.");
+        return fstring()
+    }
+    nsstring("On Wi-Fi, the next ten chapters are kept ready, so listening goes on without a connection.")
+}
+
+voice_cell(t: int, path: int): int {
+    k: int = vs_kind(msg(path, sel("section")));
+    r: int = msg(path, sel("row"));
+    if (k == VS_DL && r == 0) {
+        cell: int = list_cell(t, "dlcell", 0);
+        config: int = list_config(0);
+        msg1(config, sel("setText:"), nsstring("Download Ahead on Cellular"));
+        msg1(text_props(config), sel("setColor:"), c_ink);
+        msg1(text_props(config), sel("setNumberOfLines:"), 0);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        sw: int = make("UISwitch");
+        msg1(sw, sel("setOn:"), if (def_bool("downloadAheadCellular")) 1 else 0);
+        msg1(sw, sel("setOnTintColor:"), c_accent);
+        msg3(sw, sel("addTarget:action:forControlEvents:"), app_obj, sel("cellularSwitched:"),
+            4096);
+        msg1(cell, sel("setAccessoryView:"), sw);
+        release(sw);
+        msg1(cell, sel("setSelectionStyle:"), 0);
+        return cell
+    }
+    cell: int = list_cell(t, "voicerow", 1);
+    config: int = list_config(1);
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(detail_props(config), sel("setColor:"), c_faint);
+    msg1(text_props(config), sel("setNumberOfLines:"), 0);
+    msg1(cell, sel("setTintColor:"), c_accent);
+    msg1(cell, sel("setSelectionStyle:"), 3);
+    if (k == VS_DL) {
+        msg1(config, sel("setText:"), nsstring("Downloaded Books"));
+        fbuf_n = 0;
+        fput_size(downloaded_total());
+        msg1(config, sel("setSecondaryText:"), fstring());
+        msg1(cell, sel("setAccessoryType:"), 1)
+    } else if (k == VS_VOICE) {
+        msg1(config, sel("setText:"), nsstring("Voice"));
+        vid: int = msg1(defaults(), sel("stringForKey:"), nsstring("listenVoiceID"));
+        v: int = if (vid != 0) chosen_voice() else 0;
+        if (v != 0 && (msg1(msg(v, sel("identifier")), sel("isEqualToString:"), vid) & 255) != 0) msg1(config,
+            sel("setSecondaryText:"), msg(v, sel("name"))) else msg1(config, sel("setSecondaryText:"),
+            nsstring("Best Available"));
+        msg1(cell, sel("setAccessoryType:"), 1)
+    } else {
+        tx: int = vs_text(k);
+        n: int = text_sources(tx);
+        s: int = src_list[if (r < n) r else n - 1];
+        msg1(config, sel("setText:"), nsstring(src_readers[s]));
+        msg1(cell, sel("setAccessoryType:"), if (audio_source(tx) == s) 3 else 0);
+        msg1(cell, sel("setAccessibilityTraits:"), if (audio_source(tx) == s) objc_const("UIAccessibilityTraitSelected") else 0)
+    }
+    msg1(cell, sel("setContentConfiguration:"), config);
+    cell
+}
+
+voice_picked(s_in: int, r: int) {
+    k: int = vs_kind(s_in);
+    if (k == VS_DL) {
+        if (r == 1) open_downloads();
+        return
+    }
+    if (k == VS_VOICE) {
+        open_voice_list();
+        return
+    }
+    tx: int = vs_text(k);
+    n: int = text_sources(tx);
+    if (r >= n) return;
+    s: int = src_list[r];
+    was: int = audio_source(tx);
+    if (s != was) {
+        haptic_select();
+        set_audio_source(tx, s);
+        fbuf_n = 0;
+        fput_str("bible: voice ");
+        fput_str(text_abbrs[tx]);
+        fput_str(" ");
+        fput_str(src_ids[s]);
+        note_ns(fstring());
+        msg2(voice_table, sel("reloadSections:withRowAnimation:"), msg1(cls("NSIndexSet"),
+            sel("indexSetWithIndex:"), s_in), 5);
+        if (settings_table != 0) msg(settings_table, sel("reloadData"))
+    }
+    // Listening: the change heard in place; else a preview.
+    if (ls_active) {
+        if (s != was && tx == text_cur) listen_reader_changed()
+    } else preview_toggle(s)
+}
+
+cellular_switched(_self: int, _cmd: int, sw: int): int {
+    set_def_bool("downloadAheadCellular", (msg(sw, sel("isOn")) & 255) != 0);
+    0
+}
+
+// ---- the voice list (¬ß12.4.2) ----
+open_voice_list() {
+    if (settings_nav == 0) return;
+    vc: int = msg(msg1(msg(vlist_class, sel("alloc")), sel("initWithStyle:"), 2),
+        sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("iPhone Voice"));
+    item: int = msg(vc, sel("navigationItem"));
+    msg1(item, sel("setLargeTitleDisplayMode:"), 2);
+    msg1(item, sel("setRightBarButtonItem:"), system_item(0, "closeSheet:"));
+    vlist_table = held(vlist_table, msg(vc, sel("tableView")));
+    msg1(vlist_table, sel("setDataSource:"), app_obj);
+    msg1(vlist_table, sel("setDelegate:"), app_obj);
+    style_table(vlist_table, true);
+    voices_read();
+    msg2(settings_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+// Every time it appears: a voice just downloaded in Settings shows.
+vlist_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, vlist_class, cmd, animated);
+    voices_read();
+    if (vlist_table != 0) msg(vlist_table, sel("reloadData"));
+    0
+}
+
+vlist_will_disappear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, vlist_class, cmd, animated);
+    preview_stop();
+    0
+}
+
+// The sections: Best Available, then Premium, Enhanced and Standard (those
+// with voices).
+vl_q: []int = [3, 2, 1];
+
+vl_names: []str = ["Premium", "Enhanced", "Standard"];
+
+vl_count(q: int): int {
+    n: int = 0;
+    for i in 0..vo_n
+        if (vo_q[i] / 10 == q) n = n + 1;
+    n
+}
+
+// The section s's quality (0: Best Available).
+vl_kind(s: int): int {
+    if (s == 0) return 0;
+    k: int = 0;
+    for i in 0..3 {
+        if (vl_count(vl_q[i]) > 0) {
+            k = k + 1;
+            if (k == s) return vl_q[i]
+        }
+    }
+    0
+}
+
+vlist_sections(): int {
+    n: int = 1;
+    for i in 0..3
+        if (vl_count(vl_q[i]) > 0) n = n + 1;
+    n
+}
+
+vlist_rows(s: int): int {
+    if (s == 0) 1 else vl_count(vl_kind(s))
+}
+
+vlist_header(s: int): int {
+    q: int = vl_kind(s);
+    if (q == 0) 0 else nsstring(vl_names[3 - q])
+}
+
+// The voice at row r of quality q.
+vl_voice(q: int, r: int): int {
+    k: int = 0;
+    for i in 0..vo_n {
+        if (vo_q[i] / 10 == q) {
+            if (k == r) return vo_obj[i];
+            k = k + 1
+        }
+    }
+    0
+}
+
+vlist_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    r: int = msg(path, sel("row"));
+    cell: int = list_cell(t, "vlistrow", 0);
+    config: int = list_config(0);
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(text_props(config), sel("setNumberOfLines:"), 0);
+    msg1(cell, sel("setTintColor:"), c_accent);
+    msg1(cell, sel("setSelectionStyle:"), 3);
+    vid: int = msg1(defaults(), sel("stringForKey:"), nsstring("listenVoiceID"));
+    chosen: int = if (vid != 0) chosen_voice() else 0;
+    // (The one chosen gone: Best Available.)
+    if (chosen != 0 && (msg1(msg(chosen, sel("identifier")), sel("isEqualToString:"),
+        vid) & 255) == 0) chosen = 0;
+    on: bool = false;
+    if (s == 0) {
+        msg1(config, sel("setText:"), nsstring("Best Available"));
+        on = chosen == 0
+    } else {
+        v: int = vl_voice(vl_kind(s), r);
+        fbuf_n = 0;
+        if (v != 0) fput_voice(v);
+        msg1(config, sel("setText:"), fstring());
+        on = v != 0 && v == chosen
+    }
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryType:"), if (on) 3 else 0);
+    cell
+}
+
+vlist_picked(s: int, r: int) {
+    v: int = if (s == 0) 0 else vl_voice(vl_kind(s), r);
+    haptic_select();
+    if (v == 0) msg1(defaults(), sel("removeObjectForKey:"), nsstring("listenVoiceID")) else msg2(defaults(),
+        sel("setObject:forKey:"), msg(v, sel("identifier")), nsstring("listenVoiceID"));
+    ls_voice = 0;
+    fade_layer(msg(vlist_table, sel("layer")), 0.15f64);
+    msg(vlist_table, sel("reloadData"));
+    if (!ls_active) preview_voice()
+}
+
+// ---- previews (¬ß12.4.2): five seconds of a reader, or the voice's line ----
+pv_player: int = 0;
+
+pv_timer: int = 0;
+
+pv_src: int = -1;
+
+pv_t0: f64 = 0.0f64;
+
+preview_toggle(s: int) {
+    if (pv_src == s) {
+        preview_stop();
+        return
+    }
+    preview_stop();
+    if (s == SRC_VOICE) {
+        preview_voice();
+        return
+    }
+    // (Psalm 23 from its start; the ESV's asked of the Worker as Listen
+    // asks.)
+    c: int = book_first[18] + 22;
+    url: int = recording_url(s, c);
+    if (url == 0) return;
+    listen_session_on();
+    pv_src = s;
+    pv_player = keep(msg1(cls("AVPlayer"), sel("playerWithURL:"), url));
+    msg(pv_player, sel("play"));
+    pv_t0 = CACurrentMediaTime();
+    pv_timer = msg_f4(cls("NSTimer"), sel("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
+        0.05f64, app_obj, sel("previewTick:"), 0, 1);
+    note("bible: preview ");
+    note(src_ids[s])
+}
+
+// The last half second faded (the player's volume stepped down), then
+// stopped at 5 s.
+preview_tick(_self: int, _cmd: int, _timer: int): int {
+    if (pv_player == 0) return 0;
+    t: f64 = CACurrentMediaTime() - pv_t0;
+    if (t >= 5.0f64) {
+        preview_stop();
+        return 0
+    }
+    if (t > 4.5f64) msg_set_f32(pv_player, sel("setVolume:"), ((5.0f64 - t) * 2.0f64) as f32);
+    0
+}
+
+preview_stop() {
+    pv_timer = stop_timer(pv_timer);
+    if (pv_player != 0) {
+        msg(pv_player, sel("pause"));
+        release(pv_player);
+        pv_player = 0
+    }
+    if (pv_src == SRC_VOICE && ls_synth != 0 && !ls_active) msg1(ls_synth, sel("stopSpeakingAtBoundary:"),
+        0);
+    pv_src = -1
+}
+
+preview_voice() {
+    preview_stop();
+    listen_load();
+    if (ls_synth == 0) {
+        ls_synth = make("AVSpeechSynthesizer");
+        msg1(ls_synth, sel("setDelegate:"), app_obj)
+    }
+    listen_session_on();
+    u: int = msg1(cls("AVSpeechUtterance"), sel("speechUtteranceWithString:"), nsstring("The Lord is my shepherd; I shall not want."));
+    msg_set_f32(u, sel("setRate:"), ls_rates[clamp(def_int("listenRate"), 0, 2)] as f32);
+    msg1(u, sel("setVoice:"), chosen_voice());
+    msg1(ls_synth, sel("speakUtterance:"), u);
+    pv_src = SRC_VOICE
+}
+
+// ---- where a chapter's recording is ----
+// Its file here (downloaded, else cached), or 0.
+kept_file(s: int, c: int): int {
+    if (!src_cacheable(s)) return 0;
+    fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+    for down in [true, false] {
+        p: int = audio_chapter_path(s, c, down);
+        if ((msg1(fm, sel("fileExistsAtPath:"), p) & 255) != 0) return p
+    }
+    0
+}
+
+// The address to play chapter c of source s from: its file here, the
+// fixture's tone, or its address online (0 for the ESV's, which is asked
+// of the Worker first: ios_listen.l8).
+recording_url(s: int, c: int): int {
+    // (The ESV's: its address from the Worker, or the fixture's answer.)
+    if (s == SRC_ESV) return esv_audio_url(c);
+    if (au_fixture_dir() != 0) return msg1(cls("NSURL"), sel("fileURLWithPath:"),
+        au_fixture_file("tone.mp3"));
+    p: int = kept_file(s, c);
+    if (p != 0) return msg1(cls("NSURL"), sel("fileURLWithPath:"), p);
+    audio_url(s, c);
+    if (au_n == 0) return 0;
+    msg1(cls("NSURL"), sel("URLWithString:"), nsstring_of(au, au_n))
+}
+
+// ---- the files: the cache and the downloads ----
+au_cache_root: int = 0;
+
+au_down_root: int = 0;
+
+au_dir(down: bool): int {
+    if (down && au_down_root != 0) return au_down_root;
+    if (!down && au_cache_root != 0) return au_cache_root;
+    dirs: int = NSSearchPathForDirectoriesInDomains(if (down) 14 else 13, 1, 1);
+    base: int = msg(dirs, sel("firstObject"));
+    if (base == 0) base = NSHomeDirectory();
+    d: int = keep(msg1(msg1(base, sel("stringByAppendingPathComponent:"), nsstring("SmoothBible")),
+        sel("stringByAppendingPathComponent:"), nsstring("audio")));
+    msg4(msg(cls("NSFileManager"), sel("defaultManager")), sel("createDirectoryAtPath:withIntermediateDirectories:attributes:error:"),
+        d, 1, 0, 0);
+    if (down) {
+        // (Downloads are never backed up.)
+        url: int = msg1(cls("NSURL"), sel("fileURLWithPath:"), d);
+        msg3(url, sel("setResourceValue:forKey:error:"), msg1(cls("NSNumber"), sel("numberWithBool:"),
+            1), objc_const("NSURLIsExcludedFromBackupKey"), 0);
+        au_down_root = d
+    } else au_cache_root = d;
+    d
+}
+
+// ‚Ä¶/audio/<src>/BOOK-C.mp3 (its directory made).
+audio_chapter_path(s: int, c: int, down: bool): int {
+    d: int = msg1(au_dir(down), sel("stringByAppendingPathComponent:"), nsstring(src_ids[s]));
+    msg4(msg(cls("NSFileManager"), sel("defaultManager")), sel("createDirectoryAtPath:withIntermediateDirectories:attributes:error:"),
+        d, 1, 0, 0);
+    audio_file_name(c);
+    msg1(d, sel("stringByAppendingPathComponent:"), nsstring_of(au, au_n))
+}
+
+file_size(p: int): int {
+    // (By opening and seeking, as lang_map does: no file attributes.)
+    fd: int = open_c(msg(p, sel("fileSystemRepresentation")), 0, 0);
+    if (fd < 0) return 0;
+    n: int = lseek(fd, 0, 2);
+    close(fd);
+    if (n < 0) 0 else n
+}
+
+// The cache's index, read once.
+ac_read: bool = false;
+
+ac_buf: []i8 = new i8[262144](0i8);
+
+audio_cache_open() {
+    if (ac_read) return;
+    ac_read = true;
+    data: int = msg1(cls("NSData"), sel("dataWithContentsOfFile:"), msg1(au_dir(false),
+        sel("stringByAppendingPathComponent:"), nsstring("index.tsv")));
+    n: int = 0;
+    if (data != 0) {
+        n = msg(data, sel("length"));
+        if (n > len(ac_buf)) n = len(ac_buf);
+        if (n > 0) memcpy_from(ac_buf, msg(data, sel("bytes")), n)
+    }
+    _k: int = audio_cache_parse(ac_buf, n)
+}
+
+audio_cache_save() {
+    n: int = audio_cache_format(ac_buf);
+    data: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(ac_buf),
+        n);
+    msg2(data, sel("writeToFile:atomically:"), msg1(au_dir(false), sel("stringByAppendingPathComponent:"),
+        nsstring("index.tsv")), 1);
+    // bible: audio cache N MB (souer JHN 4, JHN 5, ‚Ä¶)
+    if (!diag_on) return;
+    fbuf_n = 0;
+    fput_str("bible: audio cache ");
+    fput_int(audio_cache_total() / 1048576);
+    fput_str(" MB (");
+    for i in 0..ac_n {
+        if (i < 6) {
+            if (i > 0) fput_str(", ");
+            if (i == 0) {
+                fput_str(src_ids[ac_src[i]]);
+                fput(32)
+            }
+            fput_code_place(ac_c[i], 0)
+        }
+    }
+    if (ac_n > 6) fput_str(", \‚\Ä\¶");
+    fput_str(")");
+    note_ns(fstring())
+}
+
+// Chapters let go (least recently played first) while the cache passes
+// 500 MB; never what plays now or the two after it.
+audio_cache_trim(s: int, playing: int) {
+    v: int = audio_cache_victim(AC_LIMIT, s, playing);
+    fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+    while (v >= 0) {
+        msg2(fm, sel("removeItemAtPath:error:"), audio_chapter_path(ac_src[v], ac_c[v],
+            false), 0);
+        audio_cache_remove(v);
+        v = audio_cache_victim(AC_LIMIT, s, playing)
+    }
+}
+
+// ---- downloads: books, by reader ----
+// The books asked for (downloads.tsv: SRC BOOK a line), each one's chapters
+// fetched one at a time.
+DL_MOST: int = 264;
+
+dl_n: int = 0;
+
+dl_src: []int = new int[264](0);
+
+dl_book: []int = new int[264](0);
+
+dl_read: bool = false;
+
+downloads_open() {
+    if (dl_read) return;
+    dl_read = true;
+    read_file("downloads.tsv");
+    dl_n = 0;
+    begin_lines();
+    while (next_line()) {
+        e: int = field_end(fpos);
+        s: int = src_of_id_at(fbuf, fpos, e);
+        b: int = field_chapter_book(field_after(fpos));
+        if (s >= 0 && src_cacheable(s) && b >= 0 && dl_n < DL_MOST && dl_index(s,
+            b) < 0) {
+            dl_src[dl_n] = s;
+            dl_book[dl_n] = b;
+            dl_n = dl_n + 1
+        }
+    }
+}
+
+// A book's code at p (its line's field), or -1.
+field_chapter_book(p: int): int {
+    if (p + 3 > line_e) return -1;
+    for b in 0..books {
+        same: bool = true;
+        for i in 0..3
+            if (bsb[book_line[b] + 1 + i] != fbuf[p + i]) same = false;
+        if (same) return b
+    }
+    -1
+}
+
+downloads_save() {
+    fbuf_n = 0;
+    for i in 0..dl_n {
+        fput_str(src_ids[dl_src[i]]);
+        fput(9);
+        for x in 0..3 fput(bsb[book_line[dl_book[i]] + 1 + x] as int);
+        fput(10)
+    }
+    write_file("downloads.tsv")
+}
+
+dl_index(s: int, b: int): int {
+    for i in 0..dl_n
+        if (dl_src[i] == s && dl_book[i] == b) return i;
+    -1
+}
+
+// How many of book b's chapters are downloaded for s.
+dl_have(s: int, b: int): int {
+    fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+    n: int = 0;
+    for c in book_first[b]..book_first[b] + book_count[b]
+        if ((msg1(fm, sel("fileExistsAtPath:"), audio_chapter_path(s, c, true)) & 255) != 0) n = n + 1;
+    n
+}
+
+dl_complete(s: int, b: int): bool {
+    dl_index(s, b) >= 0 && dl_have(s, b) == book_count[b]
+}
+
+downloaded_total(): int {
+    downloads_open();
+    n: int = 0;
+    for i in 0..dl_n n = n + book_bytes(dl_src[i], dl_book[i]);
+    n
+}
+
+// The chapter being downloaded (-1: none), its task, source, and how much
+// of it has come.
+dl_c: int = -1;
+
+dl_s: int = -1;
+
+dl_task: int = 0;
+
+dl_ahead: bool = false;
+
+dl_got: int = 0;
+
+dl_want: int = 0;
+
+dl_session_obj: int = 0;
+
+dl_session(): int {
+    if (dl_session_obj != 0) return dl_session_obj;
+    config: int = msg(cls("NSURLSessionConfiguration"), sel("defaultSessionConfiguration"));
+    if (responds(config, "setAllowsConstrainedNetworkAccess:")) msg1(config, sel("setAllowsConstrainedNetworkAccess:"),
+        1);
+    msg1(config, sel("setWaitsForConnectivity:"), 0);
+    msg_set_f(config, sel("setTimeoutIntervalForRequest:"), 30.0f64);
+    delegate: int = msg(make_net_delegate(), sel("autorelease"));
+    dl_session_obj = keep(msg3(cls("NSURLSession"), sel("sessionWithConfiguration:delegate:delegateQueue:"),
+        config, delegate, msg(cls("NSOperationQueue"), sel("mainQueue"))));
+    dl_session_obj
+}
+
+// The next chapter to fetch: a book's next missing chapter (downloads
+// first), else the next chapter ahead of what plays (fetch-ahead).
+dl_pump() {
+    if (dl_c >= 0) return;
+    downloads_open();
+    fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+    for i in 0..dl_n {
+        s: int = dl_src[i];
+        b: int = dl_book[i];
+        for c in book_first[b]..book_first[b] + book_count[b] {
+            if (dl_c < 0 && tim_flag(s, c) != TIM_MISSING && (msg1(fm, sel("fileExistsAtPath:"),
+                audio_chapter_path(s, c, true)) & 255) == 0) {
+                dl_begin(s, c, false);
+                return
+            }
+        }
+    }
+    ahead_pump()
+}
+
+// Fetch-ahead (¬ß12.3.3): while a cacheable recording plays, the next 10
+// chapters on Wi-Fi, 1 on cellular (cellular is always treated as
+// constrained), unless Download Ahead on Cellular is on.
+ahead_pump() {
+    if (dl_c >= 0 || !ls_active || ls_engine != ENGINE_PLAYER || !src_cacheable(ls_src) || ap_c < 0) return;
+    if (!net_reachable()) return;
+    most: int = if (net_cellular() && !def_bool("downloadAheadCellular")) 1 else 10;
+    audio_cache_open();
+    for k in 1..most + 1 {
+        c: int = ap_c + k;
+        if (c < chapters && tim_flag(ls_src, c) != TIM_MISSING && kept_file(ls_src,
+            c) == 0) {
+            dl_begin(ls_src, c, true);
+            return
+        }
+    }
+}
+
+dl_begin(s: int, c: int, ahead: bool) {
+    dl_c = c;
+    dl_s = s;
+    dl_ahead = ahead;
+    dl_got = 0;
+    dl_want = tim_bytes(s, c);
+    fbuf_n = 0;
+    fput_str(if (ahead) "bible: audio fetch ahead " else "bible: audio download ");
+    fput_str(src_ids[s]);
+    fput(32);
+    fput_code_place(c, 0);
+    note_ns(fstring());
+    if (au_fixture_dir() != 0) {
+        _t: int = after_common(0.3f64, "audioFixtureDownload:");
+        return
+    }
+    audio_url(s, c);
+    if (au_n == 0) {
+        dl_failed();
+        return
+    }
+    url: int = msg1(cls("NSURL"), sel("URLWithString:"), nsstring_of(au, au_n));
+    dl_task = keep(msg1(dl_session(), sel("downloadTaskWithURL:"), url));
+    msg(dl_task, sel("resume"))
+}
+
+// The fixture's download: its tone copied.
+audio_fixture_download(_self: int, _cmd: int, _timer: int): int {
+    if (dl_c < 0) return 0;
+    fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+    to: int = audio_chapter_path(dl_s, dl_c, !dl_ahead);
+    msg2(fm, sel("removeItemAtPath:error:"), to, 0);
+    msg3(fm, sel("copyItemAtPath:toPath:error:"), au_fixture_file("tone.mp3"), to,
+        0);
+    dl_got = dl_want;
+    dl_finished(file_size(to));
+    0
+}
+
+// The download task's delegate (L8Net's): its file moved where it is kept,
+// at once (it is gone when this returns).
+dl_did_finish(
+    _self: int,
+    _cmd: int,
+    _session: int,
+    task: int,
+    location: int
+): int {
+    if (task != dl_task || dl_c < 0) return 0;
+    status: int = msg(msg(task, sel("response")), sel("statusCode"));
+    if (status != 200) return 0;
+    fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+    to: int = audio_chapter_path(dl_s, dl_c, !dl_ahead);
+    msg2(fm, sel("removeItemAtPath:error:"), to, 0);
+    if ((msg3(fm, sel("moveItemAtURL:toURL:error:"), location, msg1(cls("NSURL"),
+        sel("fileURLWithPath:"), to), 0) & 255) != 0) dl_moved = file_size(to);
+    0
+}
+
+dl_moved: int = 0;
+
+dl_did_write(
+    _self: int,
+    _cmd: int,
+    _session: int,
+    task: int,
+    _wrote: int,
+    total: int,
+    expected: int
+): int {
+    if (task != dl_task) return 0;
+    dl_got = total;
+    if (expected > 0) dl_want = expected;
+    dl_progress_shown();
+    0
+}
+
+// A download's end (net_completed sends it here: not one of the ESV's).
+dl_completed(task: int, error: int) {
+    if (task != dl_task || dl_c < 0) return;
+    release(dl_task);
+    dl_task = 0;
+    moved: int = dl_moved;
+    dl_moved = 0;
+    if (error == 0 && moved > 0) dl_finished(moved) else dl_failed()
+}
+
+dl_finished(bytes: int) {
+    s: int = dl_s;
+    c: int = dl_c;
+    dl_c = -1;
+    if (dl_ahead) {
+        audio_cache_open();
+        audio_cache_add(s, c, bytes, time(0));
+        audio_cache_trim(s, ap_c);
+        audio_cache_save()
+    } else {
+        fbuf_n = 0;
+        fput_str("bible: audio downloaded ");
+        fput_code_place(c, 0);
+        note_ns(fstring());
+        dl_book_changed(ch_book[c])
+    }
+    dl_pump()
+}
+
+dl_failed() {
+    c: int = dl_c;
+    dl_c = -1;
+    fbuf_n = 0;
+    fput_str("bible: audio fetch failed ");
+    if (c >= 0) fput_code_place(c, 0);
+    note_ns(fstring());
+    // (Tried again the next time Downloads or Listen is used.)
+    if (c >= 0 && !dl_ahead) dl_book_changed(ch_book[c])
+}
+
+// Downloading stopped for book b (its index entry let go, its files kept
+// only if it is complete).
+dl_stop(s: int, b: int) {
+    i: int = dl_index(s, b);
+    if (i < 0) return;
+    dl_done[b] = false;
+    for j in i..dl_n - 1 {
+        dl_src[j] = dl_src[j + 1];
+        dl_book[j] = dl_book[j + 1]
+    }
+    dl_n = dl_n - 1;
+    downloads_save();
+    if (dl_c >= 0 && dl_s == s && ch_book[dl_c] == b && !dl_ahead) {
+        if (dl_task != 0) msg(dl_task, sel("cancel"));
+        release(dl_task);
+        dl_task = 0;
+        dl_c = -1
+    }
+    fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+    for c in book_first[b]..book_first[b] + book_count[b] msg2(fm, sel("removeItemAtPath:error:"),
+        audio_chapter_path(s, c, true), 0);
+    dl_book_changed(b);
+    dl_pump()
+}
+
+dl_start(s: int, b: int) {
+    downloads_open();
+    if (dl_index(s, b) >= 0 || dl_n >= DL_MOST) return;
+    dl_src[dl_n] = s;
+    dl_book[dl_n] = b;
+    dl_n = dl_n + 1;
+    downloads_save();
+    fbuf_n = 0;
+    fput_str("bible: download ");
+    fput_str(src_ids[s]);
+    fput(32);
+    fput_bytes(bsb, book_line[b] + 1, book_line[b] + 4);
+    note_ns(fstring());
+    dl_book_changed(b);
+    dl_pump()
+}
+
+// ---- reachability, read synchronously (no callback: ¬ß12.3.3) ----
+// (Of the zero address, 0.0.0.0, made once: "any network, and is it
+// cellular", with no host name looked up on the main thread, which can
+// block for many seconds in a tunnel; review r7-1. Whether openbible.com
+// itself answers, its item says: ¬ß12.3.4.)
+reach: int = 0;
+
+reach_flags: []i8 = new i8[8](0i8);
+
+// A sockaddr_in: sin_len 16, sin_family AF_INET (2), port and address 0.
+reach_zero: []i8 = new i8[16](0i8);
+
+reach_read(): int {
+    if (reach == 0) {
+        reach_zero[0] = 16i8;
+        reach_zero[1] = 2i8;
+        reach = SCNetworkReachabilityCreateWithAddress(0, reach_zero)
+    }
+    if (reach == 0) return 2;
+    for i in 0..8 reach_flags[i] = 0i8;
+    if ((SCNetworkReachabilityGetFlags(reach, reach_flags) & 255) == 0) return 0;
+    f: int = byte_of(reach_flags, 0) | byte_of(reach_flags, 1) << 8 | byte_of(reach_flags,
+        2) << 16 | byte_of(reach_flags, 3) << 24;
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: net flags 0x");
+        for k in 0..8 {
+            d: int = f >> 28 - 4 * k & 15;
+            fput(if (d < 10) 48 + d else 87 + d)
+        }
+        note_ns(fstring())
+    }
+    f
+}
+
+// Reachable (2), and not needing a connection made first (4, unless it
+// is made on demand); cellular (1 << 18).
+net_reachable(): bool {
+    // (The fixture's network is always up: offline, its items fail.)
+    if (au_fixture_dir() != 0) return true;
+    f: int = reach_read();
+    (f & 2) != 0
+}
+
+net_cellular(): bool {
+    if (au_fixture_dir() != 0) return false;
+    (reach_read() & 262144) != 0
+}
+
+// ---- Downloaded Books (¬ß12.4.3) ----
+dl_table: int = 0;
+
+dlb_table: int = 0;
+
+dl_vc: int = 0;
+
+// The reader whose books these are: the current version's.
+dl_reader(): int {
+    audio_source(text_cur)
+}
+
+open_downloads() {
+    if (settings_nav == 0) return;
+    downloads_open();
+    vc: int = msg(msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
+        2), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Downloaded Books"));
+    item: int = msg(vc, sel("navigationItem"));
+    msg1(item, sel("setLargeTitleDisplayMode:"), 2);
+    if (src_cacheable(dl_reader())) msg1(item, sel("setRightBarButtonItem:"), msg(vc,
+        sel("editButtonItem")));
+    dl_vc = vc;
+    dl_table = held(dl_table, msg(vc, sel("tableView")));
+    msg1(dl_table, sel("setDataSource:"), app_obj);
+    msg1(dl_table, sel("setDelegate:"), app_obj);
+    style_table(dl_table, true);
+    msg2(settings_nav, sel("pushViewController:animated:"), vc, 1);
+    dl_pump()
+}
+
+// The books downloaded (or downloading) for the reader, in Bible order.
+dlr_n: int = 0;
+
+dlr_book: []int = new int[66](0);
+
+dl_rows_build() {
+    downloads_open();
+    s: int = dl_reader();
+    dlr_n = 0;
+    for b in 0..books {
+        if (dl_index(s, b) >= 0) {
+            dlr_book[dlr_n] = b;
+            dlr_n = dlr_n + 1
+        }
+    }
+}
+
+dl_sections(): int {
+    if (src_cacheable(dl_reader())) 2 else 1
+}
+
+dl_rows(s: int): int {
+    if (!src_cacheable(dl_reader())) return 0;
+    if (s == 1) return 1;
+    dl_rows_build();
+    dlr_n
+}
+
+dl_header(s: int): int {
+    if (!src_cacheable(dl_reader())) return 0;
+    if (s == 0) {
+        dl_rows_build();
+        if (dlr_n == 0) 0 else nsstring("Downloaded")
+    } else nsstring("Download a Book")
+}
+
+dl_footer(s: int): int {
+    r: int = dl_reader();
+    if (r == SRC_ESV) return nsstring("The ESV recording is streamed, not downloaded.");
+    if (!src_cacheable(r)) return nsstring("The iPhone\‚\Ä\ôs voice works without a connection.");
+    if (s == 0) {
+        dl_rows_build();
+        return if (dlr_n == 0) nsstring("No books are downloaded.") else 0
+    }
+    nsstring("Downloads continue while Smooth Bible is open or listening.")
+}
+
+// "John ¬∑ Bob Souer ¬∑ 96 MB"
+fput_dl_row(s: int, b: int) {
+    fput_bytes(bsb, book_name_start(b), book_name_end(b));
+    fput_str(" \¬\∑ ");
+    fput_str(src_readers[s]);
+    fput_str(" \¬\∑ ");
+    fput_size(book_bytes(s, b))
+}
+
+dl_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    r: int = msg(path, sel("row"));
+    cell: int = list_cell(t, "dlrow", 0);
+    config: int = list_config(0);
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(text_props(config), sel("setNumberOfLines:"), 0);
+    if (s == 1) {
+        msg1(config, sel("setText:"), nsstring("Download a Book\‚\Ä\¶"));
+        msg1(text_props(config), sel("setColor:"), c_accent);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        msg1(cell, sel("setSelectionStyle:"), 3)
+    } else if (r < dlr_n) {
+        src: int = dl_reader();
+        b: int = dlr_book[r];
+        fbuf_n = 0;
+        fput_dl_row(src, b);
+        msg1(config, sel("setText:"), fstring());
+        msg1(cell, sel("setSelectionStyle:"), 0);
+        if (!dl_complete(src, b)) msg1(cell, sel("setAccessoryView:"), dl_ring(b,
+            0))
+    }
+    msg1(cell, sel("setContentConfiguration:"), config);
+    cell
+}
+
+dl_picked(s: int, _r: int) {
+    if (s == 1) open_download_books()
+}
+
+// Swipe to Delete (and Edit's): the book's files gone.
+dl_delete(path: int) {
+    r: int = msg(path, sel("row"));
+    if (msg(path, sel("section")) != 0 || r >= dlr_n) return;
+    b: int = dlr_book[r];
+    dl_stop(dl_reader(), b)
+}
+
+// ---- Download a Book: the books, Old and New Testament ----
+open_download_books() {
+    if (settings_nav == 0) return;
+    vc: int = msg(msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
+        2), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Download a Book"));
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    dlb_table = held(dlb_table, msg(vc, sel("tableView")));
+    msg1(dlb_table, sel("setDataSource:"), app_obj);
+    msg1(dlb_table, sel("setDelegate:"), app_obj);
+    style_table(dlb_table, true);
+    msg2(settings_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+dlb_rows(s: int): int {
+    if (s == 0) 39 else 27
+}
+
+dlb_header(s: int): int {
+    nsstring(if (s == 0) "Old Testament" else "New Testament")
+}
+
+dlb_book(s: int, r: int): int {
+    if (s == 0) r else 39 + r
+}
+
+dlb_cell(t: int, path: int): int {
+    b: int = dlb_book(msg(path, sel("section")), msg(path, sel("row")));
+    src: int = dl_reader();
+    cell: int = list_cell(t, "dlbrow", 1);
+    config: int = list_config(1);
+    msg1(config, sel("setText:"), book_name(b));
+    fbuf_n = 0;
+    fput_size(book_bytes(src, b));
+    msg1(config, sel("setSecondaryText:"), fstring());
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(detail_props(config), sel("setColor:"), c_faint);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setTintColor:"), c_accent);
+    msg1(cell, sel("setSelectionStyle:"), 3);
+    if (dl_complete(src, b)) msg1(cell, sel("setAccessoryType:"), 3) else if (dl_index(src,
+        b) >= 0) msg1(cell, sel("setAccessoryView:"), dl_ring(b, 1));
+    cell
+}
+
+dlb_picked(s: int, r: int) {
+    b: int = dlb_book(s, r);
+    src: int = dl_reader();
+    if (!src_cacheable(src) || dl_index(src, b) >= 0) return;
+    haptic_select();
+    dl_start(src, b)
+}
+
+// ---- the progress ring: a stroke of a shape layer, its button's menu the
+// confirmation of stopping (a menu of one destructive command, as History's
+// Clear: no blocks) ----
+RINGS: int = 66;
+
+// (One ring a book in each list, Downloaded Books' (0) and the book list's
+// (1): a view can be one cell's accessory only, and two cells given the
+// same one take it from each other at every layout, without end, while a
+// download reloads both lists (the listen group's stall at its downloads
+// step).)
+ring_btn: []int = new int[132](0);
+
+ring_layer: []int = new int[132](0);
+
+dl_ring(b: int, list: int): int {
+    k: int = b + RINGS * list;
+    if (ring_btn[k] == 0) {
+        btn: int = msg1(cls("UIButton"), sel("buttonWithType:"), 0);
+        msg_rect(btn, sel("setFrame:"), 0.0f64, 0.0f64, 28.0f64, 28.0f64);
+        track: int = make("CAShapeLayer");
+        ring: int = make("CAShapeLayer");
+        // (From the top, clockwise.)
+        path: int = msg_arc(cls("UIBezierPath"), sel("bezierPathWithArcCenter:radius:startAngle:endAngle:clockwise:"),
+            14.0f64, 14.0f64, 10.0f64, -1.5707963f64, 4.7123890f64, 1);
+        for l in [track, ring] {
+            msg1(l, sel("setPath:"), msg(path, sel("CGPath")));
+            msg1(l, sel("setFillColor:"), 0);
+            msg_set_f(l, sel("setLineWidth:"), 2.5f64);
+            msg_rect(l, sel("setFrame:"), 0.0f64, 0.0f64, 28.0f64, 28.0f64);
+            msg1(msg(btn, sel("layer")), sel("addSublayer:"), l)
+        }
+        msg1(track, sel("setStrokeColor:"), msg(msg(cls("UIColor"), sel("systemFillColor")),
+            sel("CGColor")));
+        msg1(ring, sel("setStrokeColor:"), msg(c_accent, sel("CGColor")));
+        msg1(ring, sel("setLineCap:"), objc_const("kCALineCapRound"));
+        msg_set_f(ring, sel("setStrokeEnd:"), 0.0f64);
+        release(track);
+        ring_layer[k] = ring;
+        // Its menu: Stop Downloading John?
+        fbuf_n = 0;
+        fput_str("Stop Downloading ");
+        fput_bytes(bsb, book_name_start(b), book_name_end(b));
+        fput_str("?");
+        title: int = fstring();
+        one[0] = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+            nsstring("Stop Downloading"), 0, sel("downloadStop:"), nsnumber_int(b));
+        msg1(one[0], sel("setAttributes:"), 2);
+        msg1(btn, sel("setMenu:"), msg2(cls("UIMenu"), sel("menuWithTitle:children:"),
+            title, nsarray(one, 1)));
+        msg1(btn, sel("setShowsMenuAsPrimaryAction:"), 1);
+        fbuf_n = 0;
+        fput_str("Downloading ");
+        fput_bytes(bsb, book_name_start(b), book_name_end(b));
+        msg1(btn, sel("setAccessibilityLabel:"), fstring());
+        ring_btn[k] = keep(btn)
+    }
+    ring_set(b);
+    ring_btn[k]
+}
+
+// The rings' share (both lists'): the book's chapters here, and the one
+// coming.
+ring_set(b: int) {
+    ring_set_k(b, b);
+    ring_set_k(b, b + RINGS)
+}
+
+ring_set_k(b: int, k: int) {
+    if (ring_layer[k] == 0) return;
+    s: int = dl_reader();
+    have: int = dl_have(s, b);
+    part: f64 = 0.0f64;
+    if (dl_c >= 0 && !dl_ahead && dl_s == s && ch_book[dl_c] == b && dl_want > 0) part = dl_got as f64 / dl_want as f64;
+    if (part > 1.0f64) part = 1.0f64;
+    end: f64 = (have as f64 + part) / book_count[b] as f64;
+    CATransaction_quiet();
+    msg_set_f(ring_layer[k], sel("setStrokeEnd:"), end);
+    msg(cls("CATransaction"), sel("commit"));
+    // (VoiceOver hears the percent, as it changes: review r7-1.)
+    if (ring_btn[k] != 0) {
+        fbuf_n = 0;
+        fput_int((end * 100.0f64) as int);
+        fput_str(" percent");
+        msg1(ring_btn[k], sel("setAccessibilityValue:"), fstring());
+        msg1(ring_btn[k], sel("setAccessibilityTraits:"), objc_const("UIAccessibilityTraitUpdatesFrequently") | objc_const("UIAccessibilityTraitButton"))
+    }
+}
+
+extern UIAccessibilityPostNotification(notification: int, argument: int): int;
+
+CATransaction_quiet() {
+    msg(cls("CATransaction"), sel("begin"));
+    msg1(cls("CATransaction"), sel("setDisableActions:"), 1)
+}
+
+dl_progress_shown() {
+    if (dl_c < 0 || dl_ahead) return;
+    ring_set(ch_book[dl_c])
+}
+
+// A book's download changed: its rows made again (a finished ring becomes
+// a checkmark).
+dl_book_changed(b: int) {
+    if (dlb_table != 0) msg(dlb_table, sel("reloadData"));
+    if (dl_table != 0) msg(dl_table, sel("reloadData"));
+    if (voice_table != 0) msg(voice_table, sel("reloadData"));
+    ring_set(b);
+    if (dl_complete(dl_reader(), b) && !dl_done[b]) {
+        dl_done[b] = true;
+        for k in [b, b + RINGS] {
+            if (ring_btn[k] != 0) release(ring_btn[k]);
+            ring_btn[k] = 0;
+            ring_layer[k] = 0
+        }
+        // ("John downloaded", said to VoiceOver.)
+        fbuf_n = 0;
+        fput_bytes(bsb, book_name_start(b), book_name_end(b));
+        fput_str(" downloaded");
+        UIAccessibilityPostNotification(objc_const("UIAccessibilityAnnouncementNotification"),
+            fstring());
+        fbuf_n = 0;
+        fput_str("bible: book downloaded ");
+        fput_bytes(bsb, book_line[b] + 1, book_line[b] + 4);
+        note_ns(fstring())
+    }
+}
+
+// (Each book's completion said once.)
+dl_done: []bool = new bool[66](false);
+
+download_stop(_self: int, _cmd: int, sender: int): int {
+    if (sender == 0 || !responds(sender, "propertyList")) return 0;
+    n: int = msg(sender, sel("propertyList"));
+    if (n == 0) return 0;
+    b: int = msg(n, sel("longValue"));
+    if (b < 0 || b >= books) return 0;
+    dl_stop(dl_reader(), b);
+    0
+}
+
+// Download tasks' callbacks, on the ESV's delegate class (before it is
+// registered).
+add_download_methods(net: int) {
+    add_method3(net, sel("URLSession:downloadTask:didFinishDownloadingToURL:"), &dl_did_finish,
+        "v@:@@@");
+    add_method5(net, sel("URLSession:downloadTask:didWriteData:totalBytesWritten:totalBytesExpectedToWrite:"),
+        &dl_did_write, "v@:@@qqq");
+    add_protocol(net, "NSURLSessionDownloadDelegate")
+}
+
+add_audio_methods(app: int) {
+    add_method1(app, sel("cellularSwitched:"), &cellular_switched, "v@:@");
+    add_method1(app, sel("previewTick:"), &preview_tick, "v@:@");
+    add_method1(app, sel("audioFixtureDownload:"), &audio_fixture_download, "v@:@");
+    add_method1(app, sel("downloadStop:"), &download_stop, "v@:@");
+    voice_class = objc_allocateClassPair(cls("UITableViewController"), "L8Voice",
+        0);
+    add_method1(voice_class, sel("viewWillAppear:"), &voice_will_appear, "v@:B");
+    add_method1(voice_class, sel("viewWillDisappear:"), &voice_will_disappear, "v@:B");
+    objc_registerClassPair(voice_class);
+    vlist_class = objc_allocateClassPair(cls("UITableViewController"), "L8VoiceList",
+        0);
+    add_method1(vlist_class, sel("viewWillAppear:"), &vlist_will_appear, "v@:B");
+    add_method1(vlist_class, sel("viewWillDisappear:"), &vlist_will_disappear, "v@:B");
+    objc_registerClassPair(vlist_class)
+}

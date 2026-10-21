@@ -1,0 +1,1233 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// Ribbons (DESIGN.md §11): ribbons.l8's places kept (ribbons.tsv; Round
+// 6's readings made ribbons once), the carried one moved by the reader's
+// rests and the chapters it reads (ios_daily.l8's signal), and put down by
+// every jump (the capsule back picking it up again); a ribbon's row (in Go
+// To's Ribbons section, ios_daily.l8), its tap (the kept place, exactly, no
+// flash, then carried) and its ⓘ; New Ribbon (pushed in Go To, or a sheet
+// from the title's menu) and Ribbon (rename, delete), with Go To's own
+// lists to choose a book and chapter (A Chapter a Day's too); the title's
+// long-press menu; the drawn ribbon glyph; and the toasts.
+import "../ios/objc.l8";
+
+import "text.l8";
+
+import "ribbons.l8";
+
+extern msg_6f(
+    receiver: int,
+    selector: int,
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64
+): int = objc_msgSend;
+
+extern msg5(
+    receiver: int,
+    selector: int,
+    a: int,
+    b: int,
+    c: int,
+    d: int,
+    e: int
+): int = objc_msgSend;
+
+// ---- kept ----
+// Whether a file of ours is there.
+file_exists(name: str): bool {
+    (msg1(msg(cls("NSFileManager"), sel("defaultManager")), sel("fileExistsAtPath:"),
+        file_path(name)) & 255) != 0
+}
+
+// At launch: the ribbons; or (the first launch with them) up to three of
+// Round 6's readings made ribbons, readings.tsv set aside as
+// readings-r6.tsv (§11.4).
+load_ribbons() {
+    if (ribbons_migrate_due(file_exists("readings.tsv"), file_exists("ribbons.tsv"))) {
+        read_file("readings.tsv");
+        made: int = migrate_readings(time(0));
+        save_ribbons();
+        fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+        msg2(fm, sel("removeItemAtPath:error:"), file_path("readings-r6.tsv"), 0);
+        msg3(fm, sel("moveItemAtPath:toPath:error:"), file_path("readings.tsv"), file_path("readings-r6.tsv"),
+            0);
+        msg1(defaults(), sel("removeObjectForKey:"), nsstring("readingsSeeded"));
+        if (diag_on) {
+            fbuf_n = 0;
+            fput_str("bible: ribbons migrated ");
+            fput_int(made);
+            fput_str(" of ");
+            fput_int(mg_of);
+            note_ns(fstring())
+        }
+        note_num("bible: readings-r6.tsv there ", if (file_exists("readings-r6.tsv")) 1 else 0)
+    } else {
+        read_file("ribbons.tsv");
+        parse_ribbons();
+        // (An older file's ribbons given their colors: kept.)
+        if (rb_colors_filled) {
+            save_ribbons();
+            note_num("bible: ribbons given colors ", rb_n)
+        }
+    }
+    rbe_n = 0;
+    note_num("bible: ribbons ", rb_n);
+    note_num("bible: ribbon carried ", rb_carried)
+}
+
+save_ribbons() {
+    format_ribbons();
+    write_file("ribbons.tsv")
+}
+
+// What ribbons.l8 says happened, into the log ("bible: ribbon made:
+// Morning at MRK 1").
+ribbons_log() {
+    if (diag_on) {
+        s: int = 0;
+        for i in 0..rbe_n {
+            if (rbe[i] as int == 10) {
+                fbuf_n = 0;
+                fput_str("bible: ");
+                for k in s..i fput(rbe[k] as int);
+                note_ns(fstring());
+                s = i + 1
+            }
+        }
+    }
+    rbe_n = 0
+}
+
+// The ribbons changed: kept, logged, the title's menu made again.
+ribbons_changed() {
+    save_ribbons();
+    ribbons_log();
+    title_menus_refresh()
+}
+
+// Chapter c read (§10.1.2's signal, or Listen's): the carried ribbon
+// moved on (M2). (A plan is read in its day's reader: §16.0 decision 7.)
+chapter_read_now(c: int) {
+    if (c < 0 || c >= chapters || day_on) return;
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: chapter read ");
+        fput_code_place(c, 0);
+        note_ns(fstring())
+    }
+    if (ribbon_read(c, time(0))) ribbons_changed() else ribbons_log()
+}
+
+// A place as the log has it: ROM 3, ROM 3:9.
+fput_code_place(c: int, v: int) {
+    for i in 0..3 fput(bsb[book_line[ch_book[c]] + 1 + i] as int);
+    fput(32);
+    fput_int(ch_num[c]);
+    if (v >= 2) {
+        fput(58);
+        fput_int(v)
+    }
+}
+
+// ---- rests (§11.1.1) ----
+// Whether the finger (or Listen's following; not the status bar's tap) has
+// moved the text since the last jump or pickup: only then is a rest a
+// scroll's rest.
+rd_scrolled: bool = false;
+
+// A jump's arrival (or a pickup): nothing it leaves moves a ribbon.
+reading_jumped() {
+    rd_scrolled = false
+}
+
+reading_scrolled() {
+    if (!day_on) rd_scrolled = true
+}
+
+// The reader at rest (place_v and place_frac measured): the carried ribbon
+// takes the place (M1); and the title's menu says where it is.
+reading_rested() {
+    // (A plan's day moves no ribbon: §16.0 decision 2.)
+    if (!restored || cur < 0 || day_on) return;
+    if (rd_scrolled && ribbon_rest(cur, place_v, place_frac, chapter_end_seen(cur),
+        time(0))) ribbons_changed() else title_menus_refresh()
+}
+
+// A rest of the reader's that is not a scroll's end: the app going away, or
+// a sheet coming up over it.
+reading_rest_now() {
+    if (!rd_scrolled || !restored || table == 0 || day_on) return;
+    measure_place();
+    reading_rested()
+}
+
+// Whether chapter c's end (its row's foot) is on the screen.
+chapter_end_seen(c: int): bool {
+    if (table == 0 || c < 0 || c >= chapters) return false;
+    top: f64 = offset_y(table) + top_inset(table);
+    bottom: f64 = offset_y(table) + view_height(table) - bottom_inset(table);
+    l8_msg_hfa(hfa, table, sel("rectForRowAtIndexPath:"), chapter_path(c), 0, 0);
+    end: f64 = hfa[1] + hfa[3];
+    end <= bottom + 1.0f64 && end >= top - 1.0f64
+}
+
+// ---- jumps (P1, P4) ----
+// A jump, before it moves the reader (kind as ribbon_jumped's: 0 with an
+// origin, 1 the capsule's, 2 none): the carried ribbon put down, silently.
+ribbons_jump(kind: int) {
+    if (ribbon_jumped(kind)) ribbons_changed() else ribbons_log()
+}
+
+// The capsule's arrival: the ribbon its jump had put down, picked up
+// again, with the toast.
+ribbons_capsule_arrived() {
+    id: int = ribbon_capsule_back();
+    if (id == 0) return;
+    reading_jumped();
+    ribbons_changed();
+    toast_reading_with(id)
+}
+
+// ---- the ribbon glyph (§11.2.6, owner amendment 2026-10-19) ----
+// A template image drawn once a size: one straight, narrow strip (0.2 of
+// its height wide, about a third of bookmark.fill's width), from 0.06 to
+// 0.94 of the height, with a small V notch at its foot (0.16 deep); no
+// curve, no shading. So at small sizes it reads as a thin ribbon, not a
+// bookmark.
+glyph_size: []f64 = new f64[4](0.0f64);
+
+glyph_image: []int = new int[4](0);
+
+// The strip's width, as a part of the image's size.
+GLYPH_W: f64 = 0.2f64;
+
+ribbon_glyph(size: f64): int {
+    for k in 0..4
+        if (glyph_image[k] != 0 && glyph_size[k] == size) return glyph_image[k];
+    S: f64 = size;
+    w: f64 = GLYPH_W * S;
+    cx: f64 = S / 2.0f64;
+    y0: f64 = 0.06f64 * S;
+    y1: f64 = 0.94f64 * S;
+    notch: f64 = 0.16f64 * S;
+    UIGraphicsBeginImageContextWithOptions(S, S, 0, 0.0f64);
+    path: int = msg(cls("UIBezierPath"), sel("bezierPath"));
+    l: f64 = cx - w / 2.0f64;
+    r: f64 = cx + w / 2.0f64;
+    msg_ff(path, sel("moveToPoint:"), l, y0);
+    msg_ff(path, sel("addLineToPoint:"), r, y0);
+    msg_ff(path, sel("addLineToPoint:"), r, y1);
+    msg_ff(path, sel("addLineToPoint:"), cx, y1 - notch);
+    msg_ff(path, sel("addLineToPoint:"), l, y1);
+    msg(path, sel("closePath"));
+    msg(msg(cls("UIColor"), sel("blackColor")), sel("setFill"));
+    msg(path, sel("fill"));
+    image: int = msg1(UIGraphicsGetImageFromCurrentImageContext(), sel("imageWithRenderingMode:"),
+        2);
+    UIGraphicsEndImageContext();
+    // (Kept: a slot free, or the first.)
+    slot: int = 0;
+    for j in 0..4
+        if (glyph_image[j] == 0 && slot == 0) slot = j;
+    release(glyph_image[slot]);
+    glyph_image[slot] = keep(image);
+    glyph_size[slot] = size;
+    image
+}
+
+// The glyph at the body text's size (rows grow with Dynamic Type).
+ribbon_row_glyph(): int {
+    f: int = msg1(cls("UIFont"), sel("preferredFontForTextStyle:"), objc_const("UIFontTextStyleBody"));
+    ribbon_glyph((msg_f(f, sel("pointSize")) + 0.5f64) as int as f64)
+}
+
+// ---- the ribbons' colors (owner, 2026-10-19) ----
+// Like a printed Bible's ribbons: red, gold, navy, green, purple, brown and
+// slate, solid and deep on the light pages (a little deeper on Sepia's),
+// lighter on the dark ones, so that each reads on its page; a narrow strip
+// of a solid color, never a highlight's pale wash.
+rc_light: []str = ["B03A2E", "B07D12", "2D4C80", "3A7A4C", "6F4C94", "7C5434", "5C6670"];
+
+rc_sepia: []str = ["A3352A", "96680C", "2A4574", "346C43", "634387", "6A4628", "525A63"];
+
+rc_dark: []str = ["E8806F", "E0B651", "86A8E0", "82C292", "BB9CE0", "CFA27A", "A8B0BA"];
+
+// Color k in the theme now (on the dark themes, their own); dark: the dark
+// themes' shades whatever the theme (for the toast, on ink).
+ribbon_ui_color(k_in: int): int {
+    k: int = if (k_in >= 0 && k_in < RB_COLORS) k_in else 0;
+    if (is_dark()) color_hex(rc_dark[k], 1.0f64) else if (theme == 3) color_hex(rc_sepia[k],
+        1.0f64) else color_hex(rc_light[k], 1.0f64)
+}
+
+// Ribbon i's color (the accent if there is no such ribbon).
+ribbon_color_of(i: int): int {
+    if (i < 0 || i >= rb_n) c_accent else ribbon_ui_color(rb_color[i])
+}
+
+// Its glyph at a size, in its color (an image drawn as it is, for menus).
+ribbon_glyph_colored(i: int, size: f64): int {
+    msg2(ribbon_glyph(size), sel("imageWithTintColor:renderingMode:"), ribbon_color_of(i),
+        1)
+}
+
+// ---- the toasts (§11.2.5) ----
+// A ribbon's toast: its glyph leading, in its color (the shade that reads
+// on the toast's ink), 1.6 s, a light impact; logged.
+ribbon_toast(text: int) {
+    ribbon_toast_of(text, -1)
+}
+
+ribbon_toast_of(text: int, i: int) {
+    msg(text, sel("retain"));
+    haptic_impact(0);
+    // (On the toast's ink: the other themes' shade; its foot a little under
+    // the baseline, as a symbol's is.)
+    k: int = if (i >= 0 && i < rb_n) rb_color[i] else 0;
+    shade: int = if (i < 0) c_bg else if (is_dark()) color_hex(rc_light[k], 1.0f64) else color_hex(rc_dark[k],
+        1.0f64);
+    glyph: int = msg2(ribbon_glyph(13.0f64), sel("imageWithTintColor:renderingMode:"),
+        shade, 1);
+    glyph = msg_set_f(glyph, sel("imageWithBaselineOffsetFromBottom:"), 2.0f64);
+    toast_image(text, glyph, if (demo_on) 6.0f64 else 1.6f64);
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: toast ");
+        n: int = nsstring_into(text, link_buf);
+        for i in 0..n fput(link_buf[i] as int);
+        note_ns(fstring())
+    }
+    release(text)
+}
+
+// "Reading with Morning".
+toast_reading_with(id: int) {
+    i: int = rb_index(id);
+    if (i < 0) return;
+    fbuf_n = 0;
+    fput_str("Reading with ");
+    fput_ribbon_name(i);
+    ribbon_toast_of(fstring(), i)
+}
+
+// ---- a ribbon's row, and New Ribbon… (§11.2.1) ----
+rb_key: []int = new int[1](0);
+
+ribbon_row_cell(t: int, i: int): int {
+    cell: int = list_cell(t, "rb-ribbon", 2);
+    if (i < 0 || i >= rb_n) return cell;
+    config: int = list_config(2);
+    msg1(config, sel("setImage:"), ribbon_row_glyph());
+    msg1(msg(config, sel("imageProperties")), sel("setTintColor:"), ribbon_color_of(i));
+    fbuf_n = 0;
+    fput_ribbon_name(i);
+    msg1(config, sel("setText:"), fstring());
+    now: int = time(0);
+    off: int = local_offset();
+    fbuf_n = 0;
+    fput_ribbon_line(i, now, off);
+    msg1(config, sel("setSecondaryText:"), fstring());
+    row_text_style(config);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryType:"), 4);
+    msg1(cell, sel("setIsAccessibilityElement:"), 1);
+    fbuf_n = 0;
+    fput_ribbon_label(i, now, off);
+    msg1(cell, sel("setAccessibilityLabel:"), fstring());
+    msg1(cell, sel("setAccessibilityHint:"), nsstring("Opens here. Moves on as you read."));
+    id: int = nsnumber_int(rb_id[i]);
+    one[0] = custom_action("Ribbon Details", "ribbonDetailsAction:");
+    objc_setAssociatedObject(one[0], ints_address(rb_key), id, 1);
+    one[1] = custom_action("Delete", "ribbonDeleteAction:");
+    objc_setAssociatedObject(one[1], ints_address(rb_key), id, 1);
+    msg1(cell, sel("setAccessibilityCustomActions:"), nsarray(one, 2));
+    cell
+}
+
+// New Ribbon…: accent, plus; faint and not to be chosen with 12.
+new_ribbon_cell(t: int): int {
+    cell: int = list_cell(t, "rb-new", 0);
+    full: bool = rb_n >= RB_MOST;
+    config: int = list_config(0);
+    msg1(config, sel("setText:"), nsstring("New Ribbon\�\�\�"));
+    msg1(text_props(config), sel("setColor:"), if (full) c_faint else c_accent);
+    config_image(config, "plus", 17.0f64, if (full) c_faint else c_accent);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setUserInteractionEnabled:"), if (full) 0 else 1);
+    msg1(cell, sel("setAccessibilityTraits:"), if (full) 257 else 1);
+    msg1(cell, sel("setAccessibilityCustomActions:"), 0);
+    cell
+}
+
+// The ribbon of a VoiceOver action (its index, or -1).
+action_ribbon(a: int): int {
+    n: int = objc_getAssociatedObject(a, ints_address(rb_key));
+    if (n == 0) -1 else rb_index(msg(n, sel("longValue")))
+}
+
+ribbon_details_action(_self: int, _cmd: int, a: int): int {
+    i: int = action_ribbon(a);
+    if (i >= 0) open_ribbon_screen(i);
+    1
+}
+
+ribbon_delete_action(_self: int, _cmd: int, a: int): int {
+    i: int = action_ribbon(a);
+    if (i >= 0) today_delete_ribbon(i);
+    1
+}
+
+// ---- opening a ribbon ----
+// The reader at a kept place exactly, as launch restores one (no flash: a
+// place, not a reference), the sheet away, the place left kept and the
+// capsule back to it (unless it is the chapter on the screen); then made
+// again once the sheet has gone. The carried ribbon put down first (P1).
+rd_go_c: int = 0;
+
+rd_go_v: int = 0;
+
+rd_go_f: int = 0;
+
+rd_settle_timer: int = 0;
+
+ribbon_place_go(c: int, v: int, f: int) {
+    if (c < 0 || c >= chapters) return;
+    // (The chapter already on the screen: there, with no capsule and no
+    // history; review r6-1.)
+    here: bool = c == cur;
+    ribbons_jump(if (here) 2 else 0);
+    if (!here) push_here();
+    clear_selection();
+    from_sheet: bool = presented() != 0;
+    dismiss_sheets();
+    show_bars(false);
+    stop_moving();
+    go_place(c, v, f);
+    arrival_y = offset_y(table);
+    arrived_v = 0;
+    save_place();
+    reading_jumped();
+    if (!here) {
+        history_add(c, v, f, false, time(0));
+        save_history()
+    }
+    rd_go_c = c;
+    rd_go_v = v;
+    rd_go_f = f;
+    // (Made again once the sheet has gone, as a jump is: its insets change
+    // as it goes.)
+    rd_settle_timer = stop_timer(rd_settle_timer);
+    rd_settle_timer = after(0.6f64, "readingSettle:");
+    if (here) note("bible: ribbon opened in the chapter on screen (no capsule)") else if (from_sheet) {
+        back_after_sheet = true;
+        style_back()
+    } else show_back();
+    title_menus_fresh();
+    note_num("bible: ribbon place at ", c)
+}
+
+reading_settle(_self: int, _cmd: int, _timer: int): int {
+    rd_settle_timer = 0;
+    d: f64 = offset_y(table) - arrival_y;
+    if (d < 0.0f64) d = -d;
+    if (d > 2.0f64 || (msg(table, sel("isTracking")) & 255) != 0) return 0;
+    go_place(rd_go_c, rd_go_v, rd_go_f);
+    arrival_y = offset_y(table);
+    save_place();
+    style_back();
+    measure_place();
+    note_num("bible: ribbon settled at ", cur);
+    note_num("bible:   verse ", place_v);
+    title_menus_refresh();
+    0
+}
+
+// Ribbon i's row tapped (or its screen's Place): a jump to it, then picked
+// up, with the toast.
+ribbon_open(i: int) {
+    if (i < 0 || i >= rb_n) return;
+    id: int = rb_id[i];
+    ribbon_place_go(rb_c[i], rb_v[i], rb_frac[i]);
+    ribbon_pick_up(id, false);
+    ribbons_changed();
+    toast_reading_with(id)
+}
+
+// ---- Begin At: a book and chapter chosen in Go To's own lists ----
+// (New Ribbon's Place and A Chapter a Day's Begin At.) The chapter
+// chosen, the verse and how far into it while neither row has changed
+// (else 0), and whose rows they are (1 New Ribbon, 2 A Chapter a Day).
+bg_c: int = 0;
+
+bg_v: int = 0;
+
+bg_f: int = 0;
+
+bg_owner: int = 0;
+
+bg_books_table: int = 0;
+
+bg_books_vc: int = 0;
+
+// Book or Chapter (row r): the value chosen ("1:21" with a verse kept); a
+// one-chapter book's Chapter dimmed, with no disclosure.
+bg_fill(cell: int, r: int) {
+    b: int = ch_book[bg_c];
+    config: int = list_config(1);
+    msg1(config, sel("setText:"), nsstring(if (r == 0) "Book" else "Chapter"));
+    if (r == 0) msg1(config, sel("setSecondaryText:"), book_name(b)) else {
+        fbuf_n = 0;
+        fput_int(ch_num[bg_c]);
+        if (bg_v >= 2) {
+            fput(58);
+            fput_int(bg_v)
+        }
+        msg1(config, sel("setSecondaryText:"), fstring())
+    }
+    single: bool = r == 1 && book_count[b] == 1;
+    // (Dimmed by its colors: a content view's alpha is the configuration's
+    // to set.)
+    msg1(text_props(config), sel("setColor:"), if (single) msg_set_f(c_ink, sel("colorWithAlphaComponent:"),
+        0.4f64) else c_ink);
+    msg1(detail_props(config), sel("setColor:"), if (single) msg_set_f(c_faint, sel("colorWithAlphaComponent:"),
+        0.4f64) else c_faint);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryType:"), if (single) 0 else 1);
+    msg1(cell, sel("setUserInteractionEnabled:"), if (single) 0 else 1);
+    msg1(cell, sel("setAccessibilityTraits:"), if (single) 256 else 1)
+}
+
+bg_picked(r: int) {
+    if (r == 0) bg_open_books() else if (book_count[ch_book[bg_c]] > 1) show_chapters_mode(ch_book[bg_c],
+        true)
+}
+
+// Book: Go To's Old and New Testament rows, the chosen one checked; a tap
+// chooses it (at its chapter 1) and pops.
+bg_open_books() {
+    sheet_nav: int = presented();
+    if (sheet_nav == 0) return;
+    vc: int = msg(msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
+        2), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Book"));
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    bg_books_vc = held(bg_books_vc, vc);
+    bg_books_table = held(bg_books_table, msg(vc, sel("tableView")));
+    msg1(bg_books_table, sel("setDataSource:"), app_obj);
+    msg1(bg_books_table, sel("setDelegate:"), app_obj);
+    style_table(bg_books_table, true);
+    // (At the book chosen.)
+    b: int = ch_book[bg_c];
+    msg(bg_books_table, sel("layoutIfNeeded"));
+    msg3(bg_books_table, sel("scrollToRowAtIndexPath:atScrollPosition:animated:"),
+        msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), if (b < 39) b else b - 39,
+        if (b < 39) 0 else 1), 2, 0);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+bg_books_rows(s: int): int {
+    if (s == 0) 39 else books - 39
+}
+
+bg_books_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    b: int = msg(path, sel("row")) + (if (s == 0) 0 else 39);
+    cell: int = list_cell(t, "bg-books", 1);
+    config: int = list_config(1);
+    msg1(config, sel("setText:"), book_name(b));
+    msg1(config, sel("setSecondaryText:"), nsnumber_text(book_count[b]));
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(detail_props(config), sel("setColor:"), c_faint);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryType:"), if (b == ch_book[bg_c]) 3 else 0);
+    cell
+}
+
+bg_books_picked(s: int, r: int) {
+    bg_choose_book(r + (if (s == 0) 0 else 39))
+}
+
+// A book chosen: its first chapter's top; New Ribbon's placeholder follows
+// it (under the chooser, so it is never seen changing); popped.
+bg_choose_book(b: int) {
+    bg_c = book_first[b];
+    bg_v = 0;
+    bg_f = 0;
+    note_num("bible: begin at book ", b);
+    if (bg_owner == 1) nr_placeholder();
+    top: int = presented();
+    if (top != 0) msg1(top, sel("popViewControllerAnimated:"), 1)
+}
+
+// A chapter chosen in the grid (its choosing mode): its top; popped.
+bg_choose_chapter(c: int) {
+    bg_c = c;
+    bg_v = 0;
+    bg_f = 0;
+    note_num("bible: begin at chapter ", c);
+    top: int = presented();
+    if (top != 0) msg1(top, sel("popViewControllerAnimated:"), 1)
+}
+
+// ---- a text field in a cell (New Ribbon's, and Ribbon's Name) ----
+// A plain cell with a field in its content view, to its layout margins:
+// the body font, growing with the text size; Done on the keyboard.
+field_cell(field_out: []int) {
+    cell: int = msg(msg2(msg(cls("UITableViewCell"), sel("alloc")), sel("initWithStyle:reuseIdentifier:"),
+        0, 0), sel("autorelease"));
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    msg1(cell, sel("setBackgroundColor:"), cell_bg());
+    field: int = msg(make("UITextField"), sel("autorelease"));
+    msg1(field, sel("setFont:"), msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
+        objc_const("UIFontTextStyleBody")));
+    msg1(field, sel("setAdjustsFontForContentSizeCategory:"), 1);
+    msg1(field, sel("setTextColor:"), c_ink);
+    msg1(field, sel("setClearButtonMode:"), 1);
+    msg1(field, sel("setAutocapitalizationType:"), 1);
+    msg1(field, sel("setReturnKeyType:"), 9);
+    msg1(field, sel("setDelegate:"), app_obj);
+    msg1(field, sel("setAccessibilityLabel:"), nsstring("Name"));
+    msg1(field, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    content: int = msg(cell, sel("contentView"));
+    msg1(content, sel("addSubview:"), field);
+    guide: int = msg(content, sel("layoutMarginsGuide"));
+    for edge in ["leadingAnchor", "trailingAnchor", "topAnchor", "bottomAnchor"] pin(field,
+        guide, edge);
+    pin_min_height(field, 22.0f64);
+    field_out[0] = cell;
+    field_out[1] = field
+}
+
+field_pair: []int = new int[2](0);
+
+// A view at least d points high.
+pin_min_height(v: int, d: f64) {
+    msg1(msg_set_f(msg(v, sel("heightAnchor")), sel("constraintGreaterThanOrEqualToConstant:"),
+        d), sel("setActive:"), 1)
+}
+
+// A field's text, into nm_in (its length).
+nm_in: []i8 = new i8[512](0i8);
+
+field_text(field: int): int {
+    t: int = msg(field, sel("text"));
+    if (t == 0) 0 else nsstring_into(t, nm_in)
+}
+
+// ---- a row of color swatches (New Ribbon's and Ribbon's: owner,
+// 2026-10-19) ----
+// The row (a cell holding a stack of buttons, kept while its screen is up,
+// like the name's field), whose it is (1 New Ribbon, 2 Ribbon), and the
+// color New Ribbon will give.
+nr_sw_cell: int = 0;
+
+rbs_sw_cell: int = 0;
+
+nr_color: int = 0;
+
+SWATCH: f64 = 30.0f64;
+
+// A cell of the palette's swatches, each a round button of its color (its
+// tag the color), owner's, k chosen.
+swatch_cell(owner: int, k: int): int {
+    cell: int = msg(msg2(msg(cls("UITableViewCell"), sel("alloc")), sel("initWithStyle:reuseIdentifier:"),
+        0, 0), sel("autorelease"));
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    msg1(cell, sel("setBackgroundColor:"), cell_bg());
+    stack: int = msg(make("UIStackView"), sel("autorelease"));
+    msg1(stack, sel("setAxis:"), 0);
+    msg_set_f(stack, sel("setSpacing:"), 12.0f64);
+    msg1(stack, sel("setTag:"), 9300 + owner);
+    msg1(stack, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    for j in 0..RB_COLORS {
+        b: int = msg1(cls("UIButton"), sel("buttonWithType:"), 0);
+        msg1(b, sel("setTag:"), j);
+        msg1(b, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+        pin_size(b, "widthAnchor", SWATCH);
+        pin_size(b, "heightAnchor", SWATCH);
+        msg_set_f(msg(b, sel("layer")), sel("setCornerRadius:"), SWATCH / 2.0f64);
+        msg1(b, sel("setAccessibilityLabel:"), nsstring(rb_color_names[j]));
+        msg3(b, sel("addTarget:action:forControlEvents:"), app_obj, sel("ribbonSwatch:"),
+            64);
+        msg1(stack, sel("addArrangedSubview:"), b)
+    }
+    content: int = msg(cell, sel("contentView"));
+    msg1(content, sel("addSubview:"), stack);
+    guide: int = msg(content, sel("layoutMarginsGuide"));
+    for edge in ["leadingAnchor", "topAnchor", "bottomAnchor"] pin(stack, guide, edge);
+    swatches_set(stack, k);
+    cell
+}
+
+// The swatches shown for the theme, k's checked (a checkmark in the page's
+// color) and selected for VoiceOver ("Gold, selected, button").
+swatches_set(stack: int, k: int) {
+    if (stack == 0) return;
+    views: int = msg(stack, sel("arrangedSubviews"));
+    for j in 0..msg(views, sel("count")) {
+        b: int = msg1(views, sel("objectAtIndex:"), j);
+        msg1(b, sel("setBackgroundColor:"), ribbon_ui_color(j));
+        msg2(b, sel("setImage:forState:"), if (j == k) symbol("checkmark", 13.0f64,
+            7, c_bg) else 0, 0);
+        msg1(b, sel("setAccessibilityTraits:"), objc_const("UIAccessibilityTraitButton") | (if (j == k) objc_const("UIAccessibilityTraitSelected") else 0))
+    }
+}
+
+swatch_stack(cell: int, owner: int): int {
+    if (cell == 0) 0 else msg1(msg(cell, sel("contentView")), sel("viewWithTag:"),
+        9300 + owner)
+}
+
+// A swatch tapped: New Ribbon's color to give, or the ribbon's own, at
+// once (kept, and everywhere its glyph is); the check moved with a 0.15 s
+// cross-fade, a selection haptic.
+ribbon_swatch(_self: int, _cmd: int, b: int): int {
+    k: int = msg(b, sel("tag"));
+    stack: int = msg(b, sel("superview"));
+    if (stack == 0 || k < 0 || k >= RB_COLORS) return 0;
+    owner: int = msg(stack, sel("tag")) - 9300;
+    if (owner == 1) {
+        nr_color = k;
+        note_num("bible: new ribbon color ", k)
+    } else if (ribbon_set_color(rbs_id, k)) ribbons_changed();
+    if (!reduce_motion()) fade_layer(msg(stack, sel("layer")), 0.15f64);
+    swatches_set(stack, k);
+    haptic_select();
+    // (The bar's glyph, if this is the ribbon carried, cross-fades to it.)
+    if (owner == 2 && rbs_id == rb_carried && title_ribbon != 0) {
+        if (!reduce_motion()) fade_layer(msg(title_ribbon, sel("layer")), 0.2f64);
+        title_place()
+    }
+    0
+}
+
+// ---- New Ribbon (§11.2.3) ----
+nr_class: int = 0;
+
+nr_vc: int = 0;
+
+nr_table: int = 0;
+
+nr_cell: int = 0;
+
+nr_field: int = 0;
+
+nr_pushed: bool = false;
+
+nr_appeared: bool = false;
+
+NR_FOOTER: str = "A ribbon keeps your place, and moves on as you read from it.";
+
+// New Ribbon at (c, v, f): pushed in Go To, or a sheet over the reader
+// (the title's New Ribbon Here…). Set up whole before it shows.
+open_new_ribbon(
+    c: int,
+    v: int,
+    f: int,
+    pushed: bool
+) {
+    if (c < 0 || c >= chapters || rb_n >= RB_MOST) return;
+    if (pushed && presented() == 0) return;
+    if (!pushed && presented() != 0) return;
+    bg_c = c;
+    bg_v = v;
+    bg_f = f;
+    bg_owner = 1;
+    nr_pushed = pushed;
+    nr_appeared = false;
+    vc: int = msg(msg1(msg(nr_class, sel("alloc")), sel("initWithStyle:"), 2), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("New Ribbon"));
+    item: int = msg(vc, sel("navigationItem"));
+    msg1(item, sel("setLargeTitleDisplayMode:"), 2);
+    add: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:style:target:action:"),
+        nsstring("Add"), 2, app_obj, sel("newRibbonAdd:")), sel("autorelease"));
+    msg1(item, sel("setRightBarButtonItem:"), add);
+    if (!pushed) msg1(item, sel("setLeftBarButtonItem:"), system_item(1, "closeSheet:"));
+    nr_vc = held(nr_vc, vc);
+    nr_table = held(nr_table, msg(vc, sel("tableView")));
+    msg1(nr_table, sel("setDataSource:"), app_obj);
+    msg1(nr_table, sel("setDelegate:"), app_obj);
+    style_table(nr_table, true);
+    field_cell(field_pair);
+    nr_cell = held(nr_cell, field_pair[0]);
+    nr_field = held(nr_field, field_pair[1]);
+    nr_color = color_default();
+    nr_sw_cell = held(nr_sw_cell, swatch_cell(1, nr_color));
+    nr_placeholder();
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: new ribbon at ");
+        fput_code_place(c, v);
+        fput_str(if (pushed) " (pushed)" else " (sheet)");
+        note_ns(fstring())
+    }
+    if (pushed) msg2(presented(), sel("pushViewController:animated:"), vc, 1) else {
+        sheet_form(540.0f64, 720.0f64);
+        present(sheet_of(vc, 0))
+    }
+}
+
+// The placeholder: the default name the place would give ("Mark",
+// "Romans (2)"), faint.
+nr_placeholder() {
+    if (nr_field == 0) return;
+    name_default(bg_c);
+    keys[0] = k_color;
+    values[0] = c_faint;
+    msg1(nr_field, sel("setAttributedPlaceholder:"), attributed_str(nsstring_of(nm_buf,
+        nm_n), nsdictionary(keys, values, 1)))
+}
+
+// Its sections: the name, Color, Place.
+nr_rows(s: int): int {
+    if (s == 2) 2 else 1
+}
+
+nr_header(s: int): int {
+    if (s == 1) nsstring("Color") else if (s == 2) nsstring("Place") else 0
+}
+
+nr_footer(s: int): int {
+    if (s == 0) nsstring(NR_FOOTER) else 0
+}
+
+nr_cell_at(t: int, path: int): int {
+    if (msg(path, sel("section")) == 0 && nr_cell != 0) return nr_cell;
+    if (msg(path, sel("section")) == 1 && nr_sw_cell != 0) return nr_sw_cell;
+    r: int = msg(path, sel("row"));
+    cell: int = list_cell(t, if (r == 0) "bg-book" else "bg-chapter", 1);
+    bg_fill(cell, r);
+    cell
+}
+
+nr_picked(s: int, r: int) {
+    if (s == 2) bg_picked(r)
+}
+
+// On the screen: the first time, the keyboard rising with it; again (a
+// book or chapter chosen, popped), its Place as chosen.
+nr_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, nr_class, cmd, animated);
+    if (!nr_appeared) {
+        nr_appeared = true;
+        if (nr_field != 0 && !demo_no_keyboard) msg(nr_field, sel("becomeFirstResponder"));
+        return 0
+    }
+    if (nr_table != 0) msg(nr_table, sel("reloadData"));
+    0
+}
+
+new_ribbon_add(_self: int, _cmd: int, _b: int): int {
+    nr_add();
+    0
+}
+
+// Add: the ribbon made (the placeholder's name if none is typed); the
+// sheet (or Go To) away; the reader at its place, unless it is there
+// already; the ribbon picked up, with the toast.
+nr_add() {
+    if (nr_field == 0) return;
+    n: int = field_text(nr_field);
+    c: int = bg_c;
+    v: int = bg_v;
+    f: int = bg_f;
+    id: int = ribbon_make(nm_in, n, c, v, f, time(0));
+    if (id == 0) return;
+    _k: bool = ribbon_set_color(id, nr_color);
+    ribbons_log();
+    msg(nr_field, sel("resignFirstResponder"));
+    there: bool = c == cur && (v == place_v || v < 2 && place_v < 2);
+    if (there) dismiss_sheets() else ribbon_place_go(c, v, f);
+    ribbon_pick_up(id, false);
+    reading_jumped();
+    ribbons_changed();
+    toast_reading_with(id)
+}
+
+// ---- Ribbon (pushed by a row's ⓘ, §11.2.4) ----
+rbs_class: int = 0;
+
+rbs_vc: int = 0;
+
+rbs_table: int = 0;
+
+rbs_cell: int = 0;
+
+rbs_field: int = 0;
+
+rbs_id: int = 0;
+
+open_ribbon_screen(i: int) {
+    sheet_nav: int = presented();
+    if (sheet_nav == 0 || i < 0 || i >= rb_n) return;
+    rbs_id = rb_id[i];
+    vc: int = msg(msg1(msg(rbs_class, sel("alloc")), sel("initWithStyle:"), 2), sel("autorelease"));
+    fbuf_n = 0;
+    fput_ribbon_name(i);
+    msg1(vc, sel("setTitle:"), fstring());
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    msg1(msg(vc, sel("navigationItem")), sel("setRightBarButtonItem:"), system_item(0,
+        "closeSheet:"));
+    rbs_vc = held(rbs_vc, vc);
+    rbs_table = held(rbs_table, msg(vc, sel("tableView")));
+    msg1(rbs_table, sel("setDataSource:"), app_obj);
+    msg1(rbs_table, sel("setDelegate:"), app_obj);
+    style_table(rbs_table, true);
+    field_cell(field_pair);
+    rbs_cell = held(rbs_cell, field_pair[0]);
+    rbs_sw_cell = held(rbs_sw_cell, swatch_cell(2, rb_color[i]));
+    rbs_field = held(rbs_field, field_pair[1]);
+    msg1(rbs_field, sel("setText:"), fstring());
+    note_num("bible: ribbon details ", rbs_id);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+rbs_rows(_s: int): int {
+    1
+}
+
+// Its sections: Name, Color, Place, Delete Ribbon.
+rbs_header(s: int): int {
+    if (s == 0) nsstring("Name") else if (s == 1) nsstring("Color") else if (s == 2) nsstring("Place") else 0
+}
+
+rbs_cell_at(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    if (s == 0 && rbs_cell != 0) return rbs_cell;
+    if (s == 1 && rbs_sw_cell != 0) return rbs_sw_cell;
+    i: int = rb_index(rbs_id);
+    if (s == 2) {
+        cell: int = list_cell(t, "rbs-place", 2);
+        config: int = list_config(2);
+        if (i >= 0) {
+            fbuf_n = 0;
+            fput_ribbon_place(i);
+            msg1(config, sel("setText:"), fstring());
+            fbuf_n = 0;
+            fput_ribbon_read(i, time(0), local_offset());
+            msg1(config, sel("setSecondaryText:"), fstring())
+        }
+        row_text_style(config);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessibilityTraits:"), 1);
+        return cell
+    }
+    cell: int = list_cell(t, "rbs-delete", 0);
+    config: int = list_config(0);
+    msg1(config, sel("setText:"), nsstring("Delete Ribbon"));
+    msg1(text_props(config), sel("setColor:"), msg(cls("UIColor"), sel("systemRedColor")));
+    msg1(text_props(config), sel("setAlignment:"), 1);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessibilityTraits:"), 1);
+    cell
+}
+
+rbs_picked(s: int, _r: int) {
+    i: int = rb_index(rbs_id);
+    if (i < 0) return;
+    if (s == 2) ribbon_open(i) else if (s == 3) {
+        // (Deleted, and popped: Go To's section set again under the pop.)
+        rbs_rename();
+        ribbon_delete(rbs_id);
+        ribbons_changed();
+        rbs_id = 0;
+        top: int = presented();
+        if (top != 0) msg1(top, sel("popViewControllerAnimated:"), 1)
+    }
+}
+
+// The name as typed, kept (an empty one gives the old name back); the
+// screen's title following.
+rbs_rename() {
+    i: int = rb_index(rbs_id);
+    if (rbs_field == 0 || i < 0) return;
+    n: int = field_text(rbs_field);
+    if (ribbon_rename(rbs_id, nm_in, n)) ribbons_changed() else ribbons_log();
+    fbuf_n = 0;
+    fput_ribbon_name(i);
+    name: int = fstring();
+    msg1(rbs_field, sel("setText:"), name);
+    if (rbs_vc != 0) msg1(rbs_vc, sel("setTitle:"), name)
+}
+
+// Leaving the screen ends the editing (and so keeps the name).
+rbs_will_go(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, rbs_class, cmd, animated);
+    if (rbs_field != 0 && (msg(rbs_field, sel("isFirstResponder")) & 255) != 0) msg(rbs_field,
+        sel("resignFirstResponder"));
+    0
+}
+
+// The keyboard's Done: New Ribbon's is Add; Ribbon's ends the editing.
+field_should_return(_self: int, _cmd: int, field: int): int {
+    if (field == nr_field && nr_field != 0) nr_add() else if (field == mm_add_field && mm_add_field != 0) mm_add_now() else msg(field,
+        sel("resignFirstResponder"));
+    1
+}
+
+field_did_end(_self: int, _cmd: int, field: int): int {
+    if (field == rbs_field && rbs_field != 0) rbs_rename();
+    0
+}
+
+// ---- the reader's title: its long-press menu (§11.2.2) ----
+// Where the reader is, for the menu: "Romans 8:12".
+here_name(): int {
+    place_name(cur, if (place_v >= 2) place_v else 0)
+}
+
+title_menu(_c: int): int {
+    kids: int = msg(cls("NSMutableArray"), sel("array"));
+    k: int = rb_carried_i();
+    glyph: int = ribbon_glyph(17.0f64);
+    if (k >= 0) {
+        fbuf_n = 0;
+        fput_str("Leave ");
+        fput_ribbon_name(k);
+        fput_str(" Here");
+        msg1(kids, sel("addObject:"), msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+            fstring(), ribbon_glyph_colored(k, 17.0f64), sel("leaveRibbonHere:"),
+            0))
+    }
+    add: int = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+        nsstring("New Ribbon Here\�\�\�"), glyph, sel("newRibbonHere:"), 0);
+    if (responds(add, "setSubtitle:")) msg1(add, sel("setSubtitle:"), here_name());
+    if (rb_n >= RB_MOST) msg1(add, sel("setAttributes:"), 1);
+    msg1(kids, sel("addObject:"), add);
+    moves: int = msg(cls("NSMutableArray"), sel("array"));
+    now: int = time(0);
+    off: int = local_offset();
+    for i in 0..rb_n {
+        if (i != k) {
+            fbuf_n = 0;
+            fput_ribbon_name(i);
+            cmd: int = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+                fstring(), ribbon_glyph_colored(i, 17.0f64), sel("moveRibbonHere:"),
+                nsnumber_int(rb_id[i]));
+            fbuf_n = 0;
+            fput_ribbon_line(i, now, off);
+            if (responds(cmd, "setSubtitle:")) msg1(cmd, sel("setSubtitle:"), fstring());
+            msg1(moves, sel("addObject:"), cmd)
+        }
+    }
+    if (msg(moves, sel("count")) > 0) msg1(kids, sel("addObject:"), msg5(cls("UIMenu"),
+        sel("menuWithTitle:image:identifier:options:children:"), nsstring("Move Ribbon Here"),
+        glyph, 0, 0, moves));
+    title: int = nsstring("");
+    if (k >= 0) {
+        fbuf_n = 0;
+        fput_str("Reading with ");
+        fput_ribbon_name(k);
+        title = fstring()
+    }
+    msg2(cls("UIMenu"), sel("menuWithTitle:children:"), title, kids)
+}
+
+// The compact band's menu, and the title's buttons' (for the chapter each
+// shows).
+title_menu_set(b: int, c: int) {
+    if (b == 0 || c < 0) return;
+    // (Not the day's reader's: no ribbons there.)
+    if (day_on) {
+        msg1(b, sel("setMenu:"), 0);
+        return
+    }
+    msg1(b, sel("setMenu:"), title_menu(c))
+}
+
+// The title's and the compact band's menus made again,
+// and what VoiceOver says of them (a ribbon made, moved, picked up or put
+// down; or the reader at rest elsewhere).
+compact_menu_c: int = -2;
+
+title_menus_refresh() {
+    title_menu_set(title_btn[0], title_btn_c[0]);
+    compact_menu_c = -2;
+    title_compact_menu();
+    title_ribbon_update();
+    title_actions(title_btn[0]);
+    title_actions(compact_button)
+}
+
+// The same, the place measured first: after an arrival (a jump, the
+// capsule, a ribbon opened, their settles), whose place is not yet
+// measured, so New Ribbon Here… says where the reader now is (review
+// r8-1).
+title_menus_fresh() {
+    if (table != 0 && restored && cur >= 0) measure_place();
+    title_menus_refresh()
+}
+
+// (Made only when the chapter it is for changes: the band is laid out at
+// every frame of a scroll.)
+title_compact_menu() {
+    if (compact_button == 0 || title_view == 0) return;
+    c: int = title_btn_c[0];
+    if (c == compact_menu_c || c < 0) return;
+    compact_menu_c = c;
+    title_menu_set(compact_button, c)
+}
+
+// VoiceOver's: New Ribbon Here, and Leave Morning Here while carried; the
+// value "Reading with Morning".
+title_actions(b: int) {
+    if (b == 0) return;
+    if (day_on) {
+        msg1(b, sel("setAccessibilityCustomActions:"), 0);
+        if (b == compact_button) msg1(b, sel("setAccessibilityValue:"), 0);
+        return
+    }
+    k: int = rb_carried_i();
+    one[0] = custom_action("New Ribbon Here", "newRibbonHereAction:");
+    n: int = 1;
+    if (k >= 0) {
+        fbuf_n = 0;
+        fput_str("Leave ");
+        fput_ribbon_name(k);
+        fput_str(" Here");
+        one[1] = msg(msg3(msg(cls("UIAccessibilityCustomAction"), sel("alloc")), sel("initWithName:target:selector:"),
+            fstring(), app_obj, sel("leaveRibbonHereAction:")), sel("autorelease"));
+        n = 2
+    }
+    msg1(b, sel("setAccessibilityCustomActions:"), nsarray(one, n));
+    if (k >= 0) {
+        fbuf_n = 0;
+        fput_str("Reading with ");
+        fput_ribbon_name(k);
+        msg1(b, sel("setAccessibilityValue:"), fstring())
+    } else msg1(b, sel("setAccessibilityValue:"), 0)
+}
+
+// New Ribbon Here…: the sheet, at the place measured now.
+new_ribbon_here(_self: int, _cmd: int, _sender: int): int {
+    if (table != 0) measure_place();
+    note("bible: new ribbon here");
+    open_new_ribbon(cur, place_v, place_frac, false);
+    0
+}
+
+new_ribbon_here_action(_self: int, _cmd: int, _a: int): int {
+    _r: int = new_ribbon_here(0, 0, 0);
+    1
+}
+
+// Move Ribbon Here › name: it takes the place, and is picked up.
+move_ribbon_here(_self: int, _cmd: int, sender: int): int {
+    id: int = 0;
+    if (sender != 0 && responds(sender, "propertyList")) {
+        n: int = msg(sender, sel("propertyList"));
+        if (n != 0 && responds(n, "longValue")) id = msg(n, sel("longValue"))
+    }
+    ribbon_move_here_now(id);
+    0
+}
+
+ribbon_move_here_now(id: int) {
+    if (rb_index(id) < 0) return;
+    if (table != 0) measure_place();
+    ribbon_move_here(id, cur, place_v, place_frac, time(0));
+    reading_jumped();
+    ribbons_changed();
+    toast_reading_with(id)
+}
+
+// Leave Morning Here: the place measured once, then put down; the toast
+// "Morning left at Romans 8:20".
+leave_ribbon_here(_self: int, _cmd: int, _sender: int): int {
+    ribbon_leave_now();
+    0
+}
+
+leave_ribbon_here_action(_self: int, _cmd: int, _a: int): int {
+    ribbon_leave_now();
+    1
+}
+
+ribbon_leave_now() {
+    k: int = rb_carried_i();
+    if (k < 0) return;
+    if (table != 0) measure_place();
+    _r: bool = ribbon_leave_here(cur, place_v, place_frac, chapter_end_seen(cur),
+        time(0));
+    ribbons_changed();
+    fbuf_n = 0;
+    fput_ribbon_name(k);
+    fput_str(" left at ");
+    fput_ribbon_place(k);
+    ribbon_toast_of(fstring(), k)
+}
+
+// ---- the sheet gone ----
+ribbons_sheet_gone() {
+    nr_table = held(nr_table, 0);
+    nr_vc = held(nr_vc, 0);
+    nr_cell = held(nr_cell, 0);
+    nr_sw_cell = held(nr_sw_cell, 0);
+    rbs_sw_cell = held(rbs_sw_cell, 0);
+    if (nr_field != 0) msg1(nr_field, sel("setDelegate:"), 0);
+    nr_field = held(nr_field, 0);
+    rbs_table = held(rbs_table, 0);
+    rbs_vc = held(rbs_vc, 0);
+    rbs_cell = held(rbs_cell, 0);
+    if (rbs_field != 0) msg1(rbs_field, sel("setDelegate:"), 0);
+    rbs_field = held(rbs_field, 0);
+    bg_books_table = held(bg_books_table, 0);
+    bg_books_vc = held(bg_books_vc, 0)
+}
+
+// The theme changed: the lists shown, in it.
+style_ribbon_sheets() {
+    for t in [nr_table, rbs_table, bg_books_table] {
+        if (t != 0) {
+            style_table(t, true);
+            msg(t, sel("reloadData"))
+        }
+    }
+    for c in [nr_cell, rbs_cell, nr_sw_cell, rbs_sw_cell] {
+        if (c != 0) msg1(c, sel("setBackgroundColor:"), cell_bg())
+    }
+    swatches_set(swatch_stack(nr_sw_cell, 1), nr_color);
+    i: int = rb_index(rbs_id);
+    if (i >= 0) swatches_set(swatch_stack(rbs_sw_cell, 2), rb_color[i]);
+    for f in [nr_field, rbs_field] {
+        if (f != 0) msg1(f, sel("setTextColor:"), c_ink)
+    }
+}
+
+// ---- classes and methods ----
+make_ribbon_classes() {
+    nr_class = objc_allocateClassPair(cls("UITableViewController"), "L8NewRibbon",
+        0);
+    add_method1(nr_class, sel("viewWillAppear:"), &nr_will_appear, "v@:B");
+    objc_registerClassPair(nr_class);
+    rbs_class = objc_allocateClassPair(cls("UITableViewController"), "L8Ribbon", 0);
+    add_method1(rbs_class, sel("viewWillDisappear:"), &rbs_will_go, "v@:B");
+    objc_registerClassPair(rbs_class)
+}
+
+// (The title's commands go up the responder chain from the reader: its
+// controller has them too.)
+add_ribbon_commands(k: int) {
+    add_method1(k, sel("newRibbonHere:"), &new_ribbon_here, "v@:@");
+    add_method1(k, sel("moveRibbonHere:"), &move_ribbon_here, "v@:@");
+    add_method1(k, sel("leaveRibbonHere:"), &leave_ribbon_here, "v@:@")
+}
+
+add_ribbon_methods(app: int) {
+    add_ribbon_commands(app);
+    add_method1(app, sel("readingSettle:"), &reading_settle, "v@:@");
+    add_method1(app, sel("ribbonDetailsAction:"), &ribbon_details_action, "B@:@");
+    add_method1(app, sel("ribbonDeleteAction:"), &ribbon_delete_action, "B@:@");
+    add_method1(app, sel("newRibbonAdd:"), &new_ribbon_add, "v@:@");
+    add_method1(app, sel("ribbonSwatch:"), &ribbon_swatch, "v@:@");
+    add_method1(app, sel("newRibbonHereAction:"), &new_ribbon_here_action, "B@:@");
+    add_method1(app, sel("leaveRibbonHereAction:"), &leave_ribbon_here_action, "B@:@");
+    add_method1(app, sel("textFieldShouldReturn:"), &field_should_return, "B@:@");
+    add_method1(app, sel("textFieldDidEndEditing:"), &field_did_end, "v@:@")
+}

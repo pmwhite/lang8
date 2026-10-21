@@ -63,7 +63,8 @@ l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
 l8 build [--profile|-p] [--unchecked-index] file.l8 -o file
 l8 wasm [--profile|-p] [--unchecked-index] [--async import]... file.l8 -o file.wasm
-l8 test [--accept] [--wasm] [--unchecked-index] [-j N] file.l8|file.t ...
+l8 arm64 [--target linux|ios|ios-sim] [--unchecked-index] [--exe [--framework NAME]... [--imports FILE] [--sdk X.Y]] file.l8 -o file
+l8 test [--accept] [--wasm] [--arm64] [--unchecked-index] [-j N] file.l8|file.t ...
 ```
 
 `test` builds each file with its `test` declarations, runs them, and compares
@@ -86,6 +87,28 @@ included. `--async import` lets that import pause the module and resume it
 later, so a blocking program loop can run in a browser. `node web/run.mjs
 file.wasm args...` runs a module, and `test --wasm` runs tests that way. `make wasm-test` runs the test suites as modules and checks
 that the compiler, built as a module, rebuilds itself unchanged under Node.
+
+`arm64` compiles a program to AArch64 assembly text, with its runtime after
+it: for Linux (ELF, `runtime-arm64-linux.s`) or for iOS and its simulator
+(Mach-O, `runtime-arm64-darwin.s`, over Apple's C library). The x86-64 code
+generator drives it unchanged: `src2/arm64.l8` writes each of the primitives
+in `src2/direct.l8` as arm64, an x86 register standing for an arm64 one, and
+explains the stack and calling conventions that keep L8 and C able to call
+each other. A library's `native "NAME.s"` is `NAME.arm64-linux.s` or
+`NAME.arm64-darwin.s` there. With `--exe` the compiler assembles and links
+that text itself (`src2/a64asm.l8`, `src2/a64link.l8`), with no other
+toolchain: for Linux, a static ELF executable; for iOS (`ios`, an iPhone's)
+or its simulator (`ios-sim`), a Mach-O executable linked to each
+`--framework`, to libobjc and to libSystem, its imports bound to the
+libraries `--imports tools/ios/imports.txt` names, chained fixups and an
+ad hoc code signature as Apple's linker writes them. `tools/ios/build.sh`
+uses Xcode's toolchain on a Mac instead (see `programs/tempo/README.md`).
+`tools/arm64/check.py` compares the encoder with LLVM's: Linux executables
+byte for byte against llvm-mc and ld.lld, and iOS ones instruction by
+instruction against llvm-mc, every relocation checked against its symbol.
+`test --arm64` builds tests that way and runs them under qemu-aarch64
+(`tools/arm64/linux.sh run`), so the compiler's tests check the arm64 code
+generator, assembler and linker too.
 
 `unused` reports functions that are unreachable from every listed program.
 Ordinary `compile` and `build` commands do not report unused functions.

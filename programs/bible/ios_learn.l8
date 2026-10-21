@@ -1,0 +1,2643 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// Learning Greek and Hebrew (DESIGN.md Â§14.2â€“Â§14.5, Â§14.10b): what is
+// kept (cards.tsv and its log, vocab.bin and letters.txt mapped at first
+// use), the iPhone's Greek and Hebrew voices (behind LEARN_SPEECH, off:
+// nothing is spoken), and the language page with what it pushes: Verses
+// You Can Read, the Alphabet (Learn 8 Letters, I Know These, Practise
+// Reading, Sounds Written As), Your Words, Add Words (Related to Words You
+// Know among its sources) and its preview, and a lemma's Forms with what
+// each does. learn.l8 is its portable part; the cards in
+// Practice are ios_cards.l8; the interlinear's hiding and the word study's
+// rows are ios_study.l8's; Memory's rows ios_memory.l8's.
+import "../ios/objc.l8";
+
+import "text.l8";
+
+import "lang.l8";
+
+import "memory.l8";
+
+import "learn.l8";
+
+// ---- the data, at first use ----
+ln_mapped: bool = false;
+
+// vocab.bin and letters.txt mapped and indexed (no more: cards.tsv needs
+// only these).
+ensure_learn() {
+    if (ln_mapped) return;
+    ln_mapped = true;
+    lvoc = lang_map("vocab", "bin");
+    lvoc_n = lang_mapped;
+    llet = lang_map("letters", "txt");
+    llet_n = lang_mapped;
+    learn_index_files();
+    note_num("bible: learn data, letters ", lt_n)
+}
+
+// And the language data (lang.l8's), for what reads the text.
+ensure_learn_lang() {
+    lang_load();
+    ensure_learn();
+    if (!learn_lang_ready) learn_index_lang()
+}
+
+// cards.tsv, at launch only if it is there (no file: nothing read).
+load_cards() {
+    read_file("cards.tsv");
+    if (fbuf_n == 0) return;
+    ensure_learn();
+    read_file("cards.tsv");
+    parse_cards(today());
+    mev_n = 0;
+    cdl_n = 0;
+    note_num("bible: learn cards ", cd_n)
+}
+
+save_cards() {
+    format_cards();
+    write_file("cards.tsv");
+    learn_flush()
+}
+
+// learn.l8's events onto the console (memory.l8's drain), and its log's
+// lines onto cards-log.tsv.
+learn_flush() {
+    memory_flush();
+    if (cdl_n > 0) {
+        fbuf_n = 0;
+        for k in 0..cdl_n fput(cdl[k] as int);
+        append_file("cards-log.tsv");
+        cdl_n = 0
+    }
+}
+
+// A card added, graded, marked known or deleted: kept, the reminders
+// scheduled again, the lists shown afresh.
+cards_changed() {
+    save_cards();
+    orig_cards_changed();
+    daily_reschedule();
+    if (lib_table != 0 && lib_seg == 3 && px_nav == 0) {
+        lib_build();
+        lib_reload(false);
+        lib_toolbar(lib_vc, true)
+    }
+}
+
+// A card by its code (language, kind and key, as menus carry it), or -1.
+card_code(k: int): int {
+    cd_lang[k] * 1000000 + cd_kind[k] * 100000 + cd_key[k]
+}
+
+card_by_code(code: int): int {
+    for k in 0..cd_n
+        if (card_code(k) == code) return k;
+    -1
+}
+
+// ---- the settings (Â§14.1.9) ----
+ln_hide(): bool {
+    def_bool("learnHideKnown")
+}
+
+ln_speak_on(lang: int): bool {
+    def_bool(if (lang == 0) "learnSpeakGreek" else "learnSpeakHebrew")
+}
+
+// The pronunciation chosen (of the language's, from 0).
+ln_pron(lang: int): int {
+    clamp(def_int(if (lang == 0) "learnPronGreek" else "learnPronHebrew"), 0, pron_count[lang] - 1)
+}
+
+// ---- the voices (Â§14.4.2) ----
+// No synthesized Greek or Hebrew is spoken anywhere (Â§14.10b.1: the
+// iPhone's voices speak only modern Greek and Israeli Hebrew); kept for
+// the commissioned recordings to use the same places (Â§14.14.2).
+LEARN_SPEECH: bool = false;
+
+ln_voice: []int = new int[2](0);
+
+ln_voice_read: []bool = new bool[2](false);
+
+ln_synth: int = 0;
+
+// The best installed voice of a language (Premium, then Enhanced, then
+// compact; any region), or 0.
+ln_voice_of(lang: int): int {
+    if (!LEARN_SPEECH) return 0;
+    if (ln_voice_read[lang]) return ln_voice[lang];
+    ln_voice_read[lang] = true;
+    if (cls("AVSpeechSynthesisVoice") == 0) listen_frameworks();
+    all: int = msg(cls("AVSpeechSynthesisVoice"), sel("speechVoices"));
+    best: int = 0;
+    best_q: int = -1;
+    if (all != 0) {
+        for i in 0..msg(all, sel("count")) {
+            v: int = msg1(all, sel("objectAtIndex:"), i);
+            l: int = msg(v, sel("language"));
+            if (l != 0 && (msg1(l, sel("hasPrefix:"), nsstring(if (lang == 0) "el" else "he")) & 255) != 0) {
+                q: int = msg(v, sel("quality"));
+                if (q > best_q) {
+                    best = v;
+                    best_q = q
+                }
+            }
+        }
+    }
+    if (best != 0) ln_voice[lang] = keep(best);
+    fbuf_n = 0;
+    fput_str("bible: learn voice ");
+    fput_str(if (lang == 0) "el-GR " else "he-IL ");
+    if (best == 0) fput_str("none") else {
+        n: int = nsstring_into(msg(best, sel("name")), link_buf);
+        for x in 0..n fput(link_buf[x] as int);
+        fput_str(if (best_q >= 3) " (premium)" else if (best_q == 2) " (enhanced)" else " (compact)")
+    }
+    note_ns(fstring());
+    ln_voice[lang]
+}
+
+// Whether a language can be spoken now (its switch on, and a voice).
+ln_can_speak(lang: int): bool {
+    LEARN_SPEECH && ln_speak_on(lang) && ln_voice_of(lang) != 0
+}
+
+// Bytes a to b of x said in a language (Greek monotonic, Hebrew as shown,
+// maqaf a space), after what is being said; the reader's Listen and
+// Practice's paused.
+ln_say_more: bool = false;
+
+ln_say(
+    lang: int,
+    x: []i8,
+    a: int,
+    b: int
+) {
+    if (!ln_can_speak(lang)) return;
+    if (!ln_say_more) {
+        listen_stop();
+        if (px_au_mode != 0) px_au_stop();
+        if (ln_synth == 0) ln_synth = make("AVSpeechSynthesizer");
+        msg1(ln_synth, sel("stopSpeakingAtBoundary:"), 0)
+    }
+    if (lang == 0) speak_greek(x, a, b) else {
+        sg_n = 0;
+        p: int = a;
+        while (p < b) {
+            cp: int = cp_at(x, p, b);
+            p = p + cp_len;
+            // (No cantillation; the maqaf a space.)
+            if (cp == 1470) sg_n = cp_put(sg, sg_n, 32) else if (!(cp >= 1425 && cp <= 1455)) sg_n = cp_put(sg,
+                sg_n, cp)
+        }
+    }
+    u: int = msg1(cls("AVSpeechUtterance"), sel("speechUtteranceWithString:"), nsstring_of(sg,
+        sg_n));
+    if (u == 0) return;
+    msg1(u, sel("setVoice:"), ln_voice_of(lang));
+    msg_set_f32(u, sel("setRate:"), 0.40f64 as f32);
+    msg_set_f(u, sel("setPostUtteranceDelay:"), 0.25f64);
+    msg1(ln_synth, sel("speakUtterance:"), u)
+}
+
+// A letter: its name, then its example (Â§14.4.2).
+ln_say_letter(i: int) {
+    lang: int = lt_lang[i];
+    ln_say(lang, llet, lt_fb[i * 9 + LF_SPEAK], lt_fe[i * 9 + LF_SPEAK]);
+    lt_example(i);
+    ln_say_more = true;
+    ln_say(lang, exm, 0, exm_n);
+    ln_say_more = false
+}
+
+// ---- words and their text ----
+// A paragraph style for original text: right to left (Hebrew) or not,
+// aligned (0 left, 1 centred, 2 right), its lines' height.
+orig_para(lang: int, align: int, lines: f64): int {
+    p: int = msg(para_style(align, 0.0f64, 0.0f64, 0.0f64, 0.0f64, lines), sel("autorelease"));
+    if (lang == 1) msg1(p, sel("setBaseWritingDirection:"), 1);
+    p
+}
+
+// A word row (Your Words, the preview): "á¼€Î³Î±Ï€Î¬Ï‰  agapaÅ" over its gloss,
+// then (if line) a faint line under it.
+ln_word_row(
+    config: int,
+    lang: int,
+    num: int,
+    line: int
+) {
+    a: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    fbuf_n = 0;
+    if (lang == 1) fput_rli();
+    fput_lemma(lang, num, 0);
+    if (lang == 1) fput_pdi();
+    append(a, fstring(), original_font(lang == 0, 17.0f64, 19.0f64), c_ink);
+    fbuf_n = 0;
+    fput_str("  ");
+    fput_lemma(lang, num, 1);
+    append(a, fstring(), italic_sans(scaled(15.0f64)), c_faint);
+    msg1(config, sel("setAttributedText:"), a);
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    fbuf_n = 0;
+    fput_lemma(lang, num, 3);
+    append(s, fstring(), msg1(cls("UIFont"), sel("preferredFontForTextStyle:"), objc_const("UIFontTextStyleSubheadline")),
+        c_ink);
+    if (line != 0) {
+        append(s, nsstring("\n"), sans(6.0f64, 0.0f64), c_faint);
+        append(s, line, msg1(cls("UIFont"), sel("preferredFontForTextStyle:"), objc_const("UIFontTextStyleFootnote")),
+            c_faint)
+    }
+    msg1(config, sel("setSecondaryAttributedText:"), s);
+    msg1(detail_props(config), sel("setNumberOfLines:"), 0);
+    msg_set_f(config, sel("setTextToSecondaryTextVerticalPadding:"), 3.0f64)
+}
+
+// Its VoiceOver label: "á¼€Î³Î±Ï€Î¬Ï‰, agapaÅ: to love. Known, next review 2
+// November." (the lemma in its language's voice, if there is one).
+ln_word_label(
+    cell: int,
+    lang: int,
+    num: int,
+    line: int
+) {
+    fbuf_n = 0;
+    fput_lemma(lang, num, 1);
+    fput_str(": ");
+    fput_lemma(lang, num, 3);
+    fput_str(". ");
+    if (line != 0) {
+        n: int = nsstring_into(line, link_buf);
+        for x in 0..n fput(link_buf[x] as int);
+        fput(46)
+    }
+    msg1(cell, sel("setAccessibilityLabel:"), fstring())
+}
+
+// The ellipsis.circle button of a word's card (or, with no card, of the
+// number: code < 0), its menu holding Mark as Known (unless it is) and
+// Delete (if a card).
+ln_menu_button(code: int, known: bool, delete: bool): int {
+    b: int = msg1(cls("UIButton"), sel("buttonWithType:"), 0);
+    msg2(b, sel("setImage:forState:"), symbol("ellipsis.circle", 20.0f64, 4, c_accent),
+        0);
+    n: int = 0;
+    if (!known) {
+        ln_items[n] = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+            nsstring("Mark as Known"), symbol("checkmark.circle", 17.0f64, 4, 0),
+            sel("learnMarkKnown:"), nsnumber_int(code));
+        n = n + 1
+    }
+    if (delete) {
+        d: int = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+            nsstring("Delete"), symbol("trash", 17.0f64, 4, 0), sel("learnDelete:"),
+            nsnumber_int(code));
+        msg1(d, sel("setAttributes:"), 2);
+        ln_items[n] = d;
+        n = n + 1
+    }
+    msg1(b, sel("setMenu:"), msg2(cls("UIMenu"), sel("menuWithTitle:children:"), nsstring(""),
+        nsarray(ln_items, n)));
+    msg1(b, sel("setShowsMenuAsPrimaryAction:"), 1);
+    msg1(b, sel("setAccessibilityLabel:"), nsstring("More"));
+    msg_rect(b, sel("setFrame:"), 0.0f64, 0.0f64, 32.0f64, 32.0f64);
+    b
+}
+
+ln_items: []int = new int[8](0);
+
+// The code a menu's command carries (-1: none).
+ln_command_code(sender: int): int {
+    if (sender == 0 || !responds(sender, "propertyList")) return -1;
+    n: int = msg(sender, sel("propertyList"));
+    if (n == 0) -1 else msg(n, sel("longValue"))
+}
+
+// A word's code with no card yet (a preview's row): its number, negative,
+// less the language's million.
+word_code(lang: int, num: int): int {
+    -(lang * 1000000 + num) - 1
+}
+
+// Mark as Known: from a menu, VoiceOver, or a preview's row.
+learn_mark_known_cmd(_self: int, _cmd: int, sender: int): int {
+    ln_mark_code(ln_command_code(sender));
+    1
+}
+
+ln_mark_code(code: int) {
+    if (code == -1) return;
+    k: int = -1;
+    if (code < -1) {
+        c: int = -code - 1;
+        lang: int = c / 1000000;
+        num: int = c % 1000000;
+        k = card_of_word(lang, num);
+        if (k < 0) k = learn_add_word(lang, num, FROM_KNOWN, today(), time(0));
+        if (wpv_table != 0) wpv_marked(lang, num)
+    } else k = card_by_code(code);
+    if (k < 0) return;
+    learn_mark_known(k, today(), time(0));
+    cards_changed();
+    ln_lists_changed()
+}
+
+learn_delete_cmd(_self: int, _cmd: int, sender: int): int {
+    k: int = card_by_code(ln_command_code(sender));
+    if (k < 0) return 0;
+    learn_delete(k, time(0));
+    cards_changed();
+    ln_lists_changed();
+    1
+}
+
+// What shows cards, shown afresh (Your Words, the Alphabet).
+ln_lists_changed() {
+    if (ywd_table != 0) {
+        ywd_build();
+        fade_layer(msg(ywd_table, sel("layer")), 0.2f64);
+        msg(ywd_table, sel("reloadData"));
+        ywd_toolbar(true)
+    }
+    if (alp_table != 0) {
+        msg(alp_table, sel("reloadData"));
+        alp_toolbar(true)
+    }
+}
+
+// ---- the language page (Â§14.3.2) ----
+lgp_class: int = 0;
+
+lgp_vc: int = 0;
+
+lgp_table: int = 0;
+
+// The language shown (and every page pushed from it).
+lg: int = 0;
+
+// Its sections: their kinds, in order.
+LG_PRACTICE: int = 0;
+
+LG_ALPHABET: int = 1;
+
+LG_WORDS: int = 2;
+
+LG_READING: int = 3;
+
+LG_HIDE: int = 4;
+
+LG_SPEAK: int = 6;
+
+lgp_kinds: []int = new int[8](0);
+
+lgp_n: int = 0;
+
+// The verses readable, counted as the page opens.
+lgp_readable: int = 0;
+
+lgp_kinds_make() {
+    lgp_n = 0;
+    cd_count_today(lg, today());
+    if (cd_new_n + cd_review_n > 0) {
+        lgp_kinds[lgp_n] = LG_PRACTICE;
+        lgp_n = lgp_n + 1
+    }
+    // (Verses You Can Read first once the alphabet is known, Â§14.10b.2;
+    // the pronunciation is the Alphabet's Sounds Written As, and nothing
+    // speaks: no Speak switch.)
+    if (kn_alpha[lg]) lgp_add(LG_READING);
+    lgp_add(LG_ALPHABET);
+    lgp_add(LG_WORDS);
+    if (!kn_alpha[lg]) lgp_add(LG_READING);
+    lgp_add(LG_HIDE);
+    if (LEARN_SPEECH) lgp_add(LG_SPEAK)
+}
+
+lgp_add(k: int) {
+    lgp_kinds[lgp_n] = k;
+    lgp_n = lgp_n + 1
+}
+
+// The language page pushed (in the sheet on top: the Library's, or the
+// Study sheet's from the interlinear's link).
+open_language(lang: int) {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    ensure_learn_lang();
+    lg = lang;
+    vc: int = pushed_list_ns(lgp_class, nsstring(language_names[lang]));
+    lgp_vc = held(lgp_vc, vc);
+    lgp_table = held(lgp_table, msg(vc, sel("tableView")));
+    msg1(vc, sel("setToolbarItems:"), nsarray(ln_items, 0));
+    lgp_prepare();
+    note_num("bible: learn page ", lang);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+// Everything computed before it shows (principle 6): its sections, the
+// readable verses, the header.
+lgp_prepare() {
+    lgp_kinds_make();
+    lgp_readable = 0;
+    if (kn_alpha[lg]) {
+        learn_readable(lg, time(0));
+        lgp_readable = crv_readable
+    }
+    W: f64 = view_width(lgp_table);
+    if (W <= 0.0f64) W = view_width(window);
+    msg1(lgp_table, sel("setTableHeaderView:"), lgp_header(W))
+}
+
+lgp_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, lgp_class, cmd, animated);
+    if (lgp_table == 0 || msg(self, sel("tableView")) != lgp_table) return 0;
+    lgp_prepare();
+    msg(lgp_table, sel("reloadData"));
+    0
+}
+
+// The header: the language's sentence, and (faint) the chapters read this
+// month's; at most four lines each; no bar, ring or chart.
+lgp_header(W: f64): int {
+    v: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, W, 100.0f64), sel("autorelease"));
+    fbuf_n = 0;
+    fput_language_header(lg);
+    first: int = label_of(attributed(fstring(), body(scaled(17.0f64)), c_ink));
+    msg1(first, sel("setTextAlignment:"), 0);
+    msg1(first, sel("setNumberOfLines:"), 0);
+    label_size(first, W - 40.0f64);
+    h: f64 = hfa[1];
+    msg_rect(first, sel("setFrame:"), 20.0f64, 20.0f64, W - 40.0f64, h);
+    msg1(v, sel("addSubview:"), first);
+    y: f64 = 20.0f64 + h;
+    fbuf_n = 0;
+    if (fput_language_recent(lg, time(0))) {
+        second: int = label_of(attributed(fstring(), body(scaled(17.0f64)), c_faint));
+        msg1(second, sel("setTextAlignment:"), 0);
+        msg1(second, sel("setNumberOfLines:"), 0);
+        label_size(second, W - 40.0f64);
+        msg_rect(second, sel("setFrame:"), 20.0f64, y + 8.0f64, W - 40.0f64, hfa[1]);
+        msg1(v, sel("addSubview:"), second);
+        y = y + 8.0f64 + hfa[1]
+    }
+    msg_rect(v, sel("setFrame:"), 0.0f64, 0.0f64, W, y + 20.0f64);
+    v
+}
+
+lgp_rows(s: int): int {
+    if (s >= lgp_n) return 0;
+    if (lgp_kinds[s] == LG_WORDS || lgp_kinds[s] == LG_READING) 2 else 1
+}
+
+lgp_header_title(s: int): int {
+    if (s >= lgp_n) return 0;
+    k: int = lgp_kinds[s];
+    if (k == LG_ALPHABET) return nsstring("Alphabet");
+    if (k == LG_WORDS) return nsstring("Words");
+    if (k == LG_READING) return nsstring("Reading");
+    if (k == LG_HIDE) return nsstring("Settings");
+    0
+}
+
+lgp_footer(s: int): int {
+    if (s >= lgp_n) return 0;
+    k: int = lgp_kinds[s];
+    if (k == LG_HIDE) return nsstring(if (lg == 0) "In Greek order, the interlinear hides the English under words you know, and the transliteration once you know the alphabet. Tap a word to show it." else "In Hebrew order, the interlinear hides the English under words you know, and the transliteration once you know the alphabet. Tap a word to show it.");
+    if (k == LG_SPEAK) {
+        if (ln_voice_of(lg) == 0) return nsstring(if (lg == 0) "To hear Greek, add a Greek voice in Settings \â\€\º Accessibility \â\€\º Spoken Content \â\€\º Voices." else "To hear Hebrew, add a Hebrew voice in Settings \â\€\º Accessibility \â\€\º Spoken Content \â\€\º Voices.");
+        return nsstring(if (lg == 0) "Letters, words and verses are read by the iPhone\â\€\™s Greek voice, which speaks modern Greek." else "Letters, words and verses are read by the iPhone\â\€\™s Hebrew voice, which speaks modern Israeli Hebrew.")
+    }
+    0
+}
+
+// A switch's row.
+lgp_switch_cell(
+    t: int,
+    title: str,
+    on: bool,
+    enabled: bool,
+    action: str
+): int {
+    cell: int = fresh_cell(t);
+    config: int = list_config(0);
+    msg1(config, sel("setText:"), nsstring(title));
+    row_text_style(config);
+    sw: int = make("UISwitch");
+    msg1(sw, sel("setOn:"), if (on) 1 else 0);
+    msg1(sw, sel("setEnabled:"), if (enabled) 1 else 0);
+    msg1(sw, sel("setOnTintColor:"), c_accent);
+    msg3(sw, sel("addTarget:action:forControlEvents:"), app_obj, sel(action), 4096);
+    msg1(cell, sel("setAccessoryView:"), sw);
+    release(sw);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    cell
+}
+
+lgp_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    r: int = msg(path, sel("row"));
+    k: int = if (s < lgp_n) lgp_kinds[s] else -1;
+    if (k == LG_HIDE) return lgp_switch_cell(t, "Hide What I Know", ln_hide(), true,
+        "learnHideSwitched:");
+    if (k == LG_SPEAK) return lgp_switch_cell(t, if (lg == 0) "Speak Greek" else "Speak Hebrew",
+        ln_speak_on(lg) && ln_voice_of(lg) != 0, ln_voice_of(lg) != 0, "learnSpeakSwitched:");
+    cell: int = list_cell(t, "lgp", 1);
+    if (k == LG_PRACTICE) {
+        config: int = list_config(1);
+        msg1(config, sel("setText:"), nsstring("Practice"));
+        row_text_style(config);
+        msg1(text_props(config), sel("setColor:"), c_accent);
+        fbuf_n = 0;
+        fput_cards_due(lg, today());
+        msg1(config, sel("setSecondaryText:"), fstring());
+        msg1(cell, sel("setContentConfiguration:"), config);
+        return cell
+    }
+    if (k == LG_ALPHABET) {
+        config: int = list_config(2);
+        msg1(config, sel("setText:"), nsstring("The Alphabet"));
+        fbuf_n = 0;
+        fput_alphabet_row(lg);
+        msg1(config, sel("setSecondaryText:"), fstring());
+        row_text_style(config);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    if (k == LG_WORDS) {
+        config: int = list_config(1);
+        msg1(config, sel("setText:"), nsstring(if (r == 0) "Your Words" else "Add Words\â\€\¦"));
+        if (r == 0) msg1(config, sel("setSecondaryText:"), nsnumber_text(words_carded(lg)));
+        row_text_style(config);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    if (k == LG_READING && r == 1) {
+        // (Read in Greek: where it will open, Â§14.11.6.)
+        config: int = list_config(2);
+        msg1(config, sel("setText:"), nsstring(if (lg == 0) "Read in Greek" else "Read in Hebrew"));
+        fbuf_n = 0;
+        fput_read_in(lg);
+        msg1(config, sel("setSecondaryText:"), fstring());
+        row_text_style(config);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        return cell
+    }
+    if (k == LG_READING) {
+        config: int = list_config(if (kn_alpha[lg]) 1 else 2);
+        msg1(config, sel("setText:"), nsstring("Verses You Can Read"));
+        if (kn_alpha[lg]) msg1(config, sel("setSecondaryText:"), nsnumber_text(lgp_readable)) else msg1(config,
+            sel("setSecondaryText:"), nsstring("After the alphabet"));
+        row_text_style(config);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    cell
+}
+
+lgp_picked(s: int, r: int) {
+    if (s >= lgp_n) return;
+    k: int = lgp_kinds[s];
+    if (k == LG_PRACTICE) practice_open_cards(lg, false);
+    if (k == LG_ALPHABET) open_alphabet();
+    if (k == LG_WORDS && r == 0) open_your_words();
+    if (k == LG_WORDS && r == 1) open_add_words();
+    if (k == LG_READING && r == 1) read_in(lg) else if (k == LG_READING) open_readable()
+}
+
+// ---- Read in Greek (Hebrew), Â§14.11.6 ----
+// Where it opens: the reader's place, if it is in the language's
+// testament; else a ribbon there (its first); else Matthew 1 (Genesis 1).
+// ri_c the chapter, ri_ribbon the ribbon's index (-1 none).
+ri_c: int = 0;
+
+ri_ribbon: int = -1;
+
+read_in_target(lang: int) {
+    ri_ribbon = -1;
+    in_nt: bool = lang == 0;
+    if (cur >= 0 && cur < chapters && ch_book[cur] >= 39 == in_nt) {
+        ri_c = cur;
+        return
+    }
+    for i in 0..rb_n {
+        if (ri_ribbon < 0 && rb_c[i] >= 0 && rb_c[i] < chapters && ch_book[rb_c[i]] >= 39 == in_nt) ri_ribbon = i
+    }
+    if (ri_ribbon >= 0) ri_c = rb_c[ri_ribbon] else ri_c = (if (in_nt) book_first[39] else 0)
+}
+
+// "John 3, where you are" (or "Romans 8, at your ribbon", "Matthew 1").
+fput_read_in(lang: int) {
+    read_in_target(lang);
+    title_of(ri_c);
+    for i in 0..out_n fput(out[i] as int);
+    if (ri_c == cur && ri_ribbon < 0) fput_str(", where you are") else if (ri_ribbon >= 0) fput_str(", at your ribbon")
+}
+
+// The sheets away, and the reader in the Hebrew and Greek there.
+read_in(lang: int) {
+    read_in_target(lang);
+    c: int = ri_c;
+    i: int = ri_ribbon;
+    dismiss_sheets();
+    switch_version(TEXT_ORIG);
+    note(if (lang == 0) "bible: learn read in greek" else "bible: learn read in hebrew");
+    if (i >= 0) ribbon_open(i) else if (c != cur) jump(c, 0)
+}
+
+learn_hide_switched(_self: int, _cmd: int, sw: int): int {
+    on: bool = (msg(sw, sel("isOn")) & 255) != 0;
+    set_def_bool("learnHideKnown", on);
+    note(if (on) "bible: learn hide on" else "bible: learn hide off");
+    0
+}
+
+learn_speak_switched(_self: int, _cmd: int, sw: int): int {
+    on: bool = (msg(sw, sel("isOn")) & 255) != 0;
+    set_def_bool(if (lg == 0) "learnSpeakGreek" else "learnSpeakHebrew", on);
+    if (alp_table != 0) msg(alp_table, sel("reloadData"));
+    0
+}
+
+// ---- Sounds Written As (Â§14.3.2, Â§14.10b.1): the pronunciation the
+// Alphabet's sounds and letter cards are written in, pushed from the
+// Alphabet's last row; a choice goes back to it ----
+prn_class: int = 0;
+
+prn_table: int = 0;
+
+open_pronunciation() {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    vc: int = pushed_list(prn_class, "Sounds Written As");
+    prn_table = held(prn_table, msg(vc, sel("tableView")));
+    msg1(vc, sel("setToolbarItems:"), nsarray(ln_items, 0));
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+prn_cell(t: int, path: int): int {
+    r: int = msg(path, sel("row"));
+    cell: int = list_cell(t, "prn", 2);
+    config: int = list_config(2);
+    msg1(config, sel("setText:"), nsstring(pron_names[pron_first[lg] + r]));
+    msg1(config, sel("setSecondaryText:"), nsstring(pron_lines[pron_first[lg] + r]));
+    row_text_style(config);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryType:"), if (r == ln_pron(lg)) 3 else 0);
+    cell
+}
+
+prn_picked(r: int) {
+    set_def_int(if (lg == 0) "learnPronGreek" else "learnPronHebrew", r);
+    note_num("bible: learn pronunciation ", r);
+    if (prn_table != 0) msg(prn_table, sel("reloadData"));
+    top: int = study_host();
+    if (top != 0) msg1(top, sel("popViewControllerAnimated:"), 1)
+}
+
+// ---- the Alphabet (Â§14.3.3) ----
+alp_class: int = 0;
+
+alp_vc: int = 0;
+
+alp_table: int = 0;
+
+// Its sections: the language's sections of letters.txt (ltsec_*), then,
+// once 8 letters are known, Practise Reading's, then Sounds Written As's.
+alp_sec: []int = new int[16](0);
+
+alp_n: int = 0;
+
+alp_practise: bool = false;
+
+alp_make() {
+    alp_n = 0;
+    for x in 0..ltsec_n {
+        if (ltsec_lang[x] == lg) {
+            alp_sec[alp_n] = x;
+            alp_n = alp_n + 1
+        }
+    }
+    alp_practise = letters_known(lg) >= 8
+}
+
+open_alphabet() {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    ensure_learn_lang();
+    alp_make();
+    vc: int = pushed_list(alp_class, "Alphabet");
+    alp_vc = held(alp_vc, vc);
+    alp_table = held(alp_table, msg(vc, sel("tableView")));
+    msg_set_f(alp_table, sel("setEstimatedRowHeight:"), 72.0f64);
+    alp_toolbar(false);
+    note_num("bible: learn alphabet ", lg);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+alp_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, alp_class, cmd, animated);
+    if (alp_table == 0 || msg(self, sel("tableView")) != alp_table) return 0;
+    alp_make();
+    msg(alp_table, sel("reloadData"));
+    alp_toolbar(false);
+    0
+}
+
+alp_sections(): int {
+    alp_n + (if (alp_practise) 1 else 0) + 1
+}
+
+// Whether section s is Practise Reading's, or Sounds Written As's (the
+// last).
+alp_is_practise(s: int): bool {
+    alp_practise && s == alp_n
+}
+
+alp_is_sounds(s: int): bool {
+    s == alp_sections() - 1
+}
+
+// The line of row r in section s (-1: Practise Reading's, Sounds Written
+// As's).
+alp_line(s: int, r: int): int {
+    if (s >= alp_n) return -1;
+    x: int = alp_sec[s];
+    k: int = 0;
+    for i in 0..lt_n {
+        if (lt_sec[i] == x) {
+            if (k == r) return i;
+            k = k + 1
+        }
+    }
+    -1
+}
+
+alp_rows(s: int): int {
+    if (s >= alp_n) return 1;
+    n: int = 0;
+    for i in 0..lt_n
+        if (lt_sec[i] == alp_sec[s]) n = n + 1;
+    n
+}
+
+alp_header(s: int): int {
+    if (s >= alp_n) return 0;
+    x: int = alp_sec[s];
+    ns_of(llet, ltsec_b[x], ltsec_e[x])
+}
+
+alp_footer(s: int): int {
+    if (alp_is_sounds(s)) return nsstring("How the table writes each sound. There are no recordings yet.");
+    if (s != alp_n - 1) return 0;
+    nsstring(if (lg == 0) "Greek has 24 letters. Words also carry breathing marks and accents; only the rough breathing (\Ê\½, an h sound) changes how a word sounds." else "Hebrew is read right to left. Its 22 letters are consonants; the vowels are the dots and dashes added under, over or beside them.")
+}
+
+// A letter's row (a run-time cell): the glyph in a 56-point column, its
+// name over its sound in the chosen pronunciation, and its example (the
+// letter in accent) over its gloss; at the accessibility sizes the example
+// under the name.
+alp_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    r: int = msg(path, sel("row"));
+    if (alp_is_sounds(s)) {
+        cell: int = list_cell(t, "alp-sounds", 1);
+        config: int = list_config(1);
+        msg1(config, sel("setText:"), nsstring("Sounds Written As"));
+        msg1(config, sel("setSecondaryText:"), nsstring(pron_names[pron_first[lg] + ln_pron(lg)]));
+        row_text_style(config);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    if (s >= alp_n) {
+        cell: int = list_cell(t, "alp-practise", 0);
+        config: int = list_config(0);
+        msg1(config, sel("setText:"), nsstring("Practise Reading"));
+        row_text_style(config);
+        msg1(text_props(config), sel("setColor:"), c_accent);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        return cell
+    }
+    i: int = alp_line(s, r);
+    cell: int = fresh_cell(t);
+    msg1(cell, sel("setBackgroundColor:"), cell_bg());
+    if (i < 0) return cell;
+    lang: int = lt_lang[i];
+    big: bool = ax_size();
+    row: int = stack(if (big) 1 else 0, if (big) 6.0f64 else 12.0f64);
+    msg1(row, sel("setAlignment:"), if (big) 1 else 3);
+    msg1(row, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    // The glyph.
+    glyph: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(glyph, sel("setAttributedText:"), attributed(ns_of(llet, lt_fb[i * 9 + LF_GLYPH],
+        lt_fe[i * 9 + LF_GLYPH]), original_font(lang == 0, 34.0f64, 40.0f64), c_ink));
+    msg1(glyph, sel("setTextAlignment:"), 1);
+    msg1(glyph, sel("setAdjustsFontSizeToFitWidth:"), 1);
+    msg_set_f(glyph, sel("setMinimumScaleFactor:"), 0.5f64);
+    if (!big) pin_size(glyph, "widthAnchor", 56.0f64);
+    msg1(row, sel("addArrangedSubview:"), glyph);
+    // The name, over the sound.
+    names: int = stack(1, 2.0f64);
+    name: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(name, sel("setAttributedText:"), attributed(ns_of(llet, lt_fb[i * 9 + LF_NAME],
+        lt_fe[i * 9 + LF_NAME]), sans(scaled(17.0f64), 0.0f64), c_ink));
+    msg1(name, sel("setNumberOfLines:"), 0);
+    msg1(names, sel("addArrangedSubview:"), name);
+    fbuf_n = 0;
+    fput_lt_sound(i, ln_pron(lang));
+    sound: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(sound, sel("setAttributedText:"), attributed(fstring(), sans(scaled(15.0f64),
+        0.0f64), c_faint));
+    msg1(sound, sel("setNumberOfLines:"), 0);
+    msg1(names, sel("addArrangedSubview:"), sound);
+    msg1(row, sel("addArrangedSubview:"), names);
+    // The example, the letter in accent, over its gloss.
+    ex: int = stack(1, 2.0f64);
+    msg1(ex, sel("setAlignment:"), if (big) 1 else 4);
+    lt_example(i);
+    word: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(word, sel("setAttributedText:"), ln_example_text(i, 17.0f64, 19.0f64, if (big) 0 else 2));
+    msg1(ex, sel("addArrangedSubview:"), word);
+    fbuf_n = 0;
+    fput_lemma(lang, lt_key[i], 3);
+    gloss: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(gloss, sel("setAttributedText:"), attributed(fstring(), sans(scaled(13.0f64),
+        0.0f64), c_faint));
+    msg1(gloss, sel("setNumberOfLines:"), 0);
+    msg1(gloss, sel("setTextAlignment:"), if (big) 0 else 2);
+    msg1(ex, sel("addArrangedSubview:"), gloss);
+    msg1(row, sel("addArrangedSubview:"), ex);
+    content: int = msg(cell, sel("contentView"));
+    msg1(content, sel("addSubview:"), row);
+    guide: int = msg(content, sel("layoutMarginsGuide"));
+    pin_to(row, "topAnchor", guide, "topAnchor", 2.0f64);
+    pin_to(row, "bottomAnchor", guide, "bottomAnchor", -2.0f64);
+    pin_to(row, "leadingAnchor", guide, "leadingAnchor", 0.0f64);
+    pin_to(row, "trailingAnchor", guide, "trailingAnchor", 0.0f64);
+    known: bool = cd_known(cl_of[i]);
+    if (known) {
+        iv: int = msg1(msg(cls("UIImageView"), sel("alloc")), sel("initWithImage:"),
+            symbol("checkmark", 15.0f64, 4, c_faint));
+        msg1(cell, sel("setAccessoryView:"), iv);
+        release(iv)
+    }
+    speak: bool = ln_can_speak(lang);
+    msg1(cell, sel("setSelectionStyle:"), if (speak) 3 else 0);
+    // VoiceOver: "Beta: b as in bat. Example: basileia, kingdom."
+    fbuf_n = 0;
+    fput_lt(i, LF_NAME);
+    fput_str(": ");
+    fput_lt_sound(i, ln_pron(lang));
+    fput_str(". Example: ");
+    w: int = example_word(i);
+    if (w >= 0) {
+        form_of(w);
+        for x in wt_b..wt_e fput(lforms[x] as int)
+    }
+    fput_str(", ");
+    fput_lemma(lang, lt_key[i], 3);
+    fput(46);
+    if (known) fput_str(" Known.");
+    msg1(cell, sel("setIsAccessibilityElement:"), 1);
+    msg1(cell, sel("setAccessibilityLabel:"), fstring());
+    if (speak) {
+        a: int = custom_action("Speak", "learnSpeakRow:");
+        objc_setAssociatedObject(a, ints_address(ln_action_key), nsnumber_int(i),
+            1);
+        one[0] = a;
+        msg1(cell, sel("setAccessibilityCustomActions:"), nsarray(one, 1))
+    }
+    cell
+}
+
+ln_action_key: []int = new int[1](0);
+
+// A line's example form as an attributed string, its marked letter in
+// accent (align: 0 left, 1 centred, 2 right).
+ln_example_text(
+    i: int,
+    gsize: f64,
+    hsize: f64,
+    align: int
+): int {
+    lt_example(i);
+    lang: int = lt_lang[i];
+    font: int = original_font(lang == 0, gsize, hsize);
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    append(s, ns_of(exm, 0, exm_b), font, c_ink);
+    append(s, ns_of(exm, exm_b, exm_e), font, c_accent);
+    append(s, ns_of(exm, exm_e, exm_n), font, c_ink);
+    msg4(s, sel("addAttribute:value:range:"), k_para, orig_para(lang, align, 1.0f64),
+        0, msg(s, sel("length")));
+    s
+}
+
+alp_picked(s: int, r: int) {
+    if (alp_is_sounds(s)) {
+        open_pronunciation();
+        return
+    }
+    if (s >= alp_n) {
+        practice_open_reading(lg);
+        return
+    }
+    i: int = alp_line(s, r);
+    if (i >= 0 && ln_can_speak(lt_lang[i])) {
+        note_num("bible: learn speak letter ", i);
+        ln_say_letter(i)
+    }
+}
+
+learn_speak_row(_self: int, _cmd: int, a: int): int {
+    n: int = objc_getAssociatedObject(a, ints_address(ln_action_key));
+    if (n == 0) return 0;
+    i: int = msg(n, sel("longValue"));
+    if (i >= 0 && i < lt_n) ln_say_letter(i);
+    1
+}
+
+// The next set to learn: up to 8 lines of one kind with no card, in table
+// order (letters, then joined words): their lines (alp_next), and how
+// many of that kind are left.
+alp_next: []int = new int[8](0);
+
+alp_next_n: int = 0;
+
+alp_left: int = 0;
+
+alp_kind: int = 0;
+
+alp_next_make() {
+    alp_next_n = 0;
+    alp_left = 0;
+    alp_kind = CK_LETTER;
+    for pass in 0..2 {
+        kind: int = if (pass == 0) CK_LETTER else CK_JOINED;
+        if (alp_next_n == 0) {
+            for i in 0..lt_n {
+                if (lt_lang[i] == lg && lt_kind[i] == kind && cl_of[i] < 0) {
+                    alp_kind = kind;
+                    alp_left = alp_left + 1;
+                    if (alp_next_n < 8) {
+                        alp_next[alp_next_n] = i;
+                        alp_next_n = alp_next_n + 1
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The toolbar (while some have no card): I Know These (its menu the
+// confirmation) on the left; Learn 8 Letters in the middle.
+alp_toolbar(animated: bool) {
+    if (alp_vc == 0) return;
+    alp_next_make();
+    n: int = 0;
+    if (alp_next_n == 0) {
+        msg2(alp_vc, sel("setToolbarItems:animated:"), nsarray(ln_items, 0), if (animated) 1 else 0);
+        return
+    }
+    know: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:style:target:action:"),
+        nsstring("I Know These"), 0, 0, 0), sel("autorelease"));
+    kids: int = msg(cls("NSMutableArray"), sel("array"));
+    for kind in [CK_LETTER, CK_JOINED] {
+        total: int = 0;
+        unknown: int = 0;
+        for i in 0..lt_n {
+            if (lt_lang[i] == lg && lt_kind[i] == kind) {
+                total = total + 1;
+                if (!cd_known(cl_of[i])) unknown = unknown + 1
+            }
+        }
+        if (unknown > 0) {
+            fbuf_n = 0;
+            fput_str("Mark All ");
+            fput_int(total);
+            fput_str(if (kind == CK_LETTER) " as Known" else " Joined Words as Known");
+            msg1(kids, sel("addObject:"), msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+                fstring(), 0, sel("learnKnowAll:"), nsnumber_int(kind)))
+        }
+    }
+    msg1(know, sel("setMenu:"), msg2(cls("UIMenu"), sel("menuWithTitle:children:"),
+        nsstring(""), kids));
+    fbuf_n = 0;
+    if (alp_left == letters_count_kind(alp_kind)) {
+        fput_str("Learn ");
+        fput_int(alp_next_n);
+        fput_str(if (alp_kind == CK_LETTER) " Letters" else " Joined Words")
+    } else if (alp_left <= 8) {
+        fput_str("Learn the Last ");
+        fput_int(alp_left)
+    } else fput_str("Learn the Next 8");
+    learn: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:style:target:action:"),
+        fstring(), 2, app_obj, sel("learnLetters:")), sel("autorelease"));
+    alp_items[n] = know;
+    n = n + 1;
+    alp_items[n] = px_flex();
+    n = n + 1;
+    alp_items[n] = learn;
+    n = n + 1;
+    alp_items[n] = px_flex();
+    n = n + 1;
+    msg2(alp_vc, sel("setToolbarItems:animated:"), nsarray(alp_items, n), if (animated) 1 else 0)
+}
+
+alp_items: []int = new int[8](0);
+
+letters_count_kind(kind: int): int {
+    n: int = 0;
+    for i in 0..lt_n
+        if (lt_lang[i] == lg && lt_kind[i] == kind) n = n + 1;
+    n
+}
+
+// Learn 8 Letters: the next set's cards added, and Practice of them.
+learn_letters(_self: int, _cmd: int, _b: int): int {
+    alp_next_make();
+    if (alp_next_n == 0) return 0;
+    n: int = 0;
+    for x in 0..alp_next_n {
+        k: int = learn_add_letter(alp_next[x], FROM_ALPHABET, today(), time(0));
+        if (k >= 0) {
+            px_q[n] = -k - 1;
+            px_back[n] = false;
+            n = n + 1
+        }
+    }
+    cards_changed();
+    alp_toolbar(true);
+    if (alp_table != 0) msg(alp_table, sel("reloadData"));
+    px_open(n);
+    0
+}
+
+// I Know These: every line of the kind marked Known (cards made first).
+learn_know_all(_self: int, _cmd: int, sender: int): int {
+    kind: int = ln_command_code(sender);
+    if (kind != CK_LETTER && kind != CK_JOINED) return 0;
+    for i in 0..lt_n {
+        if (lt_lang[i] == lg && lt_kind[i] == kind && !cd_known(cl_of[i])) {
+            k: int = if (cl_of[i] >= 0) cl_of[i] else learn_add_letter(i, FROM_KNOWN,
+                today(), time(0));
+            if (k >= 0) learn_mark_known(k, today(), time(0))
+        }
+    }
+    cards_changed();
+    alp_make();
+    if (alp_table != 0) {
+        fade_layer(msg(alp_table, sel("layer")), 0.2f64);
+        msg(alp_table, sel("reloadData"))
+    }
+    alp_toolbar(true);
+    0
+}
+
+// ---- Your Words (Â§14.3.4) ----
+ywd_class: int = 0;
+
+ywd_vc: int = 0;
+
+ywd_table: int = 0;
+
+ywd_search: int = 0;
+
+// The rows: word cards by section (0 Today, 1 New, 2 Later), then (3)
+// Letters and Joined Words, one row.
+ywd_row: []int = new int[16384](0);
+
+ywd_sec_kind: []int = new int[4](0);
+
+ywd_sec_start: []int = new int[4](0);
+
+ywd_sec_count: []int = new int[4](0);
+
+ywd_n: int = 0;
+
+// What is typed, folded.
+ywd_q: []i8 = new i8[256](0i8);
+
+ywd_q_n: int = 0;
+
+open_your_words() {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    ensure_learn_lang();
+    vc: int = pushed_list(ywd_class, "Your Words");
+    ywd_vc = held(ywd_vc, vc);
+    ywd_table = held(ywd_table, msg(vc, sel("tableView")));
+    ywd_q_n = 0;
+    item: int = msg(vc, sel("navigationItem"));
+    sc: int = msg1(msg(cls("UISearchController"), sel("alloc")), sel("initWithSearchResultsController:"),
+        0);
+    msg1(sc, sel("setObscuresBackgroundDuringPresentation:"), 0);
+    msg1(sc, sel("setHidesNavigationBarDuringPresentation:"), 0);
+    msg1(sc, sel("setSearchResultsUpdater:"), app_obj);
+    msg1(msg(sc, sel("searchBar")), sel("setPlaceholder:"), nsstring("Search Words"));
+    msg1(msg(sc, sel("searchBar")), sel("setAutocorrectionType:"), 1);
+    msg1(item, sel("setSearchController:"), sc);
+    search_stacked(item);
+    msg1(item, sel("setHidesSearchBarWhenScrolling:"), 0);
+    ywd_search = held(ywd_search, sc);
+    release(sc);
+    ywd_build();
+    ywd_toolbar(false);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+ywd_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, ywd_class, cmd, animated);
+    if (ywd_table == 0 || msg(self, sel("tableView")) != ywd_table) return 0;
+    ywd_build();
+    msg(ywd_table, sel("reloadData"));
+    ywd_toolbar(false);
+    0
+}
+
+ywd_build() {
+    td_: int = today();
+    ywd_n = 0;
+    n: int = 0;
+    for sec in 0..3 {
+        start: int = n;
+        for k in 0..cd_n {
+            if (cd_lang[k] == lg && cd_kind[k] == CK_WORD && ywd_in(k, sec, td_) && ywd_matches(k)) {
+                ywd_row[n] = k;
+                n = n + 1
+            }
+        }
+        // (Today's: Â§14.1.8's order; New's as added; Later's soonest
+        // first.)
+        for x in start + 1..n {
+            j: int = x;
+            while (j > start && cd_before(ywd_row[j], ywd_row[j - 1])) {
+                t: int = ywd_row[j];
+                ywd_row[j] = ywd_row[j - 1];
+                ywd_row[j - 1] = t;
+                j = j - 1
+            }
+        }
+        if (n > start) {
+            ywd_sec_kind[ywd_n] = sec;
+            ywd_sec_start[ywd_n] = start;
+            ywd_sec_count[ywd_n] = n - start;
+            ywd_n = ywd_n + 1
+        }
+    }
+    if (ywd_q_n == 0 && letters_carded(lg, CK_LETTER) + letters_carded(lg, CK_JOINED) > 0) {
+        ywd_sec_kind[ywd_n] = 3;
+        ywd_sec_start[ywd_n] = n;
+        ywd_sec_count[ywd_n] = 1;
+        ywd_n = ywd_n + 1
+    }
+    if (ywd_vc != 0) {
+        if (ywd_n == 0) empty_state(ywd_vc, ywd_table, if (ywd_q_n > 0) "magnifyingglass" else "character.book.closed",
+            nsstring(if (ywd_q_n > 0) "No Results" else "No Words Yet"), if (ywd_q_n > 0) "" else "Add words to learn them, most common first or from your reading.") else empty_state(ywd_vc,
+            ywd_table, "", 0, "")
+    }
+}
+
+ywd_in(k: int, sec: int, d: int): bool {
+    if (sec == 1) return cd_state[k] == MS_NEW;
+    if (cd_state[k] == MS_NEW) return false;
+    if (sec == 0) cd_due[k] <= d else cd_due[k] > d
+}
+
+// A code point folded for the search: a Greek letter its base (lower
+// case), Latin's without its marks, Hebrew's points dropped (-1).
+ln_fold(cp: int): int {
+    info: int = greek_info(cp);
+    if (info != 0) return 944 + (info & 31);
+    if (cp >= 1425 && cp <= 1479 && cp != 1470) return -1;
+    if (cp >= 768 && cp <= 879) return -1;
+    if (cp == 1498) return 1499;
+    if (cp == 1501) return 1502;
+    if (cp == 1503) return 1504;
+    if (cp == 1507) return 1508;
+    if (cp == 1509) return 1510;
+    mem_fold(cp)
+}
+
+// Bytes a to b of x folded into lf_buf.
+lf_buf: []i8 = new i8[1024](0i8);
+
+lf_n: int = 0;
+
+ln_fold_into(x: []i8, a: int, b: int) {
+    lf_n = 0;
+    p: int = a;
+    while (p < b) {
+        cp: int = cp_at(x, p, b);
+        p = p + cp_len;
+        f: int = ln_fold(cp);
+        if (f >= 0) lf_n = cp_put(lf_buf, lf_n, f)
+    }
+}
+
+lf_has_query(): bool {
+    for i in 0..lf_n - ywd_q_n + 1 {
+        same: bool = true;
+        j: int = 0;
+        while (same && j < ywd_q_n) {
+            if (lf_buf[i + j] != ywd_q[j]) same = false;
+            j = j + 1
+        }
+        if (same) return true
+    }
+    false
+}
+
+// Whether card k's lemma, transliteration or gloss has what is typed.
+ywd_matches(k: int): bool {
+    if (ywd_q_n == 0) return true;
+    p: int = lex_first(cd_lang[k] == 0, cd_key[k]);
+    if (p < 0) return false;
+    for f in [0, 1, 3] {
+        lex_field(p, f);
+        ln_fold_into(llex, lf_b, lf_e);
+        if (lf_has_query()) return true
+    }
+    false
+}
+
+ywd_typed(text: int) {
+    n: int = nsstring_into(text, link_buf);
+    ln_fold_into(link_buf, 0, n);
+    ywd_q_n = (if (lf_n > len(ywd_q)) len(ywd_q) else lf_n);
+    for i in 0..ywd_q_n ywd_q[i] = lf_buf[i];
+    ywd_build();
+    if (ywd_table != 0) msg(ywd_table, sel("reloadData"))
+}
+
+ywd_names: []str = ["Today", "New", "Later", "Letters and Joined Words"];
+
+ywd_header(s: int): int {
+    if (s < ywd_n) nsstring(ywd_names[ywd_sec_kind[s]]) else 0
+}
+
+ywd_rows(s: int): int {
+    if (s < ywd_n) ywd_sec_count[s] else 0
+}
+
+ywd_card(path: int): int {
+    s: int = msg(path, sel("section"));
+    if (s >= ywd_n || ywd_sec_kind[s] == 3) return -1;
+    ywd_row[ywd_sec_start[s] + msg(path, sel("row"))]
+}
+
+ywd_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    if (s < ywd_n && ywd_sec_kind[s] == 3) {
+        cell: int = list_cell(t, "ywd-letters", 2);
+        config: int = list_config(2);
+        fbuf_n = 0;
+        fput_int(letters_of(lg));
+        fput_str(" letters \Â\· ");
+        if (kn_alpha[lg]) fput_str("known") else {
+            fput_int(letters_known(lg));
+            fput_str(" known")
+        }
+        msg1(config, sel("setText:"), fstring());
+        row_text_style(config);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    k: int = ywd_card(path);
+    cell: int = list_cell(t, "ywd", 2);
+    if (k < 0) return cell;
+    config: int = list_config(2);
+    fbuf_n = 0;
+    fput_card_state(k, today());
+    fput_str(" \Â\· ");
+    fput_count(vk_count_of(cd_lang[k], cd_key[k]));
+    fput_str(" times");
+    line: int = fstring();
+    ln_word_row(config, cd_lang[k], cd_key[k], line);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    known: bool = cd_known(k);
+    msg1(cell, sel("setAccessoryView:"), ln_menu_button(card_code(k), known, true));
+    ln_word_label(cell, cd_lang[k], cd_key[k], line);
+    n: int = 0;
+    if (!known) {
+        a: int = custom_action("Mark as Known", "learnAxKnown:");
+        objc_setAssociatedObject(a, ints_address(ln_action_key), nsnumber_int(card_code(k)),
+            1);
+        ln_items[n] = a;
+        n = n + 1
+    }
+    d: int = custom_action("Delete", "learnAxDelete:");
+    objc_setAssociatedObject(d, ints_address(ln_action_key), nsnumber_int(card_code(k)),
+        1);
+    ln_items[n] = d;
+    n = n + 1;
+    msg1(cell, sel("setAccessibilityCustomActions:"), nsarray(ln_items, n));
+    cell
+}
+
+learn_ax_known(_self: int, _cmd: int, a: int): int {
+    n: int = objc_getAssociatedObject(a, ints_address(ln_action_key));
+    if (n != 0) ln_mark_code(msg(n, sel("longValue")));
+    1
+}
+
+learn_ax_delete(_self: int, _cmd: int, a: int): int {
+    n: int = objc_getAssociatedObject(a, ints_address(ln_action_key));
+    if (n == 0) return 0;
+    k: int = card_by_code(msg(n, sel("longValue")));
+    if (k < 0) return 0;
+    learn_delete(k, time(0));
+    cards_changed();
+    ln_lists_changed();
+    1
+}
+
+ywd_picked(s: int, r: int) {
+    if (s < ywd_n && ywd_sec_kind[s] == 3) {
+        open_alphabet();
+        return
+    }
+    k: int = if (s < ywd_n) ywd_row[ywd_sec_start[s] + r] else -1;
+    if (k >= 0) open_lemma(cd_lang[k] == 0, cd_key[k])
+}
+
+// A row swiped away: its card deleted (no confirmation; logged).
+ywd_delete(path: int) {
+    k: int = ywd_card(path);
+    if (k < 0) return;
+    s: int = msg(path, sel("section"));
+    had: int = ywd_sec_count[s];
+    sections: int = ywd_n;
+    learn_delete(k, time(0));
+    cards_changed();
+    ywd_build();
+    one[0] = path;
+    if (had == 1 || ywd_n != sections) msg(ywd_table, sel("reloadData")) else msg2(ywd_table,
+        sel("deleteRowsAtIndexPaths:withRowAnimation:"), nsarray(one, 1), 100);
+    ywd_toolbar(true)
+}
+
+// The toolbar: Practice (while some are due) in the middle, plus on the
+// right (Add Words).
+ywd_toolbar(animated: bool) {
+    if (ywd_vc == 0) return;
+    cd_count_today(lg, today());
+    n: int = 0;
+    ywd_items[n] = px_flex();
+    n = n + 1;
+    if (cd_new_n + cd_review_n > 0) {
+        ywd_items[n] = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:style:target:action:"),
+            nsstring("Practice"), 2, app_obj, sel("learnPractice:")), sel("autorelease"));
+        n = n + 1;
+        ywd_items[n] = px_flex();
+        n = n + 1
+    }
+    add: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
+        symbol("plus", 17.0f64, 4, 0), 0, app_obj, sel("learnAddWords:")), sel("autorelease"));
+    msg1(add, sel("setAccessibilityLabel:"), nsstring("Add Words"));
+    ywd_items[n] = add;
+    n = n + 1;
+    msg2(ywd_vc, sel("setToolbarItems:animated:"), nsarray(ywd_items, n), if (animated) 1 else 0)
+}
+
+ywd_items: []int = new int[6](0);
+
+learn_practice(_self: int, _cmd: int, _b: int): int {
+    practice_open_cards(lg, false);
+    0
+}
+
+learn_add_words(_self: int, _cmd: int, _b: int): int {
+    open_add_words();
+    0
+}
+
+// ---- Add Words (Â§14.3.5) ----
+adw_class: int = 0;
+
+adw_table: int = 0;
+
+// From Your Reading's rows: each one's range, its title (adw_pool) and
+// line, and its words to learn.
+// (A ninth slot, ADW_OTHER: a range previewed from elsewhere, a Memory
+// passage's details.)
+ADW_MOST: int = 8;
+
+ADW_OTHER: int = 8;
+
+adw_n: int = 0;
+
+adw_c1: []int = new int[9](0);
+
+adw_v1: []int = new int[9](0);
+
+adw_c2: []int = new int[9](0);
+
+adw_v2: []int = new int[9](0);
+
+adw_left: []int = new int[9](0);
+
+adw_title_b: []int = new int[9](0);
+
+adw_title_e: []int = new int[9](0);
+
+adw_pool: []i8 = new i8[2048](0i8);
+
+adw_pool_n: int = 0;
+
+// Related to Words You Know's words to learn (Â§14.10b.2).
+adw_related: int = 0;
+
+open_add_words() {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    ensure_learn_lang();
+    adw_make();
+    vc: int = pushed_list(adw_class, "Add Words");
+    adw_table = held(adw_table, msg(vc, sel("tableView")));
+    msg1(vc, sel("setToolbarItems:"), nsarray(ln_items, 0));
+    fbuf_n = 0;
+    fput_str("bible: learn add words, related ");
+    fput_int(adw_related);
+    fput_str(", from your reading ");
+    fput_int(adw_n);
+    note_ns(fstring());
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+// A row of From Your Reading (if it has a word to learn, and is not one
+// already): its title from fbuf's bytes from b.
+adw_add(
+    c1: int,
+    v1: int,
+    c2: int,
+    v2: int,
+    b: int
+) {
+    if (adw_n >= ADW_MOST || c1 < 0 || ch_lang(c1) != lg) {
+        fbuf_n = b;
+        return
+    }
+    for x in 0..adw_n {
+        if (adw_c1[x] == c1 && adw_v1[x] == v1 && adw_c2[x] == c2 && adw_v2[x] == v2) {
+            fbuf_n = b;
+            return
+        }
+    }
+    learn_words_of(c1, v1, c2, v2);
+    if (wu_n == 0) {
+        fbuf_n = b;
+        return
+    }
+    i: int = adw_n;
+    adw_c1[i] = c1;
+    adw_v1[i] = v1;
+    adw_c2[i] = c2;
+    adw_v2[i] = v2;
+    adw_left[i] = wu_n;
+    adw_title_b[i] = adw_pool_n;
+    for x in b..fbuf_n {
+        if (adw_pool_n < len(adw_pool)) {
+            adw_pool[adw_pool_n] = fbuf[x];
+            adw_pool_n = adw_pool_n + 1
+        }
+    }
+    adw_title_e[i] = adw_pool_n;
+    adw_n = adw_n + 1;
+    fbuf_n = b
+}
+
+adw_make() {
+    learn_related_words(lg);
+    adw_related = rel_new_n;
+    adw_n = 0;
+    adw_pool_n = 0;
+    fbuf_n = 0;
+    // The chapter being read.
+    if (cur >= 0 && cur < chapters) {
+        fput_title(cur);
+        adw_add(cur, 1, cur, bsb_verses(cur), 0)
+    }
+    // Each ribbon's chapter, by its name.
+    for i in 0..rb_n {
+        c: int = rb_c[i];
+        if (c >= 0 && c < chapters) {
+            fbuf_n = 0;
+            for x in 0..rb_name_n[i] fput(rb_name[i * RB_NAME_BYTES + x] as int);
+            fput_str(" \Â\· ");
+            fput_title(c);
+            adw_add(c, 1, c, bsb_verses(c), 0)
+        }
+    }
+    // Each Memory passage.
+    for i in 0..mq_n {
+        fbuf_n = 0;
+        fput_passage(i);
+        fput_str(" (memorizing)");
+        adw_add(mq_c1[i], mq_v1[i], mq_c2[i], mq_v2[i], 0)
+    }
+    // The newest highlighted or noted chapters.
+    seen: int = 0;
+    while (adw_n < ADW_MOST && seen < 40) {
+        best: int = -1;
+        best_t: int = -1;
+        for i in 0..hl_n {
+            c: int = key_chapter(hl_key[i]);
+            if (hl_time[i] > best_t && !adw_has_chapter(c)) {
+                best = c;
+                best_t = hl_time[i]
+            }
+        }
+        for i in 0..nt_n {
+            c: int = key_chapter(nt_key[i]);
+            if (nt_time[i] > best_t && !adw_has_chapter(c)) {
+                best = c;
+                best_t = nt_time[i]
+            }
+        }
+        if (best < 0) seen = 40 else {
+            fbuf_n = 0;
+            fput_title(best);
+            n0: int = adw_n;
+            adw_add(best, 1, best, bsb_verses(best), 0);
+            if (adw_n == n0) adw_skip(best);
+            seen = seen + 1
+        }
+    }
+    adw_skipped_n = 0
+}
+
+// The chapters passed over (no words to learn, or the other testament).
+adw_skipped: []int = new int[64](0);
+
+adw_skipped_n: int = 0;
+
+adw_skip(c: int) {
+    if (adw_skipped_n < len(adw_skipped)) {
+        adw_skipped[adw_skipped_n] = c;
+        adw_skipped_n = adw_skipped_n + 1
+    }
+}
+
+adw_has_chapter(c: int): bool {
+    for x in 0..adw_n
+        if (adw_c1[x] == c && adw_c2[x] == c && adw_v1[x] == 1) return true;
+    for x in 0..adw_skipped_n
+        if (adw_skipped[x] == c) return true;
+    false
+}
+
+// Its sections: Most Common; Related to Words You Know (a row, once a
+// known word has a neighbour to learn); From Your Reading; From Study.
+adw_sections(): int {
+    4
+}
+
+adw_rows(s: int): int {
+    if (s == 0) 1 else if (s == 1)
+        if (adw_related > 0) 1 else 0 else if (s == 2) adw_n else 0
+}
+
+adw_header(s: int): int {
+    if (s == 0) return nsstring("Most Common");
+    if (s == 2 && adw_n > 0) return nsstring("From Your Reading");
+    if (s == 3) return nsstring("From Study");
+    0
+}
+
+adw_footer(s: int): int {
+    if (s == 3) nsstring("In a word study, tap Learn This Word to add it.") else 0
+}
+
+adw_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    r: int = msg(path, sel("row"));
+    cell: int = list_cell(t, "adw", 2);
+    config: int = list_config(2);
+    if (s == 0) {
+        msg1(config, sel("setText:"), nsstring("The Next 10 Most Common"));
+        learn_next(lg, 5);
+        a: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+        fbuf_n = 0;
+        for x in 0..ln_next_n {
+            if (x > 0) fput_str(", ");
+            if (lg == 1) fput_rli();
+            fput_lemma(lg, ln_next[x], 0);
+            if (lg == 1) fput_pdi()
+        }
+        if (ln_next_n > 0) fput_str(" \â\€\¦");
+        append(a, fstring(), original_font(lg == 0, 15.0f64, 17.0f64), c_faint);
+        msg1(config, sel("setSecondaryAttributedText:"), a)
+    } else if (s == 1) {
+        // "Related to Words You Know", "24 words".
+        msg1(config, sel("setText:"), nsstring("Related to Words You Know"));
+        fbuf_n = 0;
+        fput_count(adw_related);
+        fput_str(if (adw_related == 1) " word" else " words");
+        msg1(config, sel("setSecondaryText:"), fstring())
+    } else if (r < adw_n) {
+        msg1(config, sel("setText:"), ns_of(adw_pool, adw_title_b[r], adw_title_e[r]));
+        fbuf_n = 0;
+        fput_int(adw_left[r]);
+        fput_str(if (adw_left[r] == 1) " word to learn" else " words to learn");
+        msg1(config, sel("setSecondaryText:"), fstring())
+    }
+    row_text_style(config);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryType:"), 1);
+    cell
+}
+
+adw_picked(s: int, r: int) {
+    if (s == 0) open_word_preview(WPV_MOST) else if (s == 1) open_word_preview(WPV_RELATED) else if (r < adw_n) open_word_preview(r)
+}
+
+// A range's preview, its title in fbuf (a Memory passage's: Â§14.3.6).
+open_word_preview_range(
+    c1: int,
+    v1: int,
+    c2: int,
+    v2: int
+) {
+    i: int = ADW_OTHER;
+    adw_c1[i] = c1;
+    adw_v1[i] = v1;
+    adw_c2[i] = c2;
+    adw_v2[i] = v2;
+    // (Its title at the pool's end, after Add Words' own.)
+    at: int = adw_pool_n;
+    if (at + fbuf_n > len(adw_pool)) at = 0;
+    adw_title_b[i] = at;
+    for x in 0..fbuf_n
+        if (at + x < len(adw_pool)) adw_pool[at + x] = fbuf[x];
+    adw_title_e[i] = at + fbuf_n;
+    open_word_preview(i)
+}
+
+// ---- the preview (Â§14.3.5) ----
+wpv_class: int = 0;
+
+wpv_vc: int = 0;
+
+wpv_table: int = 0;
+
+// Its words: each one's number, and its count in the passage (-1: the
+// most common's or related words' preview); and where they came from
+// (wpv_from: a passage's row of Add Words, or WPV_MOST, WPV_RELATED).
+WPV_MOST: int = -1;
+
+WPV_RELATED: int = -2;
+
+wpv_num: []int = new int[1024](0);
+
+wpv_count: []int = new int[1024](0);
+
+wpv_n: int = 0;
+
+wpv_from: int = -1;
+
+open_word_preview(from: int) {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    wpv_from = from;
+    wpv_n = 0;
+    if (from == WPV_MOST) {
+        learn_next(lg, 10);
+        for x in 0..ln_next_n {
+            wpv_num[x] = ln_next[x];
+            wpv_count[x] = -1
+        }
+        wpv_n = ln_next_n
+    } else if (from == WPV_RELATED) {
+        learn_related_words(lg);
+        for x in 0..rel_new_n {
+            if (x < len(wpv_num)) {
+                wpv_num[x] = rel_new[x];
+                wpv_count[x] = -1;
+                wpv_n = x + 1
+            }
+        }
+    } else {
+        learn_words_of(adw_c1[from], adw_v1[from], adw_c2[from], adw_v2[from]);
+        for x in 0..wu_n {
+            wpv_num[x] = wu_num[x];
+            wpv_count[x] = wu_count[x]
+        }
+        wpv_n = wu_n
+    }
+    title: int = if (from == WPV_MOST) nsstring("Most Common") else if (from == WPV_RELATED) nsstring("Related") else ns_of(adw_pool,
+        adw_title_b[from], adw_title_e[from]);
+    vc: int = msg(msg1(msg(wpv_class, sel("alloc")), sel("initWithStyle:"), 0), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), title);
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    msg1(msg(vc, sel("navigationItem")), sel("setRightBarButtonItem:"), system_item(0,
+        "closeSheet:"));
+    wpv_vc = held(wpv_vc, vc);
+    wpv_table = held(wpv_table, msg(vc, sel("tableView")));
+    msg1(wpv_table, sel("setDataSource:"), app_obj);
+    msg1(wpv_table, sel("setDelegate:"), app_obj);
+    style_table(wpv_table, false);
+    W: f64 = view_width(msg(sheet_nav, sel("view")));
+    msg1(wpv_table, sel("setTableHeaderView:"), wpv_header(W));
+    wpv_toolbar(false);
+    fbuf_n = 0;
+    fput_str("bible: learn preview ");
+    if (from == WPV_MOST) fput_str("most common") else if (from == WPV_RELATED) fput_str("related") else fput_bytes(adw_pool,
+        adw_title_b[from], adw_title_e[from]);
+    fput_str(", words ");
+    fput_int(wpv_n);
+    note_ns(fstring());
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+// "These 10 words make up 37% of the New Testament." "These 23 words are
+// the words of John 3 you haven't learned, most common first." "These 24
+// words are related to words you know, most common first."
+wpv_header(W: f64): int {
+    fbuf_n = 0;
+    fput_str("These ");
+    fput_int(wpv_n);
+    fput_str(if (wpv_n == 1) " word " else " words ");
+    if (wpv_from == WPV_RELATED) fput_str(if (wpv_n == 1) "is related to words you know." else "are related to words you know, most common first.") else if (wpv_from < 0) {
+        fput_str(if (wpv_n == 1) "makes up " else "make up ");
+        fput_int(learn_set_coverage(lg, wpv_num, wpv_n));
+        fput_str("% of the ");
+        fput_str(testament_names[lg]);
+        fput(46)
+    } else {
+        fput_str(if (wpv_n == 1) "is the word of " else "are the words of ");
+        fput_bytes(adw_pool, adw_title_b[wpv_from], adw_title_e[wpv_from]);
+        fput_str(" you haven\â\€\™t learned, most common first.")
+    }
+    head: int = label_of(attributed(fstring(), body(scaled(17.0f64)), c_ink));
+    msg1(head, sel("setTextAlignment:"), 0);
+    msg1(head, sel("setNumberOfLines:"), 0);
+    label_size(head, W - 40.0f64);
+    h: f64 = hfa[1];
+    box: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, W, h + 32.0f64), sel("autorelease"));
+    msg_rect(head, sel("setFrame:"), 20.0f64, 16.0f64, W - 40.0f64, h);
+    msg1(box, sel("addSubview:"), head);
+    box
+}
+
+wpv_cell(t: int, path: int): int {
+    r: int = msg(path, sel("row"));
+    cell: int = list_cell(t, "wpv", 2);
+    if (r >= wpv_n) return cell;
+    config: int = list_config(2);
+    line: int = 0;
+    if (wpv_count[r] >= 0) {
+        fbuf_n = 0;
+        fput_str("\Ã\— ");
+        fput_int(wpv_count[r]);
+        line = fstring()
+    }
+    ln_word_row(config, lg, wpv_num[r], line);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    // Its count in the testament, then its menu.
+    box: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, 100.0f64, 32.0f64), sel("autorelease"));
+    count: int = today_label(msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
+        objc_const("UIFontTextStyleBody")), c_faint, 1);
+    fbuf_n = 0;
+    fput_count(vk_count_of(lg, wpv_num[r]));
+    msg1(count, sel("setText:"), fstring());
+    msg(count, sel("sizeToFit"));
+    cw: f64 = view_width(count);
+    ch: f64 = view_height(count);
+    menu: int = ln_menu_button(word_code(lg, wpv_num[r]), false, false);
+    msg_rect(box, sel("setFrame:"), 0.0f64, 0.0f64, cw + 8.0f64 + 32.0f64, if (ch > 32.0f64) ch else 32.0f64);
+    msg_rect(count, sel("setFrame:"), 0.0f64, (view_height(box) - ch) / 2.0f64, cw,
+        ch);
+    msg_rect(menu, sel("setFrame:"), cw + 8.0f64, (view_height(box) - 32.0f64) / 2.0f64,
+        32.0f64, 32.0f64);
+    msg1(box, sel("addSubview:"), count);
+    msg1(box, sel("addSubview:"), menu);
+    msg1(cell, sel("setAccessoryView:"), box);
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    fbuf_n = 0;
+    fput_count(vk_count_of(lg, wpv_num[r]));
+    fput_str(" times in the ");
+    fput_str(testament_names[lg]);
+    ln_word_label(cell, lg, wpv_num[r], fstring());
+    a: int = custom_action("Mark as Known", "learnAxKnown:");
+    objc_setAssociatedObject(a, ints_address(ln_action_key), nsnumber_int(word_code(lg,
+        wpv_num[r])), 1);
+    one[0] = a;
+    msg1(cell, sel("setAccessibilityCustomActions:"), nsarray(one, 1));
+    cell
+}
+
+// A row marked known: it fades out of the preview.
+wpv_marked(lang: int, num: int) {
+    at: int = -1;
+    for x in 0..wpv_n
+        if (wpv_num[x] == num && lang == lg) at = x;
+    if (at < 0) return;
+    for x in at..wpv_n - 1 {
+        wpv_num[x] = wpv_num[x + 1];
+        wpv_count[x] = wpv_count[x + 1]
+    }
+    wpv_n = wpv_n - 1;
+    one[0] = msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), at, 0);
+    msg2(wpv_table, sel("deleteRowsAtIndexPaths:withRowAnimation:"), nsarray(one,
+        1), if (reduce_motion()) 5 else 0);
+    wpv_toolbar(true)
+}
+
+// Add 10 Words (the most common's), Add All 23 (20 or fewer), Add the
+// First 20: a set is never more than 20.
+wpv_toolbar(animated: bool) {
+    if (wpv_vc == 0) return;
+    if (wpv_n == 0) {
+        msg2(wpv_vc, sel("setToolbarItems:animated:"), nsarray(ln_items, 0), if (animated) 1 else 0);
+        return
+    }
+    fbuf_n = 0;
+    if (wpv_from == WPV_MOST) {
+        fput_str("Add ");
+        fput_int(wpv_n);
+        fput_str(if (wpv_n == 1) " Word" else " Words")
+    } else if (wpv_n <= 20) {
+        fput_str("Add All ");
+        fput_int(wpv_n)
+    } else fput_str("Add the First 20");
+    wpv_items[0] = px_flex();
+    wpv_items[1] = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:style:target:action:"),
+        fstring(), 2, app_obj, sel("learnPreviewAdd:")), sel("autorelease"));
+    wpv_items[2] = px_flex();
+    msg2(wpv_vc, sel("setToolbarItems:animated:"), nsarray(wpv_items, 3), if (animated) 1 else 0)
+}
+
+wpv_items: []int = new int[4](0);
+
+// Adding: the set's cards made (due today), back to the language page,
+// and a toast.
+learn_preview_add(_self: int, _cmd: int, _b: int): int {
+    n: int = 0;
+    from: int = if (wpv_from == WPV_MOST) FROM_FREQ else if (wpv_from == WPV_RELATED) FROM_RELATED else FROM_PASSAGE;
+    for x in 0..wpv_n {
+        if (n < 20 && learn_add_word(lg, wpv_num[x], from, today(), time(0)) >= 0) n = n + 1
+    }
+    cards_changed();
+    fbuf_n = 0;
+    fput_int(n);
+    fput_str(if (n == 1) " word added" else " words added");
+    toast_symbol(fstring(), "plus", 1.6f64);
+    fbuf_n = 0;
+    fput_str("bible: toast ");
+    fput_int(n);
+    fput_str(if (n == 1) " word added" else " words added");
+    note_ns(fstring());
+    sheet_nav: int = study_host();
+    if (sheet_nav != 0 && lgp_vc != 0) msg2(sheet_nav, sel("popToViewController:animated:"),
+        lgp_vc, 1);
+    0
+}
+
+// ---- Verses You Can Read (Â§14.3.7) ----
+vcr_class: int = 0;
+
+vcr_vc: int = 0;
+
+vcr_table: int = 0;
+
+// The sections shown (crv_sec's that have rows), and where each begins in
+// crv_*.
+vcr_sec: []int = new int[5](0);
+
+vcr_start: []int = new int[5](0);
+
+vcr_n: int = 0;
+
+vcr_names: []str = ["From Your Memory Verses", "From Your Highlights and Notes", "From What You\â\€\™ve Read",
+    "Elsewhere", "One Word to Learn"];
+
+open_readable() {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    ensure_learn_lang();
+    learn_readable(lg, time(0));
+    vcr_n = 0;
+    at: int = 0;
+    for s in 0..5 {
+        if (crv_count[s] > 0) {
+            vcr_sec[vcr_n] = s;
+            vcr_start[vcr_n] = at;
+            vcr_n = vcr_n + 1
+        }
+        at = at + crv_count[s]
+    }
+    vc: int = msg(msg1(msg(vcr_class, sel("alloc")), sel("initWithStyle:"), 0), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Verses You Can Read"));
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    msg1(msg(vc, sel("navigationItem")), sel("setRightBarButtonItem:"), system_item(0,
+        "closeSheet:"));
+    msg1(vc, sel("setToolbarItems:"), nsarray(ln_items, 0));
+    vcr_vc = held(vcr_vc, vc);
+    vcr_table = held(vcr_table, msg(vc, sel("tableView")));
+    msg1(vcr_table, sel("setDataSource:"), app_obj);
+    msg1(vcr_table, sel("setDelegate:"), app_obj);
+    style_table(vcr_table, false);
+    msg_rect(vcr_table, sel("setSeparatorInset:"), 0.0f64, 20.0f64, 0.0f64, 0.0f64);
+    if (vcr_n == 0) empty_state(vc, vcr_table, "text.book.closed", nsstring("No Verses Yet"),
+        "As you learn words, verses where you know every word appear here.");
+    fbuf_n = 0;
+    fput_str("bible: learn readable ");
+    fput_int(crv_readable);
+    fput_str(", sections");
+    for s in 0..5 {
+        fput(32);
+        fput_int(crv_count[s])
+    }
+    note_ns(fstring());
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+vcr_rows(s: int): int {
+    if (s < vcr_n) crv_count[vcr_sec[s]] else 0
+}
+
+vcr_header(s: int): int {
+    if (s < vcr_n) nsstring(vcr_names[vcr_sec[s]]) else 0
+}
+
+// The verse's original text, in the original order, at the inline size
+// (Hebrew right-aligned, right to left).
+vcr_text(vi: int): int {
+    lang: int = word_lang(v_first(vi));
+    fbuf_n = 0;
+    for o in 0..v_end(vi) - v_first(vi) {
+        w: int = word_at_order(vi, o);
+        if (w >= 0) {
+            if (o > 0) fput(32);
+            form_of(w);
+            fput_bytes(lforms, wf_b, wf_e)
+        }
+    }
+    a: int = attributed(fstring(), original_font(lang == 0, 17.0f64, 19.0f64), c_ink);
+    msg4(a, sel("addAttribute:value:range:"), k_para, orig_para(lang, if (lang == 1) 2 else 0,
+        if (lang == 1) 1.35f64 else 1.25f64), 0, msg(a, sel("length")));
+    a
+}
+
+vcr_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    x: int = vcr_start[s] + msg(path, sel("row"));
+    vi: int = crv_vi[x];
+    cell: int = list_cell(t, "vcr", 2);
+    config: int = list_config(2);
+    fbuf_n = 0;
+    fput_ref(v_chapter(vi), v_num(vi), 0);
+    w: int = crv_word[x];
+    if (w >= 0) {
+        // (The word to learn named: "Ï€ÏÏŒÏƒÏ‰Ï€Î¿Î½, face".)
+        fput_str(" \Â\· ");
+        lang: int = word_lang(w);
+        if (lang == 1) fput_rli();
+        fput_lemma(lang, w_strongs(w), 0);
+        if (lang == 1) fput_pdi();
+        fput_str(", ");
+        fput_lemma(lang, w_strongs(w), 3)
+    }
+    msg1(config, sel("setAttributedText:"), attributed(fstring(), sans(13.0f64, 0.3f64),
+        c_accent));
+    msg1(config, sel("setSecondaryAttributedText:"), vcr_text(vi));
+    msg1(detail_props(config), sel("setNumberOfLines:"), 0);
+    msg_set_f(config, sel("setTextToSecondaryTextVerticalPadding:"), 4.0f64);
+    msg_rect(config, sel("setDirectionalLayoutMargins:"), 12.0f64, 20.0f64, 12.0f64,
+        20.0f64);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    lang: int = word_lang(v_first(vi));
+    msg1(cell, sel("setAccessibilityLanguage:"), nsstring(if (lang == 0) "el" else "he"));
+    cell
+}
+
+// A verse: in the reader, in the Hebrew and Greek (the capsule back),
+// Â§14.11.6.
+vcr_picked(s: int, r: int) {
+    x: int = vcr_start[s] + r;
+    if (x >= crv_n) return;
+    vi: int = crv_vi[x];
+    c: int = v_chapter(vi);
+    v: int = v_num(vi);
+    dismiss_sheets();
+    switch_version(TEXT_ORIG);
+    jump(c, v)
+}
+
+// ---- Forms (Â§14.5.3) ----
+frm_class: int = 0;
+
+frm_table: int = 0;
+
+open_forms(greek: bool, num: int) {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    forms_of(greek, num);
+    forms_layout();
+    forms_renderings();
+    vc: int = msg(msg1(msg(frm_class, sel("alloc")), sel("initWithStyle:"), 2), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Forms"));
+    msg1(vc, sel("setHidesBottomBarWhenPushed:"), 1);
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    frm_table = held(frm_table, msg(vc, sel("tableView")));
+    msg1(frm_table, sel("setDataSource:"), app_obj);
+    msg1(frm_table, sel("setDelegate:"), app_obj);
+    style_table(frm_table, true);
+    msg_set_f(frm_table, sel("setEstimatedRowHeight:"), 56.0f64);
+    W: f64 = view_width(msg(sheet_nav, sel("view")));
+    msg1(frm_table, sel("setTableHeaderView:"), frm_header(W));
+    fbuf_n = 0;
+    fput_str("bible: learn forms ");
+    fput(if (greek) 71 else 72);
+    fput_int(num);
+    fput_str(", ");
+    fput_int(fo_total);
+    fput_str(" times, ");
+    fput_int(fs_n);
+    fput_str(" sections");
+    note_ns(fstring());
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+// The lemma (hero size), its transliteration, "Forms found in the Bible Â·
+// 143 times".
+frm_header(W: f64): int {
+    p: int = lex_first(fo_greek, fo_num);
+    if (p < 0) return 0;
+    lex_field(p, 0);
+    hero: int = label_of(attributed(ns_of(llex, lf_b, lf_e), original_font(fo_greek,
+        34.0f64, 40.0f64), c_ink));
+    lex_field(p, 1);
+    tr: int = label_of(attributed(ns_of(llex, lf_b, lf_e), italic_sans(17.0f64), c_faint));
+    fbuf_n = 0;
+    fput_str("Forms found in the Bible \Â\· ");
+    fput_count(fo_total);
+    fput_str(if (fo_total == 1) " time" else " times");
+    line: int = label_of(attributed(fstring(), sans(15.0f64, 0.0f64), msg_set_f(c_ink,
+        sel("colorWithAlphaComponent:"), 0.8f64)));
+    study_header_of(W, hero, tr, line)
+}
+
+// The number of distinct forms a lemma's parsings show (for the word
+// study's row: "23 forms").
+forms_count(): int {
+    n: int = 0;
+    for p in 0..fp_n {
+        dup: bool = false;
+        for q in 0..p
+            if (fp_form[q] == fp_form[p]) dup = true;
+        if (!dup) n = n + 1
+    }
+    n
+}
+
+// A section's header: its title, and over a grid's columns, their names
+// (Singular, Plural), once.
+frm_header_view(s: int): int {
+    if (s >= fs_n) return 0;
+    W: f64 = view_width(frm_table);
+    v: int = msg(make("UIView"), sel("autorelease"));
+    title: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(title, sel("setText:"), ns_of(fs_pool, fs_title_b[s], fs_title_e[s]));
+    // (The headline's size, to 26 points: at the largest sizes the table
+    // gives a header two lines, and "Present Active Indicative" fits them.)
+    hs: f64 = scaled(17.0f64);
+    msg1(title, sel("setFont:"), sans(if (hs > 26.0f64) 26.0f64 else hs, 0.4f64));
+    msg1(title, sel("setTextColor:"), c_ink);
+    msg1(title, sel("setNumberOfLines:"), 0);
+    // (Wrapped, not cut, at the largest sizes.)
+    msg_set_f(title, sel("setPreferredMaxLayoutWidth:"), W - 40.0f64);
+    msg1(title, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    msg1(v, sel("addSubview:"), title);
+    pin_to(title, "topAnchor", v, "topAnchor", 16.0f64);
+    pin_to(title, "leadingAnchor", v, "leadingAnchor", 20.0f64);
+    pin_to(title, "trailingAnchor", v, "trailingAnchor", -20.0f64);
+    last: int = title;
+    if (fs_grid[s] && !ax_size()) {
+        for c in 0..fs_cols[s] {
+            frm_column(W, fs_cols[s], c);
+            l: int = msg(make("UILabel"), sel("autorelease"));
+            msg1(l, sel("setText:"), nsstring(if (fs_cols[s] == 1) "Form" else if (c == 0) "Singular" else "Plural"));
+            msg1(l, sel("setFont:"), sans(13.0f64, 0.0f64));
+            msg1(l, sel("setTextColor:"), c_faint);
+            msg1(l, sel("setTextAlignment:"), 1);
+            msg1(l, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+            msg1(v, sel("addSubview:"), l);
+            pin_to(l, "topAnchor", title, "bottomAnchor", 4.0f64);
+            pin_to(l, "leadingAnchor", v, "leadingAnchor", frm_cx);
+            pin_size(l, "widthAnchor", frm_cw);
+            last = l
+        }
+    }
+    pin_to(last, "bottomAnchor", v, "bottomAnchor", -6.0f64);
+    // (Its height given, its title's wrapped lines and all: the table
+    // measured it as one line at the largest sizes.)
+    label_size(title, W - 40.0f64);
+    h: f64 = 16.0f64 + hfa[1] + 6.0f64 + (if (last != title) 4.0f64 + 18.0f64 else 0.0f64);
+    pin_size(v, "heightAnchor", h);
+    v
+}
+
+// A grid's column c (of n) in a row of width W: its x and width, within
+// the inset group's row (16 points in from each side), after a label
+// column of 36%.
+frm_cx: f64 = 0.0f64;
+
+frm_cw: f64 = 0.0f64;
+
+frm_column(W: f64, n: int, c: int) {
+    // (As the cells lie: the row 16 points in, its margins 20, the label
+    // column, 16 points, then the cells to the trailing margin.)
+    inner: f64 = W - 32.0f64;
+    x0: f64 = 16.0f64 + 20.0f64 + inner * 0.36f64;
+    frm_cw = (W - 36.0f64 - x0) / n as f64;
+    frm_cx = x0 + c as f64 * frm_cw
+}
+
+frm_rows(s: int): int {
+    if (s < fs_n) fs_rows[s] else 0
+}
+
+// A grid row (a run-time cell): its label in a fixed leading column, then
+// the cells, each the commonest form over its count ("6Ã—"), or a faint
+// "â€”"; at the accessibility sizes stacked, each labelled. A list's row:
+// its form, its parsing, its count.
+frm_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    r: int = fs_row_at(s, msg(path, sel("row")));
+    cell: int = fresh_cell(t);
+    msg1(cell, sel("setBackgroundColor:"), cell_bg());
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    if (r < 0) return cell;
+    content: int = msg(cell, sel("contentView"));
+    if (!fs_grid[s]) {
+        g: int = fr_cell0[r];
+        config: int = list_config(2);
+        a: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+        fbuf_n = 0;
+        frm_put_form(g);
+        append(a, fstring(), original_font(fo_greek, 17.0f64, 19.0f64), c_ink);
+        msg1(config, sel("setAttributedText:"), a);
+        // (Under it, what it does in italic, then its parsing.)
+        sec: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+        fbuf_n = 0;
+        if (fput_form_rendering(g)) {
+            append(sec, fstring(), italic_sans(scaled(15.0f64)), c_ink);
+            append(sec, nsstring(" \Â\· "), sans(scaled(15.0f64), 0.0f64), c_faint)
+        }
+        fbuf_n = 0;
+        frm_put_parsing(g);
+        append(sec, fstring(), sans(scaled(15.0f64), 0.0f64), c_faint);
+        row_text_style(config);
+        msg1(config, sel("setSecondaryAttributedText:"), sec);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryView:"), value_disclosure(nsnumber_text(fo_count[g]),
+            c_faint));
+        msg1(cell, sel("setSelectionStyle:"), 3);
+        msg1(cell, sel("setTag:"), g + 1);
+        frm_cell_label(cell, g);
+        return cell
+    }
+    big: bool = ax_size();
+    W: f64 = view_width(frm_table);
+    label: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(label, sel("setText:"), ns_of(fs_pool, fr_label_b[r], fr_label_e[r]));
+    msg1(label, sel("setFont:"), sans(scaled(15.0f64), 0.0f64));
+    msg1(label, sel("setTextColor:"), c_faint);
+    msg1(label, sel("setNumberOfLines:"), 0);
+    msg1(label, sel("setIsAccessibilityElement:"), 0);
+    msg1(label, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    msg1(content, sel("addSubview:"), label);
+    guide: int = msg(content, sel("layoutMarginsGuide"));
+    pin_to(label, "leadingAnchor", guide, "leadingAnchor", 0.0f64);
+    pin_to(label, "topAnchor", guide, "topAnchor", 4.0f64);
+    cells: int = stack(if (big) 1 else 0, if (big) 8.0f64 else 16.0f64);
+    msg1(cells, sel("setDistribution:"), 1);
+    msg1(cells, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    for c in 0..fs_cols[s] {
+        g: int = if (c == 0) fr_cell0[r] else fr_cell1[r];
+        msg1(cells, sel("addArrangedSubview:"), frm_cell_view(g, if (big) if (fs_cols[s] == 1) "" else if (c == 0) "Singular" else "Plural" else "",
+            r, c))
+    }
+    msg1(content, sel("addSubview:"), cells);
+    if (big) {
+        pin_to(cells, "topAnchor", label, "bottomAnchor", 6.0f64);
+        pin_to(cells, "leadingAnchor", guide, "leadingAnchor", 0.0f64)
+    } else {
+        inner: f64 = W - 32.0f64;
+        pin_size(label, "widthAnchor", inner * 0.36f64 - 16.0f64);
+        pin_to(cells, "topAnchor", guide, "topAnchor", 0.0f64);
+        pin_to(cells, "leadingAnchor", label, "trailingAnchor", 16.0f64)
+    }
+    pin_to(cells, "trailingAnchor", guide, "trailingAnchor", 0.0f64);
+    pin_to(cells, "bottomAnchor", guide, "bottomAnchor", 0.0f64);
+    msg1(cell, sel("setAccessibilityElements:"), msg(cells, sel("arrangedSubviews")));
+    cell
+}
+
+// A grid's cell: a control of its parsing's form over what it does (the
+// BSB's commonest rendering, in italic) and its count, smaller (tapped:
+// the concordance of that parsing), or a faint "â€”"; labelled at the
+// accessibility sizes.
+frm_cell_view(
+    g: int,
+    name: str,
+    r: int,
+    c: int
+): int {
+    v: int = msg(make("UIControl"), sel("autorelease"));
+    col: int = stack(1, 1.0f64);
+    msg1(col, sel("setAlignment:"), 3);
+    msg1(col, sel("setUserInteractionEnabled:"), 0);
+    msg1(col, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    if (len(name) > 0) {
+        h: int = msg(make("UILabel"), sel("autorelease"));
+        msg1(h, sel("setText:"), nsstring(name));
+        msg1(h, sel("setFont:"), sans(scaled(13.0f64), 0.0f64));
+        msg1(h, sel("setTextColor:"), c_faint);
+        msg1(col, sel("addArrangedSubview:"), h)
+    }
+    f: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(f, sel("setTextAlignment:"), 1);
+    msg1(f, sel("setAdjustsFontSizeToFitWidth:"), 1);
+    msg_set_f(f, sel("setMinimumScaleFactor:"), 0.6f64);
+    if (g >= 0) {
+        fbuf_n = 0;
+        frm_put_form(g);
+        msg1(f, sel("setAttributedText:"), attributed(fstring(), original_font(fo_greek,
+            17.0f64, 19.0f64), c_ink));
+        msg1(col, sel("addArrangedSubview:"), f);
+        fbuf_n = 0;
+        if (fput_form_rendering(g)) {
+            e: int = msg(make("UILabel"), sel("autorelease"));
+            msg1(e, sel("setAttributedText:"), attributed(fstring(), italic_sans(scaled(14.0f64)),
+                msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.8f64)));
+            msg1(e, sel("setTextAlignment:"), 1);
+            msg1(e, sel("setNumberOfLines:"), 2);
+            msg1(col, sel("addArrangedSubview:"), e)
+        }
+        n: int = msg(make("UILabel"), sel("autorelease"));
+        fbuf_n = 0;
+        fput_int(fo_count[g]);
+        fput_str("\Ã\—");
+        msg1(n, sel("setText:"), fstring());
+        msg1(n, sel("setFont:"), sans(scaled(11.0f64), 0.0f64));
+        msg1(n, sel("setTextColor:"), c_faint);
+        msg1(col, sel("addArrangedSubview:"), n);
+        msg1(v, sel("setTag:"), g + 1);
+        msg3(v, sel("addTarget:action:forControlEvents:"), app_obj, sel("learnFormTapped:"),
+            64);
+        hover(v);
+        msg1(v, sel("setIsAccessibilityElement:"), 1);
+        frm_cell_label(v, g);
+        msg1(v, sel("setAccessibilityTraits:"), objc_const("UIAccessibilityTraitButton"))
+    } else {
+        msg1(f, sel("setText:"), nsstring("\â\€\”"));
+        msg1(f, sel("setFont:"), sans(scaled(17.0f64), 0.0f64));
+        msg1(f, sel("setTextColor:"), c_faint);
+        msg1(col, sel("addArrangedSubview:"), f);
+        msg1(v, sel("setIsAccessibilityElement:"), 1);
+        fbuf_n = 0;
+        fput_bytes(fs_pool, fr_label_b[r], fr_label_e[r]);
+        fput_str(if (c == 0) " singular" else " plural");
+        fput_str(", none");
+        msg1(v, sel("setAccessibilityLabel:"), fstring())
+    }
+    msg1(v, sel("addSubview:"), col);
+    pin_to(col, "topAnchor", v, "topAnchor", 6.0f64);
+    pin_to(col, "bottomAnchor", v, "bottomAnchor", -6.0f64);
+    pin_to(col, "leadingAnchor", v, "leadingAnchor", 0.0f64);
+    pin_to(col, "trailingAnchor", v, "trailingAnchor", 0.0f64);
+    v
+}
+
+// Parsing g's form (forms.txt's line).
+frm_put_form(g: int) {
+    if (g < 0 || fo_form[g] < 0) return;
+    p: int = form_at[fo_form[g]];
+    e: int = p;
+    while (e < lforms_len && lforms[e] as int != 9) e = e + 1;
+    fput_bytes(lforms, p, e)
+}
+
+// Its parsing in words: "aorist active indicative 3rd singular" (a
+// Greek verb's), else its description's main part, lower case ("qal
+// consecutive imperfect third person masculine singular"); an ending
+// named ("his").
+frm_put_parsing(g: int) {
+    pm_b = fo_code_b[g];
+    pm_e = fo_code_e[g];
+    at: int = pf_at(1);
+    if (fo_greek && pc(0) == 86 && pc(1) == 45 && at >= 0 && pf_len >= 3) {
+        t: int = fs_letter_index("PIFARL", lmorph[at] as int);
+        voice: int = greek_voice(at + 2, pf_len - 2);
+        mood: int = lmorph[at + 1] as int;
+        if (t >= 0 && voice >= 0) {
+            frm_lower(greek_tenses[t]);
+            fput(32);
+            frm_lower(greek_voices[voice]);
+            fput(32);
+            md: int = fs_letter_index("ISOMNP", mood);
+            if (md >= 0) fput_str(mood_words[md]);
+            p: int = pf_at(2);
+            if (p >= 0 && pf_len == 2) {
+                fput(32);
+                fput_str(ord_words[clamp(lmorph[p] as int - 49, 0, 2)]);
+                fput_str(if (lmorph[p + 1] as int == 80) " plural" else " singular")
+            } else if (p >= 0 && pf_len == 3) {
+                fput(32);
+                fput_str(case_words[clamp(fs_letter_index("NGDAV", lmorph[p] as int),
+                    0, 4)]);
+                fput(32);
+                fput_str(gender_words[clamp(fs_letter_index("MFN", lmorph[p + 1] as int),
+                    0, 2)]);
+                fput_str(if (lmorph[p + 2] as int == 80) " plural" else " singular")
+            }
+            frm_put_ending(g);
+            return
+        }
+    }
+    // (The description: " - " a space, lower case, "Verb " left out.)
+    a: int = fo_desc_b[g];
+    b: int = fo_desc_e[g];
+    if (b - a > 7 && lmorph[a] as int == 86 && lmorph[a + 1] as int == 101) a = a + 7;
+    last: int = 0;
+    i: int = a;
+    while (i < b) {
+        k: int = lmorph[i] as int;
+        if (k == 32 && i + 2 < b && lmorph[i + 1] as int == 45 && lmorph[i + 2] as int == 32) {
+            fput(32);
+            i = i + 3
+        } else {
+            if (k >= 65 && k <= 90) k = k + 32;
+            if (!(k == 32 && last == 32)) fput(k);
+            last = k;
+            i = i + 1
+        }
+    }
+    frm_put_ending(g)
+}
+
+mood_words: []str = ["indicative", "subjunctive", "optative", "imperative", "infinitive",
+    "participle"];
+
+ord_words: []str = ["1st", "2nd", "3rd"];
+
+case_words: []str = ["nominative", "genitive", "dative", "accusative", "vocative"];
+
+gender_words: []str = ["masculine", "feminine", "neuter"];
+
+frm_lower(s: str) {
+    for i in 0..len(s) {
+        k: int = s[i] as int;
+        fput(if (k >= 65 && k <= 90) k + 32 else k)
+    }
+}
+
+// A parsing's ending, named from its joined word's card: " + his, him".
+frm_put_ending(g: int) {
+    if (fo_end_e[g] <= fo_end_b[g]) return;
+    j: int = jp_of_code(fo_end_b[g], fo_end_e[g]);
+    if (j < 0 || jp_lt[j] < 0) return;
+    fput_str(" \Â\· ");
+    fput_lt(jp_lt[j], LF_NAME)
+}
+
+// "Aorist active indicative, 3rd person singular, Ä“gapÄ“sen, loved, 6
+// times."
+frm_cell_label(v: int, g: int) {
+    fbuf_n = 0;
+    frm_put_parsing(g);
+    if (fbuf_n > 0 && fbuf[0] as int >= 97 && fbuf[0] as int <= 122) fbuf[0] = (fbuf[0] as int - 32) trunc i8;
+    fput_str(", ");
+    if (g >= 0 && fo_form[g] >= 0) {
+        p: int = form_at[fo_form[g]];
+        while (p < lforms_len && lforms[p] as int != 9) p = p + 1;
+        e: int = p + 1;
+        while (e < lforms_len && lforms[e] as int != 10) e = e + 1;
+        fput_bytes(lforms, p + 1, e)
+    }
+    fput_str(", ");
+    if (fput_form_rendering(g)) fput_str(", ");
+    fput_int(fo_count[g]);
+    fput_str(if (fo_count[g] == 1) " time." else " times.");
+    msg1(v, sel("setAccessibilityLabel:"), fstring())
+}
+
+// A form tapped: the concordance of the lemma in that parsing.
+learn_form_tapped(_self: int, _cmd: int, v: int): int {
+    g: int = msg(v, sel("tag")) - 1;
+    if (g >= 0 && g < fo_n) open_form_concordance(g);
+    0
+}
+
+frm_picked(s: int, r: int) {
+    if (s >= fs_n || fs_grid[s]) return;
+    x: int = fs_row_at(s, r);
+    if (x >= 0 && fr_cell0[x] >= 0) open_form_concordance(fr_cell0[x])
+}
+
+// Practice closed: the pages under it shown afresh.
+learn_pages_refresh() {
+    if (lgp_table != 0) {
+        lgp_prepare();
+        msg(lgp_table, sel("reloadData"))
+    }
+    if (ywd_table != 0) {
+        ywd_build();
+        msg(ywd_table, sel("reloadData"));
+        ywd_toolbar(true)
+    }
+    if (alp_table != 0) {
+        alp_make();
+        msg(alp_table, sel("reloadData"));
+        alp_toolbar(true)
+    }
+}
+
+// The text's size changed: a card shown laid out again (the judgement
+// row stacked or not), the pages' rows at the new size.
+learn_text_size_changed() {
+    if (crd_active) {
+        crd_fill();
+        px_toolbar(false)
+    }
+    for t in [lgp_table, alp_table, ywd_table, frm_table, wpv_table, vcr_table]
+        if (t != 0) msg(t, sel("reloadData"))
+}
+
+// ---- the tables' data (dispatched from ios_sheets.l8) ----
+ln_is_table(t: int): bool {
+    t != 0 && (t == lgp_table || t == prn_table || t == alp_table || t == ywd_table || t == adw_table || t == wpv_table || t == vcr_table || t == frm_table)
+}
+
+ln_sections(t: int): int {
+    if (t == lgp_table) return lgp_n;
+    if (t == alp_table) return alp_sections();
+    if (t == ywd_table) return ywd_n;
+    if (t == adw_table) return adw_sections();
+    if (t == vcr_table) return vcr_n;
+    if (t == frm_table) return fs_n;
+    1
+}
+
+ln_rows(t: int, s: int): int {
+    if (t == lgp_table) return lgp_rows(s);
+    if (t == prn_table) return pron_count[lg];
+    if (t == alp_table) return alp_rows(s);
+    if (t == ywd_table) return ywd_rows(s);
+    if (t == adw_table) return adw_rows(s);
+    if (t == wpv_table) return wpv_n;
+    if (t == vcr_table) return vcr_rows(s);
+    if (t == frm_table) return frm_rows(s);
+    0
+}
+
+ln_header(t: int, s: int): int {
+    if (t == lgp_table) return lgp_header_title(s);
+    if (t == alp_table) return alp_header(s);
+    if (t == ywd_table) return ywd_header(s);
+    if (t == adw_table) return adw_header(s);
+    if (t == vcr_table) return vcr_header(s);
+    0
+}
+
+ln_footer(t: int, s: int): int {
+    if (t == lgp_table) return lgp_footer(s);
+    if (t == alp_table) return alp_footer(s);
+    if (t == adw_table) return adw_footer(s);
+    if (t == prn_table) return nsstring("Changes the sounds in the letter table and on letter cards. Words keep one transliteration.");
+    0
+}
+
+ln_header_view(t: int, s: int): int {
+    if (t == frm_table) frm_header_view(s) else 0
+}
+
+ln_cell(t: int, path: int): int {
+    if (t == lgp_table) return lgp_cell(t, path);
+    if (t == prn_table) return prn_cell(t, path);
+    if (t == alp_table) return alp_cell(t, path);
+    if (t == ywd_table) return ywd_cell(t, path);
+    if (t == adw_table) return adw_cell(t, path);
+    if (t == wpv_table) return wpv_cell(t, path);
+    if (t == vcr_table) return vcr_cell(t, path);
+    frm_cell(t, path)
+}
+
+ln_picked(t: int, s: int, r: int) {
+    if (t == lgp_table) lgp_picked(s, r);
+    if (t == prn_table) prn_picked(r);
+    if (t == alp_table) alp_picked(s, r);
+    if (t == ywd_table) ywd_picked(s, r);
+    if (t == adw_table) adw_picked(s, r);
+    if (t == vcr_table) vcr_picked(s, r);
+    if (t == frm_table) frm_picked(s, r)
+}
+
+ln_can_edit(t: int, path: int): bool {
+    t == ywd_table && ywd_card(path) >= 0
+}
+
+ln_commit(t: int, path: int) {
+    if (t == ywd_table) ywd_delete(path)
+}
+
+// Your Words' search, typed.
+ln_search_updated(sc: int): bool {
+    if (sc == 0 || sc != ywd_search) return false;
+    ywd_typed(msg(msg(sc, sel("searchBar")), sel("text")));
+    true
+}
+
+// The sheets gone: what they held let go.
+learn_sheet_gone() {
+    lgp_vc = held(lgp_vc, 0);
+    lgp_table = held(lgp_table, 0);
+    prn_table = held(prn_table, 0);
+    alp_vc = held(alp_vc, 0);
+    alp_table = held(alp_table, 0);
+    ywd_vc = held(ywd_vc, 0);
+    ywd_table = held(ywd_table, 0);
+    ywd_search = held(ywd_search, 0);
+    adw_table = held(adw_table, 0);
+    wpv_vc = held(wpv_vc, 0);
+    wpv_table = held(wpv_table, 0);
+    vcr_vc = held(vcr_vc, 0);
+    vcr_table = held(vcr_table, 0);
+    frm_table = held(frm_table, 0)
+}
+
+style_learn_sheets() {
+    for t in [lgp_table, prn_table, alp_table, ywd_table, adw_table, frm_table] {
+        if (t != 0) {
+            style_table(t, true);
+            msg(t, sel("reloadData"))
+        }
+    }
+    for t in [wpv_table, vcr_table] {
+        if (t != 0) {
+            style_table(t, false);
+            msg(t, sel("reloadData"))
+        }
+    }
+}
+
+make_learn_classes() {
+    lgp_class = objc_allocateClassPair(cls("UITableViewController"), "L8Language",
+        0);
+    add_method1(lgp_class, sel("viewWillAppear:"), &lgp_will_appear, "v@:B");
+    objc_registerClassPair(lgp_class);
+    prn_class = objc_allocateClassPair(cls("UITableViewController"), "L8Pronunciation",
+        0);
+    objc_registerClassPair(prn_class);
+    alp_class = objc_allocateClassPair(cls("UITableViewController"), "L8Alphabet",
+        0);
+    add_method1(alp_class, sel("viewWillAppear:"), &alp_will_appear, "v@:B");
+    objc_registerClassPair(alp_class);
+    ywd_class = objc_allocateClassPair(cls("UITableViewController"), "L8YourWords",
+        0);
+    add_method1(ywd_class, sel("viewWillAppear:"), &ywd_will_appear, "v@:B");
+    objc_registerClassPair(ywd_class);
+    adw_class = objc_allocateClassPair(cls("UITableViewController"), "L8AddWords",
+        0);
+    objc_registerClassPair(adw_class);
+    wpv_class = objc_allocateClassPair(cls("UITableViewController"), "L8AddPreview",
+        0);
+    objc_registerClassPair(wpv_class);
+    vcr_class = objc_allocateClassPair(cls("UITableViewController"), "L8Readable",
+        0);
+    objc_registerClassPair(vcr_class);
+    frm_class = objc_allocateClassPair(cls("UITableViewController"), "L8Forms", 0);
+    objc_registerClassPair(frm_class);
+    make_card_classes()
+}
+
+add_learn_methods(app: int) {
+    add_method1(app, sel("learnMarkKnown:"), &learn_mark_known_cmd, "B@:@");
+    add_method1(app, sel("learnDelete:"), &learn_delete_cmd, "B@:@");
+    add_method1(app, sel("learnAxKnown:"), &learn_ax_known, "B@:@");
+    add_method1(app, sel("learnAxDelete:"), &learn_ax_delete, "B@:@");
+    add_method1(app, sel("learnHideSwitched:"), &learn_hide_switched, "v@:@");
+    add_method1(app, sel("learnSpeakSwitched:"), &learn_speak_switched, "v@:@");
+    add_method1(app, sel("learnSpeakRow:"), &learn_speak_row, "B@:@");
+    add_method1(app, sel("learnLetters:"), &learn_letters, "v@:@");
+    add_method1(app, sel("learnKnowAll:"), &learn_know_all, "v@:@");
+    add_method1(app, sel("learnPractice:"), &learn_practice, "v@:@");
+    add_method1(app, sel("learnAddWords:"), &learn_add_words, "v@:@");
+    add_method1(app, sel("learnPreviewAdd:"), &learn_preview_add, "v@:@");
+    add_method1(app, sel("learnFormTapped:"), &learn_form_tapped, "v@:@");
+    add_card_methods(app)
+}
