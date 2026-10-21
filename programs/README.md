@@ -14,6 +14,7 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `wayland/` | `wayland.l8` | `wayland` | Native Wayland/xdg-shell windows, EGL, xkbcommon, and typed protocol bindings |
 | `tree-calculus/` | `main.l8` | `tree_calculus` | Ternary tree-calculus interpreter, correctness tests, and upstream benchmark runner |
 | `terminal/` | `terminal.l8` | — | Wayland/EGL/OpenGL/FreeType terminal with a syscall-backed PTY shell |
+| `profile-explorer/` | `profile-explorer.l8` | — | X11/OpenGL/FreeType timeline viewer for Chrome trace JSON and `perf script` output |
 | `character/` | `main.l8` | — | Viewer for figures written as text: shapes baked into a skinned mesh, poses, animations ([format](character/FORMAT.md)) |
 | `cad/` | `main.l8` | — | CAD viewer drawn by its own renderer: a handheld and its dock, their boards, cases and 3D, step by step how they go together, and how to order them ([README](cad/README.md)) |
 | `recipes/` | `main.l8` | — | Recipe book drawn by its own renderer: say what is in the kitchen and the recipes rank by it, with what a serving gives ([README](recipes/README.md)) |
@@ -52,6 +53,9 @@ make game
 make terminal
 .build/terminal
 make terminal-test
+make profile-explorer
+.build/profile-explorer trace.json        # or: perf script | .build/profile-explorer -
+make profile-explorer-test
 make http
 make http-test
 make websocket

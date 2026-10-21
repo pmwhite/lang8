@@ -50,6 +50,7 @@ build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
 .PHONY: all check fmt selfhost compiler-test game skate malton race race-test character character-test cad cad-test recipes recipes-test stdlib-test \
 	terminal terminal-test callback-test http http-test websocket websocket-test wasm-test web \
+	profile-explorer profile-explorer-test \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
 
 # Formatting rewrites src2, so finish it before anything reads the sources.
@@ -57,7 +58,8 @@ all:
 	@$(MAKE) -s $(OK)/fmt $(OK)/stage1-tests
 	@$(MAKE) -s check
 
-check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/character $(OK)/character-tests $(BUILD)/cad $(OK)/cad-tests $(BUILD)/recipes $(OK)/recipes-tests
+check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/character $(OK)/character-tests $(BUILD)/cad $(OK)/cad-tests $(BUILD)/recipes $(OK)/recipes-tests \
+	$(BUILD)/profile-explorer $(OK)/profile-explorer-tests
 
 # ---- compiler stages ----
 
@@ -220,6 +222,16 @@ terminal-test: $(BUILD)/terminal $(BUILD)/terminal-pty-test
 	@$(STEP) 'PTY closed stdio' env SHELL=/bin/sh LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= $(BUILD)/terminal-pty-test --closed-stdio
 	@$(STEP) 'PTY Wayland' python3 programs/terminal/test_integration.py $(BUILD)/terminal
 
+$(BUILD)/profile-explorer: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'profile explorer' sh -c '$(call build,l8c3,programs/profile-explorer/profile-explorer.l8)'
+
+$(OK)/profile-explorer-tests: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	+@$(STEP) 'profile explorer tests' ./l8c3 test programs/profile-explorer/test.l8
+	@touch $@
+
+profile-explorer: $(BUILD)/profile-explorer
+profile-explorer-test: $(OK)/profile-explorer-tests
+
 # Stage 1 must also handle function values and C callbacks (needs cc and as).
 callback-test: l8c1
 	@$(STEP) 'C callbacks' python3 tests/callbacks/test_callbacks.py ./l8c1 $(BUILD)/callbacks
@@ -369,7 +381,7 @@ help:
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
 	@echo '  stdlib-test, game, skate, race, race-test, character, character-test, cad, cad-test, recipes, recipes-test, terminal, terminal-test, callback-test'
-	@echo '  http, http-test, websocket, websocket-test'
+	@echo '  http, http-test, websocket, websocket-test, profile-explorer, profile-explorer-test'
 	@echo '  wasm-test       run the tests as WebAssembly under Node; check the wasm compiler fixpoint'
 	@echo '  web             build the playground site in .build/web'
 	@echo '  cad-boards      make the CAD board files again from their generators, routed'

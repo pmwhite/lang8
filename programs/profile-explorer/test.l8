@@ -1,0 +1,222 @@
+tag profile_explorer_test;
+
+use_tag std, profile_explorer;
+
+import "../../stdlib/print.l8";
+
+import "trace.l8";
+
+import "dump.l8";
+
+write_name(t: *Trace, id: int) raises IoError {
+    name: []i8 = trace_name(t, id);
+    write_bytes(1, name)
+}
+
+// One line per event in display order: row, start, duration, name, parent.
+print_events(t: *Trace) raises IoError {
+    data: []TraceEvent = t.events.data;
+    order: []int = t.order;
+    for k in 0..len(order) {
+        index: int = order[k];
+        if (index >= 0 && index < len(data)) {
+            e: TraceEvent = data[index];
+            b: *ByteList = byte_list(64);
+            byte_text(b, "t");
+            byte_int(b, e.track);
+            byte_text(b, " d");
+            byte_int(b, e.depth);
+            byte_text(b, " ");
+            byte_time(b, e.start);
+            byte_text(b, " +");
+            byte_time(b, e.dur);
+            byte_text(b, " ");
+            write_list(b);
+            write_name(t, e.name);
+            parent: int = e.parent;
+            if (parent >= 0 && parent < len(data)) {
+                write(1, " < ");
+                write_name(t, data[parent].name)
+            }
+            write(1, "\n")
+        }
+    }
+}
+
+load(text: str): *Trace@new {
+    trace_load(bytes(text))
+}
+
+test "trace events nest by time on each thread" {
+    t: *Trace = load("""
+{"traceEvents":[
+ {"ph":"M","name":"thread_name","pid":1,"tid":2,"args":{"name":"Main"}},
+ {"ph":"M","name":"process_name","pid":1,"tid":0,"args":{"name":"App"}},
+ {"ph":"X","name":"outer","ts":1000,"dur":100,"pid":1,"tid":2,"cat":"top"},
+ {"ph":"X","name":"inner","ts":1010,"dur":30,"pid":1,"tid":2,"args":{"n":[1,{"x":"}"}]}},
+ {"ph":"B","name":"begin","ts":1050,"pid":1,"tid":2},
+ {"ph":"E","ts":1080,"pid":1,"tid":2},
+ {"ph":"i","name":"mark","ts":1090,"pid":1,"tid":3,"s":"t"},
+ {"ph":"X","name":"caf\\u00e9 \\"q\\" \\ud83d\\ude00","ts":1.2e3,"dur":5.5,"pid":1,"tid":3},
+ {"ph":"s","name":"flow","ts":1000,"pid":1,"tid":2,"id":7},
+ {"ph":"C","name":"counter","ts":1000,"pid":1,"args":{"v":3}}
+],"metadata":{"x":1}}""");
+    trace_dump(t, 5);
+    expect {|
+        format: trace events
+        events: 5
+        tracks: 2
+        duration: 206 µs
+          Main 2 · App 1: 3 events, depth 2
+          thread 3 · App 1: 2 events, depth 1
+        self time:
+          40.0 µs  outer
+          30.0 µs  inner
+          30.0 µs  begin
+          5.50 µs  café "q" 😀
+    |}
+    print_events(t);
+    expect {|
+        t0 d0 0 +100 µs outer
+        t0 d1 10.0 µs +30.0 µs inner < outer
+        t0 d1 50.0 µs +30.0 µs begin < outer
+        t1 d0 90.0 µs +0 mark
+        t1 d0 200 µs +5.50 µs café "q" 😀
+    |}
+    b: *ByteList = byte_list(16);
+    byte_time(b, trace_self_time(t, 0));
+    write_list(b);
+    expect {|40.0 µs|}
+}
+
+test "a bare array may be unterminated, and an open begin runs to the end" {
+    t: *Trace = load("""
+[{"ph":"B","name":"open","ts":5,"pid":1,"tid":1},
+{"ph":"X","name":"work","ts":10,"dur":20,"pid":1,"tid":1},
+{"ph":"X","name":"late","ts":40,"dur":2,"pid":"browser","tid":"io"},""");
+    print_events(t);
+    expect {|
+        t0 d0 0 +37.0 µs open
+        t0 d1 5.00 µs +20.0 µs work < open
+        t1 d0 35.0 µs +2.00 µs late
+    |}
+}
+
+test "a summary covers only the range and the threads asked for" {
+    t: *Trace = load("""
+[{"ph":"X","name":"a","ts":0,"dur":100,"pid":1,"tid":1},
+{"ph":"X","name":"b","ts":20,"dur":40,"pid":1,"tid":1},
+{"ph":"X","name":"c","ts":0,"dur":100,"pid":1,"tid":2}]""");
+    s: *Summary = summary_new(t, 4);
+    trace_summary(t, 50.0f64, 80.0f64, new bool[0](false), s);
+    print_summary(t, s);
+    expect {|
+        busy 60.0 µs
+        30.0 µs c
+        20.0 µs a
+        10.0 µs b
+    |}
+    skip: []bool = [false, true];
+    trace_summary(t, 0.0f64, 100.0f64, skip, s);
+    print_summary(t, s);
+    expect {|
+        busy 100 µs
+        60.0 µs a
+        40.0 µs b
+    |}
+}
+
+print_summary(t: *Trace, s: *Summary) raises IoError {
+    b: *ByteList = byte_list(64);
+    byte_text(b, "busy ");
+    byte_time(b, s.total);
+    byte_text(b, "\n");
+    write_list(b);
+    top: []int = s.top;
+    self: []f64 = s.self;
+    for k in 0..s.count {
+        if (k < len(top)) {
+            name: int = top[k];
+            if (name >= 0 && name < len(self)) {
+                b.size = 0;
+                byte_time(b, self[name]);
+                byte_text(b, " ");
+                write_list(b);
+                write_name(t, name);
+                write(1, "\n")
+            }
+        }
+    }
+}
+
+test "perf samples become spans of the frames they share" {
+    t: *Trace = load("""
+# header comment
+my prog 10/11 [000] 100.000100:     1000 cycles:u:
+	    1000 leaf+0x10 (/bin/prog)
+	    2000 mid+0x2 (/bin/prog)
+	    3000 main+0x5 (/bin/prog)
+
+my prog 10/11 [000] 100.000200:     1000 cycles:u:
+	    1100 other+0x1 (/bin/prog)
+	    2000 mid+0x8 (/bin/prog)
+	    3000 main+0x5 (/bin/prog)
+
+worker 12 100.000250: 1000 cycles:u:
+	    7f00 [unknown] (/usr/lib/libfoo.so.1)
+	    4000 std::vector<int, std::allocator<int> >::push_back(int const&)+0x9 (/bin/prog)
+
+my prog 10/11 [000] 100.000300:     1000 cycles:u:
+	    3000 main+0x5 (/bin/prog)
+
+my prog 10/11 [000] 100.005000:     1000 cycles:u:
+	    3000 main+0x5 (/bin/prog)
+""");
+    trace_dump(t, 3);
+    expect {|
+        format: perf script
+        events: 7
+        tracks: 2
+        duration: 5.00 ms
+          my prog 11: 5 events, depth 3
+          worker 12: 2 events, depth 2
+        self time:
+          200 µs  main
+          100 µs  leaf
+          100 µs  other
+    |}
+    print_events(t);
+    expect {|
+        t0 d0 0 +300 µs main
+        t0 d0 4.90 ms +100 µs main
+        t0 d1 0 +200 µs mid < main
+        t0 d2 0 +100 µs leaf < mid
+        t0 d2 100 µs +100 µs other < mid
+        t1 d0 150 µs +100 µs std::vector<int, std::allocator<int> >::push_back(int const&)
+        t1 d1 150 µs +100 µs [unknown] libfoo.so.1 < std::vector<int, std::allocator<int> >::push_back(int const&)
+    |}
+}
+
+test "input that is not a trace" {
+    t: *Trace = load("{\"displayTimeUnit\":\"ns\"}");
+    write(1, t.error);
+    expect {|no traceEvents array|}
+    t = load("hello\n");
+    write(1, t.error);
+    expect {|no perf samples found (expected `perf script` output)|}
+    t = load("[]");
+    write(1, t.error);
+    expect {|the trace has no events|}
+}
+
+test "times use the unit that suits them" {
+    b: *ByteList = byte_list(64);
+    values: []f64 = [0.0004f64, 0.25f64, 1.0f64, 12.345f64, 999.4f64, 999.6f64, 1500.0f64,
+        2500000.0f64, -3.0f64];
+    for k in 0..len(values) {
+        byte_time(b, values[k]);
+        byte_text(b, "|")
+    }
+    write_list(b);
+    expect {|0.40 ns|250 ns|1.00 µs|12.3 µs|999 µs|1.00 ms|1.50 ms|2.50 s|-3.00 µs||}
+}

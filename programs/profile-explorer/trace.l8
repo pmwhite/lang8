@@ -1,0 +1,1617 @@
+tag profile_explorer;
+
+use_tag std;
+
+import "../../stdlib/print.l8";
+
+extern open(path: str, flags: int, mode: int): int;
+
+extern syscall(
+    nr: int,
+    a1: int,
+    a2: int,
+    a3: int,
+    a4: int,
+    a5: int
+): int;
+
+// The trace model shared by both input formats. Events are spans on a thread
+// (a track). After `trace_finish`, times are microseconds from the earliest
+// event, every event has a depth and the enclosing event as its parent, and
+// each track's rows list their events by start time.
+type ByteList = {
+    data: []i8;
+    size: int
+}
+
+type IntList = {
+    data: []int;
+    size: int
+}
+
+type TraceEvent = {
+    start: f64;
+    // Negative while a begin event or a sampled frame is still open.
+    dur: f64;
+    track: int;
+    depth: int;
+    parent: int;
+    name: int;
+    cat: int;
+    // The event's JSON arguments as a byte range of the source, or -1.
+    args_at: int;
+    args_end: int
+}
+
+type EventList = {
+    data: []TraceEvent;
+    size: int
+}
+
+type TraceTrack = {
+    pid: int;
+    tid: int;
+    name: int;
+    events: int;
+    first_row: int;
+    depth: int;
+    // The innermost open event while parsing, or -1.
+    open: int;
+    // Sample times while reading perf output.
+    last: f64;
+    gap: f64
+}
+
+type TrackList = {
+    data: []TraceTrack;
+    size: int
+}
+
+// Interned byte strings: equal names share one id.
+type Strings = {
+    items: [][]i8;
+    count: int;
+    table: []int
+}
+
+type Trace = {
+    src: []i8;
+    strings: *Strings;
+    events: *EventList;
+    tracks: *TrackList;
+    // Pairs of process id and name id.
+    processes: *IntList;
+    // Event indexes grouped by row, each row sorted by start time; row r
+    // holds order[row_at[r]] up to order[row_at[r + 1]].
+    order: []int;
+    row_at: []int;
+    // Track indexes with events, in display order.
+    display: []int;
+    end: f64;
+    origin: f64;
+    perf: bool;
+    error: str
+}
+
+byte_list(capacity: int): *ByteList@new {
+    n: int = capacity;
+    if (n < 0) n = 0;
+    new ByteList { data: new i8[n](0i8), size: 0 }
+}
+
+byte_push(b: *ByteList@new, c: i8) {
+    if (b.size >= len(b.data)) {
+        old: []i8 = b.data;
+        n: int = b.size;
+        cap: int = len(old) * 2 + 16;
+        if (cap <= n) return;
+        grown: []i8 = new i8[cap](0i8);
+        for i in 0..n grown[i] = old[i];
+        b.data = grown
+    }
+    if (b.size < len(b.data)) {
+        b.data[b.size] = c;
+        b.size = b.size + 1
+    }
+}
+
+byte_text(b: *ByteList@new, s: str) {
+    for c in s byte_push(b, c)
+}
+
+byte_bytes(
+    b: *ByteList@new,
+    s: []i8,
+    at: int,
+    end: int
+) {
+    i: int = at;
+    if (i < 0) i = 0;
+    stop: int = end;
+    if (stop > len(s)) stop = len(s);
+    while (i < stop) {
+        byte_push(b, s[i]);
+        i = i + 1
+    }
+}
+
+byte_int(b: *ByteList@new, n: int) {
+    if (n < 0) {
+        byte_push(b, '-');
+        if (n < -999999999999999999) n = 999999999999999999 else n = 0 - n
+    }
+    if (n >= 10) byte_int(b, n / 10);
+    byte_push(b, (48 + n % 10) trunc i8)
+}
+
+// Writes x with a fixed number of decimal places, up to 9 while the digits
+// fit in an int.
+byte_fixed(b: *ByteList@new, x: f64, places: int) {
+    if (x < 0.0f64) {
+        byte_push(b, '-');
+        x = 0.0f64 - x
+    }
+    if (x > 1000000000000000.0f64) x = 1000000000000000.0f64;
+    scale: int = 1;
+    p: int = 0;
+    while (p < places && p < 9 && x * scale as f64 < 100000000000000000.0f64) {
+        scale = scale * 10;
+        p = p + 1
+    }
+    whole: int = (x * scale as f64 + 0.5f64) as int;
+    byte_int(b, whole / scale);
+    if (p > 0) {
+        byte_push(b, '.');
+        frac: int = whole % scale;
+        digit: int = scale / 10;
+        while (digit > 0) {
+            byte_push(b, (48 + frac / digit % 10) trunc i8);
+            digit = digit / 10
+        }
+    }
+}
+
+// Three significant digits: 1.23, 12.3, 123.
+byte_short(b: *ByteList@new, x: f64) {
+    if (x < 9.995f64) byte_fixed(b, x, 2) else if (x < 99.95f64) byte_fixed(b, x,
+        1) else byte_fixed(b, x, 0)
+}
+
+// A duration or time given in microseconds, in the unit that suits it.
+byte_time(b: *ByteList@new, us: f64) {
+    if (us == 0.0f64) {
+        byte_text(b, "0");
+        return
+    }
+    a: f64 = us;
+    if (a < 0.0f64) a = 0.0f64 - a;
+    if (us < 0.0f64) byte_push(b, '-');
+    if (a < 0.9995f64) {
+        byte_short(b, a * 1000.0f64);
+        byte_text(b, " ns")
+    } else if (a < 999.5f64) {
+        byte_short(b, a);
+        byte_text(b, " ");
+        utf8_push(b, 181);
+        byte_text(b, "s")
+    } else if (a < 999500.0f64) {
+        byte_short(b, a / 1000.0f64);
+        byte_text(b, " ms")
+    } else {
+        byte_short(b, a / 1000000.0f64);
+        byte_text(b, " s")
+    }
+}
+
+// A middle dot between spaces, a separator in labels.
+byte_dot(b: *ByteList@new) {
+    byte_text(b, " ");
+    utf8_push(b, 183);
+    byte_text(b, " ")
+}
+
+byte_equals(b: *ByteList, s: str): bool {
+    if (b.size != len(s)) return false;
+    data: []i8 = b.data;
+    n: int = b.size;
+    for i in 0..n {
+        if (data[i] != s[i]) return false
+    }
+    true
+}
+
+int_list(capacity: int): *IntList@new {
+    n: int = capacity;
+    if (n < 0) n = 0;
+    new IntList { data: new int[n](0), size: 0 }
+}
+
+int_push(l: *IntList@new, v: int) {
+    if (l.size >= len(l.data)) {
+        old: []int = l.data;
+        n: int = l.size;
+        cap: int = len(old) * 2 + 16;
+        if (cap <= n) return;
+        grown: []int = new int[cap](0);
+        for i in 0..n grown[i] = old[i];
+        l.data = grown
+    }
+    if (l.size < len(l.data)) {
+        l.data[l.size] = v;
+        l.size = l.size + 1
+    }
+}
+
+empty_event(): TraceEvent {
+    TraceEvent {
+        start: 0.0f64,
+        dur: 0.0f64,
+        track: 0,
+        depth: 0,
+        parent: -1,
+        name: 0,
+        cat: -1,
+        args_at: -1,
+        args_end: -1
+    }
+}
+
+event_push(l: *EventList@new, e: TraceEvent): int {
+    if (l.size >= len(l.data)) {
+        old: []TraceEvent = l.data;
+        n: int = l.size;
+        cap: int = len(old) * 2 + 64;
+        if (cap <= n) return -1;
+        grown: []TraceEvent = new TraceEvent[cap](empty_event());
+        for i in 0..n grown[i] = old[i];
+        l.data = grown
+    }
+    if (l.size < len(l.data)) {
+        index: int = l.size;
+        l.data[index] = e;
+        l.size = index + 1;
+        return index
+    }
+    -1
+}
+
+empty_track(): TraceTrack {
+    TraceTrack {
+        pid: 0,
+        tid: 0,
+        name: -1,
+        events: 0,
+        first_row: 0,
+        depth: 0,
+        open: -1,
+        last: -1.0f64,
+        gap: 0.0f64
+    }
+}
+
+// The track for a thread, created on first use; -1 if it cannot be added.
+trace_track(t: *Trace@new, pid: int, tid: int): int {
+    tracks: *TrackList = t.tracks;
+    data: []TraceTrack = tracks.data;
+    n: int = tracks.size;
+    i: int = n - 1;
+    while (i >= 0 && i < len(data)) {
+        if (data[i].tid == tid && data[i].pid == pid) return i;
+        i = i - 1
+    }
+    if (n >= len(data)) {
+        cap: int = len(data) * 2 + 16;
+        if (cap <= n) return -1;
+        grown: []TraceTrack = new TraceTrack[cap](empty_track());
+        for k in 0..n grown[k] = data[k];
+        tracks.data = grown
+    }
+    index: int = tracks.size;
+    if (index < 0 || index >= len(tracks.data)) return -1;
+    track: TraceTrack = empty_track();
+    track.pid = pid;
+    track.tid = tid;
+    tracks.data[index] = track;
+    tracks.size = index + 1;
+    index
+}
+
+str_hash(data: []i8, at: int, n: int): int {
+    h: int = 5381;
+    for k in 0..n h = h * 33 + (data[at + k] as int & 255) & 1152921504606846975;
+    h
+}
+
+strings_new(): *Strings@new {
+    new Strings { items: new []i8[256](new i8[0](0i8)), count: 0, table: new int[512](0) }
+}
+
+strings_same(
+    a: []i8,
+    data: []i8,
+    at: int,
+    n: int
+): bool {
+    if (len(a) != n) return false;
+    for k in 0..n {
+        if (a[k] != data[at + k]) return false
+    }
+    true
+}
+
+strings_rehash(s: *Strings@new) {
+    size: int = len(s.table) * 2;
+    if (size <= len(s.table)) return;
+    table: []int = new int[size](0);
+    items: [][]i8 = s.items;
+    count: int = s.count;
+    for id in 0..count {
+        item: []i8 = items[id];
+        slot: int = str_hash(item, 0, len(item)) % size;
+        probes: int = 0;
+        while (probes < size && slot >= 0 && slot < size && table[slot] != 0) {
+            slot = (slot + 1) % size;
+            probes = probes + 1
+        }
+        if (slot >= 0 && slot < size) table[slot] = id + 1
+    }
+    s.table = table
+}
+
+// The id of a byte string, adding it if it is new.
+strings_intern(
+    s: *Strings@new,
+    data: []i8,
+    at: int,
+    n: int
+): int {
+    if (s.count * 2 >= len(s.table)) strings_rehash(s);
+    table: []int = s.table;
+    size: int = len(table);
+    slot: int = str_hash(data, at, n) % size;
+    probes: int = 0;
+    while (probes < size && slot >= 0 && slot < size && table[slot] != 0) {
+        id: int = table[slot] - 1;
+        if (id >= 0 && id < s.count && id < len(s.items)) {
+            if (strings_same(s.items[id], data, at, n)) return id
+        }
+        slot = (slot + 1) % size;
+        probes = probes + 1
+    }
+    if (slot < 0 || slot >= size) return 0;
+    if (s.count >= len(s.items)) {
+        old: [][]i8 = s.items;
+        count: int = s.count;
+        cap: int = len(old) * 2 + 16;
+        if (cap <= count) return 0;
+        grown: [][]i8 = new []i8[cap](new i8[0](0i8));
+        for k in 0..count grown[k] = old[k];
+        s.items = grown
+    }
+    copy: []i8 = new i8[n](0i8);
+    for k in 0..n copy[k] = data[at + k];
+    id: int = s.count;
+    if (id < 0 || id >= len(s.items)) return 0;
+    s.items[id] = copy;
+    s.count = id + 1;
+    table[slot] = id + 1;
+    id
+}
+
+strings_text(s: *Strings@new, text: str): int {
+    data: []i8 = bytes(text);
+    strings_intern(s, data, 0, len(data))
+}
+
+trace_name(t: *Trace, id: int): []i8@t {
+    s: *Strings = t.strings;
+    if (id >= 0 && id < s.count && id < len(s.items)) return s.items[id];
+    s.items[0]
+}
+
+trace_new(src: []i8@new): *Trace@new {
+    t: *Trace = new Trace {
+        src: src,
+        strings: strings_new(),
+        events: new EventList { data: new TraceEvent[1024](empty_event()), size: 0 },
+        tracks: new TrackList { data: new TraceTrack[16](empty_track()), size: 0 },
+        processes: int_list(16),
+        order: new int[0](0),
+        row_at: new int[1](0),
+        display: new int[0](0),
+        end: 0.0f64,
+        origin: 0.0f64,
+        perf: false,
+        error: ""
+    };
+    // Id 0 is the empty name.
+    empty: int = strings_intern(t.strings, src, 0, 0);
+    if (empty != 0) t.error = "string table";
+    t
+}
+
+trace_event(
+    t: *Trace@new,
+    track: int,
+    start: f64,
+    dur: f64,
+    name: int,
+    cat: int
+): int {
+    e: TraceEvent = empty_event();
+    e.start = start;
+    e.dur = dur;
+    e.track = track;
+    e.name = name;
+    e.cat = cat;
+    index: int = event_push(t.events, e);
+    tracks: *TrackList = t.tracks;
+    if (index >= 0 && track >= 0 && track < tracks.size && track < len(tracks.data)) tracks.data[track].events = tracks.data[track].events + 1;
+    index
+}
+
+// ---- Chrome trace event format (JSON) ----
+type Json = {
+    src: []i8;
+    at: int
+}
+
+json_peek(j: *Json): int {
+    if (j.at < len(j.src)) return j.src[j.at] as int;
+    -1
+}
+
+json_next(j: *Json) {
+    if (j.at < len(j.src)) j.at = j.at + 1
+}
+
+json_space(j: *Json) {
+    while (j.at < len(j.src) && (j.src[j.at] == ' ' || j.src[j.at] == '\n' || j.src[j.at] == '\r' || j.src[j.at] == '\t')) j.at = j.at + 1
+}
+
+json_hex(c: int): int {
+    if (c >= 48 && c <= 57) return c - 48;
+    if (c >= 97 && c <= 102) return c - 87;
+    if (c >= 65 && c <= 70) return c - 55;
+    -1
+}
+
+utf8_push(b: *ByteList@new, code: int) {
+    if (code < 128) byte_push(b, code trunc i8) else if (code < 2048) {
+        byte_push(b, (192 + code / 64) trunc i8);
+        byte_push(b, (128 + code % 64) trunc i8)
+    } else if (code < 65536) {
+        byte_push(b, (224 + code / 4096) trunc i8);
+        byte_push(b, (128 + code / 64 % 64) trunc i8);
+        byte_push(b, (128 + code % 64) trunc i8)
+    } else {
+        byte_push(b, (240 + code / 262144 % 8) trunc i8);
+        byte_push(b, (128 + code / 4096 % 64) trunc i8);
+        byte_push(b, (128 + code / 64 % 64) trunc i8);
+        byte_push(b, (128 + code % 64) trunc i8)
+    }
+}
+
+json_hex4(j: *Json): int {
+    v: int = 0;
+    for _k in 0..4 {
+        d: int = json_hex(json_peek(j));
+        if (d < 0) return -1;
+        v = v * 16 + d;
+        json_next(j)
+    }
+    v
+}
+
+// Decodes a string at the cursor (which must be at its quote) into out.
+json_string(j: *Json, out: *ByteList@new): bool {
+    out.size = 0;
+    if (json_peek(j) != 34) return false;
+    json_next(j);
+    // Most strings have no escapes and can be copied whole.
+    src: []i8 = j.src;
+    first: int = j.at;
+    end: int = first;
+    while (end < len(src) && src[end] != '"' && src[end] != '\\') end = end + 1;
+    if (end < len(src) && src[end] == '"') {
+        byte_bytes(out, src, first, end);
+        if (end < len(j.src)) j.at = end + 1;
+        return true
+    }
+    while (j.at < len(j.src)) {
+        c: i8 = j.src[j.at];
+        j.at = j.at + 1;
+        if (c == '"') return true;
+        if (c == '\\') {
+            e: int = json_peek(j);
+            json_next(j);
+            if (e == 110) byte_push(out, '\n') else if (e == 116) byte_push(out, '\t') else if (e == 114) byte_push(out,
+                '\r') else if (e == 98) byte_push(out, 8i8) else if (e == 102) byte_push(out,
+                12i8) else if (e == 117) {
+                code: int = json_hex4(j);
+                if (code >= 55296 && code < 56320 && json_peek(j) == 92) {
+                    json_next(j);
+                    json_next(j);
+                    low: int = json_hex4(j);
+                    if (low >= 56320 && low < 57344) code = 65536 + (code - 55296) * 1024 + low - 56320
+                }
+                if (code < 0) code = 65533;
+                utf8_push(out, code)
+            } else if (e >= 0) byte_push(out, e trunc i8)
+        } else byte_push(out, c)
+    }
+    false
+}
+
+json_skip_string(j: *Json) {
+    json_next(j);
+    while (j.at < len(j.src) && j.src[j.at] != '"') {
+        if (j.src[j.at] == '\\') j.at = j.at + 1;
+        if (j.at < len(j.src)) j.at = j.at + 1
+    }
+    json_next(j)
+}
+
+// Skips one value of any kind.
+json_skip(j: *Json) {
+    c: int = json_peek(j);
+    if (c == 34) {
+        json_skip_string(j);
+        return
+    }
+    if (c == 123 || c == 91) {
+        depth: int = 0;
+        going: bool = true;
+        while (going && j.at < len(j.src)) {
+            d: i8 = j.src[j.at];
+            if (d == '"') json_skip_string(j) else {
+                if (d == '{' || d == '[') depth = depth + 1;
+                if (d == '}' || d == ']') {
+                    depth = depth - 1;
+                    if (depth <= 0) going = false
+                }
+                json_next(j)
+            }
+        }
+        return
+    }
+    while (j.at < len(j.src) && j.src[j.at] != ',' && j.src[j.at] != '}' && j.src[j.at] != ']' && j.src[j.at] != ' ' && j.src[j.at] != '\n') j.at = j.at + 1
+}
+
+json_digit(j: *Json): int {
+    c: int = json_peek(j);
+    if (c >= 48 && c <= 57) return c - 48;
+    -1
+}
+
+json_number(j: *Json): f64 {
+    negative: bool = false;
+    if (json_peek(j) == 45) {
+        negative = true;
+        json_next(j)
+    }
+    value: f64 = 0.0f64;
+    d: int = json_digit(j);
+    while (d >= 0) {
+        value = value * 10.0f64 + d as f64;
+        json_next(j);
+        d = json_digit(j)
+    }
+    if (json_peek(j) == 46) {
+        json_next(j);
+        place: f64 = 1.0f64;
+        d = json_digit(j);
+        while (d >= 0) {
+            place = place * 0.1f64;
+            value = value + d as f64 * place;
+            json_next(j);
+            d = json_digit(j)
+        }
+    }
+    c: int = json_peek(j);
+    if (c == 101 || c == 69) {
+        json_next(j);
+        down: bool = false;
+        if (json_peek(j) == 45) {
+            down = true;
+            json_next(j)
+        } else if (json_peek(j) == 43) json_next(j);
+        power: int = 0;
+        d = json_digit(j);
+        while (d >= 0) {
+            if (power < 1000) power = power * 10 + d;
+            json_next(j);
+            d = json_digit(j)
+        }
+        k: int = 0;
+        while (k < power && k < 400) {
+            if (down) value = value / 10.0f64 else value = value * 10.0f64;
+            k = k + 1
+        }
+    }
+    if (negative) return 0.0f64 - value;
+    value
+}
+
+// A thread or process id: a number, or a string mapped to a stable number.
+json_id(t: *Trace@new, j: *Json, scratch: *ByteList@new): int {
+    if (json_peek(j) == 34) {
+        if (!json_string(j, scratch)) return 0;
+        return 1099511627776 + strings_intern(t.strings, scratch.data, 0, scratch.size)
+    }
+    c: int = json_peek(j);
+    if (c == 45 || c >= 48 && c <= 57) return json_number(j) as int;
+    json_skip(j);
+    0
+}
+
+// The "name" member of a metadata event's arguments.
+json_args_name(
+    t: *Trace@new,
+    src: []i8@new,
+    at: int,
+    end: int,
+    scratch: *ByteList@new
+): int {
+    if (at < 0 || at > end || end > len(src)) return -1;
+    j: *Json = new Json { src: src, at: at };
+    if (json_peek(j) != 123) return -1;
+    json_next(j);
+    result: int = -1;
+    going: bool = true;
+    while (going && j.at < end) {
+        json_space(j);
+        if (json_peek(j) != 34 || !json_string(j, scratch)) going = false else {
+            is_name: bool = byte_equals(scratch, "name");
+            json_space(j);
+            if (json_peek(j) == 58) json_next(j);
+            json_space(j);
+            if (is_name && json_peek(j) == 34) {
+                if (json_string(j, scratch)) result = strings_intern(t.strings, scratch.data,
+                    0, scratch.size)
+            } else json_skip(j);
+            json_space(j);
+            if (json_peek(j) == 44) json_next(j) else going = false
+        }
+    }
+    result
+}
+
+// Reads one event object and adds what it describes to the trace.
+json_event(t: *Trace@new, j: *Json, scratch: *ByteList@new) {
+    if (json_peek(j) != 123) {
+        json_skip(j);
+        return
+    }
+    json_next(j);
+    ph: int = 0;
+    name: int = 0;
+    cat: int = -1;
+    ts: f64 = 0.0f64;
+    dur: f64 = 0.0f64;
+    pid: int = 0;
+    tid: int = 0;
+    args_at: int = -1;
+    args_end: int = -1;
+    going: bool = true;
+    while (going) {
+        json_space(j);
+        if (json_peek(j) != 34) going = false else {
+            json_string(j, scratch);
+            key: int = 0;
+            if (byte_equals(scratch, "ph")) key = 1 else if (byte_equals(scratch,
+                "name")) key = 2 else if (byte_equals(scratch, "cat")) key = 3 else if (byte_equals(scratch,
+                "ts")) key = 4 else if (byte_equals(scratch, "dur")) key = 5 else if (byte_equals(scratch,
+                "pid")) key = 6 else if (byte_equals(scratch, "tid")) key = 7 else if (byte_equals(scratch,
+                "args")) key = 8;
+            json_space(j);
+            if (json_peek(j) == 58) json_next(j);
+            json_space(j);
+            if (key == 1 && json_peek(j) == 34) {
+                json_string(j, scratch);
+                if (scratch.size > 0) ph = scratch.data[0] as int
+            } else if (key == 2 && json_peek(j) == 34) {
+                json_string(j, scratch);
+                name = strings_intern(t.strings, scratch.data, 0, scratch.size)
+            } else if (key == 3 && json_peek(j) == 34) {
+                json_string(j, scratch);
+                cat = strings_intern(t.strings, scratch.data, 0, scratch.size)
+            } else if (key == 4) ts = json_number(j) else if (key == 5) dur = json_number(j) else if (key == 6) pid = json_id(t,
+                j, scratch) else if (key == 7) tid = json_id(t, j, scratch) else if (key == 8) {
+                args_at = j.at;
+                json_skip(j);
+                args_end = j.at
+            } else json_skip(j);
+            json_space(j);
+            if (json_peek(j) == 44) json_next(j) else going = false
+        }
+    }
+    json_space(j);
+    if (json_peek(j) == 125) json_next(j);
+    // Metadata names threads and processes; most other phases are spans or instants.
+    if (ph == 77) {
+        label: int = json_args_name(t, t.src, args_at, args_end, scratch);
+        if (label < 0) return;
+        what: []i8 = trace_name(t, name);
+        if (strings_same(what, bytes("thread_name"), 0, 11)) {
+            track: int = trace_track(t, pid, tid);
+            tracks: *TrackList = t.tracks;
+            if (track >= 0 && track < tracks.size && track < len(tracks.data)) tracks.data[track].name = label
+        } else if (strings_same(what, bytes("process_name"), 0, 12)) {
+            int_push(t.processes, pid);
+            int_push(t.processes, label)
+        }
+        return
+    }
+    if (ph != 88 && ph != 66 && ph != 69 && ph != 105 && ph != 73 && ph != 82) return;
+    track: int = trace_track(t, pid, tid);
+    tracks: *TrackList = t.tracks;
+    if (track < 0 || track >= tracks.size || track >= len(tracks.data)) return;
+    if (ph == 69) {
+        // An end closes the innermost open begin on its thread.
+        open: int = tracks.data[track].open;
+        events: *EventList = t.events;
+        if (open >= 0 && open < events.size && open < len(events.data)) {
+            e: TraceEvent = events.data[open];
+            e.dur = ts - e.start;
+            if (e.dur < 0.0f64) e.dur = 0.0f64;
+            if (e.args_at < 0) {
+                e.args_at = args_at;
+                e.args_end = args_end
+            }
+            tracks.data[track].open = e.parent;
+            e.parent = -1;
+            events.data[open] = e
+        }
+        return
+    }
+    if (ph != 88) dur = 0.0f64;
+    if (ph == 66) dur = -1.0f64;
+    if (dur < 0.0f64 && ph == 88) dur = 0.0f64;
+    index: int = trace_event(t, track, ts, dur, name, cat);
+    events: *EventList = t.events;
+    if (index < 0 || index >= events.size || index >= len(events.data)) return;
+    events.data[index].args_at = args_at;
+    events.data[index].args_end = args_end;
+    if (ph == 66 && track < tracks.size && track < len(tracks.data)) {
+        events.data[index].parent = tracks.data[track].open;
+        tracks.data[track].open = index
+    }
+}
+
+trace_parse_json(t: *Trace@new) {
+    j: *Json = new Json { src: t.src, at: 0 };
+    scratch: *ByteList = byte_list(256);
+    json_space(j);
+    // An object holds the events in "traceEvents"; a bare array is the events.
+    if (json_peek(j) == 123) {
+        json_next(j);
+        found: bool = false;
+        going: bool = true;
+        while (going && !found) {
+            json_space(j);
+            if (json_peek(j) != 34) going = false else {
+                json_string(j, scratch);
+                json_space(j);
+                if (json_peek(j) == 58) json_next(j);
+                json_space(j);
+                if (byte_equals(scratch, "traceEvents")) found = true else {
+                    json_skip(j);
+                    json_space(j);
+                    if (json_peek(j) == 44) json_next(j) else going = false
+                }
+            }
+        }
+        if (!found) {
+            t.error = "no traceEvents array";
+            return
+        }
+    }
+    if (json_peek(j) != 91) {
+        t.error = "expected an array of trace events";
+        return
+    }
+    json_next(j);
+    going: bool = true;
+    while (going) {
+        json_space(j);
+        c: int = json_peek(j);
+        if (c == 123) {
+            before: int = j.at;
+            json_event(t, j, scratch);
+            if (j.at == before) going = false
+        } else if (c == 44) json_next(j) else going = false
+    }
+}
+
+// ---- perf script output ----
+is_space(c: i8): bool {
+    c == ' ' || c == '\t' || c == '\r'
+}
+
+is_digit(c: i8): bool {
+    c >= '0' && c <= '9'
+}
+
+// Parses digits[.digits] in src[at..end) as a number.
+parse_decimal(src: []i8, at: int, end: int): f64 {
+    value: f64 = 0.0f64;
+    place: f64 = 0.0f64;
+    i: int = at;
+    if (i < 0) i = 0;
+    stop: int = end;
+    if (stop > len(src)) stop = len(src);
+    while (i < stop) {
+        c: i8 = src[i];
+        if (c == '.') place = 1.0f64 else if (is_digit(c)) {
+            if (place > 0.0f64) {
+                place = place * 0.1f64;
+                value = value + (c as int - 48) as f64 * place
+            } else value = value * 10.0f64 + (c as int - 48) as f64
+        }
+        i = i + 1
+    }
+    value
+}
+
+int_reverse(l: *IntList) {
+    n: int = l.size;
+    data: []int = l.data;
+    if (n > len(data)) return;
+    lo: int = 0;
+    hi: int = n - 1;
+    while (lo < hi && lo >= 0 && hi < len(data)) {
+        x: int = data[lo];
+        data[lo] = data[hi];
+        data[hi] = x;
+        lo = lo + 1;
+        hi = hi - 1
+    }
+}
+
+// The open frames of a track, outermost first.
+perf_chain(t: *Trace, track: int, chain: *IntList@new) {
+    chain.size = 0;
+    tracks: *TrackList = t.tracks;
+    if (track < 0 || track >= tracks.size || track >= len(tracks.data)) return;
+    events: *EventList = t.events;
+    at: int = tracks.data[track].open;
+    guard: int = 0;
+    while (at >= 0 && at < events.size && at < len(events.data) && guard < 100000) {
+        int_push(chain, at);
+        at = events.data[at].parent;
+        guard = guard + 1
+    }
+    int_reverse(chain)
+}
+
+perf_close(t: *Trace, event: int, end: f64) {
+    events: *EventList = t.events;
+    if (event < 0 || event >= events.size || event >= len(events.data)) return;
+    d: f64 = end - events.data[event].start;
+    if (d < 0.0f64) d = 0.0f64;
+    events.data[event].dur = d
+}
+
+// Applies one sample, whose frames are outermost first: frames that continue
+// stay open, the rest close at its time, and new frames open. A long gap
+// since the thread's last sample means it was idle in between.
+perf_sample(
+    t: *Trace@new,
+    track: int,
+    time: f64,
+    frames: *IntList,
+    chain: *IntList@new
+) {
+    tracks: *TrackList = t.tracks;
+    if (track < 0 || track >= tracks.size || track >= len(tracks.data)) return;
+    perf_chain(t, track, chain);
+    open_frames: []int = chain.data;
+    open_count: int = chain.size;
+    if (open_count > len(open_frames)) return;
+    names: []int = frames.data;
+    m: int = frames.size;
+    if (m > len(names)) return;
+    last: f64 = tracks.data[track].last;
+    gap: f64 = tracks.data[track].gap;
+    keep_limit: int = open_count;
+    if (last >= 0.0f64) {
+        since: f64 = time - last;
+        if (since > 0.0f64 && (gap <= 0.0f64 || since < gap)) gap = since;
+        if (gap > 0.0f64 && since > gap * 10.0f64) {
+            for k in 0..open_count perf_close(t, open_frames[k], last + gap);
+            keep_limit = 0
+        }
+    }
+    events: *EventList = t.events;
+    keep: int = 0;
+    matching: bool = true;
+    while (matching && keep >= 0 && keep < keep_limit && keep < m && keep < open_count) {
+        open: int = open_frames[keep];
+        if (open >= 0 && open < events.size && open < len(events.data) && events.data[open].name == names[keep]) keep = keep + 1 else matching = false
+    }
+    if (keep_limit > 0) {
+        for k in keep..open_count perf_close(t, open_frames[k], time)
+    }
+    parent: int = -1;
+    if (keep > 0 && keep <= open_count) parent = open_frames[keep - 1];
+    for f in keep..m {
+        index: int = trace_event(t, track, time, -1.0f64, names[f], -1);
+        added: *EventList = t.events;
+        if (index >= 0 && index < added.size && index < len(added.data)) {
+            added.data[index].parent = parent;
+            parent = index
+        }
+    }
+    if (track < tracks.size && track < len(tracks.data)) {
+        tracks.data[track].open = parent;
+        tracks.data[track].last = time;
+        tracks.data[track].gap = gap
+    }
+}
+
+// Interns the function of a frame line: "addr symbol+0xoff (dso)".
+perf_frame(
+    t: *Trace@new,
+    src: []i8,
+    at: int,
+    end: int,
+    scratch: *ByteList@new
+): int {
+    i: int = at;
+    if (i < 0) i = 0;
+    stop: int = end;
+    if (stop > len(src)) stop = len(src);
+    while (i < stop && is_space(src[i])) i = i + 1;
+    while (i < stop && !is_space(src[i])) i = i + 1;
+    while (i < stop && is_space(src[i])) i = i + 1;
+    // The library is the last parenthesized part.
+    sym_end: int = stop;
+    while (sym_end > i && is_space(src[sym_end - 1])) sym_end = sym_end - 1;
+    dso_at: int = sym_end;
+    dso_end: int = sym_end;
+    if (sym_end > i && src[sym_end - 1] == ')') {
+        open: int = sym_end - 1;
+        while (open > i && src[open] != '(') open = open - 1;
+        if (open > i && src[open] == '(') {
+            dso_at = open + 1;
+            dso_end = sym_end - 1;
+            sym_end = open
+        }
+    }
+    while (sym_end > i && is_space(src[sym_end - 1])) sym_end = sym_end - 1;
+    // Drop "+0x1f".
+    plus: int = sym_end - 1;
+    while (plus > i && plus < len(src) && src[plus] != '+') plus = plus - 1;
+    if (plus > i && plus < sym_end - 2 && plus < len(src) - 2 && src[plus] == '+' && src[plus + 1] == '0' && src[plus + 2] == 'x') sym_end = plus;
+    scratch.size = 0;
+    byte_bytes(scratch, src, i, sym_end);
+    if (scratch.size == 0 || byte_equals(scratch, "[unknown]")) {
+        // Name unknown code by its library's file name.
+        base: int = dso_at;
+        k: int = dso_at;
+        while (k < dso_end && k >= 0 && k < len(src)) {
+            if (src[k] == '/') base = k + 1;
+            k = k + 1
+        }
+        scratch.size = 0;
+        byte_text(scratch, "[unknown] ");
+        byte_bytes(scratch, src, base, dso_end)
+    }
+    strings_intern(t.strings, scratch.data, 0, scratch.size)
+}
+
+// A sample header: "comm pid/tid [cpu] seconds.micros: period event:".
+// Returns the track, or -1; the time goes to time_out[0].
+perf_header(
+    t: *Trace@new,
+    src: []i8,
+    at: int,
+    end: int,
+    time_out: []f64
+): int {
+    stop: int = end;
+    if (stop > len(src)) stop = len(src);
+    i: int = at;
+    if (i < 0) i = 0;
+    prev_at: int = -1;
+    prev_end: int = -1;
+    before_at: int = -1;
+    before_end: int = -1;
+    while (i < stop) {
+        while (i < stop && is_space(src[i])) i = i + 1;
+        word: int = i;
+        while (i < stop && !is_space(src[i])) i = i + 1;
+        word_end: int = i;
+        // The time is the first word like 123.456789:
+        dot: bool = false;
+        digits: bool = word_end - word >= 3;
+        k: int = word;
+        while (k < word_end - 1 && k >= 0 && k < len(src)) {
+            if (src[k] == '.') dot = true else if (!is_digit(src[k])) digits = false;
+            k = k + 1
+        }
+        if (digits && dot && word_end > word && word_end - 1 < len(src) && word_end - 1 >= 0 && src[word_end - 1] == ':') {
+            time_out[0] = parse_decimal(src, word, word_end - 1) * 1000000.0f64;
+            id_at: int = prev_at;
+            id_end: int = prev_end;
+            comm_end: int = prev_at;
+            if (prev_at >= 0 && prev_at < len(src) && src[prev_at] == '[') {
+                id_at = before_at;
+                id_end = before_end;
+                comm_end = before_at
+            }
+            if (id_at < 0) return -1;
+            slash: int = id_at;
+            while (slash < id_end && slash >= 0 && slash < len(src) && src[slash] != '/') slash = slash + 1;
+            pid: int = parse_decimal(src, id_at, slash) as int;
+            tid: int = pid;
+            if (slash < id_end) tid = parse_decimal(src, slash + 1, id_end) as int;
+            track: int = trace_track(t, pid, tid);
+            tracks: *TrackList = t.tracks;
+            if (track >= 0 && track < tracks.size && track < len(tracks.data) && tracks.data[track].name < 0) {
+                ce: int = comm_end;
+                while (ce > at && ce > 0 && ce <= len(src) && is_space(src[ce - 1])) ce = ce - 1;
+                start: int = at;
+                while (start < ce && start >= 0 && start < len(src) && is_space(src[start])) start = start + 1;
+                if (start >= 0 && start <= ce && ce <= len(src)) {
+                    size: int = ce - start;
+                    comm: int = strings_intern(t.strings, src, start, size);
+                    if (track < tracks.size && track < len(tracks.data)) tracks.data[track].name = comm
+                }
+            }
+            return track
+        }
+        before_at = prev_at;
+        before_end = prev_end;
+        prev_at = word;
+        prev_end = word_end
+    }
+    -1
+}
+
+trace_parse_perf(t: *Trace@new) {
+    t.perf = true;
+    src: []i8 = t.src;
+    n: int = len(src);
+    scratch: *ByteList = byte_list(256);
+    frames: *IntList = int_list(256);
+    chain: *IntList = int_list(256);
+    time: []f64 = new f64[1](0.0f64);
+    track: int = -1;
+    samples: int = 0;
+    at: int = 0;
+    while (at < n) {
+        end: int = at;
+        while (end < n && src[end] != '\n') end = end + 1;
+        blank: bool = true;
+        for k in at..end {
+            if (!is_space(src[k])) blank = false
+        }
+        if (blank) {
+            if (track >= 0) {
+                int_reverse(frames);
+                perf_sample(t, track, time[0], frames, chain);
+                samples = samples + 1
+            }
+            track = -1
+        } else if (is_space(src[at])) {
+            if (track >= 0) int_push(frames, perf_frame(t, src, at, end, scratch))
+        } else if (src[at] != '#') {
+            if (track >= 0) {
+                int_reverse(frames);
+                perf_sample(t, track, time[0], frames, chain);
+                samples = samples + 1
+            }
+            frames.size = 0;
+            track = perf_header(t, src, at, end, time)
+        }
+        if (end < n) at = end + 1 else at = n
+    }
+    if (track >= 0) {
+        int_reverse(frames);
+        perf_sample(t, track, time[0], frames, chain);
+        samples = samples + 1
+    }
+    if (samples == 0) {
+        t.error = "no perf samples found (expected `perf script` output)";
+        return
+    }
+    // Close the frames still open one sampling interval after each thread's
+    // last sample. A thread sampled once takes the shortest interval seen.
+    tracks: *TrackList = t.tracks;
+    count: int = tracks.size;
+    shortest: f64 = 0.0f64;
+    for k in 0..count {
+        if (k < len(tracks.data)) {
+            gap: f64 = tracks.data[k].gap;
+            if (gap > 0.0f64 && (shortest <= 0.0f64 || gap < shortest)) shortest = gap
+        }
+    }
+    if (shortest <= 0.0f64) shortest = 1.0f64;
+    for k in 0..count {
+        if (k < len(tracks.data)) {
+            gap: f64 = tracks.data[k].gap;
+            if (gap <= 0.0f64) gap = shortest;
+            last: f64 = tracks.data[k].last + gap;
+            perf_chain(t, k, chain);
+            for c in 0..chain.size perf_close(t, chain.data[c], last);
+            if (k < tracks.size && k < len(tracks.data)) tracks.data[k].open = -1
+        }
+    }
+}
+
+// ---- layout ----
+event_before(events: []TraceEvent, a: int, b: int): bool {
+    if (a < 0 || a >= len(events) || b < 0 || b >= len(events)) return false;
+    ea: TraceEvent = events[a];
+    eb: TraceEvent = events[b];
+    if (ea.track != eb.track) return ea.track < eb.track;
+    if (ea.start != eb.start) return ea.start < eb.start;
+    ea.dur > eb.dur
+}
+
+// A stable merge sort of event indexes by track, start, and longest first.
+sort_events(events: []TraceEvent, order: []int) {
+    n: int = len(order);
+    a: []int = new int[n](0);
+    for i in 0..n a[i] = order[i];
+    b: []int = new int[n](0);
+    width: int = 1;
+    in_b: bool = false;
+    while (width < n && width > 0) {
+        from: []int = a;
+        to: []int = b;
+        if (in_b) {
+            from = b;
+            to = a
+        }
+        if (len(from) == n && len(to) == n) {
+            lo: int = 0;
+            while (lo < n && lo >= 0) {
+                mid: int = lo + width;
+                if (mid > n) mid = n;
+                hi: int = mid + width;
+                if (hi > n || hi < mid) hi = n;
+                i: int = lo;
+                k: int = mid;
+                out: int = lo;
+                while (out < hi && out >= 0) {
+                    take_left: bool = i < mid && (k >= hi || !event_before(events,
+                        from[k], from[i]));
+                    if (take_left && i >= 0 && i < n) {
+                        to[out] = from[i];
+                        i = i + 1
+                    } else if (k >= 0 && k < n) {
+                        to[out] = from[k];
+                        k = k + 1
+                    }
+                    out = out + 1
+                }
+                lo = hi
+            }
+        }
+        in_b = !in_b;
+        width = width * 2
+    }
+    result: []int = a;
+    if (in_b) result = b;
+    if (len(result) == n) {
+        for i in 0..n order[i] = result[i]
+    }
+}
+
+event_end(e: TraceEvent): f64 {
+    e.start + e.dur
+}
+
+// Normalizes times, closes unfinished spans, and assigns depths, parents, and rows.
+trace_finish(t: *Trace@new) {
+    events: *EventList = t.events;
+    data: []TraceEvent = events.data;
+    n: int = events.size;
+    if (n > len(data)) return;
+    origin: f64 = 0.0f64;
+    last: f64 = 0.0f64;
+    for i in 0..n {
+        e: TraceEvent = data[i];
+        if (i == 0 || e.start < origin) origin = e.start;
+        stop: f64 = e.start;
+        if (e.dur > 0.0f64) stop = e.start + e.dur;
+        if (i == 0 || stop > last) last = stop
+    }
+    for i in 0..n {
+        e: TraceEvent = data[i];
+        if (e.dur < 0.0f64) e.dur = last - e.start;
+        e.start = e.start - origin;
+        e.parent = -1;
+        data[i] = e
+    }
+    t.origin = origin;
+    t.end = last - origin;
+    order: []int = new int[n](0);
+    for i in 0..n order[i] = i;
+    sort_events(data, order);
+    // Depth is the number of enclosing events still open at the start.
+    tracks: *TrackList = t.tracks;
+    stack: *IntList = int_list(64);
+    current: int = -1;
+    for o in 0..n {
+        index: int = order[o];
+        if (index >= 0 && index < len(data)) {
+            e: TraceEvent = data[index];
+            if (e.track != current) {
+                stack.size = 0;
+                current = e.track
+            }
+            popping: bool = true;
+            while (popping && stack.size > 0 && stack.size <= len(stack.data)) {
+                top: int = stack.data[stack.size - 1];
+                if (top >= 0 && top < len(data) && event_end(data[top]) <= e.start && !(e.dur == 0.0f64 && data[top].dur == 0.0f64 && false)) stack.size = stack.size - 1 else popping = false
+            }
+            e.depth = stack.size;
+            if (stack.size > 0 && stack.size <= len(stack.data)) e.parent = stack.data[stack.size - 1];
+            data[index] = e;
+            int_push(stack, index);
+            track: int = e.track;
+            if (track >= 0 && track < tracks.size && track < len(tracks.data) && tracks.data[track].depth < e.depth + 1) tracks.data[track].depth = e.depth + 1
+        }
+    }
+    // Rows: each track's depths in turn.
+    rows: int = 0;
+    tcount: int = tracks.size;
+    for k in 0..tcount {
+        if (k < len(tracks.data)) {
+            tracks.data[k].first_row = rows;
+            rows = rows + tracks.data[k].depth
+        }
+    }
+    row_at: []int = new int[rows + 1](0);
+    for o in 0..n {
+        index: int = order[o];
+        if (index >= 0 && index < len(data)) {
+            e: TraceEvent = data[index];
+            if (e.track >= 0 && e.track < tracks.size && e.track < len(tracks.data)) {
+                row: int = tracks.data[e.track].first_row + e.depth;
+                if (row >= 0 && row < len(row_at) - 1) row_at[row + 1] = row_at[row + 1] + 1
+            }
+        }
+    }
+    for r in 0..rows {
+        if (r < len(row_at) - 1) row_at[r + 1] = row_at[r + 1] + row_at[r]
+    }
+    fill: []int = new int[rows + 1](0);
+    for r in 0..rows {
+        if (r < len(fill) && r < len(row_at)) fill[r] = row_at[r]
+    }
+    grouped: []int = new int[n](0);
+    for o in 0..n {
+        index: int = order[o];
+        if (index >= 0 && index < len(data)) {
+            e: TraceEvent = data[index];
+            if (e.track >= 0 && e.track < tracks.size && e.track < len(tracks.data)) {
+                row: int = tracks.data[e.track].first_row + e.depth;
+                if (row >= 0 && row < len(fill)) {
+                    slot: int = fill[row];
+                    if (slot >= 0 && slot < n) grouped[slot] = index;
+                    fill[row] = slot + 1
+                }
+            }
+        }
+    }
+    t.order = grouped;
+    t.row_at = row_at;
+    // Display order: by process, its main thread first, then by thread.
+    shown: *IntList = int_list(tcount);
+    for k in 0..tcount {
+        if (k < len(tracks.data) && tracks.data[k].events > 0) int_push(shown, k)
+    }
+    list: []int = shown.data;
+    count: int = shown.size;
+    if (count > len(list)) return;
+    for i in 1..count {
+        k: int = i;
+        while (k > 0 && k < count && track_before(tracks, list[k], list[k - 1])) {
+            x: int = list[k];
+            list[k] = list[k - 1];
+            list[k - 1] = x;
+            k = k - 1
+        }
+    }
+    display: []int = new int[count](0);
+    for i in 0..count display[i] = list[i];
+    t.display = display
+}
+
+track_before(tracks: *TrackList, a: int, b: int): bool {
+    if (a < 0 || a >= tracks.size || a >= len(tracks.data) || b < 0 || b >= tracks.size || b >= len(tracks.data)) return false;
+    ta: TraceTrack = tracks.data[a];
+    tb: TraceTrack = tracks.data[b];
+    if (ta.pid != tb.pid) return ta.pid < tb.pid;
+    main_a: bool = ta.tid == ta.pid;
+    main_b: bool = tb.tid == tb.pid;
+    if (main_a != main_b) return main_a;
+    ta.tid < tb.tid
+}
+
+// The whole file, or null if it cannot be opened or read.
+read_file(path: str): ?[]i8@new {
+    fd: int = open(path, 0, 0);
+    if (fd < 0) return null;
+    // lseek to the end gives the size of a regular file; pipes grow as they read.
+    size: int = syscall(8, fd, 0, 2, 0, 0);
+    syscall(8, fd, 0, 0, 0, 0);
+    cap: int = 65536;
+    if (size > 0 && size < 4000000000) cap = size;
+    buf: []i8 = new i8[cap](0i8);
+    probe: []i8 = new i8[65536](0i8);
+    n: int = 0;
+    failed: bool = false;
+    more: bool = true;
+    while (more) {
+        if (n >= 0 && n < len(buf)) {
+            r: int = read(fd, buf, n, len(buf) - n);
+            if (r > 0 && r <= len(buf) - n) n = n + r else if (r == 0) more = false else if (r != -4) {
+                failed = true;
+                more = false
+            }
+        } else {
+            // Full: anything more grows the buffer.
+            r: int = read(fd, probe, 0, len(probe));
+            if (r > 0 && r <= len(probe) && n == len(buf)) {
+                old: []i8 = buf;
+                grown_cap: int = len(old) * 2 + r;
+                if (grown_cap <= len(old) + r) {
+                    failed = true;
+                    more = false
+                } else {
+                    grown: []i8 = new i8[grown_cap](0i8);
+                    memcpy(grown, 0, old, 0, len(old));
+                    memcpy(grown, len(old), probe, 0, r);
+                    buf = grown;
+                    n = len(old) + r
+                }
+            } else if (r == 0) more = false else if (r != -4) {
+                failed = true;
+                more = false
+            }
+        }
+    }
+    syscall(3, fd, 0, 0, 0, 0);
+    if (failed) return null;
+    if (n == len(buf)) return buf;
+    if (n < 0 || n > len(buf)) return null;
+    out: []i8 = new i8[n](0i8);
+    memcpy(out, 0, buf, 0, n);
+    out
+}
+
+// Reads a trace from bytes: Chrome's JSON trace format, or `perf script` text.
+trace_load(src: []i8@new): *Trace@new {
+    t: *Trace = trace_new(src);
+    i: int = 0;
+    while (i < len(src) && (is_space(src[i]) || src[i] == '\n')) i = i + 1;
+    if (i < len(src) && (src[i] == '{' || src[i] == '[')) trace_parse_json(t) else trace_parse_perf(t);
+    trace_finish(t);
+    if (len(t.error) == 0 && t.events.size == 0) t.error = "the trace has no events";
+    t
+}
+
+// ---- queries ----
+trace_track_label(t: *Trace, track: int, out: *ByteList@new) {
+    out.size = 0;
+    tracks: *TrackList = t.tracks;
+    if (track < 0 || track >= tracks.size || track >= len(tracks.data)) return;
+    tr: TraceTrack = tracks.data[track];
+    if (tr.name >= 0) {
+        name: []i8 = trace_name(t, tr.name);
+        byte_bytes(out, name, 0, len(name))
+    } else byte_text(out, "thread");
+    if (tr.tid < 1099511627776) {
+        byte_text(out, " ");
+        byte_int(out, tr.tid)
+    }
+    // Process names follow the thread's.
+    processes: *IntList = t.processes;
+    pdata: []int = processes.data;
+    pcount: int = processes.size;
+    if (pcount > len(pdata)) return;
+    k: int = 0;
+    found: bool = false;
+    while (k >= 0 && k < pcount - 1 && !found) {
+        if (pdata[k] == tr.pid) {
+            found = true;
+            name: []i8 = trace_name(t, pdata[k + 1]);
+            byte_dot(out);
+            byte_bytes(out, name, 0, len(name));
+            if (tr.pid < 1099511627776) {
+                byte_text(out, " ");
+                byte_int(out, tr.pid)
+            }
+        }
+        k = k + 2
+    }
+}
+
+trace_rows(t: *Trace): int {
+    len(t.row_at) - 1
+}
+
+// The first position in row r's events whose event ends after time x.
+row_first_after(t: *Trace, row: int, x: f64): int {
+    row_at: []int = t.row_at;
+    if (row < 0 || row >= len(row_at) - 1) return 0;
+    lo: int = row_at[row];
+    hi: int = row_at[row + 1];
+    order: []int = t.order;
+    data: []TraceEvent = t.events.data;
+    while (lo < hi) {
+        mid: int = lo + (hi - lo) / 2;
+        index: int = -1;
+        if (mid >= 0 && mid < len(order)) index = order[mid];
+        if (index >= 0 && index < len(data) && event_end(data[index]) <= x) lo = mid + 1 else hi = mid
+    }
+    lo
+}
+
+// The event in a row at time x, allowing a little slack, or -1.
+row_event_at(
+    t: *Trace,
+    row: int,
+    x: f64,
+    slack: f64
+): int {
+    row_at: []int = t.row_at;
+    if (row < 0 || row >= len(row_at) - 1) return -1;
+    stop: int = row_at[row + 1];
+    at: int = row_first_after(t, row, x - slack);
+    order: []int = t.order;
+    data: []TraceEvent = t.events.data;
+    best: int = -1;
+    best_d: f64 = slack + 1.0f64;
+    guard: int = 0;
+    while (at < stop && at >= 0 && at < len(order) && guard < 64) {
+        index: int = order[at];
+        if (index >= 0 && index < len(data)) {
+            e: TraceEvent = data[index];
+            if (e.start > x + slack) guard = 64 else {
+                d: f64 = 0.0f64;
+                if (x < e.start) d = e.start - x else if (x > e.start + e.dur) d = x - e.start - e.dur;
+                if (d < best_d) {
+                    best = index;
+                    best_d = d
+                }
+            }
+        }
+        at = at + 1;
+        guard = guard + 1
+    }
+    best
+}
+
+// Self time of an event: its duration less its direct children's.
+trace_self_time(t: *Trace, event: int): f64 {
+    data: []TraceEvent = t.events.data;
+    if (event < 0 || event >= t.events.size || event >= len(data)) return 0.0f64;
+    e: TraceEvent = data[event];
+    total: f64 = e.dur;
+    tracks: *TrackList = t.tracks;
+    if (e.track < 0 || e.track >= tracks.size || e.track >= len(tracks.data)) return total;
+    tr: TraceTrack = tracks.data[e.track];
+    if (e.depth + 1 >= tr.depth) return total;
+    row: int = tr.first_row + e.depth + 1;
+    row_at: []int = t.row_at;
+    if (row < 0 || row >= len(row_at) - 1) return total;
+    stop: int = row_at[row + 1];
+    at: int = row_first_after(t, row, e.start);
+    order: []int = t.order;
+    while (at < stop && at >= 0 && at < len(order)) {
+        c: int = order[at];
+        if (c >= 0 && c < len(data)) {
+            child: TraceEvent = data[c];
+            if (child.start >= e.start + e.dur) at = stop else if (child.parent == event) total = total - child.dur
+        }
+        at = at + 1
+    }
+    if (total < 0.0f64) total = 0.0f64;
+    total
+}
+
+type Summary = {
+    // Self time per name id within the range.
+    self: []f64;
+    top: []int;
+    count: int;
+    total: f64
+}
+
+summary_new(t: *Trace, k: int): *Summary@new {
+    n: int = t.strings.count;
+    m: int = k;
+    if (m < 1) m = 1;
+    new Summary {
+        self: new f64[n](0.0f64),
+        top: new int[m](0),
+        count: 0,
+        total: 0.0f64
+    }
+}
+
+// Totals self time by name over the events overlapping [a, b), leaving out
+// tracks marked in skip, and keeps the names with the most in order.
+trace_summary(
+    t: *Trace,
+    a: f64,
+    b: f64,
+    skip: []bool,
+    s: *Summary
+) {
+    self: []f64 = s.self;
+    for i in 0..len(self) self[i] = 0.0f64;
+    data: []TraceEvent = t.events.data;
+    order: []int = t.order;
+    row_at: []int = t.row_at;
+    tracks: *TrackList = t.tracks;
+    total: f64 = 0.0f64;
+    tcount: int = tracks.size;
+    for k in 0..tcount {
+        if (k < len(tracks.data) && !(k < len(skip) && skip[k])) {
+            tr: TraceTrack = tracks.data[k];
+            for depth in 0..tr.depth {
+                row: int = tr.first_row + depth;
+                if (row >= 0 && row < len(row_at) - 1) {
+                    stop: int = row_at[row + 1];
+                    at: int = row_first_after(t, row, a);
+                    going: bool = true;
+                    while (going && at < stop && at >= 0 && at < len(order)) {
+                        index: int = order[at];
+                        if (index >= 0 && index < len(data)) {
+                            e: TraceEvent = data[index];
+                            if (e.start >= b) going = false else {
+                                lo: f64 = e.start;
+                                hi: f64 = e.start + e.dur;
+                                if (lo < a) lo = a;
+                                if (hi > b) hi = b;
+                                if (hi > lo) {
+                                    span: f64 = hi - lo;
+                                    if (e.name >= 0 && e.name < len(self)) self[e.name] = self[e.name] + span;
+                                    if (e.parent >= 0 && e.parent < len(data)) {
+                                        p: int = data[e.parent].name;
+                                        if (p >= 0 && p < len(self)) self[p] = self[p] - span
+                                    } else total = total + span
+                                }
+                            }
+                        }
+                        at = at + 1
+                    }
+                }
+            }
+        }
+    }
+    s.total = total;
+    // Insertion into a short list sorted by decreasing self time.
+    top: []int = s.top;
+    count: int = 0;
+    for name in 0..len(self) {
+        v: f64 = self[name];
+        if (v > 0.0f64) {
+            pos: int = count;
+            moving: bool = true;
+            while (moving && pos > 0 && pos <= len(top)) {
+                above: int = top[pos - 1];
+                if (above >= 0 && above < len(self) && self[above] < v) pos = pos - 1 else moving = false
+            }
+            if (pos >= 0 && pos < len(top)) {
+                j: int = count;
+                if (j >= len(top)) j = len(top) - 1;
+                while (j > pos && j < len(top)) {
+                    top[j] = top[j - 1];
+                    j = j - 1
+                }
+                top[pos] = name;
+                if (count < len(top)) count = count + 1
+            }
+        }
+    }
+    if (count >= 0 && count <= len(s.top)) s.count = count
+}

@@ -1,0 +1,1583 @@
+tag profile_explorer;
+
+use_tag std;
+
+use_tag gl, freetype;
+
+import "../../stdlib/print.l8";
+
+import "../gl/gl.l8";
+
+import "../freetype/ft.l8";
+
+import "trace.l8";
+
+// Everything drawn in a frame is one batch of quads: x, y, u, v, r, g, b, a
+// for each of six vertices. A negative u draws a solid color.
+const VIEW_QUADS: int = 120000;
+
+// Rows stop drawing here so the panels drawn after them still fit.
+const VIEW_TRACK_QUADS: int = 100000;
+
+const TOOLBAR_H: int = 28;
+
+const OVERVIEW_H: int = 46;
+
+const RULER_H: int = 22;
+
+const TRACKS_TOP: int = 96;
+
+const HEADER_H: int = 22;
+
+const ROW_H: int = 18;
+
+const TRACK_GAP: int = 6;
+
+const PANEL_H: int = 176;
+
+const LINE_H: int = 18;
+
+type ViewVertices = {
+    data: []f32
+}
+
+type Explorer = {
+    trace: *Trace;
+    title: []i8;
+    font: *CachedFont;
+    ascent: int;
+    program: int;
+    viewport: int;
+    buffer: u32;
+    texture: u32;
+    vertices: *ViewVertices;
+    quads: int;
+    width: int;
+    height: int;
+    // The visible time window, in microseconds from the trace start.
+    t0: f64;
+    t1: f64;
+    scroll: f64;
+    mouse_x: int;
+    mouse_y: int;
+    // 0 none, 1 pan, 2 time range, 3 overview.
+    drag: int;
+    drag_x: int;
+    drag_y: int;
+    drag_t0: f64;
+    drag_t1: f64;
+    drag_scroll: f64;
+    moved: bool;
+    selected: int;
+    hover: int;
+    // A selected time range, when range_b > range_a.
+    range_a: f64;
+    range_b: f64;
+    collapsed: []bool;
+    summary: *Summary;
+    summary_a: f64;
+    summary_b: f64;
+    summary_stale: bool;
+    overview: []f32;
+    text: *ByteList;
+    label: *ByteList;
+    chain: *IntList;
+    // Name search: names containing the query are marked in matches.
+    searching: bool;
+    query: *ByteList;
+    matches: []bool;
+    match_count: int;
+    dirty: bool
+}
+
+explorer_shader(kind: int, source: []i8) raises IoError: int {
+    shader: int = glCreateShader(kind);
+    ptr: *i8 = source;
+    size: i32 = len(source) trunc i32;
+    glShaderSource(shader, 1, &ptr, &size);
+    glCompileShader(shader);
+    ok: i32 = 0i32;
+    glGetShaderiv(shader, 35713, &ok);
+    if (ok == 0i32) {
+        log: []i8 = new i8[2048](0i8);
+        count: i32 = 0i32;
+        glGetShaderInfoLog(shader, len(log), &count, log);
+        n: int = count as int;
+        if (n < 0) n = 0;
+        if (n > len(log)) n = len(log);
+        write_bytes_n(2, log, n);
+        return 0
+    }
+    shader
+}
+
+// Sets up GL state and the font for a trace; the GL context must be current.
+explorer_new(
+    t: *Trace@new,
+    title: []i8@new,
+    width: int,
+    height: int
+) raises IoError: ?*Explorer@new {
+    font0: ?*CachedFont = load_cached_font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 13, 1024, 1024, 4096);
+    if (font0 == null) {
+        eprint("profile-explorer: cannot load DejaVuSans.ttf");
+        return null
+    }
+    font: *CachedFont = font0;
+    em: Glyph = cached_font_glyph(font, 77);
+    tracks: int = t.tracks.size;
+    if (tracks < 0) tracks = 0;
+    x: *Explorer = new Explorer {
+        trace: t,
+        title: title,
+        font: font,
+        ascent: em.top as int,
+        program: 0,
+        viewport: -1,
+        buffer: 0u32,
+        texture: 0u32,
+        vertices: new ViewVertices { data: new f32[VIEW_QUADS * 48](0.0) },
+        quads: 0,
+        width: width,
+        height: height,
+        t0: 0.0f64,
+        t1: 1.0f64,
+        scroll: 0.0f64,
+        mouse_x: -1,
+        mouse_y: -1,
+        drag: 0,
+        drag_x: 0,
+        drag_y: 0,
+        drag_t0: 0.0f64,
+        drag_t1: 0.0f64,
+        drag_scroll: 0.0f64,
+        moved: false,
+        selected: -1,
+        hover: -1,
+        range_a: 0.0f64,
+        range_b: 0.0f64,
+        collapsed: new bool[tracks](false),
+        summary: summary_new(t, 24),
+        summary_a: -1.0f64,
+        summary_b: -1.0f64,
+        summary_stale: true,
+        overview: new f32[0](0.0),
+        text: byte_list(256),
+        label: byte_list(256),
+        chain: int_list(64),
+        searching: false,
+        query: byte_list(64),
+        matches: new bool[0](false),
+        match_count: 0,
+        dirty: true
+    };
+    explorer_reset(x);
+    vs: []i8 = """
+#version 120
+attribute vec2 position;
+attribute vec2 uv;
+attribute vec4 color;
+uniform vec2 viewport;
+varying vec2 texcoord;
+varying vec4 ink;
+void main() {
+    gl_Position = vec4(position.x * 2.0 / viewport.x - 1.0,
+                       1.0 - position.y * 2.0 / viewport.y, 0.0, 1.0);
+    texcoord = uv;
+    ink = color;
+}
+""";
+    fs: []i8 = """
+#version 120
+uniform sampler2D atlas;
+varying vec2 texcoord;
+varying vec4 ink;
+void main() {
+    float coverage = texcoord.x < 0.0 ? 1.0 : texture2D(atlas, texcoord).a;
+    gl_FragColor = vec4(ink.rgb, ink.a * coverage);
+}
+""";
+    vsh: int = explorer_shader(35633, vs);
+    fsh: int = explorer_shader(35632, fs);
+    if (vsh == 0 || fsh == 0) return null;
+    x.program = glCreateProgram();
+    glAttachShader(x.program, vsh);
+    glAttachShader(x.program, fsh);
+    glBindAttribLocation(x.program, 0, "position");
+    glBindAttribLocation(x.program, 1, "uv");
+    glBindAttribLocation(x.program, 2, "color");
+    glLinkProgram(x.program);
+    ok: i32 = 0i32;
+    glGetProgramiv(x.program, 35714, &ok);
+    if (ok == 0i32) {
+        eprint("profile-explorer: shader link failed");
+        return null
+    }
+    glUseProgram(x.program);
+    x.viewport = glGetUniformLocation(x.program, "viewport");
+    glUniform1i(glGetUniformLocation(x.program, "atlas"), 0);
+    va: []u32 = new u32[1](0u32);
+    glGenVertexArrays(1, va);
+    glBindVertexArray(va[0]);
+    glGenBuffers(1, &x.buffer);
+    glBindBuffer(34962, x.buffer);
+    glVertexAttribPointer(0, 2, 5126, 0, 32, 0);
+    glVertexAttribPointer(1, 2, 5126, 0, 32, 8);
+    glVertexAttribPointer(2, 4, 5126, 0, 32, 16);
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    glEnableVertexAttribArray(2);
+    glGenTextures(1, &x.texture);
+    glBindTexture(3553, x.texture);
+    glTexParameteri(3553, 10241, 9729);
+    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 10242, 33071);
+    glTexParameteri(3553, 10243, 33071);
+    glPixelStorei(3317, 1);
+    glTexImage2D(3553, 0, 6406, font.width, font.height, 0, 6406, 5121, font.atlas);
+    font.dirty = false;
+    glEnable(3042);
+    glBlendFunc(770, 771);
+    x
+}
+
+// Shows the whole trace.
+explorer_reset(x: *Explorer) {
+    end: f64 = x.trace.end;
+    if (end <= 0.0f64) end = 1.0f64;
+    pad: f64 = end * 0.01f64;
+    x.t0 = 0.0f64 - pad;
+    x.t1 = end + pad;
+    x.dirty = true
+}
+
+// ---- drawing primitives ----
+view_corner(
+    v: []f32,
+    at: int,
+    px: f32,
+    py: f32,
+    u: f32,
+    w: f32,
+    color: int,
+    alpha: f32
+) {
+    v[at] = px;
+    v[at + 1] = py;
+    v[at + 2] = u;
+    v[at + 3] = w;
+    v[at + 4] = (color / 65536 % 256) as f32 / 255.0;
+    v[at + 5] = (color / 256 % 256) as f32 / 255.0;
+    v[at + 6] = (color % 256) as f32 / 255.0;
+    v[at + 7] = alpha
+}
+
+view_quad_uv(
+    x: *Explorer,
+    px: f32,
+    py: f32,
+    w: f32,
+    h: f32,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+    color: int,
+    alpha: f32
+) {
+    q: int = x.quads;
+    if (q < 0 || q >= VIEW_QUADS) return;
+    v: []f32 = x.vertices.data;
+    at: int = q * 48;
+    view_corner(v, at, px, py, u0, v0, color, alpha);
+    view_corner(v, at + 8, px + w, py, u1, v0, color, alpha);
+    view_corner(v, at + 16, px, py + h, u0, v1, color, alpha);
+    view_corner(v, at + 24, px + w, py, u1, v0, color, alpha);
+    view_corner(v, at + 32, px, py + h, u0, v1, color, alpha);
+    view_corner(v, at + 40, px + w, py + h, u1, v1, color, alpha);
+    x.quads = q + 1
+}
+
+view_rect(
+    x: *Explorer,
+    px: f32,
+    py: f32,
+    w: f32,
+    h: f32,
+    color: int,
+    alpha: f32
+) {
+    if (w <= 0.0 || h <= 0.0) return;
+    view_quad_uv(x, px, py, w, h, -1.0, -1.0, -1.0, -1.0, color, alpha)
+}
+
+view_outline(
+    x: *Explorer,
+    px: f32,
+    py: f32,
+    w: f32,
+    h: f32,
+    color: int
+) {
+    view_rect(x, px, py, w, 2.0, color, 1.0);
+    view_rect(x, px, py + h - 2.0, w, 2.0, color, 1.0);
+    view_rect(x, px, py, 2.0, h, color, 1.0);
+    view_rect(x, px + w - 2.0, py, 2.0, h, color, 1.0)
+}
+
+// The code point of the UTF-8 sequence at s[i] times 8, plus its length in
+// bytes; a malformed byte reads as U+FFFD with length 1.
+utf8_step(s: []i8, i: int): int {
+    if (i < 0 || i >= len(s)) return 1;
+    c: int = s[i] as int & 255;
+    if (c < 128) return c * 8 + 1;
+    extra: int = 0;
+    code: int = 0;
+    if (c >= 240 && c < 248) {
+        extra = 3;
+        code = c & 7
+    } else if (c >= 224 && c < 240) {
+        extra = 2;
+        code = c & 15
+    } else if (c >= 192 && c < 224) {
+        extra = 1;
+        code = c & 31
+    } else return 65533 * 8 + 1;
+    for k in 1..extra + 1 {
+        p: int = i + k;
+        if (p < 0 || p >= len(s) || (s[p] as int & 192) != 128) return 65533 * 8 + 1;
+        code = code * 64 + (s[p] as int & 63)
+    }
+    code * 8 + 1 + extra
+}
+
+// Draws text from s[from..to) with its baseline at py, stopping before max_x.
+// Returns the pen position after the last glyph drawn.
+view_text_range(
+    x: *Explorer,
+    px: f32,
+    py: f32,
+    s: []i8,
+    from: int,
+    to: int,
+    color: int,
+    max_x: f32
+): f32 {
+    at: int = from;
+    stop: int = to;
+    if (stop > len(s)) stop = len(s);
+    pen: f32 = px;
+    going: bool = true;
+    while (going && at < stop) {
+        step: int = utf8_step(s, at);
+        at = at + step % 8;
+        code: int = step / 8;
+        if (code < 32) code = 32;
+        g: Glyph = cached_font_glyph(x.font, code);
+        if (pen + g.adv > max_x) going = false else {
+            if (g.w > 0.0 && g.h > 0.0) view_quad_uv(x, pen + g.left, py - g.top,
+                g.w, g.h, g.u0, g.v0, g.u1, g.v1, color, 1.0);
+            pen = pen + g.adv
+        }
+    }
+    pen
+}
+
+view_text(
+    x: *Explorer,
+    px: f32,
+    py: f32,
+    s: []i8,
+    color: int,
+    max_x: f32
+): f32 {
+    view_text_range(x, px, py, s, 0, len(s), color, max_x)
+}
+
+view_list(
+    x: *Explorer,
+    px: f32,
+    py: f32,
+    b: *ByteList,
+    color: int,
+    max_x: f32
+): f32 {
+    view_text_range(x, px, py, b.data, 0, b.size, color, max_x)
+}
+
+view_width_range(
+    x: *Explorer,
+    s: []i8,
+    from: int,
+    to: int
+): f32 {
+    at: int = from;
+    stop: int = to;
+    if (stop > len(s)) stop = len(s);
+    w: f32 = 0.0;
+    while (at < stop) {
+        step: int = utf8_step(s, at);
+        at = at + step % 8;
+        code: int = step / 8;
+        if (code < 32) code = 32;
+        g: Glyph = cached_font_glyph(x.font, code);
+        w = w + g.adv
+    }
+    w
+}
+
+// ---- view geometry ----
+view_tracks_bottom(x: *Explorer): int {
+    bottom: int = x.height - PANEL_H;
+    if (bottom < TRACKS_TOP + 40) bottom = TRACKS_TOP + 40;
+    bottom
+}
+
+view_scale(x: *Explorer): f64 {
+    span: f64 = x.t1 - x.t0;
+    if (span <= 0.0f64) span = 1.0f64;
+    x.width as f64 / span
+}
+
+view_time_at(x: *Explorer, px: int): f64 {
+    x.t0 + px as f64 / view_scale(x)
+}
+
+view_x_of(x: *Explorer, t: f64): f64 {
+    (t - x.t0) * view_scale(x)
+}
+
+view_collapsed(x: *Explorer, track: int): bool {
+    collapsed: []bool = x.collapsed;
+    track >= 0 && track < len(collapsed) && collapsed[track]
+}
+
+view_track_height(x: *Explorer, track: int): int {
+    tracks: *TrackList = x.trace.tracks;
+    if (track < 0 || track >= tracks.size || track >= len(tracks.data)) return 0;
+    rows: int = tracks.data[track].depth;
+    if (view_collapsed(x, track)) rows = 0;
+    HEADER_H + rows * ROW_H + TRACK_GAP
+}
+
+view_content_height(x: *Explorer): int {
+    total: int = 0;
+    display: []int = x.trace.display;
+    for k in 0..len(display) total = total + view_track_height(x, display[k]);
+    total
+}
+
+view_clamp_scroll(x: *Explorer) {
+    visible: int = view_tracks_bottom(x) - TRACKS_TOP;
+    limit: f64 = (view_content_height(x) - visible + 40) as f64;
+    if (limit < 0.0f64) limit = 0.0f64;
+    if (x.scroll > limit) x.scroll = limit;
+    if (x.scroll < 0.0f64) x.scroll = 0.0f64
+}
+
+// Keeps the time window within reach of the trace and above a nanosecond.
+view_clamp_time(x: *Explorer) {
+    end: f64 = x.trace.end;
+    if (end <= 0.0f64) end = 1.0f64;
+    span: f64 = x.t1 - x.t0;
+    if (span < 0.001f64) {
+        mid: f64 = (x.t0 + x.t1) * 0.5f64;
+        span = 0.001f64;
+        x.t0 = mid - span * 0.5f64;
+        x.t1 = mid + span * 0.5f64
+    }
+    if (span > end * 4.0f64) {
+        x.t0 = 0.0f64 - end * 1.5f64;
+        x.t1 = end * 2.5f64;
+        span = x.t1 - x.t0
+    }
+    if (x.t1 < end * -0.5f64 + span * 0.1f64) {
+        x.t1 = end * -0.5f64 + span * 0.1f64;
+        x.t0 = x.t1 - span
+    }
+    if (x.t0 > end * 1.5f64 - span * 0.1f64) {
+        x.t0 = end * 1.5f64 - span * 0.1f64;
+        x.t1 = x.t0 + span
+    }
+}
+
+view_zoom(x: *Explorer, px: int, factor: f64) {
+    at: f64 = view_time_at(x, px);
+    x.t0 = at - (at - x.t0) * factor;
+    x.t1 = at + (x.t1 - at) * factor;
+    view_clamp_time(x);
+    x.dirty = true
+}
+
+view_pan(x: *Explorer, pixels: f64) {
+    dt: f64 = pixels / view_scale(x);
+    x.t0 = x.t0 + dt;
+    x.t1 = x.t1 + dt;
+    view_clamp_time(x);
+    x.dirty = true
+}
+
+// What lies under a point in the track area: an event, a track header, or nothing.
+type ViewHit = {
+    track: int;
+    header: bool;
+    row: int;
+    event: int
+}
+
+view_hit(x: *Explorer, px: int, py: int): ViewHit {
+    hit: ViewHit = ViewHit {
+        track: -1,
+        header: false,
+        row: -1,
+        event: -1
+    };
+    if (py < TRACKS_TOP || py >= view_tracks_bottom(x)) return hit;
+    t: *Trace = x.trace;
+    tracks: *TrackList = t.tracks;
+    y: int = TRACKS_TOP - x.scroll as int;
+    display: []int = t.display;
+    for k in 0..len(display) {
+        track: int = display[k];
+        h: int = view_track_height(x, track);
+        if (hit.track < 0 && py >= y && py < y + h && track >= 0 && track < tracks.size && track < len(tracks.data)) {
+            hit.track = track;
+            if (py < y + HEADER_H) hit.header = true else {
+                depth: int = (py - y - HEADER_H) / ROW_H;
+                if (depth < tracks.data[track].depth) {
+                    hit.row = tracks.data[track].first_row + depth;
+                    slack: f64 = 2.0f64 / view_scale(x);
+                    hit.event = row_event_at(t, hit.row, view_time_at(x, px), slack)
+                }
+            }
+        }
+        y = y + h
+    }
+    hit
+}
+
+// ---- colors ----
+EVENT_COLORS: []int = [8104666, 15247484, 9423247, 14258101, 12822248, 15127162, 8178121,
+    15240332, 11060332, 10465480, 13935475, 8829408, 11903949, 14329978, 9752279,
+    13219735];
+
+MARK_OPEN: []i8 = [226i8, 150i8, 190i8, 32i8];
+
+MARK_CLOSED: []i8 = [226i8, 150i8, 184i8, 32i8];
+
+TOOLBAR_HINTS: []str = ["wheel/W S zoom", "drag/A D pan", "shift-wheel scroll", "shift-drag range",
+    "click select", "/ find", "F fit", "C collapse", "0 reset", "Q quit"];
+
+event_color(name: int): int {
+    palette: []int = EVENT_COLORS;
+    h: int = name * 2654435761 & 2147483647;
+    slot: int = h / 7 % 16;
+    if (slot < 0 || slot >= len(palette)) return 8421504;
+    palette[slot]
+}
+
+// ---- frame ----
+
+// Chooses the smallest tick step of 1, 2, or 5 times a power of ten that
+// leaves at least 110 pixels between ticks, room for their labels.
+view_tick_step(x: *Explorer): f64 {
+    target: f64 = 110.0f64 / view_scale(x);
+    step: f64 = 0.000001f64;
+    guard: int = 0;
+    while (step * 10.0f64 < target && guard < 40) {
+        step = step * 10.0f64;
+        guard = guard + 1
+    }
+    if (step >= target) return step;
+    if (step * 2.0f64 >= target) return step * 2.0f64;
+    if (step * 5.0f64 >= target) return step * 5.0f64;
+    step * 10.0f64
+}
+
+// A tick label in the unit that suits the window's times, with just enough
+// decimals to tell ticks a step apart.
+byte_tick(
+    b: *ByteList@new,
+    t: f64,
+    step: f64,
+    magnitude: f64
+) {
+    // Units: 0 ns, 1 microseconds, 2 ms, 3 s.
+    unit: f64 = 0.001f64;
+    which: int = 0;
+    size: f64 = magnitude;
+    if (size < step) size = step;
+    if (size >= 1000000.0f64) {
+        unit = 1000000.0f64;
+        which = 3
+    } else if (size >= 1000.0f64) {
+        unit = 1000.0f64;
+        which = 2
+    } else if (size >= 1.0f64) {
+        unit = 1.0f64;
+        which = 1
+    }
+    places: int = 0;
+    scaled: f64 = step / unit;
+    while (scaled < 0.999f64 && places < 9) {
+        scaled = scaled * 10.0f64;
+        places = places + 1
+    }
+    byte_fixed(b, t / unit, places);
+    if (which == 0) byte_text(b, " ns") else if (which == 1) {
+        byte_text(b, " ");
+        utf8_push(b, 181);
+        byte_text(b, "s")
+    } else if (which == 2) byte_text(b, " ms") else byte_text(b, " s")
+}
+
+view_magnitude(x: *Explorer): f64 {
+    a: f64 = x.t0;
+    if (a < 0.0f64) a = 0.0f64 - a;
+    b: f64 = x.t1;
+    if (b < 0.0f64) b = 0.0f64 - b;
+    if (a > b) return a;
+    b
+}
+
+draw_row(x: *Explorer, row: int, y: f32) {
+    t: *Trace = x.trace;
+    row_at: []int = t.row_at;
+    if (row < 0 || row >= len(row_at) - 1) return;
+    stop: int = row_at[row + 1];
+    at: int = row_first_after(t, row, x.t0);
+    order: []int = t.order;
+    data: []TraceEvent = t.events.data;
+    scale: f64 = view_scale(x);
+    w: f64 = x.width as f64;
+    covered: f64 = -1.0f64;
+    matches: []bool = x.matches;
+    dimming: bool = x.query.size > 0;
+    going: bool = true;
+    while (going && at < stop && at >= 0 && at < len(order)) {
+        index: int = order[at];
+        next: int = at + 1;
+        if (index >= 0 && index < len(data)) {
+            e: TraceEvent = data[index];
+            if (e.start >= x.t1 || x.quads >= VIEW_TRACK_QUADS) going = false else {
+                x0: f64 = (e.start - x.t0) * scale;
+                x1: f64 = (e.start + e.dur - x.t0) * scale;
+                if (x1 < x0 + 1.0f64) x1 = x0 + 1.0f64;
+                if (x1 <= covered + 1.0f64) {
+                    // Everything ending within the covered pixels is hidden; skip past it.
+                    skip: int = row_first_after(t, row, x.t0 + (covered + 1.0f64) / scale);
+                    if (skip > next) next = skip
+                } else {
+                    if (x0 < covered) x0 = covered;
+                    if (x0 < -2.0f64) x0 = -2.0f64;
+                    if (x1 > w + 2.0f64) x1 = w + 2.0f64;
+                    box_w: f64 = x1 - x0;
+                    if (box_w > 3.0f64) box_w = box_w - 1.0f64;
+                    color: int = event_color(e.name);
+                    ink: int = 1315860;
+                    if (dimming && !(e.name >= 0 && e.name < len(matches) && matches[e.name])) {
+                        color = view_mix(color, 1776421, 0.78);
+                        ink = 6316128
+                    }
+                    if (index == x.hover) color = view_mix(color, 16777215, 0.35);
+                    view_rect(x, x0 as f32, y, box_w as f32, (ROW_H - 1) as f32, color,
+                        1.0);
+                    if (box_w > 28.0f64) {
+                        name: []i8 = trace_name(t, e.name);
+                        tx: f64 = x0 + 4.0f64;
+                        if (tx < 4.0f64) tx = 4.0f64;
+                        view_text(x, tx as f32, y + 13.0, name, ink, (x0 + box_w - 3.0f64) as f32)
+                    }
+                    covered = x1
+                }
+            }
+        }
+        at = next
+    }
+}
+
+view_mix(a: int, b: int, k: f32): int {
+    r: int = ((a / 65536 % 256) as f32 * (1.0 - k) + (b / 65536 % 256) as f32 * k) as int;
+    g: int = ((a / 256 % 256) as f32 * (1.0 - k) + (b / 256 % 256) as f32 * k) as int;
+    bl: int = ((a % 256) as f32 * (1.0 - k) + (b % 256) as f32 * k) as int;
+    r * 65536 + g * 256 + bl
+}
+
+draw_tracks(x: *Explorer@new) {
+    t: *Trace = x.trace;
+    tracks: *TrackList = t.tracks;
+    bottom: int = view_tracks_bottom(x);
+    w: f32 = x.width as f32;
+    // Grid lines at each tick.
+    step: f64 = view_tick_step(x);
+    first: f64 = (x.t0 / step) as int as f64 * step;
+    tick: f64 = first;
+    guard: int = 0;
+    while (tick < x.t1 && guard < 200) {
+        px: f64 = view_x_of(x, tick);
+        if (px >= 0.0f64) view_rect(x, px as f32, TRACKS_TOP as f32, 1.0, (bottom - TRACKS_TOP) as f32,
+            3158584, 1.0);
+        tick = tick + step;
+        guard = guard + 1
+    }
+    y: int = TRACKS_TOP - x.scroll as int;
+    display: []int = t.display;
+    for k in 0..len(display) {
+        track: int = display[k];
+        h: int = view_track_height(x, track);
+        if (y < bottom && y + h > TRACKS_TOP && track >= 0 && track < tracks.size && track < len(tracks.data)) {
+            tr: TraceTrack = tracks.data[track];
+            open: bool = !view_collapsed(x, track);
+            view_rect(x, 0.0, y as f32, w, HEADER_H as f32, 2632493, 1.0);
+            view_rect(x, 0.0, (y + HEADER_H - 1) as f32, w, 1.0, 3815998, 1.0);
+            trace_track_label(t, track, x.text);
+            marker: []i8 = MARK_CLOSED;
+            if (open) marker = MARK_OPEN;
+            pen: f32 = view_text(x, 8.0, (y + 15) as f32, marker, 10066329, w);
+            pen = view_list(x, pen, (y + 15) as f32, x.text, 14540253, w - 8.0);
+            x.text.size = 0;
+            byte_text(x.text, "   ");
+            byte_int(x.text, tr.events);
+            byte_text(x.text, " events");
+            view_list(x, pen, (y + 15) as f32, x.text, 8421504, w - 8.0);
+            if (open) {
+                for depth in 0..tr.depth {
+                    ry: int = y + HEADER_H + depth * ROW_H;
+                    if (ry + ROW_H > TRACKS_TOP && ry < bottom) draw_row(x, tr.first_row + depth,
+                        ry as f32)
+                }
+            }
+        }
+        y = y + h
+    }
+    // The selection outline and the selected range sit above the rows.
+    sel: int = x.selected;
+    data: []TraceEvent = t.events.data;
+    if (sel >= 0 && sel < t.events.size && sel < len(data)) {
+        e: TraceEvent = data[sel];
+        ey: int = view_event_y(x, sel);
+        if (ey >= 0) {
+            x0: f64 = view_x_of(x, e.start);
+            x1: f64 = view_x_of(x, e.start + e.dur);
+            if (x1 < x0 + 2.0f64) x1 = x0 + 2.0f64;
+            if (x0 < -4.0f64) x0 = -4.0f64;
+            if (x1 > w as f64 + 4.0f64) x1 = w as f64 + 4.0f64;
+            view_outline(x, (x0 - 1.0f64) as f32, (ey - 1) as f32, (x1 - x0 + 2.0f64) as f32,
+                (ROW_H + 1) as f32, 16777215)
+        }
+    }
+    if (x.range_b > x.range_a) {
+        a: f64 = view_x_of(x, x.range_a);
+        b: f64 = view_x_of(x, x.range_b);
+        if (a < -1.0f64) a = -1.0f64;
+        if (b > w as f64 + 1.0f64) b = w as f64 + 1.0f64;
+        if (b > a) {
+            view_rect(x, a as f32, TRACKS_TOP as f32, (b - a) as f32, (bottom - TRACKS_TOP) as f32,
+                4886745, 0.18);
+            view_rect(x, a as f32, TRACKS_TOP as f32, 1.0, (bottom - TRACKS_TOP) as f32,
+                4886745, 0.9);
+            view_rect(x, b as f32, TRACKS_TOP as f32, 1.0, (bottom - TRACKS_TOP) as f32,
+                4886745, 0.9)
+        }
+    }
+    // The pointer's time.
+    if (x.mouse_y >= TRACKS_TOP - RULER_H && x.mouse_y < bottom && x.mouse_x >= 0) view_rect(x,
+        x.mouse_x as f32, (TRACKS_TOP - RULER_H) as f32, 1.0, (bottom - TRACKS_TOP + RULER_H) as f32,
+        11184810, 0.5)
+}
+
+// The top of an event's row on screen, or -1 if its track is collapsed.
+view_event_y(x: *Explorer, event: int): int {
+    t: *Trace = x.trace;
+    data: []TraceEvent = t.events.data;
+    if (event < 0 || event >= len(data)) return -1;
+    e: TraceEvent = data[event];
+    y: int = TRACKS_TOP - x.scroll as int;
+    display: []int = t.display;
+    result: int = -1;
+    for k in 0..len(display) {
+        track: int = display[k];
+        if (track == e.track) {
+            if (!view_collapsed(x, track)) result = y + HEADER_H + e.depth * ROW_H
+        }
+        y = y + view_track_height(x, track)
+    }
+    result
+}
+
+draw_ruler(x: *Explorer@new) {
+    w: f32 = x.width as f32;
+    top: int = TRACKS_TOP - RULER_H;
+    view_rect(x, 0.0, top as f32, w, RULER_H as f32, 2302755, 1.0);
+    view_rect(x, 0.0, (TRACKS_TOP - 1) as f32, w, 1.0, 3815998, 1.0);
+    step: f64 = view_tick_step(x);
+    first: f64 = (x.t0 / step) as int as f64 * step;
+    tick: f64 = first;
+    guard: int = 0;
+    while (tick < x.t1 && guard < 200) {
+        px: f64 = view_x_of(x, tick);
+        if (px >= 0.0f64) {
+            view_rect(x, px as f32, (top + 12) as f32, 1.0, (RULER_H - 12) as f32,
+                8421504, 1.0);
+            x.text.size = 0;
+            byte_tick(x.text, tick, step, view_magnitude(x));
+            view_list(x, (px + 4.0f64) as f32, (top + 14) as f32, x.text, 11184810,
+                w)
+        }
+        tick = tick + step;
+        guard = guard + 1
+    }
+    if (x.range_b > x.range_a) {
+        a: f64 = view_x_of(x, x.range_a);
+        b: f64 = view_x_of(x, x.range_b);
+        if (a < 0.0f64) a = 0.0f64;
+        if (b > w as f64) b = w as f64;
+        if (b > a) view_rect(x, a as f32, top as f32, (b - a) as f32, RULER_H as f32,
+            4886745, 0.35)
+    }
+}
+
+// Activity across the whole trace: the share of threads busy at each column.
+view_build_overview(x: *Explorer@new) {
+    width: int = x.width;
+    if (width < 1) width = 1;
+    if (width > 16384) width = 16384;
+    cols: []f32 = new f32[width](0.0);
+    t: *Trace = x.trace;
+    data: []TraceEvent = t.events.data;
+    n: int = t.events.size;
+    if (n > len(data)) n = len(data);
+    end: f64 = t.end;
+    if (end <= 0.0f64) end = 1.0f64;
+    per: f64 = width as f64 / end;
+    for i in 0..n {
+        e: TraceEvent = data[i];
+        if (e.depth == 0 && e.dur > 0.0f64) {
+            a: f64 = e.start * per;
+            b: f64 = (e.start + e.dur) * per;
+            c: int = a as int;
+            if (c < 0) c = 0;
+            while (c < width && c >= 0 && c as f64 < b) {
+                lo: f64 = c as f64;
+                hi: f64 = lo + 1.0f64;
+                if (a > lo) lo = a;
+                if (b < hi) hi = b;
+                if (hi > lo && c < len(cols)) cols[c] = cols[c] + (hi - lo) as f32;
+                c = c + 1
+            }
+        }
+    }
+    peak: f32 = 0.0;
+    for c in 0..len(cols) {
+        if (cols[c] > peak) peak = cols[c]
+    }
+    if (peak > 0.0) {
+        for c in 0..len(cols) cols[c] = cols[c] / peak
+    }
+    x.overview = cols
+}
+
+draw_overview(x: *Explorer@new) {
+    w: f32 = x.width as f32;
+    top: int = TOOLBAR_H;
+    view_rect(x, 0.0, top as f32, w, OVERVIEW_H as f32, 1710622, 1.0);
+    if (len(x.overview) != x.width) view_build_overview(x);
+    cols: []f32 = x.overview;
+    h: f32 = (OVERVIEW_H - 8) as f32;
+    base: f32 = (top + OVERVIEW_H - 4) as f32;
+    // Runs of columns with equal height share one quad.
+    c: int = 0;
+    while (c < len(cols) && c >= 0) {
+        v: f32 = cols[c];
+        run: int = c + 1;
+        while (run < len(cols) && cols[run] == v) run = run + 1;
+        if (v > 0.0) view_rect(x, c as f32, base - v * h, (run - c) as f32, v * h,
+            5938621, 1.0);
+        c = run
+    }
+    // The visible window, as Chrome shows it: dim outside, edges inside.
+    end: f64 = x.trace.end;
+    if (end <= 0.0f64) end = 1.0f64;
+    a: f64 = x.t0 / end * w as f64;
+    b: f64 = x.t1 / end * w as f64;
+    if (a < 0.0f64) a = 0.0f64;
+    if (b > w as f64) b = w as f64;
+    if (a > 0.0f64) view_rect(x, 0.0, top as f32, a as f32, OVERVIEW_H as f32, 0,
+        0.55);
+    if (b < w as f64) view_rect(x, b as f32, top as f32, (w as f64 - b) as f32, OVERVIEW_H as f32,
+        0, 0.55);
+    if (b < a + 2.0f64) b = a + 2.0f64;
+    view_rect(x, a as f32, top as f32, 1.0, OVERVIEW_H as f32, 11184810, 1.0);
+    view_rect(x, (b - 1.0f64) as f32, top as f32, 1.0, OVERVIEW_H as f32, 11184810,
+        1.0);
+    view_rect(x, 0.0, (top + OVERVIEW_H - 1) as f32, w, 1.0, 3815998, 1.0)
+}
+
+draw_toolbar(x: *Explorer@new) {
+    w: f32 = x.width as f32;
+    view_rect(x, 0.0, 0.0, w, TOOLBAR_H as f32, 2302755, 1.0);
+    view_rect(x, 0.0, (TOOLBAR_H - 1) as f32, w, 1.0, 3815998, 1.0);
+    t: *Trace = x.trace;
+    pen: f32 = view_text(x, 10.0, 18.0, x.title, 15658734, w * 0.5);
+    b: *ByteList = x.text;
+    b.size = 0;
+    byte_text(b, "   ");
+    byte_int(b, t.events.size);
+    if (t.perf) byte_text(b, " frames from perf samples, ") else byte_text(b, " events, ");
+    byte_int(b, len(t.display));
+    byte_text(b, " threads, ");
+    byte_time(b, t.end);
+    pen = view_list(x, pen, 18.0, b, 9474192, w);
+    if (x.searching || x.query.size > 0) {
+        b.size = 0;
+        byte_text(b, "Find: ");
+        q: *ByteList = x.query;
+        byte_bytes(b, q.data, 0, q.size);
+        if (x.searching) utf8_push(b, 9615);
+        byte_text(b, "    ");
+        byte_int(b, x.match_count);
+        byte_text(b, " matching events");
+        byte_dot(b);
+        byte_text(b, "Enter/N next");
+        byte_dot(b);
+        byte_text(b, "Esc clear");
+        bw: f32 = view_width_range(x, b.data, 0, b.size);
+        left: f32 = w - bw - 10.0;
+        if (left < pen + 20.0) left = pen + 20.0;
+        view_rect(x, left - 6.0, 3.0, w - left, (TOOLBAR_H - 6) as f32, 3815998, 1.0);
+        view_list(x, left, 18.0, b, 16768375, w);
+        return
+    }
+    b.size = 0;
+    hints: []str = TOOLBAR_HINTS;
+    for k in 0..len(hints) {
+        if (k > 0) byte_dot(b);
+        byte_text(b, hints[k])
+    }
+    hw: f32 = view_width_range(x, b.data, 0, b.size);
+    if (w - hw - 10.0 > pen + 20.0) view_list(x, w - hw - 10.0, 18.0, b, 7368816,
+        w)
+}
+
+// Writes the enclosing frames of an event, outermost first.
+byte_stack(
+    b: *ByteList@new,
+    t: *Trace,
+    event: int,
+    chain: *IntList@new
+) {
+    chain.size = 0;
+    data: []TraceEvent = t.events.data;
+    at: int = event;
+    guard: int = 0;
+    while (at >= 0 && at < len(data) && guard < 512) {
+        int_push(chain, at);
+        at = data[at].parent;
+        guard = guard + 1
+    }
+    k: int = chain.size - 1;
+    while (k >= 0 && k < chain.size && k < len(chain.data)) {
+        index: int = chain.data[k];
+        if (index >= 0 && index < len(data)) {
+            name: []i8 = trace_name(t, data[index].name);
+            byte_bytes(b, name, 0, len(name))
+        }
+        if (k > 0) {
+            byte_text(b, "  ");
+            utf8_push(b, 8250);
+            byte_text(b, "  ")
+        }
+        k = k - 1
+    }
+}
+
+// Draws text, wrapping at the panel's edge, until max_y; returns the next baseline.
+view_wrapped(
+    x: *Explorer,
+    left: f32,
+    py: f32,
+    s: []i8,
+    count: int,
+    color: int,
+    max_y: f32
+): f32 {
+    right: f32 = x.width as f32 - 12.0;
+    stop: int = count;
+    if (stop > len(s)) stop = len(s);
+    at: int = 0;
+    y: f32 = py;
+    pen: f32 = left;
+    while (at < stop && y <= max_y) {
+        step: int = utf8_step(s, at);
+        at = at + step % 8;
+        code: int = step / 8;
+        if (code < 32) code = 32;
+        g: Glyph = cached_font_glyph(x.font, code);
+        if (pen + g.adv > right) {
+            pen = left;
+            y = y + LINE_H as f32
+        }
+        if (y <= max_y) {
+            if (g.w > 0.0 && g.h > 0.0) view_quad_uv(x, pen + g.left, y - g.top, g.w,
+                g.h, g.u0, g.v0, g.u1, g.v1, color, 1.0);
+            pen = pen + g.adv
+        }
+    }
+    y + LINE_H as f32
+}
+
+draw_details(x: *Explorer@new, top: f32) {
+    t: *Trace = x.trace;
+    data: []TraceEvent = t.events.data;
+    sel: int = x.selected;
+    if (sel < 0 || sel >= t.events.size || sel >= len(data)) return;
+    e: TraceEvent = data[sel];
+    w: f32 = x.width as f32;
+    max_y: f32 = x.height as f32 - 6.0;
+    y: f32 = top + 20.0;
+    view_rect(x, 12.0, y - 11.0, 10.0, 10.0, event_color(e.name), 1.0);
+    view_text(x, 28.0, y, trace_name(t, e.name), 16777215, w - 12.0);
+    y = y + LINE_H as f32 + 2.0;
+    b: *ByteList = x.text;
+    b.size = 0;
+    byte_text(b, "Duration ");
+    byte_time(b, e.dur);
+    byte_text(b, "     Self ");
+    byte_time(b, trace_self_time(t, sel));
+    byte_text(b, "     Start ");
+    precision: f64 = e.dur / 100.0f64;
+    if (precision < 0.001f64) precision = 0.001f64;
+    byte_tick(b, e.start, precision, e.start);
+    byte_text(b, "     Depth ");
+    byte_int(b, e.depth);
+    if (e.cat >= 0) {
+        byte_text(b, "     Category ");
+        cat: []i8 = trace_name(t, e.cat);
+        byte_bytes(b, cat, 0, len(cat))
+    }
+    view_list(x, 12.0, y, b, 13421772, w - 12.0);
+    y = y + LINE_H as f32;
+    b.size = 0;
+    byte_text(b, "Thread ");
+    label: *ByteList = x.label;
+    trace_track_label(t, e.track, label);
+    byte_bytes(b, label.data, 0, label.size);
+    view_list(x, 12.0, y, b, 11184810, w - 12.0);
+    y = y + LINE_H as f32;
+    if (e.parent >= 0) {
+        b.size = 0;
+        byte_text(b, "Stack  ");
+        byte_stack(b, t, sel, x.chain);
+        y = view_wrapped(x, 12.0, y, b.data, b.size, 11184810, max_y)
+    }
+    if (e.args_at >= 0 && e.args_end > e.args_at + 2) {
+        // Arguments as their JSON text, with runs of whitespace collapsed.
+        b.size = 0;
+        byte_text(b, "Arguments  ");
+        src: []i8 = t.src;
+        space: bool = false;
+        i: int = e.args_at;
+        stop: int = e.args_end;
+        if (stop > len(src)) stop = len(src);
+        while (i < stop && i >= 0 && b.size < 4000) {
+            c: i8 = src[i];
+            if (c == ' ' || c == '\n' || c == '\r' || c == '\t') space = true else {
+                if (space) byte_push(b, ' ');
+                space = false;
+                byte_push(b, c)
+            }
+            i = i + 1
+        }
+        view_wrapped(x, 12.0, y, b.data, b.size, 11184810, max_y)
+    }
+}
+
+// Self time by function over the selected range, or over the visible window.
+draw_summary(x: *Explorer@new, top: f32) {
+    t: *Trace = x.trace;
+    a: f64 = x.t0;
+    b: f64 = x.t1;
+    ranged: bool = x.range_b > x.range_a;
+    if (ranged) {
+        a = x.range_a;
+        b = x.range_b
+    }
+    if (a < 0.0f64) a = 0.0f64;
+    if (b > t.end) b = t.end;
+    s: *Summary = x.summary;
+    if (a != x.summary_a || b != x.summary_b || x.summary_stale) {
+        trace_summary(t, a, b, x.collapsed, s);
+        x.summary_stale = false;
+        x.summary_a = a;
+        x.summary_b = b
+    }
+    w: f32 = x.width as f32;
+    text: *ByteList = x.text;
+    text.size = 0;
+    if (ranged) byte_text(text, "Selected range ") else byte_text(text, "Visible window ");
+    // Bounds precise enough to tell apart, however far the view zooms in.
+    magnitude: f64 = b;
+    if (magnitude < 0.0f64) magnitude = 0.0f64 - magnitude;
+    byte_tick(text, a, (b - a) / 100.0f64, magnitude);
+    byte_text(text, " ");
+    utf8_push(text, 8211);
+    byte_text(text, " ");
+    byte_tick(text, b, (b - a) / 100.0f64, magnitude);
+    byte_text(text, "  (");
+    byte_time(text, b - a);
+    byte_text(text, ")  ");
+    byte_dot(text);
+    byte_text(text, "  self time by name, busy ");
+    byte_time(text, s.total);
+    y: f32 = top + 20.0;
+    view_list(x, 12.0, y, text, 15658734, w - 12.0);
+    y = y + 6.0;
+    col_w: f32 = 460.0;
+    cols: int = ((w - 12.0) / col_w) as int;
+    if (cols < 1) cols = 1;
+    per_col: int = (x.height as f32 - y - 4.0) as int / LINE_H;
+    if (per_col < 1) per_col = 1;
+    top_names: []int = s.top;
+    self: []f64 = s.self;
+    peak: f64 = 0.0f64;
+    if (s.count > 0 && len(top_names) > 0) {
+        first: int = top_names[0];
+        if (first >= 0 && first < len(self)) peak = self[first]
+    }
+    for k in 0..s.count {
+        col: int = k / per_col;
+        if (col < cols && k < len(top_names)) {
+            name: int = top_names[k];
+            if (name >= 0 && name < len(self)) {
+                cx: f32 = 12.0 + col as f32 * col_w;
+                cy: f32 = y + (k % per_col * LINE_H + LINE_H) as f32;
+                share: f64 = 0.0f64;
+                if (peak > 0.0f64) share = self[name] / peak;
+                view_rect(x, cx, cy - 11.0, 80.0, 12.0, 2763306, 1.0);
+                view_rect(x, cx, cy - 11.0, (80.0f64 * share) as f32, 12.0, event_color(name),
+                    1.0);
+                text.size = 0;
+                byte_time(text, self[name]);
+                if (s.total > 0.0f64) {
+                    byte_text(text, "  ");
+                    byte_fixed(text, self[name] / s.total * 100.0f64, 1);
+                    byte_text(text, "%")
+                }
+                view_list(x, cx + 88.0, cy, text, 13421772, cx + col_w);
+                view_text(x, cx + 200.0, cy, trace_name(t, name), 15658734, cx + col_w - 12.0)
+            }
+        }
+    }
+}
+
+draw_panel(x: *Explorer@new) {
+    top: f32 = view_tracks_bottom(x) as f32;
+    w: f32 = x.width as f32;
+    view_rect(x, 0.0, top, w, x.height as f32 - top, 2302755, 1.0);
+    view_rect(x, 0.0, top, w, 1.0, 4868682, 1.0);
+    if (x.selected >= 0) draw_details(x, top) else draw_summary(x, top)
+}
+
+draw_tooltip(x: *Explorer@new) {
+    if (x.drag != 0) return;
+    t: *Trace = x.trace;
+    data: []TraceEvent = t.events.data;
+    h: int = x.hover;
+    if (h < 0 || h >= t.events.size || h >= len(data)) return;
+    e: TraceEvent = data[h];
+    b: *ByteList = x.text;
+    b.size = 0;
+    byte_time(b, e.dur);
+    byte_text(b, "  ");
+    name: []i8 = trace_name(t, e.name);
+    byte_bytes(b, name, 0, len(name));
+    if (b.size > 300) b.size = 300;
+    tw: f32 = view_width_range(x, b.data, 0, b.size) + 16.0;
+    px: f32 = x.mouse_x as f32 + 14.0;
+    py: f32 = x.mouse_y as f32 + 18.0;
+    w: f32 = x.width as f32;
+    if (px + tw > w) px = w - tw;
+    if (px < 0.0) px = 0.0;
+    view_rect(x, px, py, tw, 24.0, 1052688, 0.95);
+    view_rect(x, px, py, 3.0, 24.0, event_color(e.name), 1.0);
+    view_list(x, px + 8.0, py + 16.0, b, 15658734, w)
+}
+
+draw_cursor_time(x: *Explorer@new) {
+    if (x.mouse_x < 0 || x.mouse_y < TRACKS_TOP - RULER_H || x.mouse_y >= view_tracks_bottom(x)) return;
+    b: *ByteList = x.text;
+    b.size = 0;
+    byte_tick(b, view_time_at(x, x.mouse_x), view_tick_step(x) / 10.0f64, view_magnitude(x));
+    tw: f32 = view_width_range(x, b.data, 0, b.size) + 10.0;
+    px: f32 = x.mouse_x as f32 + 1.0;
+    if (px + tw > x.width as f32) px = x.mouse_x as f32 - tw;
+    top: f32 = (TRACKS_TOP - RULER_H) as f32;
+    view_rect(x, px, top, tw, (RULER_H - 1) as f32, 3815998, 1.0);
+    view_list(x, px + 5.0, top + 15.0, b, 16777215, x.width as f32)
+}
+
+explorer_draw(x: *Explorer@new) {
+    x.quads = 0;
+    view_clamp_scroll(x);
+    draw_tracks(x);
+    draw_ruler(x);
+    draw_overview(x);
+    draw_toolbar(x);
+    draw_panel(x);
+    draw_cursor_time(x);
+    draw_tooltip(x);
+    glViewport(0, 0, x.width, x.height);
+    glUniform2f(x.viewport, x.width as f32, x.height as f32);
+    glClearColor(0.105, 0.105, 0.12, 1.0);
+    glClear(16384);
+    if (x.font.dirty) {
+        glBindTexture(3553, x.texture);
+        glTexSubImage2D(3553, 0, 0, 0, x.font.width, x.font.height, 6406, 5121, x.font.atlas);
+        x.font.dirty = false
+    }
+    used: int = x.quads;
+    if (used > 0 && used <= VIEW_QUADS) {
+        glBufferData(34962, used * 48 * 4, x.vertices.data, 35040);
+        glDrawArrays(4, 0, used * 6)
+    }
+    x.dirty = false
+}
+
+// ---- input ----
+explorer_hover(x: *Explorer) {
+    hover: int = -1;
+    if (x.drag == 0) {
+        hit: ViewHit = view_hit(x, x.mouse_x, x.mouse_y);
+        hover = hit.event
+    }
+    if (hover != x.hover) {
+        x.hover = hover;
+        x.dirty = true
+    }
+}
+
+explorer_motion(x: *Explorer, px: int, py: int) {
+    x.mouse_x = px;
+    x.mouse_y = py;
+    x.dirty = true;
+    if (x.drag != 0 && (px - x.drag_x > 3 || x.drag_x - px > 3 || py - x.drag_y > 3 || x.drag_y - py > 3)) x.moved = true;
+    if (x.drag == 1) {
+        dt: f64 = (x.drag_x - px) as f64 / view_scale(x);
+        span: f64 = x.drag_t1 - x.drag_t0;
+        x.t0 = x.drag_t0 + dt;
+        x.t1 = x.t0 + span;
+        view_clamp_time(x);
+        x.scroll = x.drag_scroll + (x.drag_y - py) as f64;
+        view_clamp_scroll(x)
+    } else if (x.drag == 2) {
+        a: f64 = view_time_at(x, x.drag_x);
+        b: f64 = view_time_at(x, px);
+        if (b < a) {
+            x.range_a = b;
+            x.range_b = a
+        } else {
+            x.range_a = a;
+            x.range_b = b
+        }
+    } else if (x.drag == 3) explorer_overview_seek(x, px);
+    explorer_hover(x)
+}
+
+explorer_overview_seek(x: *Explorer, px: int) {
+    end: f64 = x.trace.end;
+    span: f64 = x.t1 - x.t0;
+    mid: f64 = px as f64 / x.width as f64 * end;
+    x.t0 = mid - span * 0.5f64;
+    x.t1 = mid + span * 0.5f64;
+    view_clamp_time(x)
+}
+
+// state carries X modifier bits: 1 is Shift, 4 is Control.
+explorer_press(
+    x: *Explorer,
+    button: int,
+    px: int,
+    py: int,
+    state: int
+) {
+    x.mouse_x = px;
+    x.mouse_y = py;
+    x.dirty = true;
+    shift: bool = (state & 1) != 0;
+    control: bool = (state & 4) != 0;
+    if (button == 4 || button == 5) {
+        if (shift) {
+            delta: f64 = 3.0f64 * ROW_H as f64;
+            if (button == 4) delta = 0.0f64 - delta;
+            x.scroll = x.scroll + delta;
+            view_clamp_scroll(x)
+        } else if (py >= view_tracks_bottom(x) && !control) { } else {
+            factor: f64 = 1.25f64;
+            if (button == 4) factor = 0.8f64;
+            view_zoom(x, px, factor)
+        }
+        explorer_hover(x);
+        return
+    }
+    if (button == 6 || button == 7) {
+        delta: f64 = x.width as f64 * 0.08f64;
+        if (button == 6) delta = 0.0f64 - delta;
+        view_pan(x, delta);
+        return
+    }
+    if (button != 1 && button != 2) return;
+    x.drag_x = px;
+    x.drag_y = py;
+    x.drag_t0 = x.t0;
+    x.drag_t1 = x.t1;
+    x.drag_scroll = x.scroll;
+    x.moved = false;
+    if (py >= TOOLBAR_H && py < TOOLBAR_H + OVERVIEW_H) {
+        x.drag = 3;
+        explorer_overview_seek(x, px)
+    } else if (py >= TRACKS_TOP - RULER_H && py < TRACKS_TOP || shift && py < view_tracks_bottom(x)) {
+        x.drag = 2;
+        x.range_a = view_time_at(x, px);
+        x.range_b = x.range_a
+    } else if (py >= TRACKS_TOP && py < view_tracks_bottom(x)) x.drag = 1
+}
+
+explorer_release(
+    x: *Explorer,
+    button: int,
+    px: int,
+    py: int
+) {
+    if (button != 1 && button != 2) return;
+    drag: int = x.drag;
+    x.drag = 0;
+    x.dirty = true;
+    if (drag == 1 && !x.moved) {
+        hit: ViewHit = view_hit(x, px, py);
+        collapsed: []bool = x.collapsed;
+        if (hit.header && hit.track >= 0 && hit.track < len(collapsed)) {
+            collapsed[hit.track] = !collapsed[hit.track];
+            x.summary_stale = true
+        } else x.selected = hit.event
+    }
+    if (drag == 2 && !x.moved) {
+        x.range_a = 0.0f64;
+        x.range_b = 0.0f64
+    }
+    explorer_hover(x)
+}
+
+// Zooms to the selected event, or to the selected range.
+explorer_fit(x: *Explorer) {
+    t: *Trace = x.trace;
+    data: []TraceEvent = t.events.data;
+    a: f64 = 0.0f64;
+    b: f64 = 0.0f64;
+    sel: int = x.selected;
+    if (sel >= 0 && sel < t.events.size && sel < len(data)) {
+        a = data[sel].start;
+        b = a + data[sel].dur
+    } else if (x.range_b > x.range_a) {
+        a = x.range_a;
+        b = x.range_b
+    } else {
+        explorer_reset(x);
+        return
+    }
+    pad: f64 = (b - a) * 0.1f64;
+    if (pad <= 0.0f64) pad = 1.0f64;
+    x.t0 = a - pad;
+    x.t1 = b + pad;
+    view_clamp_time(x);
+    // Bring the event's row into view.
+    if (sel >= 0) {
+        y: int = view_event_y(x, sel);
+        bottom: int = view_tracks_bottom(x);
+        if (y >= 0 && (y < TRACKS_TOP || y + ROW_H > bottom)) {
+            x.scroll = x.scroll + (y - (TRACKS_TOP + bottom) / 2) as f64;
+            view_clamp_scroll(x)
+        }
+    }
+    x.dirty = true
+}
+
+fold(c: i8): i8 {
+    if (c >= 'A' && c <= 'Z') return (c as int + 32) trunc i8;
+    c
+}
+
+// Whether hay contains the first n bytes of needle, ignoring ASCII case.
+contains_fold(hay: []i8, needle: []i8, n: int): bool {
+    if (n == 0) return true;
+    if (n > len(hay)) return false;
+    i: int = 0;
+    while (i >= 0 && i <= len(hay) - n) {
+        k: int = 0;
+        while (k >= 0 && k < n && k < len(hay) - i && fold(hay[i + k]) == fold(needle[k])) k = k + 1;
+        if (k == n) return true;
+        i = i + 1
+    }
+    false
+}
+
+// Marks the names that contain the query and counts their events.
+explorer_search(x: *Explorer@new) {
+    t: *Trace = x.trace;
+    strings: *Strings = t.strings;
+    count: int = strings.count;
+    if (len(x.matches) != count) x.matches = new bool[count](false);
+    matches: []bool = x.matches;
+    items: [][]i8 = strings.items;
+    q: *ByteList = x.query;
+    needle: []i8 = q.data;
+    n: int = q.size;
+    if (n > len(needle)) n = len(needle);
+    if (n < 0) n = 0;
+    for id in 0..len(matches) {
+        hit: bool = false;
+        if (n > 0 && id < len(items)) {
+            item: []i8 = items[id];
+            hit = contains_fold(item, needle, n)
+        }
+        matches[id] = hit
+    }
+    data: []TraceEvent = t.events.data;
+    events: int = t.events.size;
+    if (events > len(data)) events = len(data);
+    found: int = 0;
+    for i in 0..events {
+        name: int = data[i].name;
+        if (name >= 0 && name < len(matches) && matches[name]) found = found + 1
+    }
+    x.match_count = found;
+    x.dirty = true
+}
+
+// Selects the next matching event after the selection (or the window's start)
+// and brings it into view.
+explorer_next_match(x: *Explorer) {
+    t: *Trace = x.trace;
+    data: []TraceEvent = t.events.data;
+    matches: []bool = x.matches;
+    events: int = t.events.size;
+    if (events > len(data)) events = len(data);
+    after: f64 = x.t0;
+    sel: int = x.selected;
+    if (sel >= 0 && sel < events) after = data[sel].start;
+    best: int = -1;
+    first: int = -1;
+    for i in 0..events {
+        e: TraceEvent = data[i];
+        if (e.name >= 0 && e.name < len(matches) && matches[e.name]) {
+            if (first < 0 || first >= len(data) || e.start < data[first].start) first = i;
+            later: bool = e.start > after || e.start == after && i > sel;
+            if (later && (best < 0 || best >= len(data) || e.start < data[best].start)) best = i
+        }
+    }
+    if (best < 0) best = first;
+    if (best < 0) return;
+    x.selected = best;
+    explorer_reveal(x, best)
+}
+
+// Pans and scrolls so an event is visible, zooming out only if it is wider than the view.
+explorer_reveal(x: *Explorer, event: int) {
+    t: *Trace = x.trace;
+    data: []TraceEvent = t.events.data;
+    if (event < 0 || event >= len(data)) return;
+    e: TraceEvent = data[event];
+    collapsed: []bool = x.collapsed;
+    if (e.track >= 0 && e.track < len(collapsed) && collapsed[e.track]) {
+        collapsed[e.track] = false;
+        x.summary_stale = true
+    }
+    span: f64 = x.t1 - x.t0;
+    if (e.dur > span * 0.9f64) {
+        explorer_fit(x);
+        return
+    }
+    if (e.start < x.t0 || e.start + e.dur > x.t1) {
+        mid: f64 = e.start + e.dur * 0.5f64;
+        x.t0 = mid - span * 0.5f64;
+        x.t1 = mid + span * 0.5f64;
+        view_clamp_time(x)
+    }
+    y: int = view_event_y(x, event);
+    bottom: int = view_tracks_bottom(x);
+    if (y >= 0 && (y < TRACKS_TOP || y + ROW_H > bottom)) {
+        x.scroll = x.scroll + (y - (TRACKS_TOP + bottom) / 2) as f64;
+        view_clamp_scroll(x)
+    }
+    x.dirty = true
+}
+
+// Handles a key, with the text it types; returns false to quit.
+explorer_key(
+    x: *Explorer@new,
+    sym: int,
+    state: int,
+    typed: []i8,
+    typed_n: int
+): bool {
+    x.dirty = true;
+    if (x.searching) {
+        q: *ByteList = x.query;
+        if (sym == 65307) {
+            x.searching = false;
+            q.size = 0;
+            explorer_search(x)
+        } else if (sym == 65293 || sym == 65421) {
+            x.searching = false;
+            explorer_next_match(x)
+        } else if (sym == 65288) {
+            // Drop the last character, with its UTF-8 continuation bytes.
+            size: int = q.size;
+            if (size > 0) size = size - 1;
+            while (size > 0 && size < len(q.data) && (q.data[size] as int & 192) == 128) size = size - 1;
+            if (size >= 0 && size <= q.size) q.size = size;
+            explorer_search(x)
+        } else if (typed_n > 0 && typed_n <= len(typed) && (typed[0] as int & 255) >= 32 && typed[0] != 127i8) {
+            byte_bytes(q, typed, 0, typed_n);
+            explorer_search(x)
+        }
+        return true
+    }
+    if (sym == 47 || (state & 4) != 0 && (sym == 102 || sym == 70)) {
+        x.searching = true;
+        return true
+    }
+    if ((sym == 110 || sym == 78) && x.query.size > 0) {
+        explorer_next_match(x);
+        return true
+    }
+    px: int = x.mouse_x;
+    if (px < 0 || px >= x.width || x.mouse_y < TRACKS_TOP - RULER_H) px = x.width / 2;
+    if (sym == 113 || sym == 81) return false;
+    if (sym == 119 || sym == 87 || sym == 61 || sym == 43 || sym == 65451) view_zoom(x,
+        px, 0.8f64) else if (sym == 115 || sym == 83 || sym == 45 || sym == 65453) view_zoom(x,
+        px, 1.25f64) else if (sym == 97 || sym == 65 || sym == 65361) view_pan(x,
+        0.0f64 - x.width as f64 * 0.12f64) else if (sym == 100 || sym == 68 || sym == 65363) view_pan(x,
+        x.width as f64 * 0.12f64) else if (sym == 65362) x.scroll = x.scroll - 3.0f64 * ROW_H as f64 else if (sym == 65364) x.scroll = x.scroll + 3.0f64 * ROW_H as f64 else if (sym == 65365) x.scroll = x.scroll - (view_tracks_bottom(x) - TRACKS_TOP) as f64 * 0.9f64 else if (sym == 65366) x.scroll = x.scroll + (view_tracks_bottom(x) - TRACKS_TOP) as f64 * 0.9f64 else if (sym == 48 || sym == 65360) {
+        explorer_reset(x);
+        x.scroll = 0.0f64
+    } else if (sym == 102 || sym == 70) explorer_fit(x) else if (sym == 65307) {
+        if (x.selected >= 0) x.selected = -1 else {
+            x.range_a = 0.0f64;
+            x.range_b = 0.0f64
+        }
+    } else if (sym == 99 || sym == 67) {
+        // Collapse or expand every track.
+        collapsed: []bool = x.collapsed;
+        any_open: bool = false;
+        for k in 0..len(collapsed) {
+            if (!collapsed[k]) any_open = true
+        }
+        for k in 0..len(collapsed) collapsed[k] = any_open;
+        x.summary_stale = true
+    }
+    if ((state & 4) != 0 && sym == 48) explorer_reset(x);
+    view_clamp_scroll(x);
+    explorer_hover(x);
+    true
+}

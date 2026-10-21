@@ -1,0 +1,207 @@
+tag profile_explorer;
+
+use_tag std;
+
+use_tag gl, x11;
+
+import "../../stdlib/print.l8";
+
+import "../gl/gl.l8";
+
+import "trace.l8";
+
+import "dump.l8";
+
+import "view.l8";
+
+// A trace viewer in the style of Chrome's performance panel: every thread's
+// spans on one zoomable timeline. Reads Chrome trace event JSON (DevTools,
+// Perfetto, chrome://tracing) or `perf script` output.
+usage() raises IoError {
+    eprint("usage: profile-explorer [--dump] TRACE");
+    eprint("  TRACE is Chrome trace event JSON or `perf script` output; - reads standard input.");
+    eprint("  --dump prints the threads and the top self times instead of opening a window.")
+}
+
+main(argc: int, argv: []str) raises IoError: int {
+    dump: bool = false;
+    path: ?str = null;
+    arg: int = 1;
+    while (arg < argc) {
+        if (argv[arg] == "--dump") dump = true else if (argv[arg] == "--help" || argv[arg] == "-h") {
+            usage();
+            return 0
+        } else if (path == null) path = argv[arg] else {
+            usage();
+            return 2
+        }
+        arg = arg + 1
+    }
+    if (path == null) {
+        usage();
+        return 2
+    }
+    file: str = path;
+    // "-" reads standard input, as in `perf script | profile-explorer -`.
+    if (file == "-") file = "/dev/stdin";
+    src0: ?[]i8 = read_file(file);
+    if (src0 == null) {
+        write(2, "profile-explorer: cannot read ");
+        write(2, file);
+        write(2, "\n");
+        return 1
+    }
+    src: []i8 = src0;
+    t: *Trace = trace_load(src);
+    if (len(t.error) > 0) {
+        write(2, "profile-explorer: ");
+        write(2, file);
+        write(2, ": ");
+        write(2, t.error);
+        write(2, "\n");
+        if (t.events.size == 0) return 1
+    }
+    if (dump) {
+        trace_dump(t, 20);
+        return 0
+    }
+    // The window title is the file's name without its directories.
+    base: int = 0;
+    for i in 0..len(file) {
+        if (file[i] == '/') base = i + 1
+    }
+    title_list: *ByteList = byte_list(64);
+    k: int = base;
+    while (k >= 0 && k < len(file)) {
+        byte_push(title_list, file[k]);
+        k = k + 1
+    }
+    title: []i8 = new i8[title_list.size](0i8);
+    for i in 0..len(title) {
+        if (i < title_list.size && i < len(title_list.data)) title[i] = title_list.data[i]
+    }
+    d0: ?*i8 = XOpenDisplay(null);
+    if (d0 == null) {
+        eprint("profile-explorer: cannot open the X display (set DISPLAY; XWayland works)");
+        return 1
+    }
+    dpy: *i8 = d0;
+    screen: int = XDefaultScreen(dpy);
+    attr: []i32 = [4i32, 5i32, 8i32, 8i32, 9i32, 8i32, 10i32, 8i32, 0i32];
+    vis0: ?*XVisualInfo = glXChooseVisual(dpy, screen, attr);
+    if (vis0 == null) {
+        eprint("profile-explorer: glXChooseVisual failed");
+        return 1
+    }
+    vis: *XVisualInfo = vis0;
+    root: int = XRootWindow(dpy, screen);
+    width: int = 1400;
+    height: int = 900;
+    // Key, button, pointer motion, exposure, and structure events.
+    wa: XSetWindowAttributes = XSetWindowAttributes {
+        background_pixmap: 0,
+        background_pixel: 0,
+        border_pixmap: 0,
+        border_pixel: 0,
+        bit_gravity: 0i32,
+        win_gravity: 0i32,
+        backing_store: 0i32,
+        backing_planes: 0,
+        backing_pixel: 0,
+        save_under: 0i32,
+        event_mask: 163949,
+        do_not_propagate_mask: 0,
+        override_redirect: 0i32,
+        colormap: XCreateColormap(dpy, root, vis.visual, 0),
+        cursor: 0
+    };
+    win: int = XCreateWindow(dpy, root, 0, 0, width, height, 0, vis.depth as int,
+        1, vis.visual, 10248, &wa);
+    if (win == 0) {
+        eprint("profile-explorer: XCreateWindow failed");
+        return 1
+    }
+    named: *ByteList = byte_list(64);
+    byte_text(named, "Profile explorer ");
+    utf8_push(named, 8212);
+    byte_text(named, " ");
+    byte_bytes(named, title, 0, len(title));
+    window_name: []i8 = new i8[named.size](0i8);
+    for i in 0..len(window_name) {
+        if (i < named.size && i < len(named.data)) window_name[i] = named.data[i]
+    }
+    XStoreName(dpy, win, cstr(window_name));
+    proto: []int = new int[1](0);
+    proto[0] = XInternAtom(dpy, "WM_DELETE_WINDOW", 0);
+    XSetWMProtocols(dpy, win, &proto[0], 1);
+    XMapRaised(dpy, win);
+    XFlush(dpy);
+    ctx0: ?*i8 = glXCreateContext(dpy, vis, null, 1);
+    if (ctx0 == null) {
+        eprint("profile-explorer: glXCreateContext failed");
+        return 1
+    }
+    ctx: *i8 = ctx0;
+    if (glXMakeCurrent(dpy, win, ctx) == 0) {
+        eprint("profile-explorer: glXMakeCurrent failed");
+        return 1
+    }
+    glXSwapIntervalEXT(dpy, win, 1);
+    x0: ?*Explorer = explorer_new(t, title, width, height);
+    if (x0 == null) return 1;
+    x: *Explorer = x0;
+    ev: XEvent = XEvent.Other;
+    typed: []i8 = new i8[32](0i8);
+    running: bool = true;
+    alive: bool = true;
+    while (running) {
+        // Block for the next event unless a frame is due.
+        if (!x.dirty || XPending(dpy) != 0) {
+            XNextEvent(dpy, &ev);
+            match ev {
+                KeyPress k -> {
+                    typed_n: int = XLookupString(&ev, typed, len(typed), null, null);
+                    if (typed_n < 0 || typed_n > len(typed)) typed_n = 0;
+                    if (!explorer_key(x, XLookupKeysym(&ev, 0), k.state as int, typed,
+                        typed_n)) running = false
+                }
+                ButtonPress b -> explorer_press(x, b.button as int, b.x as int, b.y as int,
+                    b.state as int);
+                ButtonRelease b -> explorer_release(x, b.button as int, b.x as int,
+                    b.y as int);
+                MotionNotify m -> explorer_motion(x, m.x as int, m.y as int);
+                LeaveNotify -> {
+                    x.mouse_x = -1;
+                    x.mouse_y = -1;
+                    x.hover = -1;
+                    x.dirty = true
+                }
+                Expose -> x.dirty = true;
+                ConfigureNotify c -> {
+                    if (c.width as int != x.width || c.height as int != x.height) {
+                        x.width = c.width as int;
+                        x.height = c.height as int;
+                        x.dirty = true
+                    }
+                }
+                DestroyNotify -> {
+                    running = false;
+                    alive = false
+                }
+                ClientMessage c -> {
+                    if (c.l0 == proto[0]) running = false
+                }
+                _ -> { }
+            }
+        }
+        if (running && x.dirty && XPending(dpy) == 0) {
+            explorer_draw(x);
+            glXSwapBuffers(dpy, win)
+        }
+    }
+    glXMakeCurrent(dpy, 0, null);
+    glXDestroyContext(dpy, ctx);
+    if (alive) XDestroyWindow(dpy, win);
+    XCloseDisplay(dpy);
+    0
+}
