@@ -10009,3 +10009,82 @@ These are decided above; the owner may overrule:
    or follows the verse at the top of the page as you scroll.
 7. **The panel is a fixed 390 pt** (decided: every Study screen is laid out for it), or
    resizable by dragging the divider.
+
+### 17.11 Builder notes (§17, as built)
+Where the build differs from the text above, and why:
+1. **"Wide" is regular both ways** (`ios_ipad.l8`'s `wide()`): an iPad's full or wide
+   window, never an iPhone (a Pro Max held sideways is regular wide but compact tall, and
+   its sheets stay page sheets). Form sheets, the Aa popover, Study beside the text and the
+   floating controls' iPad places follow it. The floating controls also follow the column
+   wherever it is capped (an iPhone held sideways), and elsewhere keep the iPhone's places,
+   inside the safe area.
+2. **The width changes only when the root says.** The root (`L8Root`) lays its children out
+   by frames in `viewDidLayoutSubviews`, the reader's navigation controller's view without
+   an autoresizing mask, so when the window rotates or resizes, or the panel comes or goes,
+   the root measures the place on rows still at the old width, sets the new frame, and
+   makes the rows again with the place put back. So no `viewWillTransitionToSize:` override
+   (and no CGSize argument through `objc.l8`) is needed; `objc.l8` is unchanged. The place
+   is kept (not measured again) through a run of resizes until the reader moves the text,
+   so it never drifts. A live resize (iOS 26's `isInteractivelyResizing`) relays out at
+   most every 0.1 s and once at its end. The scene's geometry callbacks only note that.
+3. **The keys are the app's object's** (the responder chain's end): the menu bar's commands
+   (`buildMenuWithBuilder:`, main menu only) and `keyCommands` for Space, ⇧Space, ⌘D,
+   Practice's Return and ⌘1–⌘3 and the panel's ⌘↑ ⌘↓, each offered only where it acts
+   (`canPerformAction:withSender:`). Nothing of ours becomes first responder for them: the
+   first build's root container did, and an iPhone then showed its keyboard under context
+   menus. The menu bar and these keys are an iPad's only, so an iPhone is as it was.
+   Reading Settings (⌘,) is in the View menu with Listen / Pause and Show Study, not the
+   app menu. Space and ⇧Space are our own on every iOS (not `allowsKeyboardScrolling`); ↑
+   and ↓ by a line are not built (the table would have to be focused). ⌘] in a day's
+   reader is the next day wherever you are in it.
+4. **Study beside the text's stack is not moved to a sheet.** When the window is too narrow
+   for the panel and Study is opened as a sheet, the panel's stack is let go (one Study at a
+   time) and the sheet is a new Study at the verse asked for; the panel comes back at its
+   verse (not its stack) when the window widens again and the sheet has gone. Without a
+   sheet in between, it comes back as it was, stack and all (501).
+5. **The panel's title is the verse** (its back buttons and VoiceOver's "Study, John
+   3:16"), the segments its title view, each as wide as its title at 12.5 points so
+   "Commentary" is whole in 390 points. The tray's Study, beside, opens at Words.
+6. **The manual's Practice keys** ("In Practice, Return checks, and ⌘1, ⌘2 and ⌘3 …") are in
+   Reading's With a keyboard part, linking to Practice, not in Memory's Practice part: so
+   the iPhone's shots of the Memory page (410, 418) are unchanged (§17.8.3).
+7. **Hover** is on the capsules, the tray's swatches, actions and close, the interlinear's
+   tiles, Forms' cells, the tip's buttons, the mini player's buttons and the bar's Study
+   button. Practice's words are text in a text view and have none.
+8. **The mini player stays at most 360 points** (within §17.2.3's 560), centred under the
+   column.
+9. **Go To's field takes the keys** after ⌘L, and on an iPad with a hardware keyboard
+   (GameController's `GCKeyboard`, loaded at first use); Practice turns typing on for a
+   hardware keyboard on an iPad (not in the demo, whose simulator reports the Mac's
+   keyboard and still shows its own).
+10. **On an iPad, a sheet's search field is under its title** (`preferredSearchBarPlacement`
+    stacked), so Search keeps its scope bar (All, OT, NT, the book) in a form sheet.
+11. **The share sheets are popovers on an iPad** (UIKit needs a source there): from the
+    tray's Share, else over the column; the Library's export from its button.
+12. **The narrow window's stand-in** sets the window's frame (centred, 375 or 900 points)
+    and, below 600 points, the scene's `traitOverrides` compact, so sheets are page sheets
+    as in a real narrow window.
+13. **Turning the iPad in CI:** `requestGeometryUpdateWithPreferences:` is ignored on an
+    iPad for an app that supports multitasking, so the `ipad` group turns the simulated
+    iPad through Simulator's Device menu (Rotate Left, Rotate Right, clicked by System
+    Events). The iPhone's 490 and 491 are turned by the app's own request. Shots taken in
+    landscape come out in the device's portrait and are turned upright by `shots.py
+    upright` (only those `landscape.txt` names).
+14. **Keeping what is under the top across a width change:** the reader and the day's
+    reader keep their verse exactly; Practice sets its margins again for the new width
+    (its text reflows under its top); the interlinear is laid out again for its width at
+    the same offset.
+15. **The iPad's App Store icons:** `tools/ios/assets.sh` (and `build.sh`) compile the icon
+    for the iPad too when the Info.plist lists device family 2 (the 152 and 167 point
+    icons App Store Connect asks of an iPad app).
+16. **CI:** the `ipad` group is fourth on the notes job, its iPad booted when its turn comes
+    (booted beside the others it slowed them more than its own boot: run 39536990908 booted
+    it during help, 2.5 → 10.6 minutes; 39541699431 beside notes' iPhone, notes 6.5 → 12.4,
+    listen 4 → 6.3). Run 39544870211 (277be25c7): notes listen help ipad 21.7 minutes
+    (notes 5.5, listen 3.8, help 2.1, ipad 8.4 with its boot), languages versions more 18.1,
+    ribbons study ios18 17.2, store memory 12.8, read plans 10.0. The 13-inch simulator is
+    1376 points wide in landscape (not 1366): 975 → 985 points of page beside the panel.
+17. **The iPhone's portrait shots:** compared with run 39530638707's (before §17), none
+    changed in layout; the shots that differ do so by the run's timing as two runs before
+    §17 also did (scroll indicators, a toast's moment, Listen's verse and progress, a
+    keyboard's moment, a cursor), and 410 and 418 (the Memory page) not at all.
