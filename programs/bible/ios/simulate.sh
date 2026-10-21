@@ -96,7 +96,9 @@
 #           and Learn This Word, John 3 once it is known, Genesis 1 and
 #           Psalm 23 in Hebrew, Show Accents, a Qere's Ketiv, Malachi 4:1's
 #           Hebrew number, Daniel 2:4's Aramaic, Listen's row, Night, the
-#           largest text, a BSB highlight in Greek; the recording of
+#           largest text, a BSB highlight in Greek, a highlight and a
+#           selection in Hebrew, M'Cheyne's day 1 in the day's reader and
+#           a popover there; the recording of
 #           sequence 17 (original-transitions.mp4); its log's checks in
 #           original.txt
 #   ipad    §17 (DESIGN.md §17.8.2), on the 13-inch iPad Pro, tips on, a
@@ -107,6 +109,7 @@
 #           card, the Greek page, the day's reader, the capsule, the mini
 #           player; ⌘L; the narrow window's stand-in; the manual's keys;
 #           the share popover; Study beside the text (492 to 503); the
+#           Hebrew and Greek with Study beside and a popover (503b, 503c); the
 #           recording of sequences 22 and 23 (ipad-transitions.mp4); the
 #           13-inch App Store screenshots (store-ipad-1.png to 5); its
 #           log's checks in ipad.txt. (Shots taken in landscape are
@@ -1427,6 +1430,12 @@ ipad)
   rotate left
   step 560 502-beside-day 12; land 502-beside-day
   step 561 503-beside-closed 10; land 503-beside-closed
+  # The Hebrew and Greek on the iPad (Round 11, DESIGN.md §14.11.11): John
+  # 3:16 selected with Study beside it, then an apparatus entry's popover;
+  # put away after.
+  step 633 503b-ipad-original-beside 12; land 503b-ipad-original-beside
+  step 634 503c-ipad-original-popover 10; land 503c-ipad-original-popover
+  step 635 "" 8
   # The 13-inch App Store screenshots (§17.8.4), from these.
   for pair in 1:461-ipad-landscape 2:464-ipad-goto 3:492-beside-open 4:473-ipad-practice 5:475-ipad-greek-page; do
     cp "$out/${pair#*:}.png" "$out/store-ipad-${pair%%:*}.png" 2>/dev/null && land "store-ipad-${pair%%:*}"
@@ -1468,14 +1477,16 @@ ipad)
   wait "$recorder" 2>/dev/null
   # The log's checks (§17.8.2): the place kept at each turn, the forms of
   # the sheets, the menu's commands, Study beside the text's states.
-  grep -h "bible: width\|bible: column\|bible: sheet as\|bible: menu\|bible: demo menu\|bible: study beside\|bible: demo rotate\|bible: demo narrow\|bible:   wide\|bible: key\|bible: go to field\|bible: demo step\|bible: demo sequence\|bible: popover style" \
+  grep -h "bible: width\|bible: column\|bible: sheet as\|bible: menu\|bible: demo menu\|bible: study beside\|bible: demo rotate\|bible: demo narrow\|bible:   wide\|bible: key\|bible: go to field\|bible: demo step\|bible: demo sequence\|bible: popover style\|bible: orig\|bible: demo no" \
     "$out/console.txt" > "$out/ipad.txt" 2>/dev/null
   for want in "kept JHN 3:16" "sheet as a form sheet 540 x 720" "sheet as a popover 375 x 640" "sheet as a form sheet 700 x 860" \
       "demo menu Go: Go To…, Search…, Next Chapter, Previous Chapter, Back, Library" "key go to" "go to field active" \
       "study beside: shown John 3:16" "study beside: verse John 3:17" "study beside: show in text" \
-      "study beside: hidden (width)" "study beside: screens 2" "popover style 2" "study beside: closed" "demo sequence 22 done" "demo sequence 23 done"; do
+      "study beside: hidden (width)" "study beside: screens 2" "popover style 2" "study beside: closed" "demo sequence 22 done" "demo sequence 23 done" \
+      "orig popover"; do
     grep -qF "$want" "$out/ipad.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/ipad.txt"; failed=1; }
   done
+  if grep -q "demo no apparatus entry" "$out/ipad.txt"; then echo "FAILED: an apparatus entry not found" | tee -a "$out/ipad.txt"; failed=1; fi
   tail -5 "$out/ipad.txt"
   ;;
 ios18)
@@ -1530,6 +1541,11 @@ original)
   step 622 293-ax-greek 12
   ui content_size large
   step 624 295-highlight-in-greek 12
+  # (A highlight and a selection in Hebrew; M'Cheyne's day 1 in the day's
+  # reader, Hebrew then Greek, and an apparatus entry's popover there: §16.)
+  step 630 295b-highlight-hebrew 10
+  step 631 296-day-original 14
+  step 632 296b-day-popover 10
   # The screen recording of sequence 17 (its setup before the mark).
   step 625 "" 8
   rec0=$(now)
