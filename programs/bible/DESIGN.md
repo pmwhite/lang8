@@ -5777,9 +5777,17 @@ paragraph is published with it.
 5. **Henson's text:** "the LORD" is read "Yahweh" alone (the Classic WEB says "Yahweh is my
    shepherd"), besides LORD and GOD as "Yahweh".
 6. **Checks' limits:** 2.5 to 30 letters a second for verses of 20 letters or more
-   (genealogies are read slowly), the score floor −2.6 a letter (the bottom 1% of verses at 2×), more than 3 verses below
+   (genealogies are read slowly), the score floor −2.6 a letter (the bottom 1% of Souer's verses at 2×), more than 3 verses below
    it flagging the chapter; `finish` applies them again, so they can be retuned without
-   re-aligning.
+   re-aligning. **The floor is per reader:** `finish` lowers it to the reader's own bottom
+   1% where that is lower (Gilbert −3.87, Henson −3.46; Souer and Hays keep −2.6). Gilbert's
+   recordings and Henson's Classic WEB score lower throughout: at −2.6, 5.2% of Gilbert's
+   verses and 2.2% of Henson's were below it (Hays 0.04%), and their verses between their
+   floor and −2.6 transcribe about as well as those just above −2.6 (spot CER 0.18 and 0.27
+   against 0.15 and 0.21), while those below their floor do not (0.39, 0.44). The floor is
+   never raised: Hays's own bottom 1% (−1.19) would flag ten sound chapters. The checks
+   across readers use the flags as re-checked, so Gilbert's chapters trusted again take
+   part.
 7. **Zips:** 7-Zip extracts them (Info-ZIP's unzip cannot read Souer's 4.5 GB OT zip).
    Gilbert's chapters are fetched one at a time with a 1 s pause, as specified.
 8. **Names:** `verse_at` and `time_of` are `audio_verse_at` and `audio_time_of`
@@ -5829,6 +5837,21 @@ voice list titled "iPhone Voice"; 191b and 191c), 9 (audio's limits read before 
 a refused request counts for nothing; tested with 900 refusals). Minor 6 (the
 layout-outside-window warning) is left for the §11 ribbons build, which remakes those
 screens, as the review allows; 9b (raḥam) stays for the next data pass.
+
+**The timing files, finished (2026-10-20):** the run ended at 13:15 (about 1.5 days at 2×,
+two jobs); `align.py finish` made all four files, 1,189 chapters each, none `missing`:
+
+| Reader | Flagged `chapter` | Of them, across readers | Spot CER | Score floor |
+|---|---|---|---|---|
+| Souer | 6 (0.50%) | 2 | 0.105 over 297 | −2.60 |
+| Hays | 2 (0.17%) | 2 | 0.052 over 296 | −2.60 |
+| Gilbert | 27 (2.27%) | 13 | 0.118 over 301 | −3.87 |
+| Henson | 11 (0.93%) | 0 | 0.090 over 296 | −3.46 |
+
+Gilbert is over §12.2.5's 1%: 12 chapters with more than 3 verses below his floor (Luke 14
+has 35, 2 Chronicles 16 14, Judges 17 13), 2 psalms whose title (verse 0) lasts under 0.4 s,
+and 13 with a verse far from Souer's and Hays's share (he is the reader most often apart).
+They play the recording and follow by chapter. 58 spot verses of 1,190 transcribe above 25%.
 
 ### 12.11 Owner amendment (2026-10-19): changing narrator or version keeps the verse
 Changing the narrator (Voice) or the version while listening continues from the verse being

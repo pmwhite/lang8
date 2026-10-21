@@ -86,7 +86,11 @@ BSB_READERS = ("souer", "hays", "gilbert")
 
 # The checks' limits (§12.2.5). SCORE_MIN is the mean log-probability a
 # letter below which a verse is doubted; set from the test chapters' and
-# the first runs' distribution (the bottom 1% or so of verses).
+# the first runs' distribution (the bottom 1% or so of Souer's verses).
+# `finish` lowers it for a reader whose own bottom 1% is lower (Gilbert's
+# recordings and Henson's Classic WEB score lower throughout, and their
+# verses down to that floor transcribe as well as Souer's), never raises
+# it (FLOOR_SHARE).
 MIN_SECONDS = 0.4
 RATE_MIN = 2.5
 RATE_MAX = 30.0
@@ -95,6 +99,7 @@ DOUBTED_MAX = 3
 SHARE_OFF = 0.5
 SHARE_SECONDS = 1.5
 SPOT_SHARE = 300 / 31100
+FLOOR_SHARE = 0.01
 
 BLOCK_SECONDS = 300
 WINDOW_MARGIN = 20
@@ -345,9 +350,10 @@ def align_chapter(em, verses):
     return out
 
 
-def checks(rows):
+def checks(rows, floor=SCORE_MIN):
     """A chapter's reasons to doubt it (an empty list: trusted), from its
-    verses' (v, letters, start, end, score); frames."""
+    verses' (v, letters, start, end, score); frames. floor: the score
+    below which a verse is doubted."""
     reasons = []
     doubted = 0
     last = -1
@@ -368,7 +374,7 @@ def checks(rows):
         # ones' rates are judged.)
         if n >= 20 and (rate < RATE_MIN or rate > RATE_MAX):
             reasons.append("%d: %.1f letters/s" % (v, rate))
-        if sc is not None and sc < SCORE_MIN:
+        if sc is not None and sc < floor:
             doubted += 1
     if doubted > DOUBTED_MAX:
         reasons.append("%d verses below the score" % doubted)
@@ -768,12 +774,32 @@ def shares(fields):
     return [d / speech for d in durs], speech / 100
 
 
+def score_floor(details):
+    """A reader's score floor: SCORE_MIN, or the bottom FLOOR_SHARE of the
+    reader's own verses' scores where that is lower."""
+    sc = sorted(x[4] for d in details.values() for x in d["verses"] if x[1] and x[4] is not None)
+    if not sc:
+        return SCORE_MIN
+    return min(SCORE_MIN, sc[int(FLOOR_SHARE * (len(sc) - 1))])
+
+
 def cmd_finish(args):
     made = time.strftime("%Y-%m-%d")
     out_dir = os.path.join(DATA, "audio")
     os.makedirs(out_dir, exist_ok=True)
     texts = {t: spoken_lines(t) for t in ("bsb", "web")}
     parts = {r: read_partial(r) for r in READERS}
+    floors = {r: score_floor(parts[r][1]) for r in READERS}
+    # (The checks again, with the limits as they are now and the reader's
+    # floor, before the readers are compared.)
+    for r in READERS:
+        lines, details = parts[r]
+        for key, d in details.items():
+            f = lines.get(key)
+            if f is None:
+                continue
+            d["reasons"] = checks([tuple(x) for x in d["verses"]], floors[r])
+            lines[key] = f[:4] + ["chapter" if d["reasons"] else "ok"] + f[5:]
     # Across readers: the three BSB readers' shares of each chapter.
     cross = {r: {} for r in BSB_READERS}
     for key in texts["bsb"][0]:
@@ -817,11 +843,6 @@ def cmd_finish(args):
                 else:
                     out.append("%s\t%d\t0\t0\tmissing" % key)
                 continue
-            d = details.get(key)
-            if d:
-                # (The checks again, with the limits as they are now.)
-                d["reasons"] = checks([tuple(x) for x in d["verses"]])
-                f = f[:4] + ["chapter" if d["reasons"] else "ok"] + f[5:]
             if f[4] == "ok" and key in cross.get(r, {}):
                 f = f[:4] + ["chapter"] + f[5:]
                 details.get(key, {}).setdefault("reasons", []).append(
@@ -836,10 +857,12 @@ def cmd_finish(args):
             fh.write("\n".join(out) + "\n")
         spots = [s for d in details.values() for s in d.get("spots", [])]
         mean_cer = sum(s[1] for s in spots) / len(spots) if spots else float("nan")
-        report.append("%s: %d aligned, %d flagged chapter (%.2f%%), %d not aligned; CER %.3f over %d spot verses"
+        report.append("%s: %d aligned, %d flagged chapter (%.2f%%; %d across readers), %d not aligned; "
+                      "CER %.3f over %d spot verses; score floor %.2f"
                       % (r, len(order) - len(missing), len(flagged),
-                         100 * len(flagged) / max(1, len(order) - len(missing)), len(missing), mean_cer,
-                         len(spots)))
+                         100 * len(flagged) / max(1, len(order) - len(missing)),
+                         sum(1 for k in flagged if k in cross.get(r, {})), len(missing), mean_cer,
+                         len(spots), floors[r]))
         for key in flagged[:40]:
             d = details.get(key, {})
             report.append("  %s %d: %s" % (key[0], key[1], "; ".join(d.get("reasons", []))[:150]))
