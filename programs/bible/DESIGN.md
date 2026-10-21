@@ -8219,6 +8219,33 @@ Deviations, each with its reason:
 26. **Shots 282 and 283** are Reading settings in a Greek and a Hebrew chapter (the Listen row
     disabled, Glosses and Show Accents under Version): §14.10b.1 took Listen for the original
     away. **294 is two:** 294 the Greek page with Read in Greek, 294b the reader after it.
+27. **A Qere's popover gives no transliteration** where the tables' form is another spelling (they
+    often have the Ketiv's: צָיִד's tables say ṣê·ḏāh, צֵידָה); its line reads "Read as shown (Qere);
+    written צֵידָה (Ketiv)".
+28. **Search's first Latin query is slow on CI's simulator** (about half a second for "agape", the
+    forms' pages read cold; a Greek or Hebrew query about 90 ms): a word is passed over by its
+    transliteration's first letter before it is folded. Measured on a phone, it may want a folded
+    index made once.
+29. **The demo listens for steps up to 649** (it stopped at 599; Round 11's are 600 to 629), and
+    Round 11's later codes are 1100 to 1199, before §17's 1000s.
+
+**CI.** The `original` group (shots 270–295, 291b, 294b, sequence 17's recording) runs third on the
+read job's iPhone, reset after help, with plans fourth (still last, for its alert); the workflow
+shuts the third group's simulator only when the fourth isn't on it. Run 39569313518, with it third
+on the languages job, took: read/help/plans 14.0 minutes, languages/versions/original 21.2,
+store/memory/more 18.6, ribbons/study/ios18 13.4, notes/listen/ipad 29.8 (the iPad's group alone
+16.4); the original group itself 4.2 (251 s). Moved to the read job, that job should take about
+18, languages/versions about 17, so the longest stays the notes job's.
+
+**What needs a real phone:** the Hebrew's points and the dotted lines under them in SF Hebrew at
+every text size (the simulator's fonts are the phone's, but the eye should judge); the apparatus
+read at arm's length in each theme; right to left with a selection, a highlight and a note's mark
+in a Hebrew verse; the letter keyboard's feel, its clicks and its height beside the system's on
+each iPhone and the iPad (and with a hardware keyboard, which bypasses it); VoiceOver on a Greek
+and a Hebrew verse with and without those voices installed, and on the apparatus; the first
+search by Latin letters (its time); the first switch to the version (17 ms to map its words on
+the simulator, the text indexed after); Share as Image's Hebrew card; Practice's hidden points in
+Hebrew at Letters.
 
 ### 14.12 Round 12: a Greek course
 

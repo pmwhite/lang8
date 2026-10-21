@@ -336,8 +336,8 @@ about 27 when each group had a Mac of its own; see the workflow's header):
   last. store and memory share a Mac, each on its own simulator, more
   third on memory's; ios18 follows ribbons and study on an iOS 18 iPhone of
   its own; languages (Round 10) goes first on the versions job's iPhone;
-  original (Round 11) third on it, after versions; help (§15) second on
-  the read job's, before plans (grown by §16's day's
+  help (§15) second on the read job's and original (Round 11) third,
+  before plans (grown by §16's day's
   reader); ipad (§17, on the 13-inch iPad Pro) third on the notes job, its
   iPad booted when its turn comes (booted beside the others, it slowed them
   more than its boot costs; `simulate.sh`'s `SIM_KEEP` would leave one
