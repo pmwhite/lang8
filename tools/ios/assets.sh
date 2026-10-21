@@ -41,12 +41,18 @@ if [ -f "$dir/AppIcon-dark.png" ] && [ -f "$dir/AppIcon-tinted.png" ]; then
  "info": {"author": "xcode", "version": 1}}
 JSON
 fi
+# (An app for the iPad too, UIDeviceFamily 2 in DIR's Info.plist: its
+# icons as well, CFBundleIcons~ipad's.)
+targets="--target-device iphone"
+if plutil -extract UIDeviceFamily json -o - "$dir/Info.plist" 2>/dev/null | grep -q 2; then
+  targets="$targets --target-device ipad"
+fi
 for sdk in iphoneos iphonesimulator; do
   rm -rf "$out/$sdk"
   mkdir -p "$out/$sdk"
   compile() {
     xcrun actool --compile "$out/$sdk" --platform "$sdk" --minimum-deployment-target 16.0 \
-      --target-device iphone --app-icon AppIcon $accent \
+      $targets --app-icon AppIcon $accent \
       --output-partial-info-plist "$out/$sdk/icon.plist" "$work/Assets.xcassets" > "$work/actool.txt" 2>&1
   }
   if ! compile; then

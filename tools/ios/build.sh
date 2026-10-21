@@ -78,18 +78,23 @@ if [ -f "$dir/AppIcon-dark.png" ] && [ -f "$dir/AppIcon-tinted.png" ]; then
  "info": {"author": "xcode", "version": 1}}
 JSON
 fi
+# (An app for the iPad too: its icons as well, as tools/ios/assets.sh does.)
+targets="--target-device iphone"
+if plutil -extract UIDeviceFamily json -o - "$dir/Info.plist" 2>/dev/null | grep -q 2; then
+  targets="$targets --target-device ipad"
+fi
 actool() {
   rm -rf "$out/actool-out"
   mkdir -p "$out/actool-out"
   xcrun actool --compile "$out/actool-out" --platform "$sdk" --minimum-deployment-target 16.0 \
-    --target-device iphone --app-icon AppIcon $accent --output-partial-info-plist "$out/icon.plist" \
+    $targets --app-icon AppIcon $accent --output-partial-info-plist "$out/icon.plist" \
     "$out/Assets.xcassets" > "$out/actool.txt" 2>&1
 }
 # (actool takes a minute and more on a fresh Mac. With $ACTOOL_CACHE, what
 # it made is kept there, by its inputs and Xcode's version, and used again.)
 cached=
 if [ -n "${ACTOOL_CACHE:-}" ]; then
-  key=$( { echo "$sdk $accent"; xcodebuild -version; (cd "$out/Assets.xcassets" && find . -type f | sort | xargs shasum); } | shasum | cut -c1-20)
+  key=$( { echo "$sdk $accent $targets"; xcodebuild -version; (cd "$out/Assets.xcassets" && find . -type f | sort | xargs shasum); } | shasum | cut -c1-20)
   cached="$ACTOOL_CACHE/$key"
 fi
 if [ -n "$cached" ] && [ -f "$cached/icon.plist" ]; then
