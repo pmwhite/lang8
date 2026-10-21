@@ -1,0 +1,401 @@
+tag bible;
+
+use_tag std;
+
+// The Hebrew and Greek in the reader (DESIGN.md §14.11), apart from any
+// platform: which words are glossed (by what you know, or the rare ones)
+// and each one's gloss, the BSB's words for it in its verse; a verse's
+// words, its Hebrew number, a Qere's Ketiv; what a word's popover says; the
+// word picked in the text; search by Greek, Hebrew or Latin letters, their
+// accents, breathings and points folded. text.l8 lays the text out (its
+// words from orig-words.bin, tools/orig.py's); test_lang.l8 and
+// test_learn.l8 test this.
+import "text.l8";
+
+import "store.l8";
+
+import "lang.l8";
+
+import "learn.l8";
+
+// ---- orig-ketiv.txt: WORD<TAB>QERE<TAB>KETIV a line, by word ----
+lket: []i8 = new i8[1](0i8);
+
+lket_n: int = 0;
+
+ket_at: []int = new int[4097](0);
+
+ket_lines: int = 0;
+
+ket_index() {
+    ket_lines = line_starts(lket, lket_n, ket_at)
+}
+
+// The Ketiv of word w (a Qere): kt_b to kt_e in lket; false if none.
+kt_b: int = 0;
+
+kt_e: int = 0;
+
+og_ketiv(w: int): bool {
+    lo: int = 0;
+    hi: int = ket_lines;
+    while (lo < hi) {
+        mid: int = (lo + hi) / 2;
+        if (ket_word(mid) < w) lo = mid + 1 else hi = mid
+    }
+    if (lo >= ket_lines || ket_word(lo) != w) return false;
+    p: int = ket_at[lo];
+    e: int = ket_at[lo + 1] - 1;
+    tabs: int = 0;
+    while (p < e && tabs < 2) {
+        if (lket[p] as int == 9) tabs = tabs + 1;
+        p = p + 1
+    }
+    kt_b = p;
+    kt_e = e;
+    e > p
+}
+
+ket_word(i: int): int {
+    n: int = 0;
+    p: int = ket_at[i];
+    while (p < lket_n && is_digit(lket[p] as int)) {
+        n = n * 10 + lket[p] as int - 48;
+        p = p + 1
+    }
+    n
+}
+
+// ---- which words are glossed (§14.11.4) ----
+// Reading settings → Glosses: Words I Haven't Learned, Rare Words, None;
+// -1 (not chosen): words not learned once the language has a card, rare
+// words before.
+OG_UNLEARNED: int = 0;
+
+OG_RARE: int = 1;
+
+OG_NONE: int = 2;
+
+og_setting: int = -1;
+
+og_lang(w: int): int {
+    if (og_greek(w)) 0 else 1
+}
+
+og_mode(lang: int): int {
+    if (og_setting >= 0) return og_setting;
+    if (learn_started(lang)) OG_UNLEARNED else OG_RARE
+}
+
+// The printed reader's editions' rule: Greek words used 30 times or fewer,
+// Hebrew fewer than 100.
+og_rare(lang: int, num: int): bool {
+    n: int = vk_count_of(lang, num);
+    if (lang == 0) n <= 30 else n < 100
+}
+
+// Whether word w of the text is known (§14.1.3): as its words.bin word is;
+// a variant the tables lack, by its own number and parsing.
+og_known(w: int): bool {
+    j: int = og_join(w);
+    if (j >= 0 && learn_lang_ready) return word_known(j);
+    lang: int = og_lang(w);
+    num: int = og_strongs(w);
+    if ((og_flags(w) & OG_ARAMAIC) != 0) return false;
+    if (num > 0) {
+        fl: int = vk_flags_of(lang, num);
+        if ((fl & FL_ARAMAIC) != 0) return false;
+        if (!(word_card_known(lang, num) || (fl & FL_NAME) != 0 && kn_alpha[lang])) return false
+    }
+    if (lang == 1 && learn_lang_ready) {
+        m: int = og_morph(w);
+        bits: int = if (m >= 0 && m < len(mp_bits)) mp_bits[m] & 65535 else 0;
+        for k in 0..len(jp_ids)
+            if ((bits & 1 << k) != 0 && !kn_part[k]) return false
+    }
+    true
+}
+
+// Whether word w is glossed in a mode: names only before the alphabet is
+// known (decision 12); Aramaic always, until its cards (Round 14).
+og_wanted(w: int, mode: int): bool {
+    if (mode == OG_NONE) return false;
+    lang: int = og_lang(w);
+    num: int = og_strongs(w);
+    name: bool = (og_flags(w) & OG_NAME) != 0 || num > 0 && (vk_flags_of(lang, num) & FL_NAME) != 0;
+    if (name) return !kn_alpha[lang] && (mode == OG_UNLEARNED || og_rare(lang, num));
+    if (mode == OG_UNLEARNED) return !og_known(w);
+    num > 0 && og_rare(lang, num)
+}
+
+// The glosses made for chapter c (text.l8's og_gl and the rest), unless
+// they are already, for the cards and the mode now: how many of its words
+// are glossed, of how many.
+og_gl_gen: int = -1;
+
+og_gl_mode: int = -1;
+
+og_prep_glossed: int = 0;
+
+og_prep_words: int = 0;
+
+orig_prepare(c: int) {
+    if (c < 0 || c >= chapters) return;
+    lang: int = if (ch_book[c] < 39) 1 else 0;
+    mode: int = og_mode(lang);
+    if (og_gl_c == c && og_gl_gen == cd_gen && og_gl_mode == mode) return;
+    og_gl_c = c;
+    og_gl_gen = cd_gen;
+    og_gl_mode = mode;
+    first: int = og_ch_first[c];
+    last: int = if (c + 1 < chapters) og_ch_first[c + 1] else og_n;
+    n: int = last - first;
+    if (n > OW_MOST) n = OW_MOST;
+    og_gl_first = first;
+    og_gt_n = 0;
+    og_prep_glossed = 0;
+    og_prep_words = n;
+    for i in 0..n {
+        w: int = first + i;
+        og_gk[i] = og_strongs(w) | (if (og_greek(w)) 32768 else 0);
+        og_gt_b[i] = og_gt_n;
+        if (og_wanted(w, mode)) og_gloss_into_gt(w);
+        og_gt_e[i] = og_gt_n;
+        og_gl[i] = og_gt_e[i] > og_gt_b[i];
+        if (og_gl[i]) og_prep_glossed = og_prep_glossed + 1
+    }
+}
+
+// Made again at the next layout (a card changed; the mode chosen).
+orig_forget() {
+    og_gl_c = -1
+}
+
+og_gt_put(k: int) {
+    if (og_gt_n < len(og_gt)) {
+        og_gt[og_gt_n] = k trunc i8;
+        og_gt_n = og_gt_n + 1
+    }
+}
+
+// Word w's gloss onto og_gt.
+og_gloss_into_gt(w: int) {
+    fbuf_n = 0;
+    fput_og_gloss(w);
+    for i in 0..fbuf_n og_gt_put(fbuf[i] as int)
+}
+
+// ---- a word's gloss: the BSB's words for it in its verse ----
+// Word w's gloss into fbuf: the BSB's rendering of it in that verse
+// (through words.bin, its join), its first letter lower case where it
+// begins a sentence (but I, and God and names); without one, the gloss of
+// its sense in the lexicon (before a colon, as lists show it).
+fput_og_gloss(w: int) {
+    j: int = og_join(w);
+    if (j >= 0) {
+        vi: int = word_verse(j);
+        if (vi >= 0) {
+            study_load(vi);
+            chunk_of(j);
+            if (ch_e > ch_b) {
+                low: bool = sentence_start(ch_b) && !keeps_capital(w, ch_b, ch_e);
+                for x in ch_b..ch_e {
+                    k: int = st[x] as int;
+                    if (x == ch_b && low && k >= 65 && k <= 90) k = k + 32;
+                    fput(k)
+                }
+                return
+            }
+        }
+    }
+    greek: bool = og_greek(w);
+    num: int = og_strongs(w);
+    if (num <= 0) return;
+    e: int = meaning_entry(greek, num, if (j >= 0) w_sense(j) else og_sense(w));
+    if (e < 0) e = lex_first(greek, num);
+    if (e < 0) return;
+    lex_field(e, 3);
+    fput_gloss(lf_b, lf_e)
+}
+
+// Whether st[b] begins a sentence: the verse's (or its title's) first
+// word, or after . ! ? or an opening quotation mark.
+sentence_start(b: int): bool {
+    x: int = b;
+    while (x > 0) {
+        k: int = st[x - 1] as int & 255;
+        if (k == 32) x = x - 1 else if (k == 156 || k == 152) {
+            // (“ or ‘: the last byte of its three.)
+            return true
+        } else return k == 46 || k == 33 || k == 63 || x == st_title + 1 && st_title > 0
+    }
+    true
+}
+
+// Whether a gloss keeps its capital: "I", a name, God.
+keeps_capital(w: int, b: int, e: int): bool {
+    if (e - b == 1 || e - b > 1 && (st[b + 1] as int == 39 || (st[b + 1] as int & 255) == 226)) {
+        if (st[b] as int == 73) return true
+    }
+    if ((og_flags(w) & OG_NAME) != 0) return true;
+    num: int = og_strongs(w);
+    if (og_greek(w)) num == 2316 || num == 2424 || num == 5547 else num == 430 || num == 410
+}
+
+// The verse (verses.bin's index) word j of words.bin is in (-1: none).
+word_verse(j: int): int {
+    if (j < 0 || lv_n == 0) return -1;
+    lo: int = 0;
+    hi: int = lv_n;
+    while (lo + 1 < hi) {
+        mid: int = (lo + hi) / 2;
+        if (v_first(mid) <= j) lo = mid else hi = mid
+    }
+    if (j >= v_end(lo)) -1 else lo
+}
+
+// ---- a verse of the original (the text current the Hebrew and Greek's) ----
+// Verse v's words (keyed as the BSB's; 0, its psalm's title) of chapter c:
+// og_vb to og_ve; and its Hebrew number where it differs (og_hn_c,
+// og_hn_v; 0 none).
+og_vb: int = 0;
+
+og_ve: int = 0;
+
+og_hn_c: int = 0;
+
+og_hn_v: int = 0;
+
+og_verse(c: int, v: int): bool {
+    og_vb = 0;
+    og_ve = 0;
+    og_hn_c = 0;
+    og_hn_v = 0;
+    if (c < 0 || c >= chapters || ch_start[c] < 0) return false;
+    w: int = og_ch_first[c];
+    p: int = ch_start[c];
+    cur: int = -1;
+    hc: int = 0;
+    hv: int = 0;
+    found: bool = false;
+    while (p < ch_end[c]) {
+        e: int = line_end(p);
+        k: int = bsb[p] as int;
+        if (k == 78) {
+            hc = number_at(p + 1);
+            q: int = p + 1;
+            while (q < e && bsb[q] as int != 58) q = q + 1;
+            hv = number_at(q + 1)
+        } else if (k == 86 || k == 68) {
+            if (found) return true;
+            cur = (if (k == 68) 0 else key_at(p + 1));
+            if (cur == v) {
+                found = true;
+                og_vb = w;
+                og_ve = w;
+                og_hn_c = hc;
+                og_hn_v = hv
+            }
+            hc = 0;
+            hv = 0
+        }
+        if (og_words_line(k)) {
+            n: int = og_count(p + 1, e, w);
+            w = w + n;
+            if (found) og_ve = w
+        }
+        p = e + 1
+    }
+    found
+}
+
+// The verse word w is in: og_wc, og_wv (0: its psalm's title); false if
+// none.
+og_wc: int = -1;
+
+og_wv: int = 0;
+
+og_where(w: int): bool {
+    c: int = og_chapter_of(w);
+    og_wc = c;
+    og_wv = 0;
+    if (c < 0) return false;
+    k: int = og_ch_first[c];
+    p: int = ch_start[c];
+    v: int = 0;
+    while (p < ch_end[c]) {
+        e: int = line_end(p);
+        x: int = bsb[p] as int;
+        if (x == 86) v = key_at(p + 1) else if (x == 68) v = 0;
+        if (og_words_line(x)) {
+            n: int = og_count(p + 1, e, k);
+            if (w < k + n) {
+                og_wv = v;
+                return true
+            }
+            k = k + n
+        }
+        p = e + 1
+    }
+    false
+}
+
+// Word w's letters into fbuf (its punctuation and maqaf left out).
+fput_og_form(w: int) {
+    p: int = og_text_at(w);
+    if (p < 0) return;
+    e: int = og_letters_end(p, p + og_len(w));
+    for i in p..e fput(bsb[i] as int)
+}
+
+// Its transliteration (the BSB's tables', through its join), into fbuf;
+// false if it has none.
+fput_og_translit(w: int): bool {
+    j: int = og_join(w);
+    if (j < 0) return false;
+    form_of(j);
+    if (wt_e <= wt_b) return false;
+    for i in wt_b..wt_e fput(lforms[i] as int);
+    true
+}
+
+// Its meaning here (UBS's: "to have love for someone … · Love, Affection,
+// Compassion") into fbuf; false if none known.
+fput_og_meaning(w: int): bool {
+    j: int = og_join(w);
+    m: int = if (j >= 0) w_meaning(j) else 0;
+    if (m <= 0) return false;
+    fput_meaning(m);
+    true
+}
+
+// A meaning's definition (or its glosses) and its domain.
+fput_meaning(m: int) {
+    mean_field(m, 4);
+    if (mf_e <= mf_b) mean_field(m, 5);
+    for i in mf_b..mf_e fput(lmeant[i] as int);
+    mean_field(m, 3);
+    if (mf_e > mf_b) {
+        fput_str(" \�\� ");
+        for i in mf_b..mf_e fput(lmeant[i] as int)
+    }
+}
+
+// ---- the word picked in the text (the edit menu's Study) ----
+// The word whose letters are at or after byte b of the chapter laid out
+// (ow_b to ow_e): pick_word (words.bin's; -1 if it has none) and pick_vi;
+// the original's word in og_picked. False if no word is.
+og_picked: int = -1;
+
+og_pick(b: int): bool {
+    og_picked = -1;
+    pick_word = -1;
+    pick_vi = -1;
+    for i in 0..ow_n {
+        if (og_picked < 0 && b < ow_e[i]) og_picked = ow_w[i]
+    }
+    if (og_picked < 0) return false;
+    pick_word = og_join(og_picked);
+    pick_vi = word_verse(pick_word);
+    pick_word >= 0 && pick_vi >= 0
+}

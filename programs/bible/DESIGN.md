@@ -8064,6 +8064,72 @@ A small keyboard of our own, for typing Greek and Hebrew without adding a system
    (284–289).
 7. Launch time unchanged (the text and words are read at first use of this version).
 
+#### 14.11.11 Builder notes (Round 11, as built)
+Built in steps (§14.11's order: the data, the version in the reader, glosses and the popover,
+then the rest), each its own commit; these notes grow with them.
+
+**The data (R11.0 and §14.11.1).** `tools/orig.py` (run by `fetch.sh … make` after `learn.py`)
+makes `data/orig.txt` (6.8 MB), `data/lang/orig-words.bin` (5.3 MB, 443,372 words),
+`orig-ketiv.txt` (1,309 Qere) and `orig-accents.txt` (5.3 MB); `tools/ubs.py` after it makes
+`data/lang/meanings.bin` (a u16 per words.bin word, 0.9 MB) and `meanings.txt` (25,751 meanings,
+4.1 MB), with `meanings-LICENSE.txt` beside them: UBS's credit, what was changed, and that these
+two files are CC BY-SA 4.0 as their source is. Sources, all pinned: STEP's TAHOT and TAGNT at
+`ed476a8e…` (already in `fetch.sh`, unchanged sums); UBS's
+`UBSGreekNTDic-v1.1-en.JSON` (sha256 `d84bb907…`, as §14.10b.3),
+`UBSHebrewDic-v0.9.3-en.JSON` (`3ed17584…`) and `UBSHebrewDicLexicalDomains-v0.9.3-en.JSON`
+(`11dd87c6…`), at commit `33dcc8c6…`, added to `fetch.sh` with their sums (the Greek domains
+file isn't needed: each Greek meaning names its own domain and subdomain). Both tools' `--check`
+run in `make bible-test` and CI's test job. Counts: 31,086 verses, every one the BSB has, with
+words; 442,655 of 443,372 words (99.84%) joined to words.bin; meanings for 91.6% of the New
+Testament's words and 86.3% of the Old's (SDBH is about 90% done); John 3:16's ἠγάπησεν is 25.43,
+"to have love for someone or something, based on sincere appreciation and high regard", Love,
+Affection, Compassion.
+
+Deviations, each with its reason:
+1. **The Greek is TAGNT's NA28 word lines, with their punctuation,** and the check is that each
+   verse's NA28 words are in its text line in order (7,942 verses, none out): the text line has
+   every edition's words (John 3:16's αὐτοῦ is only the TR's and Byzantine's), so it can't be the
+   text itself. TAGNT's ¶ (the Tyndale House paragraphs) and NA28's brackets are left out; the
+   paragraphs are the BSB's.
+2. **The Hebrew leaves out TAHOT's words restored from the LXX (X, 152)** and the 14 words
+   written but not read (a Ketiv with no Qere): the version is the Leningrad Codex as read.
+   Restored words (R: Joshua 21:36–37, Nehemiah 7:68) are kept, since the BSB has those verses.
+3. **Sof pasuq (׃) is kept** in the running text, as printed Hebrew Bibles keep it and the Greek
+   keeps its full stops; `forms.txt`'s cleaning is otherwise followed (cantillation and paseq
+   out; points, dagesh, meteg, shin and sin dots and maqaf kept).
+4. **Aramaic runs are `X` records, not `R`,** which is already a heading's passages in every
+   version; Hebrew is `H`, Greek `T`. A verse's runs alternate where its language does (Daniel
+   2:4 is `H` then `X`). **The Hebrew numbers are `N<c>:<v>` records** before the verse (and
+   before a psalm's title, its own Hebrew verse 1): 1,971 verses differ.
+5. **orig-words.bin's `u16 0` holds each word's length in the text's bytes** (its punctuation
+   and a maqaf after it): a STEP word can hold a maqaf (Exodus 4:2's מַה־זֶּה, a Qere written
+   as one) or a space (Numbers 7:59), so splitting the text at spaces and maqafs can't find the
+   words; the lengths can, and the test checks they fall at spaces and records' ends.
+6. **A word joined to words.bin takes the tables' Strong's number and parsing** (so the
+   lexicon, cards and counts are the app's); one the tables lack takes STEP's number and its
+   parsing in the tables' style, by the commonest pairing of STEP's code with the tables' among
+   joined words (seven words had codes never paired, converted by rule; four morph.txt lines
+   added). A word is joined first by number, as `senses.py` does, then by its form unaccented
+   (3,789: STEP numbers some forms by their lemma, ἡμῶν G3165, where the tables have G2257).
+   STEP's runs of words numbered alike are put in the BSB verse that holds most of their numbers
+   (26 runs in the BSB's other numbering, Revelation 12:18's sentence in 12:17).
+7. **Paragraphs:** the Greek's are the BSB's at verse starts; the Hebrew's are the BSB's and
+   also a petuha or setuma before a verse, so a long narrative isn't one paragraph with a
+   distant apparatus.
+8. **UBS's places are mapped by place, then by number:** a word's place in its verse as UBS
+   counts it (each Greek word two; each Hebrew word two for each joined word before it and two
+   for itself, its ending not counted, by the Hebrew's verse numbers) takes that place's first
+   meaning when its number agrees, or when most of the verse's numbers agree (STEP's and UBS's
+   numbering of some forms differ: σου G4771, G4675); the rest of a verse's occurrences of a
+   number go to its words of that number in order. `meanings.txt` keeps a CODE field (the
+   Louw–Nida subdomain, SDBH's lexical domain) to group "In the same domain", and the entry's
+   Strong's numbers; for Hebrew, DOMAIN is the domain above SDBH's own and SUBDOMAIN SDBH's
+   (Exist, under Existence).
+9. **`fetch.sh DIR` fails today on eBible.org's four zips and OpenBible.info's
+   cross-references.zip** (republished since their sums were taken): not this round's, so left
+   for the round that makes those texts again, as §9.2.1 says; `orig.py` and `ubs.py` were run on
+   their own on the checked STEP and UBS files.
+
 ### 14.12 Round 12: a Greek course
 
 Round 12 adds what a course gives: a sequence of short lessons that teach the grammar as a

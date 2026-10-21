@@ -157,13 +157,25 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   (`tools/related.py`, MACULA's Proximity, CC BY 4.0); `data/lang/vocab.bin`
   how often each word occurs (`tools/learn.py`, from the app's own data;
   it prints DESIGN.md §14.0.3's table) and `letters.txt` the letter cards,
-  written by hand (public domain).
+  written by hand (public domain). `data/orig.txt` is the Hebrew and Greek
+  (Round 11: `tools/orig.py`, from STEP's TAHOT, the Leningrad Codex with
+  the Qere read, and TAGNT's NA28 words; CC BY 4.0), keyed by the BSB's
+  verses, with `data/lang/orig-words.bin` its words (each one's number,
+  parsing, sense, flags, length and words.bin word), `orig-ketiv.txt` the
+  Qere's Ketiv and `orig-accents.txt` the Hebrew with its cantillation;
+  `data/lang/meanings.bin` and `meanings.txt` are each word's meaning in its
+  verse and its semantic domain (`tools/ubs.py`, from the United Bible
+  Societies' open dictionaries of Greek, after Louw and Nida, and Hebrew,
+  SDBH), CC BY-SA 4.0 as their source is (`meanings-LICENSE.txt`).
   `tools/fetch.sh DIR make` downloads the sources, checks
   their sha256, and makes them all again.
   `lang.l8` reads the study data for the study screens (`test_lang.l8`), and
-  `ios_study.l8` shows them.
+  `ios_study.l8` shows them; `orig.l8` is the Hebrew and Greek's portable
+  part (which words are glossed and their glosses, a verse's words and
+  Hebrew number, a word's popover, search by its letters).
   The BSB, KJV, WEB, ASV, YLT and the commentary are in the public domain;
-  the cross references are CC BY 4.0.
+  the cross references and STEP's texts are CC BY 4.0; UBS's meanings CC
+  BY-SA 4.0.
 - `text.l8` indexes it and lays a chapter out as runs of styled text;
   `test_text.l8` tests that (`make bible-test`).
 - `ios.l8` is the app: the reader and its classes; `ios_look.l8` the themes,
