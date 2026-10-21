@@ -8279,7 +8279,10 @@ the original third on the read job): read/help/original/plans 19.7 minutes, note
 notes/listen/ipad 24.1, languages/versions 18.2, ribbons/study/ios18 17.5, store/memory/more 18.5,
 frames 11.0; the original group 253 s, the ipad group 675 s. (The same groups took 13 to 18
 minutes on two jobs that changed nothing between the runs: the runners' speed varies by a third
-from run to run, more than these shots add.)
+from run to run, more than these shots add.) Run 39583129288 (648de2ce8) lost its read job: the
+simulator took the app's install but then called it "unknown to FrontBoard", so it never launched
+and every step of the read group timed out until the job's 30 minutes ran out; the other jobs were
+green. A runner's fault, not the app's: run again.
 
 **What needs a real phone:** the Hebrew's points and the dotted lines under them in SF Hebrew at
 every text size (the simulator's fonts are the phone's, but the eye should judge); the apparatus
