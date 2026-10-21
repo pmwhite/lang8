@@ -1,11 +1,33 @@
 # Smooth Bible
 
 The Berean Standard Bible to read on an iPhone, in UIKit's own views: an
-L8 program (`ios.l8`) compiled by `l8 arm64 --target ios`, with no Swift,
+L8 program (`ios/app.l8`) compiled by `l8 arm64 --target ios`, with no Swift,
 Objective-C source or Xcode project. It sends messages to UIKit through the
 Objective-C runtime (`programs/ios/objc.l8`), and makes its own classes and
 delegates there at run time, so the text scrolls, selects, copies and is
 read aloud by VoiceOver as it would be in the phone's own apps.
+
+## Layout
+
+- `core/`: what every platform shares, with no platform code: the text and
+  its layout, the study data, plans, Memory, learning, ribbons, what is
+  kept, the ESV's cache rules, the Manual, recorded readings and the Hebrew
+  and Greek, with their tests (`test_*.l8`).
+- `ios/`: the iPhone and iPad app (`app.l8` and its screens, in UIKit), and
+  what goes into its bundle (Info.plist, icons, colors, frameworks,
+  resources) and the simulator scripts.
+- `web/`: the reader on the web (`app.l8`, `reader.l8`, `table.l8`, `html.l8`,
+  `estimate.l8`, tested in `test_html.l8`), and `web/page/`, its page,
+  styles, boot script, fonts, site build (`build.py`) and browser tests.
+- `data/`: the texts and the study, plan and audio data the apps read.
+- `tools/`: the scripts that made the data, and `sizes.l8` (the web's
+  sizes tables) and `spoken.l8` (the spoken text, for the aligner).
+- `worker/`: the Cloudflare Worker at smoothbible.com (the ESV proxy and
+  the site).
+- `site/`: smoothbible.com's own pages.
+- `demo/`: CI's audio fixture.
+- `reviews/`: the reviews of each round (`REVIEW-*.md`), kept as written.
+- `DESIGN.md` the design, `WEB.md` the web reader's, and this README.
 
 ## Reading
 
@@ -50,7 +72,7 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   Calendar (transcribed from Bonar's 1878 edition), Old and New Together,
   the NT in 90 days, Psalms and Proverbs in a month, the Gospels in 30
   days, and A Chapter a Day; a day is up to six passages (verse ranges).
-  A plan's day opens in a reader of its own (`ios_day.l8`): the reader in
+  A plan's day opens in a reader of its own (`ios/day.l8`): the reader in
   a mode, its page only that day's passages, the title the passage you're
   in over the day, Done, Mark Read at the bottom right (a passage also
   marks itself, read to its end and rested in, or heard), the day's end
@@ -60,9 +82,9 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   through the one block, `../ios/block.l8`).
   Word study shows a word's exact sense (STEP's TAHOT and TAGNT) and
   related words (MACULA), and the share sheet has Share as Image
-  (`ios_share.l8`).
+  (`ios/share.l8`).
 - Ribbons (Round 6, as revised): named places you carry while you read
-  (`ribbons.l8`), made only by you (the title's long-press, New Ribbon
+  (`core/ribbons.l8`), made only by you (the title's long-press, New Ribbon
   Here…, or Go To's New Ribbon…), listed first in Go To in the order made
   (up to 12; ⓘ to rename or delete, a swipe to delete). Opening one picks it
   up: it then takes every rest's place, either way, and a read chapter's
@@ -157,7 +179,7 @@ read aloud by VoiceOver as it would be in the phone's own apps.
 
 ## Files
 
-- `data/bsb.txt` is the text, one record a line (see `text.l8` and
+- `data/bsb.txt` is the text, one record a line (see `core/text.l8` and
   `tools/usfm.py`, which made it from the publisher's USFM, `bsb_usfm.zip`);
   `data/kjv.txt`, `web.txt`, `asv.txt` and `ylt.txt` are the other versions,
   made by the same tool from eBible.org's USFM, and `data/refs.txt` the
@@ -189,76 +211,76 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   word's).
   `tools/fetch.sh DIR make` downloads the sources, checks
   their sha256, and makes them all again.
-  `lang.l8` reads the study data for the study screens (`test_lang.l8`), and
-  `ios_study.l8` shows them; `orig.l8` is the Hebrew and Greek's portable
+  `core/lang.l8` reads the study data for the study screens (`core/test_lang.l8`), and
+  `ios/study.l8` shows them; `core/orig.l8` is the Hebrew and Greek's portable
   part (which words are glossed and their glosses, a verse's words and
   Hebrew number, a word's popover, search by its letters).
   The BSB, KJV, WEB, ASV, YLT and the commentary are in the public domain;
   the cross references and STEP's texts are CC BY 4.0; UBS's meanings CC
   BY-SA 4.0.
-- `text.l8` indexes it and lays a chapter out as runs of styled text;
-  `test_text.l8` tests that (`make bible-test`).
-- `ios.l8` is the app: the reader and its classes; `ios_look.l8` the themes,
-  fonts and styles; `ios_store.l8` what is kept; `ios_select.l8` selection,
-  the tray, the edit menu and jumps; `ios_sheets.l8` the sheets;
-  `ios_versions.l8` the versions and switching; `ios_esv.l8` the ESV's
+- `core/text.l8` indexes it and lays a chapter out as runs of styled text;
+  `core/test_text.l8` tests that (`make bible-test`).
+- `ios/app.l8` is the app: the reader and its classes; `ios/look.l8` the themes,
+  fonts and styles; `ios/store.l8` what is kept; `ios/select.l8` selection,
+  the tray, the edit menu and jumps; `ios/sheets.l8` the sheets;
+  `ios/versions.l8` the versions and switching; `ios/esv.l8` the ESV's
   client, cache on disk and the reader's states while a chapter comes
-  (`esv_cache.l8` its portable rules, tested in `test_store.l8`);
-  `ios_compare.l8` Compare; `ios_study2.l8` the Study sheet's segments;
-  `ios_daily.l8` Go To's Ribbons and Reading Plan sections, the plans, a
-  plan's days, A Chapter a Day and the reminder, and `ios_day.l8` a plan's
-  day's reader (`plans.l8` their portable part: the plans, their days of
-  passages, progress, a day laid out; tested in `test_plans.l8`);
+  (`core/esv_cache.l8` its portable rules, tested in `core/test_store.l8`);
+  `ios/compare.l8` Compare; `ios/study2.l8` the Study sheet's segments;
+  `ios/daily.l8` Go To's Ribbons and Reading Plan sections, the plans, a
+  plan's days, A Chapter a Day and the reminder, and `ios/day.l8` a plan's
+  day's reader (`core/plans.l8` their portable part: the plans, their days of
+  passages, progress, a day laid out; tested in `core/test_plans.l8`);
   `data/plans/mcheyne.txt` and `chrono.txt` the listed plans
   (`tools/chrono.py` makes the second from `chrono-order.txt` and checks
-  that it has every verse once); `ios_ribbons.l8` the ribbons' rows, New
-  Ribbon, Ribbon, the title's menu, the glyph and the toasts (`ribbons.l8`
-  their portable part, tested in `test_ribbons.l8`); `ios_share.l8` Share as
-  Image; `ios_memory.l8` Memory's files, the tray's Memorize, the
-  Library's Memory segment, Add Passage and Passage, and `ios_practice.l8`
-  Practice (`memory.l8` their portable part: words and key letters, parts,
+  that it has every verse once); `ios/ribbons.l8` the ribbons' rows, New
+  Ribbon, Ribbon, the title's menu, the glyph and the toasts (`core/ribbons.l8`
+  their portable part, tested in `core/test_ribbons.l8`); `ios/share.l8` Share as
+  Image; `ios/memory.l8` Memory's files, the tray's Memorize, the
+  Library's Memory segment, Add Passage and Passage, and `ios/practice.l8`
+  Practice (`core/memory.l8` their portable part: words and key letters, parts,
   hiding, the schedule, Today, the files and the reminder's words, tested
-  in `test_memory.l8`); `ios_learn.l8` Greek's and Hebrew's pages (the
+  in `core/test_memory.l8`); `ios/learn.l8` Greek's and Hebrew's pages (the
   language page, the Alphabet and Sounds Written As, Your Words, Add Words
   and its preview, Verses You Can Read, Forms), cards.tsv and the voices
   (off, behind `LEARN_SPEECH`), and
-  `ios_cards.l8` cards and Practise Reading in Practice (`learn.l8` their
-  portable part: vocab.bin and letters.txt, cards on `memory.l8`'s
+  `ios/cards.l8` cards and Practise Reading in Practice (`core/learn.l8` their
+  portable part: vocab.bin and letters.txt, cards on `core/memory.l8`'s
   schedule, what is known, coverage, a passage's words, readable verses,
-  a card's verse, cards.tsv; `lang.l8` a lemma's forms and Greek for the
-  voice; tested in `test_learn.l8`); `ios_help.l8` the Manual and
-  Reading settings' Help (`help.l8` its portable part: `data/help.txt` read
-  and checked, the Manual's search; tested in `test_help.l8`, which fails
+  a card's verse, cards.tsv; `core/lang.l8` a lemma's forms and Greek for the
+  voice; tested in `core/test_learn.l8`); `ios/help.l8` the Manual and
+  Reading settings' Help (`core/help.l8` its portable part: `data/help.txt` read
+  and checked, the Manual's search; tested in `core/test_help.l8`, which fails
   on a broken link or anchor, an unknown symbol, or a paragraph out of the
-  house style); `ios_ipad.l8` the window's root (a container of the reader's navigation
+  house style); `ios/ipad.l8` the window's root (a container of the reader's navigation
   controller and, beside it, Study's), the width's changes and the place
   kept through them, the floating controls over the column, form sheets
-  and popovers, the keys and the menu bar, and hover; `ios_beside.l8`
-  Study beside the text (`text.l8`'s `column_width` is the column, tested
-  in `test_text.l8`); `ios_orig.l8` the Hebrew and Greek's
+  and popovers, the keys and the menu bar, and hover; `ios/beside.l8`
+  Study beside the text (`core/text.l8`'s `column_width` is the column, tested
+  in `core/test_text.l8`); `ios/orig.l8` the Hebrew and Greek's
   screens (its data at first use, Glosses and Show Accents, the glossed
-  words' lines, a word's popover, the letter keyboard); `ios_demo.l8` (and
-  `ios_demo3.l8` to `ios_demo17.l8`) the demo CI runs (`ios_demo11.l8`
+  words' lines, a word's popover, the letter keyboard); `ios/demo.l8` (and
+  `ios/demo3.l8` to `ios/demo17.l8`) the demo CI runs (`ios/demo11.l8`
   Round 11's).
-- The web (`WEB.md`): `html.l8` writes a chapter as HTML (tested in
-  `test_html.l8`); `estimate.l8` estimates a chapter's height from its
+- The web (`WEB.md`): `web/html.l8` writes a chapter as HTML (tested in
+  `web/test_html.l8`); `web/estimate.l8` estimates a chapter's height from its
   records (or counts its blocks for `tools/sizes.l8`'s sizes table, which
-  the first paint estimates from); `text.l8`'s `text_load_book` holds one
-  book with the whole Bible's chapter numbers (tested in `test_text.l8`).
-  The app is `web.l8` (start, settings, keys, history, Go To),
-  `web_reader.l8` (the scroller laid out by the height table, the window
-  of chapters, the bar, the place, footnotes) and `web_table.l8` (the
+  the first paint estimates from); `core/text.l8`'s `text_load_book` holds one
+  book with the whole Bible's chapter numbers (tested in `core/test_text.l8`).
+  The app is `web/app.l8` (start, settings, keys, history, Go To),
+  `web/reader.l8` (the scroller laid out by the height table, the window
+  of chapters, the bar, the place, footnotes) and `web/table.l8` (the
   calibration, measuring, kept heights), running in the browser through
   the page bridge (`../web/dom.l8`, `web/dom.js`). `make bible-web` builds
-  the site into `.build/bible-site` (`web/bible/`); `make
+  the site into `.build/bible-site` (`web/page/`); `make
   bible-wasm-test` runs the tests as WebAssembly. The workflow's `web` job
   (Linux) builds the site, runs the driver's checks
-  (`web/bible/test/drive.mjs`) and pushes the shots to
+  (`web/page/test/drive.mjs`) and pushes the shots to
   `ci-bible-web-shots`.
-- `audio.l8` is recorded readings' portable part (sources, addresses,
+- `core/audio.l8` is recorded readings' portable part (sources, addresses,
   timings, which source a chapter is heard from, the cache's rules), tested
-  in `test_audio.l8`; `ios_audio.l8` the Voice screens, voices, the cache
-  and downloads; `ios_listen.l8` both engines (AVQueuePlayer, no blocks;
+  in `core/test_audio.l8`; `ios/audio.l8` the Voice screens, voices, the cache
+  and downloads; `ios/listen.l8` both engines (AVQueuePlayer, no blocks;
   AVSpeechSynthesizer). `data/audio/<reader>.tim` are the verse timings
   and `henson.paths` eBible.org's file names
   (`tools/web_audio_manifest.py`); `tools/align.py` made the timings
@@ -273,7 +295,7 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   ESV's tags with the WEB's words) and `make_fixtures.mjs`, which writes the
   app's fixture (`ios/esv-fixture/`) for CI. It is deployed at
   smoothbible.com (below), with `/api/v1/esv/audio` (Round 7).
-- `ios/` is what goes into the app besides its code: its Info.plist, icon
+- `ios/` also holds what goes into the app besides its code: its Info.plist, icon
   (`AppIcon.svg`, drawn to `AppIcon.png` in Chromium, and as
   `AppIcon.svg#dark` and `#tinted` to `AppIcon-dark.png` and
   `AppIcon-tinted.png`, the tinted one on a transparent background),
@@ -283,9 +305,9 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   simulator.
 
 ```sh
-tools/ios/build-linux.sh sim programs/bible/ios.l8 build programs/bible/ios     # anywhere
-tools/ios/build-linux.sh device programs/bible/ios.l8 device programs/bible/ios # and the IPA
-programs/bible/ios/simulate.sh build/SmoothBible.app shots                    # on a Mac
+tools/ios/build-linux.sh sim programs/bible/ios/app.l8 build programs/bible/ios     # anywhere
+tools/ios/build-linux.sh device programs/bible/ios/app.l8 device programs/bible/ios # and the IPA
+programs/bible/ios/simulate.sh build/SmoothBible.app shots                        # on a Mac
 ```
 
 Both builds are linked with iOS 26.2's SDK, so on iOS 26 the app has iOS
@@ -300,7 +322,7 @@ checkout origin/ci-bible-assets -- programs/bible/ios/assets` (the build
 stops, saying so, until then). On a Mac, the Xcode way still works:
 
 ```sh
-./l8c3 arm64 --target ios programs/bible/ios.l8 -o bible-ios.s
+./l8c3 arm64 --target ios programs/bible/ios/app.l8 -o bible-ios.s
 tools/ios/build.sh sim bible-ios.s build programs/bible/ios
 ```
 
