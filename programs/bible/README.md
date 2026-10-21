@@ -132,14 +132,11 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   of the app's own; the language page's Read in Greek (Hebrew) opens it.
   Word studies and cards give each word's meaning in its verse and its
   semantic domain (UBS's), and words in the same domain.
-- The manual and quick tips (§15): a tip at the top of Go To, one
-  sentence with More (the manual at its part), Next and sometimes an
-  action (New Ribbon…, Reading Plans, Open Memory…); the same tip all day,
-  basics first, skipping what you already do (your data, and first-use
-  flags in `helpUsed`), cycling. Reading settings → Help has the Manual (12
-  pages with search, symbols drawn inline, links between parts) and Show
-  Tips. The words are `data/help.txt`: every round that changes a feature,
-  a control's title or a place updates it (DESIGN.md §15.6).
+- The Manual (§15; its quick tips removed by the owner, §15.11): Reading
+  settings → Help → Manual (12 pages with search, symbols drawn inline,
+  links between parts). The words are `data/help.txt`: every round that
+  changes a feature, a control's title or a place updates it (DESIGN.md
+  §15.6).
 - iPad, and any width (§17): one app for the iPhone and the iPad, every
   orientation (an iPhone not upside down), any window from 320 × 480,
   following the window's size class: a narrow window is the iPhone's app.
@@ -225,12 +222,11 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   portable part: vocab.bin and letters.txt, cards on `memory.l8`'s
   schedule, what is known, coverage, a passage's words, readable verses,
   a card's verse, cards.tsv; `lang.l8` a lemma's forms and Greek for the
-  voice; tested in `test_learn.l8`); `ios_help.l8` the tip in Go To,
-  the Manual and Reading settings' Help (`help.l8` their portable part:
-  `data/help.txt` read and checked, the tips' order and the rule that picks
-  one, the Manual's search; tested in `test_help.l8`, which fails on a
-  broken link or anchor, an unknown condition, action or symbol, or a tip
-  out of the house style); `ios_ipad.l8` the window's root (a container of the reader's navigation
+  voice; tested in `test_learn.l8`); `ios_help.l8` the Manual and
+  Reading settings' Help (`help.l8` its portable part: `data/help.txt` read
+  and checked, the Manual's search; tested in `test_help.l8`, which fails
+  on a broken link or anchor, an unknown symbol, or a paragraph out of the
+  house style); `ios_ipad.l8` the window's root (a container of the reader's navigation
   controller and, beside it, Study's), the width's changes and the place
   kept through them, the floating controls over the column, form sheets
   and popovers, the keys and the menu bar, and hover; `ios_beside.l8`
@@ -343,8 +339,7 @@ about 27 when each group had a Mac of its own; see the workflow's header):
   reader); ipad (§17, on the 13-inch iPad Pro) third on the notes job, its
   iPad booted when its turn comes (booted beside the others, it slowed them
   more than its boot costs; `simulate.sh`'s `SIM_KEEP` would leave one
-  booted ahead). Every group but help and ipad turns Show Tips off before its first
-  launch, so its shots of Go To have no tip. Each group is uploaded (`shots-GROUP`) as it ends,
+  booted ahead). Each group is uploaded (`shots-GROUP`) as it ends,
   and `timing.txt` says when its boot, install, launch and settling came.
 - The groups are paired by their times so the jobs end together (a group
   takes 1 to 4 minutes once booted; `timing.txt`'s `total` minus its

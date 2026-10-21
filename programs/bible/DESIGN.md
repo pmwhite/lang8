@@ -26,7 +26,7 @@ vocabulary, the original text in the reader glossed by what you know, a Greek co
 Hebrew course, and Aramaic with recordings) are specified in §14 and follow Round 9;
 §14.10b amends Round 10 (owner, 2026-10-20): pronunciation written, not spoken, until
 recordings are commissioned, and meaning first.** **The
-manual and quick tips (owner request 2026-10-20: a tip always at the top of Go To with Next,
+manual and quick tips (owner request 2026-10-20: a tip always at the top of Go To with Next, [The quick tips were removed, owner 2026-10-21: §15.11; the manual stays.]
 More and an action, changing once a day and skipping what you already do; a 12-page
 Manual with search, reached from Reading settings' Help; Show Tips on by default; the
 words in `data/help.txt`) are specified in §15, built after Round 10 and before Round 11.** **A plan's day in a reader of
@@ -295,7 +295,7 @@ and memorize, and every exercise is a real verse.
 5. **Round 14, Biblical Aramaic and recordings:** a short Aramaic course (Daniel, Ezra);
    human recordings of the original texts if their rights holders agree (§14.14.2).
 
-### The manual and quick tips (fully specified in §15; after Round 10, before Round 11)
+### The manual and quick tips (fully specified in §15; after Round 10, before Round 11) — the tips removed, owner 2026-10-21 (§15.11)
 1. **A tip at the top of Go To**, one sentence, with **Next**, **More** (the manual at its
    part) and sometimes an action ("New Ribbon…"); basics first, skipping what you already
    do, changing once a day, cycling so there's always one.
@@ -500,7 +500,7 @@ the ESV and Crossway convention.
 | Speak a letter, word or verse (§14.5.4, §14.12.4) | `speaker.wave.2` |
 | Known, in Related Words and the Alphabet; a lesson marked done (§14.5.2, §14.3.3, §14.12.2) | `checkmark`, faint |
 | The letter keyboard's delete key (§14.11.5) | `delete.left` |
-| The tip in Go To (§15.1.1) | `lightbulb`, faint |
+| The tip in Go To (§15.1.1; removed, §15.11) | `lightbulb`, faint | (removed with the tips, §15.11)
 | The Manual in Reading settings' Help (§15.3.1) | `book.closed` |
 | Mark Read in the day's reader (§16.2.3) | `circle` / `checkmark.circle.fill` (read: accent) |
 
@@ -7770,7 +7770,7 @@ and nothing else.
   recordings yet."
 - **Greek and Hebrew → Words:** "Each word is practised in a verse … what it means there,
   with words you already know from its family."
-- **No tip mentions hearing Greek or Hebrew.** The `greek` tip stays.
+- **No tip mentions hearing Greek or Hebrew.** The `greek` tip stays. (Tips removed: §15.11.)
 
   (Done in this commit.)
 
@@ -8713,6 +8713,9 @@ Manual. Everything else stays as it is. The words themselves (48 tips and 12 man
 pages) are in **`programs/bible/data/help.txt`**, written with this section, so the
 builder builds the screens and the file is the content.
 
+**Owner amendment (2026-10-21), §15.11:** the quick tips are removed ("it's clutter"); the
+Manual stays. Read §15.1, §15.2, §15.4 and the tips' parts of §15.5–§15.7 as history.
+
 ### 15.0 Decisions (the designer's, with reasons)
 1. **The tip lives at the top of Go To, as its first row.** Go To is opened several times a
    day by everyone (it's how you go anywhere), and its top already holds the personal
@@ -9038,6 +9041,31 @@ These are decided above; the owner may overrule:
 
 ---
 
+### 15.11 Owner amendment (2026-10-21): the quick tips removed
+The owner: "I'd also like to remove the quick tips feature; it's clutter." The Manual
+stays as §15.3 has it.
+1. **Go To** has no tip row (§15.1 goes): its sections are Ribbons, Reading Plan(s),
+   Recent and the books, and it opens scrolled to the book being read unless a ribbon or a
+   plan puts its top in reach (§3.2, §10.7a note 4, §11.2.1), as before §15.
+2. **Reading settings' Help** keeps one row, **Manual** (no footer). Show Tips goes (§15.4).
+3. **`data/help.txt`** has no `tip` lines and no tip markup; its Reading Settings page's
+   part `help` is "This manual", saying where the Manual is. `help.l8` reads pages, parts
+   and paragraphs only; a `tip` line is an error ("the quick tips were removed").
+   `test_help.l8` checks the manual: its links, anchors, symbols, ids, and the house style
+   (no exclamation mark, none of the words the style forbids), now on every paragraph.
+4. **The code:** the tips' order, the daily rule, the conditions, the used flags
+   (`helpUsed`, every feature's `help_used` call: they served only the skipping) and the
+   saved tip state go. `tipCurrent`, `tipDay`, `tipSeen`, `helpUsed` and `showTips` in an
+   older build's defaults are left there, never read.
+5. **CI:** the help group is the Manual's: 400 (`400-goto`, Go To from a fresh install, no
+   tip), 407–411, 414, 414b, 415 (`415-ax-goto`), 416–418; 401–406, 412, 413, 419 and the
+   recording of sequence 20 go; its log's checks (`manual.txt`) fail on any `bible: tip`
+   line. No group turns tips off before its launch any more.
+6. **§16, §17 and §14:** their tips (§16's plan-day, plan-mark, plan-listen and plan-more,
+   and the used flags §16.12 note 12 added; §17.7's two iPad tips and the `iphone`
+   condition; §14.10b's `greek` tip) are removed with the rest; their manual text stays.
+   WEB.md's mentions of tips are the web designer's.
+
 ## 16. Reading a plan's day in a reader of its own (owner request 2026-10-20; built after Round 10 and §15, before Round 11)
 
 The owner, 2026-10-20: "I feel like for reading plans, it would be nice to have all the
@@ -9349,7 +9377,7 @@ departs from them only where noted in the file:
 - **Go To's plan row** (§11.3.1): its title lists today's passages ("Genesis 12–14; Psalm
   105; Hebrews 11:8–19", two lines at most, then "…"); a tap opens today's day (§16.1);
   its circle and VoiceOver's Mark as Read mark the whole day.
-- **The manual and tips** (§15): `data/help.txt`'s Reading Plans page and its tips are
+- **The manual and tips** (§15): `data/help.txt`'s Reading Plans page and its tips are [Tips removed: §15.11.]
   updated with this section (done in the same commit as this design).
 
 ### 16.7 Accessibility
@@ -9454,7 +9482,7 @@ rest of §16 holds for each plan.
   - a tap opens that plan's today in the day's reader.
 - **Then Reading Plans** (the list), as now.
 - **Header:** "Reading Plans" when two or more are followed, "Reading Plan" with one.
-- **The tip and Go To's opening position** (§15, §11.2.1) are unchanged: any followed plan
+- **The tip and Go To's opening position** (§15, §11.2.1) are unchanged: any followed plan [Tips removed: §15.11; Go To opens as before §15.]
   counts as "a plan".
 
 #### 16.11.4 The day's reader
@@ -9520,7 +9548,7 @@ rest of §16 holds for each plan.
 - The Plans page's "Plans" part adds: "You can follow several plans at once: start another
   from Reading Plans, and each has its own row in Go To."
 - The reminder part says the switch includes that plan in the one daily notification.
-- **A tip, added by §16.11's builder with the tests' counts** (level 3, MORE
+- **A tip, added by §16.11's builder with the tests' counts** (level 3, MORE [Removed with the tips: §15.11.]
   `plans#about`): "You can follow more than one reading plan; each has its own row in Go To."
 
 #### 16.11.9 Tests and CI
@@ -9575,7 +9603,7 @@ then mark it as unread if they tap it again."
 3. **The day's end** has no Mark Day N as Read: "End of Day 32", then, once the day is read,
    a quiet line "Day 32 is read" (the subheadline's size, faint, after an accent check),
    then Next and the Also today rows as §16.11.4 has them.
-4. **help.txt:** the Plans page's Marking part and the plan-mark tip say the capsule marks
+4. **help.txt:** the Plans page's Marking part and the plan-mark tip say the capsule marks [The tip went with the tips: §15.11.]
    the day and unmarks it, and that nothing is marked for you.
 5. **CI:** 435 Mark Read (the day read, Day Done); 436 the end with "Day 122 is read" and no
    button; 437 (`437-mark-unread`, was `437-day-done`) Mark Read again: the day unread; 443
@@ -9659,7 +9687,7 @@ Where the build differs from the text above, and why:
     into Psalm 108 by Listen's own path.
 11. **Listen** stops when the day is put away (Done, or a reference left for), and the
     reader's own Listen stops when a day comes up.
-12. **The tips' conditions** gain three used flags, `plan-day`, `plan-mark` and
+12. **The tips' conditions** gain three used flags, `plan-day`, `plan-mark` and [Removed with the tips: §15.11.]
     `plan-listen` (set the first time a day is opened, Mark Read tapped, a day listened
     to), so those tips are skipped once done (§15's "skipping what you already do");
     `help.l8` lists them after `unbuilt`.
@@ -9679,7 +9707,7 @@ Where the build differs from the text above, and why:
     - `userInfo`'s `plans` are the files' numbers (N of `plan-N.tsv`), which name a plan
       followed exactly (two A Chapter a Days share an id's prefix); an older build's
       `{"day": N}` opens the first plan followed's today.
-    - The tip `plan-more` (level 3, `-`, `plans#about`) is added; `test_help.l8`'s counts
+    - The tip `plan-more` (level 3, `-`, `plans#about`) is added; `test_help.l8`'s counts [Removed with the tips.]
       are 52 tips, 25 at level 3.
     - The plans group's 148 (the authorization alert, last) now shows the Chronological's
       days (the first plan followed then); 150 opens day 2 of Bible in a Year in the day's
@@ -9843,7 +9871,7 @@ So the iPhone doesn't change (§17.8.3).
 #### 17.3.1 Sheets and popovers
 | Screen | iPhone (and narrow iPad) | iPad, regular width |
 |---|---|---|
-| Go To (§3.2, with §15's tip) | Page sheet, large | **Form sheet** (`UIModalPresentationFormSheet`), with `preferredContentSize` 540 × 720 (the system fits it to the window) |
+| Go To (§3.2; §15's tip removed, §15.11) | Page sheet, large | **Form sheet** (`UIModalPresentationFormSheet`), with `preferredContentSize` 540 × 720 (the system fits it to the window) |
 | Search (§3.6) | Page sheet | Form sheet, 620 × 760 |
 | Library and its Memory segment (§3.5, §13.4) | Page sheet, medium/large | Form sheet, 620 × 800 |
 | Reading settings (Aa) (§3.7) | Sheet, medium, undimmed | **Popover** from the Aa button (`barButtonItem`), 375 × 640, undimmed. Changes show live on the page beside it. Its pushed screens (Versions, Voice, Acknowledgements, Manual) push inside the popover |
@@ -9857,7 +9885,7 @@ So the iPhone doesn't change (§17.8.3).
 | Title menu (§11.2.2), sort menu (§7.9) | Menus | Menus (unchanged) |
 | The day's reader (§16) | Full screen | Full screen, the column centred |
 | Share sheet, Share as Image composer (§10.5) | System sheet | System popover from the tray's Share; the composer a form sheet |
-| Manual (§15) | Pushed in Reading settings | Pushed in Reading settings' popover; from a tip's More, pushed in Go To's form sheet |
+| Manual (§15) | Pushed in Reading settings | Pushed in Reading settings' popover (a tip's More went with the tips, §15.11) |
 - **Size classes decide**, at presentation time and on change:
   - `traitCollection.horizontalSizeClass` regular uses the iPad column, compact the
     iPhone's;
@@ -9877,7 +9905,7 @@ So the iPhone doesn't change (§17.8.3).
   table's bottom inset grows by the tray's height while it's up, as now).
 
 #### 17.3.3 Go To
-- **As a form sheet:** the tip row (§15.1) on top, then Ribbons, Reading Plan, Recent and
+- **As a form sheet:** the tip row (§15.1) on top, then Ribbons, Reading Plan, Recent and [No tip row: §15.11.]
   the books.
 - **The chapter grid** computes its columns from the sheet's width (7 or 8 columns at 540
   pt).
@@ -10083,7 +10111,7 @@ and arrows follow the system's focus.
   - system buttons, bar items, rows and segmented controls hover by themselves;
   - our own controls take the system's automatic hover (`hoverStyle` =
     `UIHoverStyle automaticStyle`, iOS 17): the capsules, the tray's swatches and
-    actions, interlinear tiles, Practice's words (tap to show), Forms cells and the tip's
+    actions, interlinear tiles, Practice's words (tap to show), Forms cells and the tip's [The tip went: §15.11.]
     buttons. Before iOS 17 they have none.
 - **Clicking a verse** selects it, as a tap does. A click-drag selects words (the text
   view's own).
@@ -10106,14 +10134,14 @@ and arrows follow the system's focus.
 - **`traitOverrides`** (iOS 17): the demo's narrow window only.
 - **`responds()` checks** guard every iOS 17 or 26 call on iOS 16.
 
-### 17.7 The manual and tips (`data/help.txt`)
+### 17.7 The manual and tips (`data/help.txt`) (its tips removed, owner 2026-10-21: §15.11; the manual parts stay)
 - The Reading page gains a part **"keys" "With a keyboard"**:
   - the shortcuts of §17.4.1 in a short list: "⌘L Go To · ⌘F Search · ⌘] and ⌘[ next and
     previous chapter · ⌘← back · ⌘⇧P Listen";
   - and: "On iPad, hold ⌘ to see them."
 - The Memory page's Practice part adds "With a keyboard, Return checks, and ⌘1, ⌘2 and ⌘3
   choose Not Yet, Mostly and Knew It."
-- **A tip** (level 2, shown only on iPad): "With a keyboard, ⌘L opens Go To and ⌘F opens
+- **A tip** (level 2, shown only on iPad): "With a keyboard, ⌘L opens Go To and ⌘F opens [Removed with the tips: §15.11.]
   Search."
   - It needs a new condition `iphone` (true on an iPhone, so the tip is skipped there),
     added to §15.2.2's closed set and `test_help.l8`.
@@ -10122,7 +10150,7 @@ and arrows follow the system's focus.
   or in a wide window, Study opens beside the text instead of over it, and stays while you
   read. It shows the verse you chose; select another verse to study it. The Study button
   at the top, or ⌥⌘I, shows and hides it."
-- **A second iPad-only tip** (level 3, `UNLESS iphone`, MORE `study#beside`): "On iPad held
+- **A second iPad-only tip** (level 3, `UNLESS iphone`, MORE `study#beside`): "On iPad held [Removed with the tips.]
   sideways, Study opens beside the text and stays while you read."
 - No other iPad-specific text: the app works the same way.
 
@@ -10150,7 +10178,7 @@ and arrows follow the system's focus.
   | `461-ipad-landscape` | The same verse at the top after rotating (log: "kept JHN 3:16 …") |
   | `462-ipad-largest-text` | AX size: the column wider, the same characters a line |
   | `463-ipad-tray` | The tray, 560 pt, centred over the column |
-  | `464-ipad-goto` | Go To as a form sheet with the tip row |
+  | `464-ipad-goto` | Go To as a form sheet with the tip row | [no tip row since §15.11]
   | `465-ipad-goto-grid` | The chapter grid in the sheet |
   | `466-ipad-search` | Search as a form sheet, the keyboard's shortcuts bar |
   | `467-ipad-settings-popover` | Reading settings as a popover from Aa, the page undimmed beside it |
@@ -10213,7 +10241,7 @@ and arrows follow the system's focus.
 - 13-inch, 2064 × 2752 portrait (and 2752 × 2064 landscape), from the `ipad` group by the
   store job's script, as the iPhone's are:
   1. the reader in landscape (461);
-  2. Go To with the tip (464);
+  2. Go To with the tip (464); [no tip since §15.11]
   3. Study beside the text (492);
   4. Practice (473);
   5. the Greek page (475).
@@ -10324,7 +10352,7 @@ Where the build differs from the text above, and why:
    Reading's With a keyboard part, linking to Practice, not in Memory's Practice part: so
    the iPhone's shots of the Memory page (410, 418) are unchanged (§17.8.3).
 7. **Hover** is on the capsules, the tray's swatches, actions and close, the interlinear's
-   tiles, Forms' cells, the tip's buttons, the mini player's buttons and the bar's Study
+   tiles, Forms' cells, the tip's buttons, the mini player's buttons and the bar's Study [no tip since §15.11]
    button. Practice's words are text in a text view and have none.
 8. **The mini player stays at most 360 points** (within §17.2.3's 560), centred under the
    column.
