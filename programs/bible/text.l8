@@ -100,6 +100,42 @@ text_use(t: int) {
     text_cur = t
 }
 
+// A borrowed view of one version's records and chapter index. Reading
+// through it never changes the reader's current version. The arrays are
+// shared, not copied; take a new view after loading or replacing a text.
+type TextSource = {
+    version: int;
+    data: []i8;
+    size: int;
+    chapter_count: int;
+    starts: []int;
+    ends: []int;
+    verses: []int
+}
+
+// Text t must be loaded (or be the current text, including bible_index's
+// direct input). Chapter numbers are shared by every version.
+text_source(t: int): TextSource {
+    if (t == text_cur) return TextSource {
+        version: t,
+        data: bsb,
+        size: bsb_n,
+        chapter_count: chapters,
+        starts: ch_start,
+        ends: ch_end,
+        verses: ch_verses
+    };
+    TextSource {
+        version: t,
+        data: tx_buf[t],
+        size: tx_n[t],
+        chapter_count: chapters,
+        starts: tx_ch_start[t],
+        ends: tx_ch_end[t],
+        verses: tx_ch_verses[t]
+    }
+}
+
 // Each text's own arrays, made with the program (the BSB's are the globals
 // it began with), so that no text's loading allocates.
 tx1_line: []int = new int[66](0);
@@ -317,22 +353,25 @@ text_done(t: int, buf: []i8@immortal, n: int) {
 
 // Whether text t has verse v of chapter c (scanned, as verse_text does).
 text_has(t: int, c: int, v: int): bool {
-    if (t == text_cur) return has_verse(c, v);
-    if (!tx_ready[t]) return false;
-    was: int = text_cur;
-    text_use(t);
-    found: bool = has_verse(c, v);
-    text_use(was);
-    found
+    if (t < 0 || t > TEXT_PIN) return false;
+    if (t != text_cur && !tx_ready[t]) return false;
+    source: TextSource = text_source(t);
+    source_has_verse(&source, c, v)
 }
 
 has_verse(c: int, v: int): bool {
-    if (c < 0 || c >= chapters || ch_start[c] < 0) return false;
-    if (v > ch_verses[c]) return false;
-    p: int = ch_start[c];
-    while (p < ch_end[c]) {
-        e: int = line_end(p);
-        if (bsb[p] as int == 86 && key_at(p + 1) == v) return true;
+    source: TextSource = text_source(text_cur);
+    source_has_verse(&source, c, v)
+}
+
+source_has_verse(source: *TextSource, c: int, v: int): bool {
+    if (c < 0 || c >= source.chapter_count || source.starts[c] < 0) return false;
+    if (v <= 0 || v > source.verses[c]) return false;
+    p: int = source.starts[c];
+    while (p < source.ends[c]) {
+        e: int = record_line_end(source.data, source.size, p);
+        if (source.data[p] as int == 86 && record_key_at(source.data, source.size,
+            p + 1) == v) return true;
         p = e + 1
     }
     false
@@ -384,18 +423,26 @@ refs_read(b: []i8, n: int) {
 
 // Where the line at p ends (its newline, or the end).
 line_end(p: int): int {
+    record_line_end(bsb, bsb_n, p)
+}
+
+record_line_end(data: []i8, size: int, p: int): int {
     e: int = p;
-    while (e < bsb_n && bsb[e] as int != 10) e = e + 1;
+    while (e < size && data[e] as int != 10) e = e + 1;
     e
 }
 
 // A verse's key at p (its V line's number, or the number after > in
 // V15>14).
 key_at(p: int): int {
-    n: int = number_at(p);
+    record_key_at(bsb, bsb_n, p)
+}
+
+record_key_at(data: []i8, size: int, p: int): int {
+    n: int = record_number_at(data, size, p);
     i: int = p;
-    while (i < bsb_n && bsb[i] as int >= 48 && bsb[i] as int <= 57) i = i + 1;
-    if (i < bsb_n && bsb[i] as int == 62) number_at(i + 1) else n
+    while (i < size && data[i] as int >= 48 && data[i] as int <= 57) i = i + 1;
+    if (i < size && data[i] as int == 62) record_number_at(data, size, i + 1) else n
 }
 
 // The highest number shown for the verse keyed k in chapter c (k itself,
@@ -414,10 +461,14 @@ verse_shown_last(c: int, k: int): int {
 
 // The number at p, up to the line's end.
 number_at(p: int): int {
+    record_number_at(bsb, bsb_n, p)
+}
+
+record_number_at(data: []i8, size: int, p: int): int {
     n: int = 0;
     i: int = p;
-    while (i < bsb_n && bsb[i] as int >= 48 && bsb[i] as int <= 57) {
-        n = n * 10 + bsb[i] as int - 48;
+    while (i < size && data[i] as int >= 48 && data[i] as int <= 57) {
+        n = n * 10 + data[i] as int - 48;
         i = i + 1
     }
     n
@@ -1539,16 +1590,34 @@ vt_add(k: int) {
 
 // Verse v of chapter c into vt: how long it is.
 verse_text(c: int, v: int): int {
+    source: TextSource = text_source(text_cur);
+    source_verse_text(&source, c, v)
+}
+
+// Verse v of chapter c into vt, from text t, without switching versions.
+// An unavailable version has no words; never quote the current one instead.
+verse_text_of(t: int, c: int, v: int): int {
     vt_n = 0;
-    p: int = ch_start[c];
-    e_ch: int = ch_end[c];
+    if (t < 0 || t > TEXT_PIN) return 0;
+    if (t != text_cur && !tx_ready[t]) return 0;
+    source: TextSource = text_source(t);
+    source_verse_text(&source, c, v)
+}
+
+// Verse words into vt, using an explicit source. Like verse_text, this
+// replaces vt only; it leaves the current version and layout untouched.
+source_verse_text(source: *TextSource, c: int, v: int): int {
+    vt_n = 0;
+    if (c < 0 || c >= source.chapter_count || source.starts[c] < 0 || v <= 0) return 0;
+    p: int = source.starts[c];
+    e_ch: int = source.ends[c];
     inside: bool = false;
     broke: bool = false;
     while (p < e_ch) {
-        e: int = line_end(p);
-        k: int = bsb[p] as int;
+        e: int = record_line_end(source.data, source.size, p);
+        k: int = source.data[p] as int;
         if (k == 86) {
-            n: int = key_at(p + 1);
+            n: int = record_key_at(source.data, source.size, p + 1);
             if (inside && n != v) {
                 // The verse after it: done (a verse keyed alike goes on).
                 e = e_ch;
@@ -1559,7 +1628,7 @@ verse_text(c: int, v: int): int {
             }
         } else if (inside) {
             if (is_words(k)) {
-                vt_words(p + 1, e, broke);
+                vt_words_from(source.data, p + 1, e, broke);
                 broke = false
             } else if (k != 70) broke = true
         }
@@ -1682,8 +1751,17 @@ is_words(k: int): bool {
 
 // A T line's words onto vt (after a space, if a line broke before them).
 vt_words(p: int, e: int, broke: bool) {
-    if (broke && vt_n > 0 && vt[vt_n - 1] as int != 32 && p < e && bsb[p] as int != 32) vt_add(32);
-    for i in p..e vt_add(bsb[i] as int)
+    vt_words_from(bsb, p, e, broke)
+}
+
+vt_words_from(
+    data: []i8,
+    p: int,
+    e: int,
+    broke: bool
+) {
+    if (broke && vt_n > 0 && vt[vt_n - 1] as int != 32 && p < e && data[p] as int != 32) vt_add(32);
+    for i in p..e vt_add(data[i] as int)
 }
 
 // ---- references: "jn 3:16" ----
