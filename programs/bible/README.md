@@ -234,6 +234,9 @@ read aloud by VoiceOver as it would be in the phone's own apps.
 - `ios/app.l8` is the app: the reader and its classes; `ios/look.l8` the themes,
   fonts and styles; `ios/store.l8` what is kept; `ios/select.l8` selection,
   the tray, the edit menu and jumps; `ios/sheets.l8` the sheets;
+  `ios/tables.l8` the lists the app's object answers for: each screen
+  registers its table global and handlers once (`sheet_screens_made`),
+  and what it lets go when the sheets are gone;
   `ios/versions.l8` the versions and switching; `ios/esv.l8` the ESV's
   client, cache on disk and the reader's states while a chapter comes
   (`core/esv_cache.l8` its portable rules);
