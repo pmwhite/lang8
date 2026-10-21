@@ -8265,6 +8265,44 @@ Deviations, each with its reason:
     LN 25.43)"), and a homograph's [a] after a Greek or Hebrew word goes. 2,075 lines changed;
     `meanings.bin` is byte for byte the same (no meaning merged or split).
 
+**After review r11-1 (approve with fixes, at 1484cf8f; run 39605448327):**
+
+37. **A UBS meaning is a word's only when its entry lists the word's Strong's number, or a known
+    variant of it** (Major 1). Deviation 8's "or when most of the verse's numbers agree" is gone:
+    it let a place counted wrong give each later word its neighbour's meaning (Genesis 1:7's
+    מִתַּחַת counted as two by UBS, so אֲשֶׁר had "water" and הָיָה "firmament"). `ubs.py`'s
+    `VARIANTS` lists the known variants by hand, 74 pairs of (our number, a number UBS's entry
+    lists): one lemma numbered apart (σου G4771, G4675; ἡμῶν G1473, G2257; ἦν G1510, G2258;
+    אֲנָשִׁים H582, H376; the Aramaic and Hebrew twins, H4430 and H4428), found where a verse's places
+    line up and the two disagree at one place between agreeing ones three times or more, each
+    read; the long tail (3,455 Hebrew pairs) was shifts and isn't listed. The rest of a verse's
+    occurrences of a number (or a variant's) go to its words of that number in order, each place
+    once, in a fixed order (it had followed Python's set order, so two runs could differ by a
+    word or two). A word with neither has no meaning, and shows the BSB's gloss alone.
+    - **Counted** over `meanings.bin` as the review did (an entry not listing the word's number;
+      pairs seen fewer than five times): before, 4,198 Hebrew words in 3,455 pairs and 218 Greek;
+      after, 19 Hebrew in 6 pairs and 30 Greek in 9, every one a listed variant. Outside the
+      variants: before 5,252 Hebrew meanings (2.03%, the 645 words without a number among them)
+      and 194 Greek (0.15%); after none.
+    - **What moved:** 3,440 Hebrew and 55 Greek words now have their own meaning instead of
+      another's; 1,999 Hebrew (645 of them words the tables give no number) and 168 Greek have
+      none now; 3,209 Hebrew and 1,005 Greek gained one (places a neighbour had held). Words
+      with no UBS meaning: Greek 10,778 of 138,131 (7.8%; was 11,615), Hebrew 39,126 of 299,456
+      numbered words (13.1%; was 40,981) and the 645 without a number. Coverage 92.2% and 86.9%
+      (was 91.6% and 86.3%).
+    - **`ubs.py --check`** prints each testament's count of meanings that are another word's
+      and its five worst verses, and fails above 0.2%; it shows and checks Genesis 1:7's אֲשֶׁר
+      ("that; which") and הָיָה ("to happen"), Ezekiel 37:23's עַם ("people") and Jeremiah
+      51:64's דִּבְרֵי ("words; message"). On the old files it fails (Hebrew 2.03%).
+38. **UBS's markup is all made plain** (Minor 7, the LN ruling). `clean` drops every Louw–Nida
+    reference with what only points to it: "(derivative of ἀγαπάω ‘to love’)", "(see LN 11.67)",
+    "; see LN 93.32", "compare LN …", "at LN 11.94" (1,033 lines had one). SDBH's marks between
+    a definition's parts (≈ 1,314 lines, ◄ 4,451, ► 4,173) are written "; ", its "hence: =" is
+    "hence:", its |i…|i* round a Latin name go, and its " + " before a detail is ", ". 36 Greek
+    "[Glosses - en]" placeholders are left out. `--check` fails on any ≈, ◄, ►, {, }, |i or "LN "
+    left; `meanings-LICENSE.txt` says what was changed so. The real-phone list loses its LN
+    question.
+
 **CI.** The `original` group (shots 270–295, 291b, 294b, 295b, 296, 296b, sequence 17's recording;
 503b and 503c are the ipad group's) runs third on the
 read job's iPhone, reset after help, with plans fourth (still last, for its alert); the workflow
@@ -8298,8 +8336,7 @@ search by Latin letters (its time); the first switch to the version (17 ms to ma
 the simulator, the text indexed after); Share as Image's Hebrew card (now at the right); Practice's
 hidden points in Hebrew at Letters; a toast over the word's popover; a Hebrew search's semibold
 match without its background, whether it stands out enough; the popover on the iPad, from a
-pointer and a finger; the Louw–Nida references ("LN 25.43") in a definition, whether they help or
-should go.
+pointer and a finger.
 
 ### 14.12 Round 12: a Greek course
 

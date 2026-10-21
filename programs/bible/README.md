@@ -182,7 +182,10 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   Societies' open dictionaries of Greek, after Louw and Nida, and Hebrew,
   SDBH), CC BY-SA 4.0 as their source is (`meanings-LICENSE.txt`); their
   markup is made plain (notes' marks dropped, verses named, Louw–Nida's
-  entries as "LN 25.43").
+  references and SDBH's marks left out), and a word takes a meaning only
+  when its entry lists the word's Strong's number or a known variant of it
+  (`ubs.py`'s `VARIANTS`; `--check` fails if more than 0.2% are another
+  word's).
   `tools/fetch.sh DIR make` downloads the sources, checks
   their sha256, and makes them all again.
   `lang.l8` reads the study data for the study screens (`test_lang.l8`), and

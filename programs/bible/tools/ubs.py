@@ -27,15 +27,23 @@ source is, apart from the rest of the data:
                      H157 …, by "," ). Its first line is the credit.
 
 UBS gives every occurrence of a meaning as BBBCCCVVVSSWWW (book, chapter,
-verse, a word's place). A verse's occurrences of a Strong's number are
-given to words.bin's words of that number in that verse in the original
-order (the Hebrew's verses by their Hebrew numbers, orig.txt's N records;
-a psalm's title is its verse 1). Where the counts differ, those in order
-up to the fewer, and the verse is counted.
+verse, a word's place). A word takes its place's meaning (the Hebrew's
+verses by their Hebrew numbers, orig.txt's N records; a psalm's title is
+its verse 1) only when the meaning's entry lists the word's Strong's
+number, or a known variant of it (VARIANTS: one lemma numbered apart);
+the rest of a verse's occurrences of a number go to its words of that
+number not yet given one, in the original order. A word with neither has
+no meaning (the app gives the BSB's gloss alone): a neighbour's meaning,
+from a place counted wrong, is worse than none.
 
-It prints its coverage (of the words of each testament, names included)
-and John 3:16's ἠγάπησεν and Genesis 1:1's בָּרָא; it exits 1 if a check
-fails (Greek coverage under 90%, Hebrew under 75%, ἠγάπησεν not 25.43).
+It prints its coverage (of the words of each testament, names included),
+how many meanings are another word's (the entry doesn't list the word's
+number or a variant), and some words' meanings (John 3:16's ἠγάπησεν,
+Genesis 1:7's אֲשֶׁר and הָיָה, Ezekiel 37:23's עַם, Jeremiah 51:64's
+דִּבְרֵי); it exits 1 if a check fails (Greek coverage under 90%, Hebrew
+under 75%, more than 0.2% of either testament's meanings another word's,
+UBS's markup or a Louw–Nida reference left in meanings.txt, or one of
+those words' meanings not its own).
 --check DATA checks the files so, without UBS's:
 
     python3 -I ubs.py --check DATA
@@ -119,15 +127,32 @@ def ref_name(code):
 def clean(s):
     """UBS's markup made plain: a note's mark ({N:001}) dropped, as the notes
     aren't kept; a verse ({S:06602000300012}) named, Revelation 20:3; a
-    Louw–Nida entry ({D:11.55}) as LN 11.55; a word linked ({L:…<…>}, its
-    homograph's [a] after it) and the rest ({A:MT}) as their text."""
+    Louw–Nida entry ({D:11.55}) dropped with what only points to it (a
+    reader has no Louw–Nida to look in: "(derivative of ἀγαπάω 'to love,'
+    {D:25.43})" is "(derivative of ἀγαπάω 'to love')", "(see {D:11.67})"
+    and "; see {D:93.32}" go); a word linked ({L:…<…>}, its homograph's [a]
+    after it) and the rest ({A:MT}) as their text; SDBH's marks (◄ ► ≈
+    between a definition's parts, "hence: =", |i…|i* round a Latin name, +
+    before a detail) as plain punctuation."""
     s = re.sub(r"\s*\{N:[^}]*\}", "", s or "")
     s = re.sub(r"\{S:(\d{9,})\}", lambda m: ref_name(m.group(1)), s)
-    s = re.sub(r"\{D:([^}]*)\}", r"LN \1", s)
+    ln = r"\{D:[^}]*\}"
+    lns = ln + r"(?:\s*,?\s*(?:and|or|;)?\s*" + ln + r")*"
+    s = re.sub(r",([’'])\s*" + lns, r"\1", s)
+    s = re.sub(r"\s*\((?:see |cf\. |compare )?(?:also )?(?:discussion (?:at|in) )?" + lns + r"\)", "", s)
+    s = re.sub(r"\s*[;,]?\s*(?:but\s+)?(?:\(?(?:see|compare|cf\.)\s+(?:also\s+)?(?:discussion (?:at|in) )?)" + lns, "", s)
+    s = re.sub(r"\s*(?:[;,]|\b(?:at|in))\s*" + lns + r"(?=\s*[,()])", "", s)
+    s = re.sub(r"\s*" + lns, "", s)
     s = re.sub(r"\{L:([^<}]*)(<[^>]*>)?\}(\[[a-z]\])?", r"\1", s)
     s = re.sub(r"\{[A-Z]:([^<}]*)(<[^>]*>)?\}", r"\1", s)
     s = re.sub(r"(?<=[^\x00-\x7f])\[[a-z]\]", "", s)
-    s = re.sub(r"^=\s*", "", s.strip())
+    s = re.sub(r"\|i(.*?)\|i\*", r"\1", s)
+    s = re.sub(r"^\s*=\s*", "", s)
+    s = re.sub(r"\s*[;,]?\s*[◄►≈]\s*[;,]?\s*", "; ", s)
+    s = re.sub(r"(?<=[:;])\s*=\s+", " ", s)
+    s = re.sub(r"\s*,?\s+\+\s+(?=[a-z])", ", ", s)
+    s = re.sub(r"^[;\s]+|[;\s]+$", "", s)
+    s = re.sub(r"\(\s*;\s*", "(", s)
     return " ".join(s.replace("\t", " ").split())
 
 
@@ -171,7 +196,7 @@ def meanings_of(path, lang, hdomains):
                     sub = doms[0]["Domain"] if doms else ""
                     dom = hdomains.get(code[:-3], "") if len(code) > 3 else ""
                 fields = [lang, code, clean(dom), clean(sub), clean(sense.get("DefinitionShort")),
-                          "; ".join(clean(g) for g in sense.get("Glosses") or [] if clean(g)),
+                          "; ".join(clean(g) for g in sense.get("Glosses") or [] if clean(g) and not g.startswith("[Glosses")),
                           ",".join(nums)]
                 yield fields, nums, m.get("LEXReferences") or []
 
@@ -262,6 +287,35 @@ def orig_verses(data):
     return out
 
 
+# Known variants of one word: (our Strong's number, one UBS's entry lists),
+# where the BSB tables (or STEP) number a lemma or one of its forms apart
+# from UBS. Found where a verse's places line up and the two disagree at
+# one place between agreeing ones, three times or more, and each read: the
+# rest of that list are a place's neighbour (a shift), not one word.
+VARIANTS = frozenset(tuple(p.split("/")) for p in """
+    G4771/G4675 G4771/G4572 G4771/G4674 G4771/G5212
+    G1473/G2257 G3165/G2257 G1473/G2504 G1473/G1699 G1473/G1683
+    G1510/G2258 G1511/G2258 G3778/G5023 G2036/G3004 G2046/G2036 G2400/G3708
+    G2411/G2413 G4413/G4412 G2419/G2414 G2068/G5315 G3440/G3441 G2112/G2117
+    G5225/G5224 G3361/G3756 G3361/G3379 G5037/G2532 G4459/G4458 G3403/G3415
+    G3063/G3062 G2448/G2455 G4113/G4116 G848/G846 G2548/G2532 G2532/G2579
+    G2532/G2547 G2532/G2548 G5101/G5100 G4057/G4056 G2207/G2208 G4118/G4183
+    G4119/G4183 G4712/G4172 G687/G686 G4225/G4226 G681/G680 G159/G158
+    G4252/G4251 G2908/G2909
+    H582/H376 H2396/H3169 H7417/H7416 H6177/H6176 H8577/H8568 H4147/H4149
+    H6032/H6030 H7921/H7909 H7654/H7653 H7843/H4889 H2334/H2971 H7034/H7033
+    H3919/H3918 H2361/H2438 H1247/H1248 H8322/H8292 H4430/H4428 H5705/H5704
+    H2493/H2494 H6992/H6991 H1219/H1208 H6252/H6253 H2655/H2654 H8076/H8074
+    H2189/H2113 H1364/H1362 H3826/H3820
+""".split())
+
+
+def agrees(k, nums):
+    """Whether a meaning whose entry lists nums is our word k's: its number
+    is there, or a known variant of it."""
+    return k in nums or any((k, n) in VARIANTS for n in nums)
+
+
 def build(ubs_dir, data):
     books = book_codes(os.path.join(data, "bsb.txt"))
     BOOK_NAMES[:] = [line[5:].strip() for line in open(os.path.join(data, "bsb.txt"), encoding="utf-8")
@@ -296,29 +350,28 @@ def build(ubs_dir, data):
                     if ref is None:
                         stats["Hebrew references to no verse"] += 1
                         continue
-                for n in nums:
+                for n in sorted(set(nums) | set(k for k, t in VARIANTS if t in nums)):
                     occ[(ref, n)].append(((c, v), w, mid, place))
     mean = [0] * nw
     taken = set()
-    # By place: a word whose number is the place's; or any word of a verse
-    # most of whose words agree (STEP and UBS number some forms apart: σου
-    # G4771, G4675).
+    # By place: a word takes its place's meaning only when the entry lists
+    # its number, or a known variant of it. A place counted wrong (Genesis
+    # 1:7's מִתַּחַת, which UBS counts as two) moves every place after it,
+    # so a neighbour's meaning is never taken.
     for bsb, uref, ws, _ in orig_verses(data):
-        hits = [(j, k, p) for j, k, p in ws if uref + (p,) in at]
-        agree = sum(1 for j, k, p in hits if k in at[uref + (p,)][1])
-        trust = hits and agree >= 0.7 * len(hits)
-        for j, k, p in hits:
-            mid, nums = at[uref + (p,)]
-            if j >= 0 and (k in nums or trust):
-                mean[j] = mid
+        for j, k, p in ws:
+            x = at.get(uref + (p,))
+            if j >= 0 and x and not mean[j] and agrees(k, x[1]):
+                mean[j] = x[0]
                 taken.add(uref + (p,))
-                stats["words given a meaning by place" + ("" if k in nums else ", their numbers apart")] += 1
-    # The rest by number, in order.
-    for (ref, n), xs in occ.items():
+                stats["words given a meaning by place" + ("" if k in x[1] else ", a variant's number")] += 1
+    # The rest by number (or a variant's), in order, each place once.
+    for (ref, n), xs in sorted(occ.items()):
         xs = sorted(x for x in xs if x[3] not in taken)
         ws = [i for i in vwords.get(ref, ()) if key[i] == n and not mean[i]]
         for i, x in zip(ws, xs):
             mean[i] = x[2]
+            taken.add(x[3])
             stats["words given a meaning by number, in order"] += 1
     return lines, mean, stats
 
@@ -357,11 +410,41 @@ def check(data):
             print("FAIL: under %d%%" % (floor * 100))
             ok = False
 
-    def show(ref, n):
-        ws = [i for i in vwords[ref] if key[i] == n]
-        m = mean[ws[0]] if ws else 0
-        f = lines[m - 1].split("\t") if m else []
-        print("%s %d:%d %s: %s" % (ref + (n, " · ".join(f[1:6]) if f else "none")))
+    # A meaning whose entry doesn't list the word's number (or a known
+    # variant's) is another word's: a place counted wrong, its neighbour's.
+    ot = set(book_codes(os.path.join(data, "bsb.txt"))[:39])
+    where = {}
+    for ref, ws in vwords.items():
+        for i in ws:
+            where[i] = ref
+    for lg in "GH":
+        ws = [i for i in range(nw) if mean[i] and (key[i][:1] or ("H" if where[i][0] in ot else "G")) == lg]
+        bad = [i for i in ws if not agrees(key[i], lines[mean[i] - 1].split("\t")[6].split(","))]
+        print("%s: %d of %d meanings another word's (%.2f%%; at most 0.2%%)"
+              % (lg, len(bad), len(ws), 100.0 * len(bad) / max(1, len(ws))))
+        if len(bad) > 0.002 * len(ws):
+            print("FAIL: too many meanings given to the wrong word")
+            ok = False
+        for ref, n in collections.Counter(where[i] for i in bad).most_common(5):
+            print("  %s %d:%d: %d" % (ref + (n,)))
+    marks = collections.Counter()
+    for x in lines:
+        for m in ("≈", "◄", "►", "{", "}", "|i", "LN "):
+            if m in x:
+                marks[m] += 1
+    for m, n in sorted(marks.items()):
+        print("FAIL: %d meanings with UBS's markup %r left" % (n, m))
+        ok = False
+
+    def show(ref, n, want=None):
+        f = []
+        for i in [i for i in vwords[ref] if key[i] == n]:
+            m = mean[i]
+            f = lines[m - 1].split("\t") if m else []
+            print("%s %d:%d %s: %s" % (ref + (n, " · ".join(f[1:6]) if f else "none")))
+            if want is not None and not (f and agrees(n, f[6].split(",")) and want in f[5]):
+                print("FAIL: %s %d:%d's %s is not %r" % (ref + (n, want)))
+                return None
         return f
     f = show(("JHN", 3, 16), "G25")
     if not f or f[1] != "025B" and "Love" not in f[3]:
@@ -369,6 +452,10 @@ def check(data):
         ok = False
     show(("GEN", 1, 1), "H1254")
     show(("PSA", 23, 1), "H7462")
+    for ref, n, want in ((("GEN", 1, 7), "H834", "that; which"), (("GEN", 1, 7), "H1961", "to happen"),
+                         (("EZK", 37, 23), "H5971", "people"), (("JER", 51, 64), "H1697", "word")):
+        if show(ref, n, want) is None:
+            ok = False
     return ok
 
 
