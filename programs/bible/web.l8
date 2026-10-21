@@ -377,7 +377,7 @@ change_step(n: int) {
         dom_set_prop_of(range, "value", wb, 0, wb_n);
         dom_free(range)
     }
-    settings_changed()
+    settings_changed(true)
 }
 
 // A control in the sheet changed: its setting applied at once and kept,
@@ -431,18 +431,16 @@ on_setting(_data: int) {
         dom_wake_lock(if (on) 1 else 0)
     } else if (is_key(sbuf, 0, n, "keys")) set_keys = on;
     if (theme) fade_theme();
-    if (relaid && win_first >= 0) {
-        r_lines = set_lines;
-        rebuild(pl_c)
-    }
-    settings_changed()
+    if (relaid) r_lines = set_lines;
+    // (Only what changes a chapter's height lays the page out again.)
+    settings_changed(!theme && !is_key(sbuf, 0, n, "red") && !is_key(sbuf, 0, n, "wake") && !is_key(sbuf,
+        0, n, "keys"))
 }
 
-settings_changed() {
+settings_changed(relay: bool) {
     apply_settings();
     save_settings();
-    restore_place();
-    save_place()
+    if (relay) relayout(true)
 }
 
 fade_timer: int = 0;
@@ -500,7 +498,7 @@ on_key(_data: int) {
         dom_free(field);
         return
     }
-    if (win_first < 0 && !dom_key_is(",") && !dom_key_is("?")) return;
+    if (r_bible == 0 && !dom_key_is(",") && !dom_key_is("?")) return;
     if (dom_key_is("]")) {
         place_now();
         if (pl_c + 1 < chapters) jump(pl_c + 1, 0);
@@ -508,9 +506,9 @@ on_key(_data: int) {
     } else if (dom_key_is("[")) {
         place_now();
         // (The chapter read's start, if it is above; else the one before.)
-        n: int = dom_rects_all(win_h[pl_c], "h2.op", rects);
-        top: f64 = if (n > 0) rects[1] else art_top(pl_c);
-        c: int = if (top < reading_y() - 13.0f64) pl_c else pl_c - 1;
+        measure_sp();
+        top: f64 = sp_top + pos[pl_c] + h2_offset(pl_c) - reading_y();
+        c: int = if (scroll_y > top + 1.0f64) pl_c else pl_c - 1;
         if (c >= 0) jump(c, 0);
         dom_prevent_default()
     } else if (dom_key_is("Home")) {
@@ -554,13 +552,14 @@ on_text_click(_data: int) {
         dom_prevent_default();
         at: int = -1;
         k: int = dom_event_attr("data-f", abuf);
-        if (k > 0) at = num_at(abuf, 0, k);
+        n_at: int = if (k > 0) num_at(abuf, 0, k) else 0;
         v: int = 0;
         k = dom_event_attr("data-v", abuf);
         if (k > 0) v = num_at(abuf, 0, k);
         c: int = pl_c;
         k = dom_event_attr("data-c", abuf);
         if (k > 0) c = num_at(abuf, 0, k);
+        at = note_line(c, n_at);
         fn_open(c, v, at);
         return
     }
@@ -598,9 +597,15 @@ place_of_url(b: []i8, n: int): bool {
 // ---- history ----
 // Back and Forward: the entry's place, exactly (or its address's chapter).
 on_pop(_data: int) {
+    // (Back from Go To closes it.)
+    if (goto_open()) {
+        goto_entry = false;
+        dom_call(goto_dlg, "close");
+        return
+    }
     n: int = dom_state(sbuf);
     if (n > 0 && n <= len(sbuf) && read_place(sbuf, n)) {
-        restore_place();
+        restore_place("back");
         title_c = -1;
         set_title(pl_c, false);
         return
@@ -608,9 +613,9 @@ on_pop(_data: int) {
     k: int = dom_get_prop_s(DOM_LOCATION, "pathname", abuf);
     if (k > 0 && k <= len(abuf) && place_of_url(abuf, k)) {
         pl_c = url_c;
-        pl_v = 1;
+        pl_v = 0;
         pl_f = 0.0f64;
-        restore_place();
+        restore_place("back");
         title_c = -1;
         set_title(pl_c, false)
     }
@@ -627,23 +632,28 @@ seen_width: f64 = 0.0f64;
 
 on_resize(_data: int) {
     measure();
-    if (view_w == seen_width) return;
+    if (view_w == seen_width || r_bible == 0) return;
     seen_width = view_w;
+    stale = true;
     dom_cancel(resize_timer);
     resize_timer = dom_timeout(100.0f64, &on_resized, 0)
 }
 
-// Fonts that came in reflow the text: the place put back only if the
-// reader has not moved since it was kept (else it is no longer theirs).
+// Fonts that came in reflow the text: laid out again (held until the
+// reader is still), the place the last rest kept (the text has already
+// reflowed under the old places, so it cannot be read now).
 on_fonts(_data: int) {
-    if (!moved_since_rest && !finger_down) on_resized(0)
+    // (Before the first placement, which calibrates with what has come.)
+    if (r_bible == 0) return;
+    stale = true;
+    relayout(false)
 }
 
-// After a resize (or fonts arriving), the place where it was at the last
-// rest.
+// After a new width, laid out again, the place the last rest kept (held
+// until the reader is still).
 on_resized(_data: int) {
-    restore_place();
-    save_place()
+    if (printing) return;
+    relayout(false)
 }
 
 on_hide(_data: int) {
@@ -653,24 +663,33 @@ on_hide(_data: int) {
     save_place()
 }
 
-// Print the chapter at the reading line alone (§W3.8).
+// Print the chapter at the reading line alone, back in the page's flow
+// (§W3.8, §W3.3).
+printing: bool = false;
+
 on_print(_data: int) {
-    before: bool = dom_event_is("beforeprint");
-    if (before) place_now();
-    for c in win_first..win_last + 1 dom_toggle_class(win_h[c], "unprinted", if (before && c != pl_c) 1 else 0)
+    if (r_bible == 0) return;
+    printing = dom_event_is("beforeprint");
+    if (printing) {
+        place_now();
+        if (art_h[pl_c] != 0) dom_add_class(art_h[pl_c], "printed");
+        dom_add_class(DOM_ROOT, "printing")
+    } else {
+        dom_class_all(r_main, ".printed", "printed", 0);
+        dom_remove_class(DOM_ROOT, "printing")
+    }
 }
 
 // The bar: Aa opens Reading settings; the small title expands the bar
 // (and goes nowhere until it is expanded).
 on_bar_click(_data: int) {
-    if (bar_p > 0.5f64) {
-        t: int = dom_event_closest(".title");
-        if (t != 0) {
-            dom_free(t);
-            dom_prevent_default();
-            expand_bar();
-            return
-        }
+    t: int = dom_event_closest(".title");
+    if (t != 0) {
+        dom_free(t);
+        if (r_bible == 0 || (dom_ev[DE_MODS] & (DOM_CTRL | DOM_ALT | DOM_META | DOM_SHIFT)) != 0) return;
+        dom_prevent_default();
+        if (bar_p > 0.5f64) expand_bar() else open_goto();
+        return
     }
     aa: int = dom_event_closest(".aa");
     if (aa != 0) {
@@ -679,42 +698,131 @@ on_bar_click(_data: int) {
     }
 }
 
-// ---- start ----
-text_url: []i8 = new i8[256](0i8);
-
+// ---- start (WEB.md §W1.8) ----
+// Every reader's address is the same shell: the app reads the address,
+// takes up the place's book and the version's sizes table (fetched by the
+// boot script as the page began), holds the book (text_load_book, the
+// whole Bible's chapter numbers), and places the chapter in its first
+// frame; the whole version comes after, at low priority.
 text_files: []str = ["bsb", "kjv", "web", "asv", "ylt"];
+
+data_dir: []i8 = new i8[128](0i8);
+
+data_n: int = 0;
+
+// The place to start at (the address's chapter and verse), and whether
+// Go To opens over it (/read/bsb/).
+start_c: int = 0;
+
+start_v: int = 0;
+
+start_goto: bool = false;
+
+// A book by its address's name (genesis, 1-samuel), from the names every
+// version shares; -1 if none.
+slug_book(b: []i8, p: int, e: int): int {
+    for bk in 0..66 {
+        name: str = book_names_all[bk];
+        if (len(name) == e - p) {
+            same: bool = true;
+            for i in 0..len(name) {
+                k: int = name[i] as int;
+                want: int = if (k == 32) 45 else lower(k);
+                if (lower(b[p + i] as int) != want) same = false
+            }
+            if (same) return bk
+        }
+    }
+    -1
+}
+
+// The chapter of book bk numbered n, before any text is held.
+chapter_number(bk: int, n: int): int {
+    c: int = 0;
+    for k in 0..bk c = c + book_chapters[k];
+    if (n < 1) c else if (n > book_chapters[bk]) c + book_chapters[bk] - 1 else c + n - 1
+}
+
+// The book a chapter number is in.
+book_of_chapter(c: int): int {
+    k: int = 0;
+    at: int = 0;
+    while (k < 65 && at + book_chapters[k] <= c) {
+        at = at + book_chapters[k];
+        k = k + 1
+    }
+    k
+}
+
+// A data file's address into wb: the directory, then name.
+w_data(name: str) {
+    wb_n = 0;
+    for i in 0..data_n w_byte(data_dir[i] as int);
+    w_byte(47);
+    w_str(name)
+}
+
+// When each step of the start happened (ms), for the CI's report.
+mark(name: str) {
+    t: int = dom_prop_handle(DOM_WINDOW, "sbTimes");
+    if (t != 0) {
+        dom_set_prop(t, name, dom_now());
+        dom_free(t)
+    }
+}
 
 main(): int {
     dom_start();
+    mark("main");
     r_main = dom_by_id("text");
     r_bar = dom_query(DOM_DOCUMENT, "header.bar");
     r_title = dom_query(r_bar, ".title");
-    n: int = dom_get_attr(DOM_ROOT, "data-version", sbuf);
-    r_text = TEXT_BSB;
-    if (n > 0) {
-        t: int = name_index(text_files, sbuf, 0, n);
-        if (t >= 0) r_text = t
-    }
     load_settings();
     r_lines = set_lines;
     data: int = dom_prop_handle(DOM_WINDOW, "sbData");
-    k: int = dom_get_prop_s(data, text_files[r_text], text_url);
+    data_n = dom_get_prop_s(data, "data", data_dir);
     icons_n = dom_get_prop_s(data, "icons", icons);
     dom_free(data);
-    if (k <= 0 || k > len(text_url) || icons_n <= 0 || icons_n > len(icons)) {
-        dom_log("smooth bible: no text to load");
-        return 1
-    }
-    // (The reader starts only on a page with a chapter; on another, the
-    // book index or About, the settings, their keys and the theme.)
-    art: int = dom_query(r_main, "article.ch");
-    if (art == 0) {
+    // (/read/<version>/<book>/<n>, or /read/<version>/ for Go To over the
+    // place; else not a reader's page: About.)
+    n: int = dom_get_prop_s(DOM_LOCATION, "pathname", sbuf);
+    if (n > len(sbuf)) n = len(sbuf);
+    t: int = -1;
+    if (n >= 10 && is_key(sbuf, 0, 6, "/read/")) t = name_index(text_files, sbuf,
+        6, 9);
+    if (t < 0 || n > 9 && sbuf[9] as int != 47 || data_n <= 0 || data_n > len(data_dir)) {
         page_only();
         return 0
     }
-    dom_free(art);
+    r_text = t;
+    r_text_t = t;
+    p: int = 10;
+    e: int = p;
+    while (e < n && sbuf[e] as int != 47) e = e + 1;
+    bk: int = if (e > p) slug_book(sbuf, p, e) else -1;
+    ch: int = if (e + 1 < n) num_at(sbuf, e + 1, n) else 0;
+    if (bk >= 0 && ch > 0) start_c = chapter_number(bk, ch) else {
+        // (The place kept, if in this version.)
+        start_goto = e == p;
+        start_c = (if (bk >= 0) chapter_number(bk, 1) else 0);
+        k: int = dom_store_get("sb.place", vbuf);
+        if (k > 9 && k <= len(vbuf) && is_key(vbuf, 6, 9, text_files[t])) {
+            q: int = 10;
+            while (q < k && vbuf[q] as int != 47) q = q + 1;
+            pb: int = slug_book(vbuf, 10, q);
+            if (pb >= 0 && (bk < 0 || pb == bk)) start_c = chapter_number(pb, num_at(vbuf,
+                q + 1, k))
+        }
+    }
+    h: int = dom_get_prop_s(DOM_LOCATION, "hash", abuf);
+    start_v = (if (h > 1 && h <= len(abuf)) num_at(abuf, 1, h) else 0);
     dom_set_prop_s(DOM_HISTORY, "scrollRestoration", "manual");
-    dom_fetch_gz(url_str(text_url, k), &on_text, 0);
+    reader_begin();
+    // (The two first files, as the boot script began them.)
+    w_data(text_files[t]);
+    w_str(".sizes.gz");
+    dom_fetch_gz_of(wb, 0, wb_n, &on_sizes, 0);
+    fetch_book(book_of_chapter(start_c));
     0
 }
 
@@ -727,52 +835,11 @@ page_only() {
     dom_set_prop(DOM_WINDOW, "sbReady", dom_now())
 }
 
-// The URL as a str (once, at the start).
-url_str(b: []i8, n: int): str@new {
-    c: []i8 = new i8[n](0i8);
-    for i in 0..n c[i] = b[i];
-    cstr(c)
-}
-
-// The text has come: the page's chapter taken as the app's own, the
-// window filled around it, and the page's events listened to.
-on_text(_data: int) {
-    if (dom_ev[DE_STATUS] != 200) {
-        dom_log("smooth bible: the text did not load");
-        return
-    }
-    buf: []i8 = dom_fetch_body(dom_ev[DE_ID]);
-    if (r_text == TEXT_BSB) bsb = buf;
-    text_load(r_text, buf, len(buf));
-    text_use(r_text);
-    t0: f64 = dom_now();
-    adopt();
-    dom_set_prop(DOM_WINDOW, "sbAdoptMs", dom_now() - t0);
-    dom_set_prop(DOM_WINDOW, "sbReady", dom_now())
-}
-
-adopt() {
-    art: int = dom_query(r_main, "article.ch");
-    c: int = 0;
-    if (art != 0) {
-        n: int = dom_get_attr(art, "data-c", abuf);
-        if (n > 0) c = num_at(abuf, 0, n)
-    }
+// The page's parts made, and what tells whether a finger or a button is
+// down and the page moving, from the start (the first placement waits for
+// rest).
+reader_begin() {
     find_iowan();
-    if (art == 0 || r_lines) {
-        // (No chapter here, or verses on lines of their own: written anew.)
-        if (art != 0) {
-            dom_remove(art);
-            dom_free(art)
-        }
-        rebuild(c)
-    } else {
-        win_h[c] = art;
-        win_first = c;
-        win_last = c
-    }
-    // (The tools shown; the pager and the notes' list hidden: below the
-    // text, so nothing in it moves.)
     dom_add_class(DOM_ROOT, "app");
     t: int = dom_query(r_title, ".tt");
     r_t[0] = dom_query(t, ".t");
@@ -781,41 +848,194 @@ adopt() {
     dom_set_attr(r_t[1], "aria-hidden", "true");
     dom_append(t, r_t[1]);
     dom_free(t);
-    title_c = c;
     fn_make();
-    // Where to read from: the entry's own place (a reload, Back), else the
-    // place kept, if it is in this chapter and the address names no verse;
-    // else where the page is now (the boot script placed a verse).
-    measure();
-    placed: bool = false;
-    n: int = dom_state(sbuf);
-    if (n > 0 && n <= len(sbuf) && read_place(sbuf, n) && pl_c == c) placed = true;
-    if (!placed && dom_get_prop_s(DOM_LOCATION, "hash", abuf) <= 0) {
-        k: int = dom_store_get("sb.place", sbuf);
-        sp: int = 0;
-        while (sp < k && sbuf[sp] as int != 32) sp = sp + 1;
-        if (k > 0 && k <= len(sbuf) && sp < k && read_place_at(sbuf, sp + 1, k) && pl_c == c) placed = true
+    t_box = dom_create("div");
+    dom_set_class(t_box, "measure");
+    dom_set_attr(t_box, "aria-hidden", "true");
+    dom_append(r_main, t_box);
+    // (The version's name for the hidden h1, and its line at the foot.)
+    h1: int = dom_query(DOM_DOCUMENT, "h1.vh");
+    if (h1 != 0) {
+        dom_set_text(h1, text_names[r_text]);
+        dom_free(h1)
     }
-    if (placed) restore_place() else {
-        // (A verse in the address, #16: a third of the way down, as the
-        // boot script placed it before the fonts came.)
-        h: int = dom_get_prop_s(DOM_LOCATION, "hash", abuf);
-        v: int = if (h > 1 && h <= len(abuf)) num_at(abuf, 1, h) else 0;
-        settle_window();
-        measure();
-        if (v > 0 && verse_box(c, v)) {
-            d: f64 = v_top - reading_y() - (view_h - bar_h) / 3.0f64;
-            if (d > 1.5f64 || d < -1.5f64) scroll_by(d)
-        }
-        place_now()
+    cv: int = dom_query(DOM_DOCUMENT, ".credit .cv");
+    if (cv != 0) {
+        wb_n = 0;
+        w_str(text_names[r_text]);
+        w_str(" \�\� Public Domain");
+        dom_set_text_of(cv, wb, 0, wb_n);
+        dom_free(cv)
     }
-    measure();
-    last_y = scroll_y;
-    save_place();
+    dom_set_attr(DOM_ROOT, "data-version", text_files[r_text]);
     has_scrollend = dom_has_prop(DOM_WINDOW, "onscrollend") == 1;
     dom_listen(DOM_WINDOW, "scroll", DOM_PASSIVE, &on_scroll, 0);
     if (has_scrollend) dom_listen(DOM_WINDOW, "scrollend", DOM_PASSIVE, &on_scrollend,
         0);
+    dom_listen(DOM_WINDOW, "touchstart", DOM_PASSIVE, &on_touch, 0);
+    dom_listen(DOM_WINDOW, "touchmove", DOM_PASSIVE, &on_touch, 0);
+    dom_listen(DOM_WINDOW, "touchend", DOM_PASSIVE, &on_touch, 0);
+    dom_listen(DOM_WINDOW, "touchcancel", DOM_PASSIVE, &on_touch, 0);
+    dom_listen(DOM_WINDOW, "pointerdown", DOM_PASSIVE, &on_pointer, 0);
+    dom_listen(DOM_WINDOW, "pointerup", DOM_PASSIVE, &on_pointer, 0);
+    dom_listen(DOM_WINDOW, "pointercancel", DOM_PASSIVE, &on_pointer, 0);
+    fonts_h = dom_prop_handle(DOM_DOCUMENT, "fonts");
+    if (fonts_h != 0) dom_listen(fonts_h, "loadingdone", 0, &on_fonts, 0);
+    measure();
+    last_y = scroll_y
+}
+
+// ---- the texts as they come ----
+// The books asked for (once each) and held; the sizes table; the whole.
+book_asked: []bool = new bool[66](false);
+
+book_held: bool = false;
+
+sizes_held: bool = false;
+
+whole_held: bool = false;
+
+fetch_book(bk: int) {
+    if (book_asked[bk] || whole_held) return;
+    book_asked[bk] = true;
+    w_data(text_files[r_text]);
+    w_byte(47);
+    w_str(book_codes[bk]);
+    w_str(".gz");
+    dom_fetch_gz_of(wb, 0, wb_n, &on_book, bk)
+}
+
+on_sizes(_data: int) {
+    if (dom_ev[DE_STATUS] != 200) {
+        dom_log("smooth bible: the sizes did not load");
+        return
+    }
+    b: []i8 = dom_fetch_body(dom_ev[DE_ID]);
+    sizes_read(b, len(b));
+    sizes_held = true;
+    mark("sizes");
+    if (book_held && r_bible == 0) first_paint()
+}
+
+on_book(bk: int) {
+    if (dom_ev[DE_STATUS] != 200) {
+        dom_log("smooth bible: a book did not load");
+        return
+    }
+    if (whole_held) return;
+    b: []i8 = dom_fetch_body(dom_ev[DE_ID]);
+    room: []i8 = dom_bytes(text_book_room(bk, len(b)));
+    text_load_book(r_text, bk, b, len(b), room);
+    text_use(r_text);
+    if (r_text == TEXT_BSB) bsb = tx_buf[TEXT_BSB];
+    book_held = true;
+    mark("book");
+    if (r_bible == 0) {
+        if (sizes_held) first_paint()
+    } else {
+        // (The chapters of a book that came: their estimates from their
+        // text, the window able to write them.)
+        refine_estimates();
+        ask_frame()
+    }
+}
+
+// The first placement (§W3.3 item 7): the table from the sizes table and
+// the book held, the scroller built, the chapter written and placed (the
+// address's verse a third of the way down, flashed; or the place the entry
+// or storage kept; or the chapter's opener under the bar), all before any
+// text is painted.
+cal_tries: int = 0;
+
+first_paint() {
+    if (finger_down || pointer_down || dom_now() - moved_at < 300.0f64) {
+        dom_cancel(relayout_timer);
+        relayout_timer = dom_timeout(100.0f64, &on_first, 0);
+        return
+    }
+    measure();
+    mark("calibrating");
+    calibrate();
+    mark("calibrated");
+    // (Drawing the calibration makes the browser fetch the faces the text
+    // needs, if the device has no font of its own before them: until they
+    // are in, a moment more, three seconds at most, so the first text is
+    // drawn in its own font and never swapped.)
+    cal_tries = cal_tries + 1;
+    if (fonts_h != 0 && cal_tries < 30 && dom_get_prop_s(fonts_h, "status", abuf) == 7) {
+        dom_cancel(relayout_timer);
+        relayout_timer = dom_timeout(100.0f64, &on_first, 0);
+        return
+    }
+    make_key();
+    estimate_all(r_lines);
+    mark("estimated");
+    c: int = start_c;
+    choose_range(c);
+    pos_from(slack_for(c));
+    phs_now = false;
+    build_scroller();
+    title_c = -1;
+    pl_c = c;
+    pl_v = 0;
+    pl_f = 0.0f64;
+    placed: bool = false;
+    n: int = dom_state(sbuf);
+    if (n > 0 && n <= len(sbuf) && read_place(sbuf, n) && pl_c == c) placed = true;
+    if (!placed && start_v == 0) {
+        k: int = dom_store_get("sb.place", sbuf);
+        sp: int = 0;
+        while (sp < k && sbuf[sp] as int != 32) sp = sp + 1;
+        if (k > 0 && k <= len(sbuf) && sp < k && read_place_at(sbuf, sp + 1, k) && pl_c == c) placed = true else {
+            pl_c = c;
+            pl_v = 0;
+            pl_f = 0.0f64
+        }
+    }
+    y: f64 = place_y();
+    if (!placed && start_v > 0 && verse_box(c, start_v)) y = scroll_y + v_top - reading_y() - (view_h - bar_h) / 3.0f64 else if (!placed) y = y + h2_offset(c);
+    scroll_write(y, "start");
+    mark("placed");
+    if (!placed && start_v > 0) flash(c, start_v);
+    fill_now();
+    set_title(c, false);
+    place_now();
+    last_y = scroll_y;
+    // (Kept, the address left as it came, #16 and all, till the reader
+    // moves.)
+    keep_place();
+    after_start();
+    phs_timer = dom_timeout(50.0f64, &write_placeholders, 0);
+    // (The whole version next, at low priority.)
+    w_data(text_files[r_text]);
+    w_str(".gz");
+    dom_fetch_gz_low_of(wb, 0, wb_n, &on_whole, 0);
+    if (start_goto) open_goto()
+}
+
+on_first(_data: int) {
+    first_paint()
+}
+
+// The whole version: it replaces the books held (the same chapter
+// numbers, nothing redrawn), and the estimates are made from its text.
+on_whole(_data: int) {
+    if (dom_ev[DE_STATUS] != 200) {
+        dom_log("smooth bible: the text did not load");
+        return
+    }
+    buf: []i8 = dom_fetch_body(dom_ev[DE_ID]);
+    text_load(r_text, buf, len(buf));
+    text_use(r_text);
+    if (r_text == TEXT_BSB) bsb = buf;
+    whole_held = true;
+    refine_estimates();
+    ask_frame();
+    dom_set_prop(DOM_WINDOW, "sbWhole", dom_now())
+}
+
+// The page's events, once the first chapter is placed.
+after_start() {
     dom_listen(DOM_WINDOW, "resize", DOM_PASSIVE, &on_resize, 0);
     dom_listen(DOM_WINDOW, "popstate", 0, &on_pop, 0);
     dom_listen(DOM_WINDOW, "keydown", 0, &on_key, 0);
@@ -827,15 +1047,13 @@ adopt() {
     dom_listen(r_bar, "click", 0, &on_bar_click, 0);
     dom_listen(r_bar, "focusin", 0, &on_bar_focus, 0);
     dom_listen(r_bar, "focusout", 0, &on_bar_focus, 0);
-    fonts: int = dom_prop_handle(DOM_DOCUMENT, "fonts");
-    if (fonts != 0) dom_listen(fonts, "loadingdone", 0, &on_fonts, 0);
-    dom_listen(DOM_WINDOW, "touchstart", DOM_PASSIVE, &on_touch, 0);
-    dom_listen(DOM_WINDOW, "touchend", DOM_PASSIVE, &on_touch, 0);
-    dom_listen(DOM_WINDOW, "touchcancel", DOM_PASSIVE, &on_touch, 0);
     measure();
     seen_width = view_w;
     dom_media_listen("(prefers-color-scheme: dark)", &on_scheme, 0);
-    if (set_wake) dom_wake_lock(1)
+    if (set_wake) dom_wake_lock(1);
+    dom_listen(DOM_WINDOW, "sbcheck", 0, &on_check, 0);
+    bg_schedule(300.0f64);
+    dom_set_prop(DOM_WINDOW, "sbReady", dom_now())
 }
 
 sbuf2: []i8 = new i8[512](0i8);
@@ -848,4 +1066,140 @@ read_place_at(b: []i8, p: int, n: int): bool {
 
 on_scheme(_data: int) {
     if (set_theme == 0) apply_settings()
+}
+
+// For the CI (§W3.3's estimates check): every chapter of this scroller's
+// range estimated from its text and measured at the page's width, and
+// estimated from the sizes table, published as window.sbCheck ("c
+// estimate measured from-sizes;" each, in tenths of a px; the whole text
+// must have come).
+on_check(_data: int) {
+    tb_n = 0;
+    for c in sc_first..sc_last + 1 {
+        o_int(c);
+        o_byte(32);
+        o_int((est_chapter(c, r_lines) * 10.0f64) as int);
+        o_byte(32);
+        o_int((measure_one(c, r_lines) * 10.0f64) as int);
+        o_byte(32);
+        o_int((est_from_sizes(c) * 10.0f64) as int);
+        o_byte(59)
+    }
+    dom_set_prop_of(DOM_WINDOW, "sbCheck", tb_out, 0, tb_n)
+}
+
+// ---- Go To, its first form (WEB.md §W1.8, §W5.2 without the field,
+// Recent or the tip) ----
+// The books under Old Testament and New Testament, each a row that opens
+// in place to its chapters as links (one book open at a time; a book of one
+// chapter is a link itself), the current chapter filled; opened by the
+// title and at /read/<version>/. It is a history entry: Back closes it, and
+// a chapter chosen replaces the entry with the jump.
+goto_dlg: int = 0;
+
+goto_entry: bool = false;
+
+goto_html() {
+    hb_n = 0;
+    h_str("<dialog class=\"goto sheet\" aria-labelledby=\"goto-h\" autofocus><header><h2 id=\"goto-h\">Go To</h2><button class=\"done\" type=\"button\" data-act=\"done\">Done</button></header><div class=\"cols\">");
+    cur: int = if (title_c >= 0) title_c else pl_c;
+    for testament in 0..2 {
+        h_str(if (testament == 0) "<section><h3>Old Testament</h3><div class=\"group\">" else "<section><h3>New Testament</h3><div class=\"group\">");
+        for b in if (testament == 0) 0 else 39..if (testament == 0) 39 else 66 {
+            if (book_count[b] == 1) {
+                h_str("<a class=\"row book\" href=\"");
+                h_chapter_url(r_text, book_first[b], 0, 0);
+                h_str("\">");
+                h_text(bsb, book_name_start(b), book_name_end(b));
+                h_str("</a>")
+            } else {
+                h_str("<details name=\"book\"");
+                if (ch_book[cur] == b) h_str(" open");
+                h_str("><summary class=\"row\"><span>");
+                h_text(bsb, book_name_start(b), book_name_end(b));
+                h_str("</span><span class=\"n\">");
+                h_int(book_count[b]);
+                h_str("</span>");
+                h_icon("chevron-down", "chev");
+                h_str("</summary><ol class=\"chapters\">");
+                for n in 0..book_count[b] {
+                    c: int = book_first[b] + n;
+                    h_str("<li><a href=\"");
+                    h_chapter_url(r_text, c, 0, 0);
+                    h_str("\"");
+                    if (c == cur) h_str(" aria-current=\"page\"");
+                    h_str(">");
+                    h_int(n + 1);
+                    h_str("</a></li>")
+                }
+                h_str("</ol></details>")
+            }
+        }
+        h_str("</div></section>")
+    }
+    h_str("</div></dialog>")
+}
+
+goto_open(): bool {
+    goto_dlg != 0 && dom_get_prop(goto_dlg, "open") == 1.0f64
+}
+
+open_goto() {
+    if (goto_open()) return;
+    if (goto_dlg != 0) {
+        dom_remove(goto_dlg);
+        dom_free_tree(goto_dlg)
+    }
+    goto_html();
+    goto_dlg = dom_insert_html_of(DOM_BODY, 2, hb, 0, hb_n);
+    dom_listen(goto_dlg, "click", 0, &on_goto_click, 0);
+    dom_listen(goto_dlg, "close", 0, &on_goto_closed, 0);
+    expand_bar();
+    // (Its own entry, so Back closes it.)
+    place_now();
+    save_place();
+    wb_n = 0;
+    w_url(if (title_c >= 0) title_c else pl_c, 0);
+    gs: []i8 = goto_state;
+    dom_push(wb, wb_n, gs, 4);
+    goto_entry = true;
+    dom_call(goto_dlg, "showModal");
+    // (The current book's row in the middle of the list.)
+    cur: int = dom_query(goto_dlg, "details[open]");
+    if (cur != 0) {
+        dom_scroll_into_view(cur, 1, 0);
+        dom_free(cur)
+    }
+}
+
+goto_state: []i8 = [103i8, 111i8, 116i8, 111i8];
+
+// Closed by Done, Escape or a chapter: its entry goes too (Back), unless a
+// jump replaced it or Back closed it.
+on_goto_closed(_data: int) {
+    if (goto_entry) {
+        goto_entry = false;
+        dom_call(DOM_HISTORY, "back")
+    }
+    t: int = dom_query(r_bar, ".title");
+    if (t != 0) {
+        dom_call(t, "focus");
+        dom_free(t)
+    }
+}
+
+on_goto_click(_data: int) {
+    n: int = dom_event_attr("data-act", sbuf);
+    if (n > 0 && is_key(sbuf, 0, n, "done")) {
+        dom_call(goto_dlg, "close");
+        return
+    }
+    if ((dom_ev[DE_MODS] & (DOM_CTRL | DOM_ALT | DOM_META | DOM_SHIFT)) != 0 || dom_ev[DE_BUTTON] != 0) return;
+    k: int = dom_event_attr("href", abuf);
+    if (k <= 0 || k > len(abuf) || !place_of_url(abuf, k)) return;
+    dom_prevent_default();
+    // (The jump takes the dialog's entry.)
+    goto_entry = false;
+    dom_call(goto_dlg, "close");
+    go(url_c, url_v, true)
 }

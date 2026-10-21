@@ -1,14 +1,14 @@
 // Smooth Bible on the web: starts the reader (programs/bible/web.l8) with
 // the page bridge (../dom.js). The boot script imports this once the
-// browser is known to run the module. build.py puts the assets' hashed
-// names in for the {{...}} and the imports' paths.
+// browser is known to run the module, having started the first paint's
+// fetches (window.l8Prefetch, by address), which the bridge takes up.
+// build.py puts the assets' hashed names in for the {{...}} and the
+// imports' paths.
 import { instantiate, runStart } from "../l8-runtime.js";
 import { domHost } from "../dom.js";
 
-window.sbData = {
-  bsb: "{{data_bsb}}", kjv: "{{data_kjv}}", web: "{{data_web}}", asv: "{{data_asv}}", ylt: "{{data_ylt}}",
-  icons: "{{icons}}",
-};
+window.sbTimes = { module: performance.now() };
+window.sbData = { data: "/read/data/{{data}}", icons: "/read/{{icons}}" };
 
 const decoder = new TextDecoder();
 const sys = {
@@ -23,7 +23,9 @@ const sys = {
   close: () => -9,
 };
 
-const module = await WebAssembly.compileStreaming(fetch("{{wasm}}"));
+const wasm = "/read/{{wasm}}";
+const module = await WebAssembly.compileStreaming(window.l8Prefetch?.[wasm] || fetch(wasm));
+window.sbTimes.compiled = performance.now();
 const dom = domHost();
 const { instance } = await instantiate(module, sys, dom.imports);
 dom.attach(instance);

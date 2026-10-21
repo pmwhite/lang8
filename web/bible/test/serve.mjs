@@ -9,6 +9,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 import worker from "../../../programs/bible/worker/worker.js";
 
 const types = {
@@ -58,8 +59,16 @@ export function serve(site, port) {
   const server = http.createServer(async (req, res) => {
     const request = new Request(`http://smoothbible.com${req.url}`, { method: req.method, headers: req.headers });
     const r = await worker.fetch(request, env);
-    const body = Buffer.from(await r.arrayBuffer());
-    res.writeHead(r.status, Object.fromEntries(r.headers));
+    let body = Buffer.from(await r.arrayBuffer());
+    // (Compressed as Cloudflare does text, scripts and wasm, so the budgets
+    // see what a phone would be sent; data files are gzip themselves.)
+    const headers = Object.fromEntries(r.headers);
+    if (/gzip/.test(req.headers["accept-encoding"] || "") && /^(text\/|application\/(wasm|javascript)|image\/svg)/.test(headers["content-type"] || "")) {
+      body = zlib.gzipSync(body);
+      headers["content-encoding"] = "gzip";
+      headers["content-length"] = String(body.length);
+    }
+    res.writeHead(r.status, headers);
     res.end(body);
   });
   return new Promise((resolve) => server.listen(port, "127.0.0.1", () => resolve(server)));

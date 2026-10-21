@@ -207,14 +207,15 @@ $(BUILD)/bible.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'bible wasm' sh -c './l8c3 wasm programs/bible/web.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 # The web reader's site (WEB.md §W1.9) in .build/bible-site: the marketing
-# pages, and read/ with every chapter prerendered (prerender.l8), the app
-# and its assets under hashed names, then checked (web/bible/build.py).
+# pages, and read/: the shell, About, the app and its assets under hashed
+# names, the texts whole and by book with their sizes tables (tools/sizes.l8),
+# then checked (web/bible/build.py).
 # Serve it as smoothbible.com does: node web/bible/test/serve.mjs.
-$(BUILD)/bible-prerender: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
-	@$(STEP) 'bible prerender' sh -c '$(call build,l8c3,programs/bible/prerender.l8)'
+$(BUILD)/bible-sizes: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'bible sizes tool' sh -c '$(call build,l8c3,programs/bible/tools/sizes.l8)'
 
-$(OK)/bible-web: $(BUILD)/bible-prerender $(BUILD)/bible.wasm web/l8-runtime.js web/dom.js $(wildcard web/bible/* web/bible/fonts/* programs/bible/site/* programs/bible/site/*/*) programs/bible/data/bsb.txt | $(OK)
-	@$(STEP) 'bible web site' python3 -I web/bible/build.py $(BUILD)/bible-prerender $(BUILD)/bible.wasm $(BUILD)/bible-site
+$(OK)/bible-web: $(BUILD)/bible-sizes $(BUILD)/bible.wasm web/l8-runtime.js web/dom.js $(wildcard web/bible/* web/bible/fonts/* programs/bible/site/* programs/bible/site/*/*) programs/bible/data/bsb.txt | $(OK)
+	@$(STEP) 'bible web site' python3 -I web/bible/build.py $(BUILD)/bible-sizes $(BUILD)/bible.wasm $(BUILD)/bible-site
 	@$(STEP) 'bible web check' python3 -I web/bible/build.py --check $(BUILD)/bible-site
 	@touch $@
 

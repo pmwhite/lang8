@@ -333,6 +333,16 @@ export function domHost() {
       const v = obj(h)?.[str(name)];
       return typeof v === "string" ? give(v, out) : -1n;
     },
+    dom_style_num: (h, property) => parseFloat(getComputedStyle(obj(h)).getPropertyValue(str(property))) || 0,
+    dom_children_px(h, first, property, values, n) {
+      const kids = obj(h).children;
+      const v = mem.view();
+      const p = Number(values);
+      const k = str(property);
+      const f = Number(first);
+      for (let i = 0; i < Number(n) && f + i < kids.length; i++) kids[f + i].style.setProperty(k, v.getFloat64(p + 8 * i, true) + "px");
+      return 0n;
+    },
     dom_has_prop: (h, name) => (str(name) in obj(h) ? 1n : 0n),
     dom_prop_handle(h, name) {
       const v = obj(h)?.[str(name)];
@@ -477,6 +487,12 @@ export function domHost() {
 
     dom_fetch: (url, f, data) => fetchInto(str(url), f, data, false),
     dom_fetch_gz: (url, f, data) => fetchInto(str(url), f, data, true),
+    dom_fetch_gz_low: (url, f, data) => fetchInto(str(url), f, data, true, true),
+    dom_fetch_gz_of: (b, start, end, f, data) => fetchInto(range(b, start, end), f, data, true),
+    dom_fetch_gz_low_of: (b, start, end, f, data) => fetchInto(range(b, start, end), f, data, true, true),
+    dom_bytes(n) {
+      return BigInt(mem.newCounted(new Uint8Array(Number(n))));
+    },
     dom_fetch_take(id, out, at) {
       const body = fetches.get(Number(id)) ?? new Uint8Array(0);
       fetches.delete(Number(id));
@@ -578,8 +594,10 @@ export function domHost() {
     },
   };
 
-  // A GET, its body kept until the program takes it; unzipped if gz.
-  const fetchInto = (url, f, data, gz) => {
+  // A GET, its body kept until the program takes it; unzipped if gz. A
+  // fetch the page began early for the same address (globalThis.l8Prefetch,
+  // address to promise) is taken up instead of fetching again.
+  const fetchInto = (url, f, data, gz, low = false) => {
     const id = nextId++;
     const done = (status, body) => {
       fetches.set(id, body);
@@ -589,7 +607,9 @@ export function domHost() {
         setInt(v, 10, body.length);
       });
     };
-    fetch(url)
+    const early = globalThis.l8Prefetch?.[url];
+    if (early) delete globalThis.l8Prefetch[url];
+    (early || fetch(url, low ? { priority: "low" } : {}))
       .then(async (r) => {
         if (!r.ok || !gz) return done(r.status, new Uint8Array(await r.arrayBuffer()));
         const plain = r.body.pipeThrough(new DecompressionStream("gzip"));
@@ -633,7 +653,7 @@ export function domHost() {
         return f.apply(this, args);
       } catch (e) {
         console.error(`l8 ${name} failed`, e);
-        return name === "dom_get_prop" || name === "dom_call" || name === "dom_call_s" || name.startsWith("dom_now") || name === "dom_date_now" ? 0 : -1n;
+        return ["dom_get_prop", "dom_call", "dom_call_s", "dom_now", "dom_date_now", "dom_style_num"].includes(name) ? 0 : -1n;
       }
     };
   }

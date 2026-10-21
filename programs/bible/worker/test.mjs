@@ -374,17 +374,20 @@ test("bad audio requests are 400s, and the key is in no reply", async () => {
   }
 });
 
-// ---- the reader on the web, /read/ (WEB.md §W2.1a) ----
+// ---- the reader on the web, /read/ (WEB.md §W2.1a, §W1.8) ----
 // ASSETS as Cloudflare's static assets over a small site: /x/ is
 // x/index.html, /x is x.html, a missing file the site's 404 page.
+const SHELL = `<!doctype html><html><head><title>Smooth Bible</title>
+<meta property="og:title" content="Smooth Bible">
+<!--sb-head-->
+</head><body><a class="title" href="/read/bsb/" aria-label="Smooth Bible"><span class="tt"><span class="t">Smooth Bible</span></span></a><main id="text"></main></body></html>`;
 const site = {
   "/index.html": ["text/html; charset=utf-8", "<p>home</p>"],
   "/404.html": ["text/html; charset=utf-8", "<p>not found</p>"],
-  "/read/index.html": ["text/html; charset=utf-8", "<p>books</p>"],
-  "/read/shell.html": ["text/html; charset=utf-8", "<p>shell</p>"],
-  "/read/bsb/john/3.html": ["text/html; charset=utf-8", "<p>John 3</p>"],
+  "/read/shell.html": ["text/html; charset=utf-8", SHELL],
+  "/read/about.html": ["text/html; charset=utf-8", "<p>about</p>"],
   "/read/app.0123456789.wasm": ["application/wasm", "\0asm"],
-  "/read/data/bsb.0123456789.gz": ["application/gzip", "gz"],
+  "/read/data/0123456789/bsb/JHN.gz": ["application/gzip", "gz"],
 };
 const ASSETS = {
   async fetch(request) {
@@ -403,45 +406,63 @@ test("the boot script's hash is the one the CSP names", () => {
   assert.ok(CSP.includes(`'${hash}'`));
 });
 
-test("/read: a page with the CSP, revalidated; the shell for a reader's address; 404 otherwise", async () => {
+test("/read: every reader's address is the shell, its head filled for it; nothing indexed", async () => {
   let r = await page("/read");
   assert.equal(r.status, 301);
   assert.equal(r.headers.get("location"), "https://smoothbible.com/read/");
   r = await page("/read/bsb/john/3");
   assert.equal(r.status, 200);
-  assert.equal(await r.text(), "<p>John 3</p>");
+  let html = await r.text();
+  assert.match(html, /<title>John 3 · BSB · Smooth Bible<\/title>/);
+  assert.match(html, /<meta property="og:title" content="John 3 · Smooth Bible">/);
+  assert.match(html, /<meta property="og:description" content="John 3 in the Berean Standard Bible.">/);
+  assert.match(html, /<meta name="description" content="John 3 in the Berean Standard Bible.">/);
+  assert.match(html, /<meta property="og:url" content="https:\/\/smoothbible.com\/read\/bsb\/john\/3">/);
+  assert.match(html, /<span class="t">John 3<\/span>/);
+  assert.match(html, /aria-label="John 3"/);
   assert.equal(r.headers.get("content-security-policy"), CSP);
   assert.equal(r.headers.get("cache-control"), "public, max-age=0, must-revalidate");
+  assert.equal(r.headers.get("x-robots-tag"), "noindex");
   assert.equal(r.headers.get("x-content-type-options"), "nosniff");
   assert.equal(r.headers.get("referrer-policy"), "strict-origin-when-cross-origin");
   assert.match(r.headers.get("permissions-policy"), /screen-wake-lock=\(self\)/);
-  assert.equal(r.headers.get("x-robots-tag"), null);
-  for (const path of ["/read/esv/john/3", "/read/kjv/ps/23", "/read/search", "/read/jn3%3A16", "/read/manual/ribbons", "/read/plans/mcheyne/32"]) {
+  html = await (await page("/read/kjv/psalms/23")).text();
+  assert.match(html, /<title>Psalm 23 · KJV · Smooth Bible<\/title>/);
+  html = await (await page("/read/esv/john/3")).text();
+  assert.match(html, /<meta property="og:description" content="John 3 in the English Standard Version.">/);
+  for (const path of ["/read/", "/read/kjv/ps/23", "/read/bsb/", "/read/search", "/read/jn3%3A16", "/read/manual/ribbons", "/read/plans/mcheyne/32"]) {
     r = await page(path);
     assert.equal(r.status, 200, path);
-    assert.equal(await r.text(), "<p>shell</p>", path);
+    html = await r.text();
+    assert.match(html, /<title>Smooth Bible<\/title>/, path);
+    assert.doesNotMatch(html, /description/, path);
+    assert.match(html, /<main id="text"><\/main>/, path);
     assert.equal(r.headers.get("x-robots-tag"), "noindex", path);
     assert.equal(r.headers.get("content-security-policy"), CSP, path);
   }
+  r = await page("/read/about");
+  assert.equal(await r.text(), "<p>about</p>");
+  assert.equal(r.headers.get("x-robots-tag"), "noindex");
   r = await page("/read/a/b/c/d");
   assert.equal(r.status, 404);
   assert.equal(await r.text(), "<p>not found</p>");
-  assert.equal(r.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(r.headers.get("x-robots-tag"), "noindex");
 });
 
 test("/read: hashed files and data kept a year; the site and the API as they were", async () => {
-  for (const path of ["/read/app.0123456789.wasm", "/read/data/bsb.0123456789.gz"]) {
+  for (const path of ["/read/app.0123456789.wasm", "/read/data/0123456789/bsb/JHN.gz"]) {
     const r = await page(path);
     assert.equal(r.status, 200, path);
     assert.equal(r.headers.get("cache-control"), "public, max-age=31536000, immutable", path);
     assert.equal(r.headers.get("content-security-policy"), null, path);
+    assert.equal(r.headers.get("x-robots-tag"), "noindex", path);
   }
   let r = await page("/");
   assert.equal(await r.text(), "<p>home</p>");
   assert.equal(r.headers.get("content-security-policy"), null);
-  assert.equal(r.headers.get("x-content-type-options"), null);
+  assert.equal(r.headers.get("x-robots-tag"), null);
   r = await page("/api/v1/status");
   assert.equal(r.status, 200);
-  assert.equal(r.headers.get("content-security-policy"), null);
+  assert.equal(r.headers.get("x-robots-tag"), null);
   assert.deepEqual(await r.json(), { ok: true, esv: true, esvAudio: true });
 });

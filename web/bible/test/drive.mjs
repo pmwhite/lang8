@@ -185,7 +185,7 @@ export const SIZES = {
 };
 
 async function main() {
-  if (!fs.existsSync(path.join(site, "read", "index.html"))) throw new Error("no site in " + site + ": make bible-web");
+  if (!fs.existsSync(path.join(site, "read", "shell.html"))) throw new Error("no site in " + site + ": make bible-web");
   fs.mkdirSync(out, { recursive: true });
   const port = 8500 + Math.floor(Math.random() * 400);
   const server = await serve(site, port);
@@ -199,7 +199,7 @@ async function main() {
   // (A first page, so the browser's own start-up is not timed.)
   {
     const warm = await newPage(chrome.port, []);
-    await warm.open(base + "/read/bsb/genesis/1", false);
+    await warm.open(base + "/read/about", false);
     await warm.close();
   }
   for (const [name, flow] of Object.entries(flows)) {

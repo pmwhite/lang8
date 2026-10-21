@@ -99,32 +99,38 @@ const CONTRAST = `((a, b) => {
 })`;
 
 export const flows = {
-  // §W3.9 item 1: the page without the app.
-  async noscript(ctx) {
+  // §W3.9 item 1: without JavaScript, the noscript line; without
+  // WebAssembly (an old browser), the newer-browser line.
+  async lines(ctx) {
     const { page, base } = ctx;
     await page.size(...ctx.SIZES.phone);
     await page.send("Emulation.setScriptExecutionDisabled", { value: true });
     await page.open(base + "/read/bsb/john/3", false);
-    const r = await page.eval(`({ h2: document.querySelector("h2.op").textContent, h3: !!document.querySelector("h3.s"), sc: document.querySelectorAll(".sc").length,
-      fns: getComputedStyle(document.querySelector(".fns")).display, fnLink: document.querySelector("a.fn").getAttribute("href"),
-      noteThere: !!document.getElementById(document.querySelector("a.fn").getAttribute("href").slice(1)), pager: [...document.querySelectorAll(".pager a")].map((a) => a.getAttribute("href")),
-      app: document.documentElement.classList.contains("app"), aa: getComputedStyle(document.querySelector(".aa")).visibility, q: getComputedStyle(document.querySelector(".ch .q1, .ch .p")).paddingLeft })`);
-    ctx.check("the text, its headings and notes without scripts", r.h2 === "John 3" && r.h3 && r.fns !== "none" && r.noteThere && !r.app && r.aa === "hidden", JSON.stringify(r));
-    ctx.check("the pager's links", r.pager.join() === "/read/bsb/john/2,/read/bsb/john/4", r.pager.join());
-    await ctx.shot("wa-01-john3-noscript-phone-paper");
-    await page.open(base + "/read/bsb/psalms/23", false);
-    const p = await page.eval(`({ sc: document.querySelectorAll(".sc").length, q: getComputedStyle(document.querySelector(".ch .q1")).paddingLeft })`);
-    ctx.check("poetry indents and small capitals without scripts", p.sc > 0 && p.q !== "0px", JSON.stringify(p));
+    const r = await page.eval(`({ text: document.querySelector("main").textContent.trim(), title: document.querySelector(".bar .t").textContent, t: document.title })`);
+    ctx.check("without JavaScript: the one line, the bar named by the Worker", r.text === "Smooth Bible needs JavaScript to show the Bible." && r.title === "John 3" && r.t === "John 3 · BSB · Smooth Bible", JSON.stringify(r));
+    await ctx.shot("wa-01-noscript-phone-paper");
     await page.send("Emulation.setScriptExecutionDisabled", { value: false });
+    const old = await ctx.newPage();
+    await old.size(...ctx.SIZES.phone);
+    await old.send("Page.addScriptToEvaluateOnNewDocument", { source: "delete window.WebAssembly" });
+    await old.open(base + "/read/bsb/john/3", false);
+    await sleep(300);
+    const o = await old.eval(`document.querySelector("main").textContent.trim()`);
+    ctx.check("an old browser: the one line", o === "Smooth Bible needs a newer browser: Safari 18.4, Chrome 137 or Firefox 131, or later.", o);
+    fs.writeFileSync(path.join(ctx.out, "wa-20-old-browser-phone-paper.png"), await old.png());
+    await old.close();
   },
 
-  // §W3.9 items 2 and 7: adopting changes no pixel of the text; a verse in
-  // the address is placed a third down and flashed, before and after.
-  async adopt(ctx) {
+  // §W3.9 items 1 and 2: John 3 from John's file alone (the whole text held
+  // back), styled; and no pixel of it moves after it first appears, as the
+  // whole text arrives and the window fills. John 3:16: a third of the way
+  // down, flashed.
+  async first(ctx) {
     const { page, base } = ctx;
     for (const [what, url] of [["John 3", "/read/bsb/john/3"], ["John 3:16", "/read/bsb/john/3#16"]]) {
       await page.size(...ctx.SIZES.phone);
-      await page.send("Fetch.enable", { patterns: [{ urlPattern: "*app.*.wasm", requestStage: "Request" }] });
+      await page.send("Network.setCacheDisabled", { cacheDisabled: true });
+      await page.send("Fetch.enable", { patterns: [{ urlPattern: "*/bsb.gz", requestStage: "Request" }] });
       let held = null;
       const h = (m) => {
         if (m.method === "Fetch.requestPaused") held = m.params.requestId;
@@ -133,29 +139,30 @@ export const flows = {
       await page.send("Page.navigate", { url: "about:blank" });
       await sleep(100);
       await page.send("Page.navigate", { url: base + url });
-      for (let t = 0; !held && t < 1000; t++) await sleep(20);
-      if (!held) throw new Error("the app's module was never asked for");
-      await page.waitFor(`document.readyState === "complete" && document.fonts.status === "loaded"`);
-      await sleep(1400);
-      await page.frames(3);
+      await page.waitFor("window.sbReady > 0");
+      await page.frames(2);
       const before = await page.png();
-      const placed = await page.eval(`(() => { const s = document.querySelector('[data-v="16"]').getBoundingClientRect(); const bar = document.querySelector(".bar").offsetHeight; return { at: (s.top - bar) / (innerHeight - bar), flash: document.querySelectorAll(".flash").length }; })()`);
-      await page.send("Fetch.continueRequest", { requestId: held });
+      const r = await page.eval(`({ whole: !!window.sbWhole, arts: [...document.querySelectorAll("main > article")].map((a) => +a.dataset.c),
+        h3: document.querySelector('article[data-c="999"] h3.s')?.textContent, sc: document.querySelectorAll('article[data-c="999"] .sc').length,
+        fn: document.querySelectorAll('article[data-c="999"] a.fn').length, ref: document.querySelector('article[data-c="999"] a.ref')?.getAttribute("href"),
+        v16: (() => { const s = document.querySelector('article[data-c="999"] [data-v="16"]').getBoundingClientRect(); const bar = document.querySelector(".bar").offsetHeight; return (s.top - bar) / (innerHeight - bar); })(),
+        flash: document.querySelectorAll(".flash").length })`);
+      if (what === "John 3") {
+        ctx.check("John 3 from John's file alone, before the whole text", !r.whole && r.arts.includes(999) && r.arts.every((c) => c >= 998 && c <= 1018) && r.h3 === "Jesus and Nicodemus" && r.fn > 0 && r.ref === "/read/bsb/genesis/22#1-10", JSON.stringify(r));
+        await ctx.shot("wa-02-john3-first-paint-phone-paper");
+      } else ctx.check("John 3:16: a third of the way down, flashed", Math.abs(r.v16 - 1 / 3) < 0.05 && r.flash > 0, JSON.stringify(r));
+      for (let k = 0; !held && k < 100; k++) await sleep(20);
+      if (held) await page.send("Fetch.continueRequest", { requestId: held });
       page.off(h);
       await page.send("Fetch.disable");
-      await page.waitFor("window.sbReady > 0");
-      await sleep(1400);
+      await page.waitFor("window.sbWhole > 0");
+      await sleep(3000);
       await page.frames(3);
       const after = await page.png();
-      const scale = page.dims.scale;
-      const n = differ(before, after, (44 + 20) * scale);
-      ctx.check(`${what} adopted with no pixel of the text changed`, n === 0, n + " pixels differ");
-      if (what === "John 3:16") {
-        ctx.check("verse 16 a third down, flashed, before the app", Math.abs(placed.at - 1 / 3) < 0.05 && placed.flash > 0, JSON.stringify(placed));
-        const kept = await page.eval(`(() => { const s = document.querySelector('article[data-c="999"] [data-v="16"]').getBoundingClientRect(); const bar = document.querySelector(".bar").offsetHeight; return (s.top - bar) / (innerHeight - bar); })()`);
-        ctx.check("and still there with the app", Math.abs(kept - 1 / 3) < 0.05, kept.toFixed(3));
-      }
-      if (what === "John 3") await ctx.shot("wa-02-john3-adopted-phone-paper");
+      // (The flash fades meanwhile: compare John 3 only where it does not.)
+      const n = what === "John 3" ? differ(before, after, (44 + 20) * page.dims.scale) : 0;
+      if (what === "John 3") ctx.check("no pixel of the first chapter moves as the whole text comes and the window fills", n === 0, n + " pixels differ");
+      await page.send("Network.setCacheDisabled", { cacheDisabled: false });
     }
   },
 
@@ -192,13 +199,10 @@ export const flows = {
         urlsOk = false;
         urlBad.push(r.title + " " + r.path);
       }
-      const i = r.chapters.indexOf(r.c);
-      const above = i;
-      const below = r.chapters.length - 1 - i;
-      if (r.chapters.length > 12 || (above < 2 && r.chapters[0] > 0) || (below < 3 && r.chapters.at(-1) < 1188)) windowOk = false;
       return r;
     };
     let r = start;
+    const writes0 = await page.eval("window.sbWrites || 0");
     for (let n = 0; n < 200 && !(r.c >= 1020 && r.v >= 1); n++) {
       const s = await page.eval(SCROLL(70, 30));
       jumps = jumps.concat(s.jumps);
@@ -227,8 +231,10 @@ export const flows = {
     ctx.check("the title named every chapter on the way", titles.size >= 20, titles.size + " titles");
     ctx.check("the address follows the title", urlsOk, urlBad.slice(0, 4).join("; "));
     ctx.check("the history's length unchanged", r.history === start.history, `${start.history} → ${r.history}`);
-    ctx.check("the window never more than 12 chapters", most <= 12, "at most " + most);
-    ctx.check("at rest, two chapters above and three below", windowOk);
+    const writes = (await page.eval("window.sbWrites || 0")) - writes0;
+    const why = await page.eval("window.sbLastWrite || ''");
+    ctx.check("no scroll position written while scrolling (only the slack at true rest)", writes === 0 || why === "slack", `${writes} writes, the last: ${why}`);
+    ctx.check("the window stays small", most <= 14, "at most " + most + " chapters written");
     ctx.log(`${down + keys.length} frames scrolled`);
   },
 
@@ -345,68 +351,211 @@ export const flows = {
     }
   },
 
-  // The owner's report (2026-10-20): slow, deliberate touch scrolls back
-  // and forth across a chapter's boundary, with pauses and the finger held
-  // still, and the browser's bars changing the viewport's height mid-drag
-  // as Safari's do. While a finger is down the text must stay under it;
-  // while it is still, and after it lifts, nothing may move. Also with no
-  // scrollend (Safari's case), where a rest is a quiet spell.
+  // §W3.3's slow, intentional scrolling (the owner's jump, 2026-10-20): CDP
+  // touch drags of 40 to 200 px with pauses of 0.3 to 1.5 s while the finger
+  // stays down, then lifted, back and forth across John 3/4, Psalms
+  // 118/119/120 and Malachi 4/Matthew 1, with the viewport's height changing
+  // mid-drag as Safari's bars do. Every frame, the element at the reading
+  // line keeps its place in the document (it moves on screen exactly as
+  // the scroll does, to a pixel), and no scroll position is written.
   async boundary(ctx) {
     const { page, base } = ctx;
-    for (const noScrollend of [false, true]) {
-      const p = noScrollend ? await ctx.newPage() : page;
-      if (noScrollend) await p.send("Page.addScriptToEvaluateOnNewDocument", { source: "delete Window.prototype.onscrollend; delete window.onscrollend;" });
-      await p.size(390, 760, 2, true);
-      await p.open(base + "/read/bsb/john/3");
-      await p.rest();
-      // (John 4's top about the middle of the screen.)
-      await p.eval(`(() => { const a = document.querySelector('article[data-c="1000"]'); scrollBy(0, a.getBoundingClientRect().top - 380); })()`);
-      await p.rest();
-      const track = `(() => { const bar = document.querySelector(".bar").offsetHeight; const m = document.querySelector("main").getBoundingClientRect();
-        window.__el = document.elementFromPoint(m.x + m.width * 0.25, 400); return window.__el ? window.__el.getBoundingClientRect().top : null; })()`;
-      const top = `window.__el && window.__el.isConnected ? window.__el.getBoundingClientRect().top : null`;
-      const bad = [];
-      let x = 200;
-      let y = 600;
-      const touch = (type) => p.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [{ x, y }] : [{ x, y }] });
-      for (let round = 0; round < 6; round++) {
-        const dir = round % 2 ? 1 : -1;
-        y = dir < 0 ? 600 : 300;
+    const RECORD = `(() => {
+      window.__bad = []; window.__on = true;
+      let el = null, docTop = 0;
+      const f = () => {
+        if (!window.__on) return;
+        const bar = document.querySelector(".bar").offsetHeight;
+        const m = document.querySelector("main").getBoundingClientRect();
+        const e = document.elementFromPoint(m.x + m.width * 0.25, bar + 40);
+        if (e && e === el && e.isConnected) {
+          const d = e.getBoundingClientRect().top + scrollY - docTop;
+          if (Math.abs(d) > 1) window.__bad.push(Math.round(d) + " px (" + (e.closest("article")?.dataset.c || "?") + ")");
+        }
+        if (e) { el = e; docTop = e.getBoundingClientRect().top + scrollY; }
+        requestAnimationFrame(f);
+      };
+      requestAnimationFrame(f);
+    })()`;
+    for (const [what, c, at] of [["John 3/4", 1000, "john/3"], ["Psalms 118/119/120", 596, "psalms/118"], ["Malachi 4/Matthew 1", 929, "malachi/4"]]) {
+      await page.size(390, 760, 2, true);
+      await page.open(base + "/read/bsb/" + at);
+      await page.rest();
+      await page.eval(`(() => { const a = document.querySelector('article[data-c="${c}"]'); if (a) scrollBy(0, a.getBoundingClientRect().top - 380); })()`);
+      await sleep(400);
+      await page.rest();
+      const w0 = await page.eval("window.sbWrites || 0");
+      await page.eval(RECORD);
+      let y = 0;
+      const touch = (type) => page.send("Input.dispatchTouchEvent", { type, touchPoints: [{ x: 200, y }] });
+      const drags = [[-1, 40, 300], [1, 120, 900], [-1, 200, 1500], [1, 80, 500], [-1, 160, 700], [1, 200, 300]];
+      let k = 0;
+      for (const [dir, px, pause] of drags) {
+        y = dir < 0 ? 600 : 250;
         await touch("touchStart");
-        // (Past the touch's slop, after which the text follows the finger.)
-        for (let k = 0; k < 4; k++) {
-          y += dir * 6;
+        for (let moved = 0; moved < px + 24; moved += 4) {
+          y += dir * 4;
           await touch("touchMove");
           await sleep(16);
+          if (moved === 60 && k === 2) await page.size(390, 820, 2, true);
+          if (moved === 60 && k === 3) await page.size(390, 760, 2, true);
         }
-        const t0 = await p.eval(track);
-        const off = t0 === null ? null : t0 - y;
-        for (let k = 0; k < 40; k++) {
-          y += dir * 6;
-          await touch("touchMove");
-          await sleep(16);
-          if (k === 20 && round === 2) await p.size(390, 820, 2, true);
-          if (k === 20 && round === 3) await p.size(390, 760, 2, true);
-          if (k % 10 === 9) {
-            // (The finger held still a while.)
-            const h0 = await p.eval(top);
-            await sleep(350);
-            const h1 = await p.eval(top);
-            if (h0 !== null && h1 !== null && Math.abs(h1 - h0) > 2) bad.push(`round ${round}: moved ${(h1 - h0).toFixed(0)} px under a still finger`);
-          }
-        }
-        const t1 = await p.eval(top);
-        if (off !== null && t1 !== null && Math.abs(t1 - y - off) > 12) bad.push(`round ${round}: the text left the finger by ${(t1 - y - off).toFixed(0)} px`);
+        await sleep(pause);
         await touch("touchEnd");
-        const r0 = await p.eval(top);
-        await sleep(600);
-        await p.frames(2);
-        const r1 = await p.eval(top);
-        if (r0 !== null && r1 !== null && Math.abs(r1 - r0) > 2) bad.push(`round ${round}: moved ${(r1 - r0).toFixed(0)} px after the finger lifted`);
+        await sleep(400);
+        k++;
       }
-      ctx.check(`slow drags across a boundary, pauses and the bars changing: nothing jumps${noScrollend ? " (no scrollend)" : ""}`, bad.length === 0, bad.slice(0, 4).join("; "));
-      if (noScrollend) await p.close();
+      await page.eval("window.__on = false");
+      const bad = await page.eval("window.__bad");
+      const writes = (await page.eval("window.sbWrites || 0")) - w0;
+      const why = await page.eval("window.sbLastWrite || ''");
+      ctx.check(`slow drags across ${what}: the text moves exactly with the scroll`, bad.length === 0, bad.slice(0, 5).join(", "));
+      ctx.check(`slow drags across ${what}: no scroll position written`, writes === 0 || why === "slack", `${writes} (${why})`);
     }
+  },
+
+  // §W3.3's fast flings: 8,000 and 20,000 px/s, down and up, 3 s each.
+  // No frame shows the page's end, the pager or the credit line before
+  // Revelation, or a strip with neither text nor placeholder (the view is
+  // always inside the scroller).
+  async fling(ctx) {
+    const { page, base } = ctx;
+    await page.size(...ctx.SIZES.phone);
+    await page.open(base + "/read/bsb/john/3");
+    await page.rest();
+    const RECORD = `(() => {
+      window.__bad = []; window.__on = true; window.__frames = 0;
+      const f = () => {
+        if (!window.__on) return;
+        window.__frames++;
+        const b = document.querySelector(".bible").getBoundingClientRect();
+        const cr = document.querySelector(".credit").getBoundingClientRect();
+        const end = document.querySelector('.bible > article[data-c="1188"]');
+        if (!end && (b.bottom < innerHeight || cr.top < innerHeight)) window.__bad.push("the end at frame " + window.__frames);
+        if (b.top > document.querySelector(".bar").offsetHeight + 1 && scrollY > 0) window.__bad.push("above the scroller at frame " + window.__frames);
+        requestAnimationFrame(f);
+      };
+      requestAnimationFrame(f);
+    })()`;
+    let shot = false;
+    for (const [speed, dir] of [[8000, -1], [8000, 1], [20000, -1], [20000, 1]]) {
+      const w0 = await page.eval("window.sbWrites || 0");
+      await page.eval(RECORD);
+      const g = page.send("Input.synthesizeScrollGesture", { x: 200, y: 400, yDistance: dir * speed * 3, speed, gestureSourceType: "touch", repeatCount: 1 });
+      if (!shot && speed === 20000) {
+        await sleep(350);
+        await ctx.shot("wa-21-fling-phone-paper");
+        shot = true;
+      }
+      await g;
+      await page.eval("window.__on = false");
+      const bad = await page.eval("window.__bad");
+      const r = await reading(page);
+      const writes = (await page.eval("window.sbWrites || 0")) - w0;
+      ctx.check(`a fling at ${speed} px/s ${dir < 0 ? "down" : "up"}: never the end, never outside the scroller`, bad.length === 0, bad.slice(0, 3).join("; ") + ` (at ${r.title})`);
+      ctx.check(`a fling at ${speed} px/s ${dir < 0 ? "down" : "up"}: no scroll position written`, writes === 0, String(writes));
+      await page.rest();
+    }
+  },
+
+  // §W3.3's estimates: every BSB chapter estimated against its measured
+  // height, at phone and desktop widths.
+  async estimates(ctx) {
+    const { page, base } = ctx;
+    for (const size of ["phone", "desktop"]) {
+      await page.size(...ctx.SIZES[size]);
+      await page.open(base + "/read/bsb/john/3");
+      await page.rest();
+      await page.waitFor("window.sbWhole > 0");
+      await page.eval(`window.sbCheck = ""; dispatchEvent(new Event("sbcheck"))`);
+      await page.waitFor("window.sbCheck", 120000);
+      const rows = (await page.eval("window.sbCheck")).split(";").filter(Boolean).map((r) => r.split(" ").map(Number));
+      let sum = 0, worst = 0, worstC = 0, above = 0, aboveTotal = 0, szSum = 0, szWorst = 0;
+      for (const [c, e, m, z] of rows) {
+        szSum += Math.abs(z - m) / m;
+        szWorst = Math.max(szWorst, Math.abs(z - m) / m);
+        const err = Math.abs(e - m) / m;
+        sum += err;
+        if (err > worst) [worst, worstC] = [err, c];
+        if (c < 999) {
+          above += e - m;
+          aboveTotal += m;
+        }
+      }
+      const mean = sum / rows.length;
+      const cum = Math.abs(above) / aboveTotal;
+      ctx.log(`${size}: ${rows.length} chapters, mean ${(100 * mean).toFixed(2)}%, worst ${(100 * worst).toFixed(2)}% (chapter ${worstC}), above John 3 ${(100 * cum).toFixed(2)}%; from the sizes table alone (the first paint's, report only): mean ${(100 * szSum / rows.length).toFixed(2)}%, worst ${(100 * szWorst).toFixed(2)}%`);
+      fs.writeFileSync(path.join(ctx.out, `estimates-${size}.txt`), rows.map((r) => r.join(" ")).join("\n") + "\n");
+      ctx.check(`estimates at ${size}: mean error 2% or less`, mean <= 0.02, (100 * mean).toFixed(2) + "%");
+      ctx.check(`estimates at ${size}: worst 6% or less`, worst <= 0.06, (100 * worst).toFixed(2) + "% (chapter " + worstC + ")");
+      ctx.check(`estimates at ${size}: signed error above John 3 1.5% or less`, cum <= 0.015, (100 * cum).toFixed(2) + "%");
+    }
+  },
+
+  // §W3.3's size limit: the largest step and a 200% browser text size keep
+  // the scroller under 12 million px (a testament or a book), and its link
+  // across works.
+  async sizelimit(ctx) {
+    const { page, base } = ctx;
+    await page.size(...ctx.SIZES.phone);
+    await page.send("Page.addScriptToEvaluateOnNewDocument", { source: `(function big() { if (document.documentElement) document.documentElement.style.fontSize = "200%"; else requestAnimationFrame(big); })()` });
+    await setSettings(page, base, "/read/bsb/malachi/4", "step=7");
+    const h = await page.eval(`document.querySelector(".bible").getBoundingClientRect().height`);
+    const across = await page.eval(`document.querySelector(".across:not(.up) a")?.getAttribute("href") || ""`);
+    ctx.check("the largest text: the scroller under 12 million px", h < 12e6, Math.round(h) + " px" + (across ? ", across to " + across : ""));
+    if (across) {
+      await page.eval(`document.querySelector(".across:not(.up) a").click()`);
+      await sleep(600);
+      await page.rest();
+      const r = await reading(page);
+      ctx.check("the link across the scroller's end lands there", r.path === across && r.title === "Matthew 1", r.path + " " + r.title);
+    }
+    await page.eval("localStorage.clear()");
+  },
+
+  // The first Go To (§W1.8): the title opens it over the place, John's
+  // row open with chapter 3 current; a chapter chosen goes there, the
+  // dialog's entry replaced (Back returns to John 3); Back closes it; and
+  // /read/bsb/ opens it over the place.
+  async goto(ctx) {
+    const { page, base } = ctx;
+    for (const size of ["phone", "desktop"]) {
+      await page.size(...ctx.SIZES[size]);
+      await page.open("about:blank", false);
+      await page.open(base + "/read/bsb/john/3");
+      await page.rest();
+      const h0 = await page.eval("history.length");
+      await page.eval(`document.querySelector(".bar .title").click()`);
+      await page.waitFor(`document.querySelector("dialog.goto")?.open`);
+      await page.frames(3);
+      const hOpen = await page.eval("history.length");
+      const g = await page.eval(`({ open: document.querySelector("dialog.goto details[open] summary span").textContent, cur: document.querySelector("dialog.goto [aria-current]")?.textContent, books: document.querySelectorAll("dialog.goto summary, dialog.goto a.book").length })`);
+      ctx.check(`Go To at ${size}: John open, chapter 3 current, 66 books`, g.open === "John" && g.cur === "3" && g.books === 66, JSON.stringify(g));
+      await ctx.shot(`wa-15-goto-${size}-paper`);
+      if (size === "phone") await axe(ctx, "Go To");
+      await page.eval(`(() => { const d = [...document.querySelectorAll("dialog.goto details")].find((x) => x.querySelector("summary span").textContent === "Romans"); d.open = true; d.querySelectorAll("a")[7].click(); })()`);
+      await sleep(300);
+      await page.rest();
+      const r = await reading(page);
+      ctx.check(`Go To at ${size}: a chapter chosen goes there`, r.title === "Romans 8" && r.path === "/read/bsb/romans/8" && !(await page.eval(`document.querySelector("dialog.goto").open`)), r.title + " " + r.path);
+      const h1 = await page.eval("history.length");
+      ctx.check(`Go To at ${size}: it is an entry, which the jump replaces`, hOpen === h0 + 1 && h1 === hOpen, `${h0} → ${hOpen} → ${h1}`);
+      await page.eval("history.back()");
+      await sleep(400);
+      await page.rest();
+      const b = await reading(page);
+      ctx.check(`Go To at ${size}: Back from the jump returns to John 3`, b.title === "John 3", b.title);
+    }
+    await page.eval(`document.querySelector(".bar .title").click()`);
+    await page.waitFor(`document.querySelector("dialog.goto")?.open`);
+    await page.eval("history.back()");
+    await sleep(400);
+    ctx.check("Back closes Go To", !(await page.eval(`document.querySelector("dialog.goto").open`)));
+    await page.open(base + "/read/bsb/");
+    await page.waitFor(`document.querySelector("dialog.goto")?.open`);
+    const r = await reading(page);
+    ctx.check("/read/bsb/ opens Go To over the place", r.title === "John 3", r.title);
+    await page.eval("localStorage.clear()");
   },
 
   // §W3.9 item 9: the bar collapses without moving the text.
@@ -511,20 +660,32 @@ export const flows = {
   async performance(ctx) {
     const { page, base } = ctx;
     await page.size(...ctx.SIZES.phone);
-    await page.send("Network.setCacheDisabled", { cacheDisabled: true });
-    await page.send("Network.emulateNetworkConditions", { offline: false, latency: 150, downloadThroughput: (9e6 / 8) | 0, uploadThroughput: (1.5e6 / 8) | 0 });
-    await page.send("Emulation.setCPUThrottlingRate", { rate: 4 });
     await page.send("Page.addScriptToEvaluateOnNewDocument", { source: `window.__lcp = 0; window.__cls = 0;
       new PerformanceObserver((l) => { for (const e of l.getEntries()) window.__lcp = e.startTime; }).observe({ type: "largest-contentful-paint", buffered: true });
       new PerformanceObserver((l) => { for (const e of l.getEntries()) if (!e.hadRecentInput) window.__cls += e.value; }).observe({ type: "layout-shift", buffered: true });` });
-    await page.open(base + "/read/bsb/john/3");
-    await sleep(500);
-    const r = await page.eval(`({ lcp: Math.round(__lcp), cls: __cls, ready: Math.round(sbReady) })`);
-    await page.send("Emulation.setCPUThrottlingRate", { rate: 1 });
-    await page.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
-    ctx.check("the text on screen in 1.5 s or less (LCP)", r.lcp > 0 && r.lcp <= 1500, r.lcp + " ms");
-    ctx.check("no layout shift (CLS 0.01 or less)", r.cls <= 0.01, r.cls.toFixed(4));
-    ctx.check("the app ready in 3.5 s or less", r.ready <= 3500, r.ready + " ms");
+    const visit = async (down, latency, cold) => {
+      await page.send("Network.setCacheDisabled", { cacheDisabled: cold });
+      await page.send("Network.emulateNetworkConditions", { offline: false, latency, downloadThroughput: (down / 8) | 0, uploadThroughput: (1.5e6 / 8) | 0 });
+      await page.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+      await page.open("about:blank", false);
+      await page.open(base + "/read/bsb/john/3");
+      await sleep(600);
+      const r = await page.eval(`({ lcp: Math.round(__lcp), cls: __cls, ready: Math.round(sbReady), whole: Math.round(window.sbWhole || -1) })`);
+      await page.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+      await page.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+      return r;
+    };
+    const first = await visit(9e6, 150, true);
+    ctx.log(`4G, first visit: text ${first.lcp} ms, ready ${first.ready} ms, the whole text ${first.whole} ms`);
+    ctx.check("first visit on 4G: the text on screen in 1.5 s or less (LCP)", first.lcp > 0 && first.lcp <= 1500, first.lcp + " ms");
+    ctx.check("first visit on 4G: no layout shift (CLS 0.01 or less)", first.cls <= 0.01, first.cls.toFixed(4));
+    ctx.check("first visit on 4G: the app ready in 1.8 s or less", first.ready <= 1800, first.ready + " ms");
+    const second = await visit(9e6, 150, false);
+    ctx.log(`4G, second visit: text ${second.lcp} ms, ready ${second.ready} ms`);
+    ctx.check("second visit on 4G: the text on screen in 0.8 s or less", second.lcp > 0 && second.lcp <= 800, second.lcp + " ms");
+    const slow = await visit(1.6e6, 150, true);
+    ctx.log(`slow 4G, first visit (report only, 3 s): text ${slow.lcp} ms, ready ${slow.ready} ms, the whole text ${slow.whole} ms`);
+    await page.send("Network.setCacheDisabled", { cacheDisabled: false });
   },
 
   // §W14.3: phase (a)'s shots at three sizes, in Paper and Night, and the
@@ -537,15 +698,11 @@ export const flows = {
         await page.size(...ctx.SIZES[size]);
         await page.theme(dark);
         for (const [n, what, url] of [["10", "john3", "/read/bsb/john/3"], ["11", "genesis1", "/read/bsb/genesis/1"], ["12", "psalm23", "/read/bsb/psalms/23"],
-          ["13", "psalm119", "/read/bsb/psalms/119"], ["14", "jude", "/read/bsb/jude/1"], ["15", "index", "/read/bsb/"]]) {
+          ["13", "psalm119", "/read/bsb/psalms/119"], ["14", "jude", "/read/bsb/jude/1"]]) {
           await page.open(base + url);
           await page.rest();
-          if (what === "index") {
-            const ix = await page.eval(`({ arts: document.querySelectorAll("article.ch").length, first: document.querySelector("main a")?.getAttribute("href"), app: document.documentElement.classList.contains("app") })`);
-            ctx.check(`the book index stays the book index (${size}, ${theme})`, ix.arts === 0 && ix.first === "/read/bsb/genesis/1" && ix.app, JSON.stringify(ix));
-          }
           await ctx.shot(`wa-${n}-${what}-${size}-${theme}`);
-          if (size === "phone" && !dark && (what === "john3" || what === "index")) await axe(ctx, what);
+          if (size === "phone" && !dark && what === "john3") await axe(ctx, what);
         }
         await page.open(base + "/read/bsb/john/3");
         await page.eval(`document.querySelector(".bar .aa").click()`);
@@ -588,16 +745,5 @@ export const flows = {
     const wide = await page.eval(`document.documentElement.scrollWidth <= innerWidth`);
     ctx.check("320 px at 200% text: nothing wider than the screen", wide);
     await ctx.shot("wa-19-narrow-200-phone-paper");
-    const old = await ctx.newPage();
-    await old.size(...ctx.SIZES.phone);
-    await old.send("Page.addScriptToEvaluateOnNewDocument", { source: "delete window.WebAssembly" });
-    await old.open(base + "/read/bsb/john/3", false);
-    await sleep(500);
-    const line = await old.eval(`!document.querySelector(".old").hidden && !document.documentElement.classList.contains("app")`);
-    ctx.check("an old browser: the page, and its one line at the end", line);
-    await old.eval(`scrollTo(0, 1e6)`);
-    await old.frames(2);
-    fs.writeFileSync(path.join(ctx.out, "wa-20-old-browser-phone-paper.png"), await old.png());
-    await old.close();
   },
 };

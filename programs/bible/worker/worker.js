@@ -31,6 +31,7 @@
 // address; tests point it at a mock.
 import { BOOKS } from "./versecounts.js";
 import { BOOT_HASH } from "./boot_hash.js";
+import { passage } from "./books.js";
 import { convert, keyOf } from "./esv.js";
 
 // The budget for every call upstream, under the terms with room to spare.
@@ -260,12 +261,14 @@ export const searchReply = (body) => ({
     .filter(Boolean),
 });
 
-// ---- the reader on the web, /read/ (WEB.md §W2.1a) ----
-// A reader's address with no page of its own (an ESV chapter, search, a
-// plan's day, the manual, a passage typed into the address) is answered
-// by the app's shell, which draws it.
+// ---- the reader on the web, /read/ (WEB.md §W2.1a, §W1.8) ----
+// Every reader's address (/read/ itself, a version's chapter or book,
+// search, a plan's day, the manual, a passage typed into the address) is
+// answered by the app's shell, which draws it; its head is filled for the
+// address (the passage's name, never its text). Only files, the shell and
+// About are assets. Nothing under /read/ is indexed.
 export const READER =
-  /^\/read\/(?:(?:bsb|kjv|web|asv|ylt|esv)(?:\/[a-z0-9-]+(?:\/\d{1,3})?)?\/?|search|plans\/[a-z0-9-]+\/\d{1,3}|manual(?:\/[a-z0-9-]+)?|[A-Za-z0-9.:%-]{1,40})$/;
+  /^\/read\/(?:(?:bsb|kjv|web|asv|ylt|esv)(?:\/[a-z0-9-]+(?:\/\d{1,3})?)?\/?|search|plans\/[a-z0-9-]+\/\d{1,3}|manual(?:\/[a-z0-9-]+)?|[A-Za-z0-9.:%-]{1,40})?$/;
 
 export const CSP = [
   "default-src 'self'",
@@ -300,17 +303,43 @@ const readerHeaders = (r, path, extra = {}) => {
   } else if (HASHED.test(path) || path.startsWith("/read/data/") || path.startsWith("/read/fonts/")) {
     h.set("Cache-Control", "public, max-age=31536000, immutable");
   }
+  h.set("X-Robots-Tag", "noindex");
   for (const [k, v] of Object.entries(extra)) h.set(k, v);
   return new Response(r.body, { status: extra.status ?? r.status, statusText: r.statusText, headers: h });
 };
+
+const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+
+// The shell's head and the bar's first title for an address: "John 3 · BSB
+// · Smooth Bible", og:title "John 3 · Smooth Bible", og:description "John 3
+// in the Berean Standard Bible.", og:url; anything not a passage keeps
+// "Smooth Bible" and no description. (By replacing the shell's own
+// defaults: the shell is ours and small; this also runs under Node.)
+export function fillShell(html, url) {
+  const p = passage(url.pathname);
+  const href = "https://smoothbible.com" + url.pathname;
+  let head = `<meta property="og:url" content="${esc(href)}">`;
+  if (!p) return html.replace("<!--sb-head-->", head);
+  const title = `${p.name} · ${p.version.toUpperCase()} · Smooth Bible`;
+  const desc = `${p.name} in the ${p.versionName}.`;
+  head = `<meta name="description" content="${esc(desc)}">\n<meta property="og:description" content="${esc(desc)}">\n` + head;
+  return html
+    .replace("<title>Smooth Bible</title>", `<title>${esc(title)}</title>`)
+    .replace('<meta property="og:title" content="Smooth Bible">', `<meta property="og:title" content="${esc(p.name)} · Smooth Bible">`)
+    .replace("<!--sb-head-->", head)
+    .replace('aria-label="Smooth Bible"', `aria-label="${esc(p.name)}"`)
+    .replace('<span class="t">Smooth Bible</span>', `<span class="t">${esc(p.name)}</span>`);
+}
 
 async function read(request, env, url) {
   const r = await env.ASSETS.fetch(request);
   if (r.status === 404 && READER.test(url.pathname)) {
     const shell = await env.ASSETS.fetch(new Request(new URL("/read/shell", url), request));
+    const html = fillShell(await shell.text(), url);
     const h = new Headers(shell.headers);
-    h.set("X-Robots-Tag", "noindex");
-    return readerHeaders(new Response(shell.body, { status: 200, headers: h }), url.pathname);
+    h.delete("content-length");
+    h.delete("etag");
+    return readerHeaders(new Response(html, { status: 200, headers: h }), url.pathname);
   }
   return readerHeaders(r, url.pathname);
 }
