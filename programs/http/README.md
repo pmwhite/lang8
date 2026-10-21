@@ -4,11 +4,11 @@ An HTTP/1.1 origin-server and client library written in L8. Import `http.l8`.
 The parser, serializer, chunk decoder, conditional-request evaluator, range
 implementation, socket transport, clocks, calendar conversion, and process
 management are L8 code backed by Linux system calls. HTTP binaries have no libc
-or dynamic-loader dependency. The build and test commands build a tag-aware
+or dynamic-loader dependency. The build commands build a tag-aware
 stage-2 compiler using the checked-in `bootstrap`, without a C compiler or
 third-party HTTP package, on x86-64 Linux. Public declarations carry
 the `http` tag; callers activate it with `use_tag http;`. Implementation helpers
-carry only `http_internal`, which is explicitly enabled by white-box tests.
+carry only `http_internal`.
 Runnable examples live in [`../examples/http-client.l8`](../examples/http-client.l8)
 and [`../examples/http-server.l8`](../examples/http-server.l8).
 
@@ -16,10 +16,8 @@ The selected protocol scope is **HTTP/1.1 over TCP**, with HTTP/1.0 compatibilit
 The reference set includes RFC 9110, RFC 9112, their verified-errata snapshots,
 and the March 2026 RFC 9931 CONNECT security update. Original documents,
 source URLs, and SHA-256 hashes are in [spec/](spec/). The
-[conformance matrix](CONFORMANCE.md) maps implemented behavior to executable
-tests and explicitly identifies optional and application-owned behavior.
-This is a tested implementation, not a claim that finite tests prove every
-requirement in the entire HTTP family.
+[conformance matrix](CONFORMANCE.md) records the implemented scope and historical
+test evidence. The networking test suites have been removed.
 
 ## Build and run
 
@@ -27,7 +25,6 @@ From the repository root:
 
 ```sh
 make http
-make http-test
 .build/http/server 8080 127.0.0.1
 # In another terminal:
 .build/http/client 127.0.0.1 8080 /
@@ -52,12 +49,6 @@ The client arguments are `HOST PORT TARGET [METHOD [BODY [expect|chunked]]]`.
 It prints response content, exits 22 for HTTP errors, 1 for protocol/transport
 failure, and 2 for invalid invocation. BODY arguments are strings; binary bodies
 are supported by the library. It does not follow redirects automatically.
-
-`make http-test` uses the stage-3 compiler. To test another compiler, run
-`python3 tools/lib_expect.py --discover programs/http/tests --compiler PATH` and
-`L8C=PATH HTTP_BUILD=DIR python3 -m unittest discover -s programs/http/tests`. Tests
-require Python 3.11+ and its standard library, run exclusively against local
-loopback peers, and need no network downloads. Test helpers rebuild once per run.
 
 ```sh
 python3 programs/http/spec/fetch.py --check     # offline hash verification

@@ -54,7 +54,7 @@ MOST = 6          # passages a day
 HEADER = (
     "# Chronological (our own order, from George Townsend's arrangements, 1821 and 1825, "
     "and A. T. Robertson's Harmony of the Gospels, 1922; public domain).\n"
-    "# Made by tools/chrono.py from data/plans/chrono-order.txt; checked by test_plans.l8.\n"
+    "# Made by tools/chrono.py from data/plans/chrono-order.txt.\n"
     "@id\tchrono\n"
     "@name\tChronological\n"
     "@blurb\tThe whole Bible in the order the events happened: the prophets with their kings, "

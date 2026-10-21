@@ -11,7 +11,6 @@ make profile-explorer
 perf record -g -F 5000 ./program
 perf script | .build/profile-explorer -            # perf samples, from stdin
 .build/profile-explorer --dump trace.json          # threads and top self times, no window
-make profile-explorer-test
 ```
 
 ## Input
@@ -87,8 +86,7 @@ event, the event under the pointer, or a span's children is a binary search.
 FreeType glyph atlas. Rows skip spans that would land on pixels already drawn,
 so a frame's cost follows the window's size rather than the trace's.
 `profile-explorer.l8` owns the X11 window and event loop and redraws only after
-input. `dump.l8` prints the text summary used by `--dump` and the tests in
-`test.l8`, which run without a display.
+input. `dump.l8` prints the text summary used by `--dump`.
 
 The whole file is kept in memory along with the parsed events: Chromium's
 startup trace (49 MB, 168,000 events, 89 threads) loads in about two seconds.

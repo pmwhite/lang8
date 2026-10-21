@@ -8,9 +8,6 @@ Build and test from the lang8 repository root:
 ./l8 build programs/tree-calculus/main.l8 -o .build/tree-calculus
 printf '21100\n2100\n' | .build/tree-calculus
 # 2100
-python3 programs/tree-calculus/test.py
-./l8 build programs/tree-calculus/test-native.l8 -o .build/tree-calculus-test
-.build/tree-calculus-test
 ```
 
 Input matches the upstream C++ benchmark interface: one prefix-encoded tree per
@@ -153,25 +150,3 @@ JavaScript/WebAssembly used Node 26.7.0; Python was 3.11.2.
 [Saved measurements](benchmark-results.json) include both scans, all samples,
 commands, failures and source/binary checksums. These results establish the lead
 on the measured machine and workloads, not on every CPU or arbitrary program.
-
-
-## Validation
-
-`test.py` checks both backends against an independent Python reduction oracle:
-all pairs of trees up to five nodes, 400 deterministic random applications,
-malformed inputs, and deep trees that exercise buffer/stack growth and large
-output. A 12,000-step nested application forces continuation growth during
-reduction. The 1,412 CLI checks run with the normal OS stack limit. The extended
-run also passed all 1,440 checks, including upstream programs at additional
-sizes to check beyond the timed workloads:
-
-```sh
-python3 programs/tree-calculus/test.py --upstream /tmp/tree-calculus
-```
-
-`test-native.l8` checks the shared binary layouts, forced arena and stack growth,
-preservation of caller continuation frames, cached-node reuse, and deliberate
-node/application-cache collisions. In particular, it verifies that evicted nodes
-remain valid and that equivalent nodes may receive different IDs. Python is
-needed only for testing and benchmarking; the interpreter is a static executable
-with no libc or upstream dependency.

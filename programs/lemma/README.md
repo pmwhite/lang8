@@ -8,7 +8,6 @@ graph of its subject.
 
 ```sh
 make lemma && .build/lemma [PROGRESS]   # PROGRESS: .build/lemma-progress.txt
-make lemma-test                         # the engine's tests, and every level played
 make lemma-web                          # the page, in .build/web/lemma (after make web)
 ```
 

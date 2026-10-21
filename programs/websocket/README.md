@@ -28,7 +28,6 @@ From the repository root:
 make websocket
 .build/websocket/server 8081
 .build/websocket/client 127.0.0.1 8081 / hello
-make websocket-test
 ```
 
 Protocol reference: [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html).

@@ -1,5 +1,9 @@
 # Smooth Bible on the web: design specification
 
+> 2026-10-21: Bible test suites, browser checks and simulator screenshot
+> automation were removed at the owner's request. Test/screenshot instructions
+> below are historical; current build commands are in README.md.
+
 The web designer writes this. The web builder implements it as written, and the designer
 reviews CI screenshots against it (`REVIEW-web-*.md`). The rules are DESIGN.md's (its
 opening paragraph): if something here can't be built, the builder says so in the commit

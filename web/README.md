@@ -205,16 +205,6 @@ Integers, pointers, and slices cross as `i64` (a JavaScript `BigInt`), and
 Other imports return `-ENOSYS`. `instantiate(module, sys, extra)` accepts
 extra imports, and `MemFS` is an in-memory file system for browsers.
 
-## Character viewer
-
-The site's `character/` page runs `programs/character` on the same platform,
-with a page round it: the figure's poses, animations, and routes over the ground, its layers and parts
-to show, hide, and pick out, the views, and the figure's text
-([format](../programs/character/FORMAT.md)) to change and bake again. The
-viewer writes lines starting `CHR` that the page reads, and takes the page's
-commands as key codes from 1000000000 up (see `character.js`). A phone bakes
-a coarser mesh unless `?detail=100` asks for the finest.
-
 ## CAD
 
 The site's `cad/` page runs `programs/cad` (see its README) on the same
@@ -341,10 +331,16 @@ fetches the place's book, the sizes table and the app at once), `read.css`,
 `about.html`, and `bible.js`, which starts `programs/bible/web.l8`. `make
 bible-web` builds the site in `.build/bible-site` (`bible/build.py`: the
 assets under hashed names; each version whole, book by book, and its sizes
-table, `programs/bible/tools/sizes.l8`); `node bible/test/serve.mjs` serves
-it as smoothbible.com does, through the real Worker. `node
-web/bible/test/drive.mjs` (after `npm ci` in `web/bible/test`, for axe-core)
-runs the reader's checks and shots in headless Chrome over CDP
-(`flows.mjs`; `--only scroll,keep`, `--no-shots`), writing them to
-`.build/bible-web-shots`; CI's `web` job runs it and pushes the shots to
-`ci-bible-web-shots`.
+table, `programs/bible/tools/sizes.l8`); `node web/bible/serve.mjs` from
+the repository root serves it as smoothbible.com does, through the real
+Worker. CI's `web` job builds and uploads the site as `bible-web-site`.
+The browser checks and screenshot runs have been removed.
+
+`make -j4 bible-web` packages each translation independently in
+`.build/bible-data/`, sharing Make's job slots. UI assets reuse those compressed
+files; changing a translation rebuilds that version and the data manifest.
+The size-table tool depends on the text/estimate modules and standard library,
+so UI source edits do not invalidate the data cache. `bible/build.py` implements
+the splitting, hashing and page assembly; Make owns stage dependencies and
+parallelism. The data remains gzip for the browser's explicit
+`DecompressionStream("gzip")` loading path.

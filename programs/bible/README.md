@@ -189,36 +189,35 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   word's).
   `tools/fetch.sh DIR make` downloads the sources, checks
   their sha256, and makes them all again.
-  `lang.l8` reads the study data for the study screens (`test_lang.l8`), and
+  `lang.l8` reads the study data for the study screens, and
   `ios_study.l8` shows them; `orig.l8` is the Hebrew and Greek's portable
   part (which words are glossed and their glosses, a verse's words and
   Hebrew number, a word's popover, search by its letters).
   The BSB, KJV, WEB, ASV, YLT and the commentary are in the public domain;
   the cross references and STEP's texts are CC BY 4.0; UBS's meanings CC
   BY-SA 4.0.
-- `text.l8` indexes it and lays a chapter out as runs of styled text;
-  `test_text.l8` tests that (`make bible-test`).
+- `text.l8` indexes it and lays a chapter out as runs of styled text.
 - `ios.l8` is the app: the reader and its classes; `ios_look.l8` the themes,
   fonts and styles; `ios_store.l8` what is kept; `ios_select.l8` selection,
   the tray, the edit menu and jumps; `ios_sheets.l8` the sheets;
   `ios_versions.l8` the versions and switching; `ios_esv.l8` the ESV's
   client, cache on disk and the reader's states while a chapter comes
-  (`esv_cache.l8` its portable rules, tested in `test_store.l8`);
+  (`esv_cache.l8` its portable rules);
   `ios_compare.l8` Compare; `ios_study2.l8` the Study sheet's segments;
   `ios_daily.l8` Go To's Ribbons and Reading Plan sections, the plans, a
   plan's days, A Chapter a Day and the reminder, and `ios_day.l8` a plan's
   day's reader (`plans.l8` their portable part: the plans, their days of
-  passages, progress, a day laid out; tested in `test_plans.l8`);
+  passages, progress, a day laid out);
   `data/plans/mcheyne.txt` and `chrono.txt` the listed plans
   (`tools/chrono.py` makes the second from `chrono-order.txt` and checks
   that it has every verse once); `ios_ribbons.l8` the ribbons' rows, New
   Ribbon, Ribbon, the title's menu, the glyph and the toasts (`ribbons.l8`
-  their portable part, tested in `test_ribbons.l8`); `ios_share.l8` Share as
+  their portable part); `ios_share.l8` Share as
   Image; `ios_memory.l8` Memory's files, the tray's Memorize, the
   Library's Memory segment, Add Passage and Passage, and `ios_practice.l8`
   Practice (`memory.l8` their portable part: words and key letters, parts,
-  hiding, the schedule, Today, the files and the reminder's words, tested
-  in `test_memory.l8`); `ios_learn.l8` Greek's and Hebrew's pages (the
+  hiding, the schedule, Today, the files and the reminder's words);
+  `ios_learn.l8` Greek's and Hebrew's pages (the
   language page, the Alphabet and Sounds Written As, Your Words, Add Words
   and its preview, Verses You Can Read, Forms), cards.tsv and the voices
   (off, behind `LEARN_SPEECH`), and
@@ -226,38 +225,31 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   portable part: vocab.bin and letters.txt, cards on `memory.l8`'s
   schedule, what is known, coverage, a passage's words, readable verses,
   a card's verse, cards.tsv; `lang.l8` a lemma's forms and Greek for the
-  voice; tested in `test_learn.l8`); `ios_help.l8` the Manual and
+  voice); `ios_help.l8` the Manual and
   Reading settings' Help (`help.l8` its portable part: `data/help.txt` read
-  and checked, the Manual's search; tested in `test_help.l8`, which fails
-  on a broken link or anchor, an unknown symbol, or a paragraph out of the
-  house style); `ios_ipad.l8` the window's root (a container of the reader's navigation
+  and checked, the Manual's search); `ios_ipad.l8` the window's root (a container of the reader's navigation
   controller and, beside it, Study's), the width's changes and the place
   kept through them, the floating controls over the column, form sheets
   and popovers, the keys and the menu bar, and hover; `ios_beside.l8`
-  Study beside the text (`text.l8`'s `column_width` is the column, tested
-  in `test_text.l8`); `ios_orig.l8` the Hebrew and Greek's
+  Study beside the text (`text.l8`'s `column_width` is the column); `ios_orig.l8` the Hebrew and Greek's
   screens (its data at first use, Glosses and Show Accents, the glossed
   words' lines, a word's popover, the letter keyboard); `ios_demo.l8` (and
-  `ios_demo3.l8` to `ios_demo17.l8`) the demo CI runs (`ios_demo11.l8`
+  `ios_demo3.l8` to `ios_demo17.l8`) the retained demo code (`ios_demo11.l8`
   Round 11's).
-- The web (`WEB.md`): `html.l8` writes a chapter as HTML (tested in
-  `test_html.l8`); `estimate.l8` estimates a chapter's height from its
+- The web (`WEB.md`): `html.l8` writes a chapter as HTML; `estimate.l8` estimates a chapter's height from its
   records (or counts its blocks for `tools/sizes.l8`'s sizes table, which
   the first paint estimates from); `text.l8`'s `text_load_book` holds one
-  book with the whole Bible's chapter numbers (tested in `test_text.l8`).
+  book with the whole Bible's chapter numbers.
   The app is `web.l8` (start, settings, keys, history, Go To),
   `web_reader.l8` (the scroller laid out by the height table, the window
   of chapters, the bar, the place, footnotes) and `web_table.l8` (the
   calibration, measuring, kept heights), running in the browser through
   the page bridge (`../web/dom.l8`, `web/dom.js`). `make bible-web` builds
-  the site into `.build/bible-site` (`web/bible/`); `make
-  bible-wasm-test` runs the tests as WebAssembly. The workflow's `web` job
-  (Linux) builds the site, runs the driver's checks
-  (`web/bible/test/drive.mjs`) and pushes the shots to
-  `ci-bible-web-shots`.
+  the site into `.build/bible-site` (`web/bible/`). The workflow's `web` job
+  builds the site and uploads it as `bible-web-site`. Serve it locally with
+  `node web/bible/serve.mjs`.
 - `audio.l8` is recorded readings' portable part (sources, addresses,
-  timings, which source a chapter is heard from, the cache's rules), tested
-  in `test_audio.l8`; `ios_audio.l8` the Voice screens, voices, the cache
+  timings, which source a chapter is heard from, the cache's rules); `ios_audio.l8` the Voice screens, voices, the cache
   and downloads; `ios_listen.l8` both engines (AVQueuePlayer, no blocks;
   AVSpeechSynthesizer). `data/audio/<reader>.tim` are the verse timings
   and `henson.paths` eBible.org's file names
@@ -265,13 +257,11 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   (wav2vec2 forced alignment of each recording to `tools/spoken.l8`'s text,
   `make bible-spoken VERSION=bsb`; see its docstring for running it), in a
   venv outside the repository; no audio is ever committed.
-  `demo/audio/` is CI's audio fixture (`make_fixture.sh`: a tone, its
-  timings, the ESV's answers), installed in every group (`L8_AUDIO_FIXTURE`).
+  `demo/audio/` holds the demo audio fixture (`make_fixture.sh`: a tone,
+  its timings, the ESV's answers), enabled by `L8_AUDIO_FIXTURE`.
 - `worker/` is the ESV proxy, a Cloudflare Worker (`worker.js`; `esv.js`
-  turns the ESV API's HTML into our records), with its tests
-  (`node --test programs/bible/worker/test.mjs`, against `fixtures/`: the
-  ESV's tags with the WEB's words) and `make_fixtures.mjs`, which writes the
-  app's fixture (`ios/esv-fixture/`) for CI. It is deployed at
+  turns the ESV API's HTML into our records), and `make_fixtures.mjs`, which writes the
+  app's fixture (`ios/esv-fixture/`) for demos. It is deployed at
   smoothbible.com (below), with `/api/v1/esv/audio` (Round 7).
 - `ios/` is what goes into the app besides its code: its Info.plist, icon
   (`AppIcon.svg`, drawn to `AppIcon.png` in Chromium, and as
@@ -279,19 +269,15 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   `AppIcon-tinted.png`, the tinted one on a transparent background),
   privacy manifest,
   named colors (`Colors/`: Paper, Ink, Faint, Accent, each light and dark),
-  frameworks and resources; and `simulate.sh`, which runs it in the
-  simulator.
+  frameworks and resources.
 
 ```sh
 tools/ios/build-linux.sh sim programs/bible/ios.l8 build programs/bible/ios     # anywhere
 tools/ios/build-linux.sh device programs/bible/ios.l8 device programs/bible/ios # and the IPA
-programs/bible/ios/simulate.sh build/SmoothBible.app shots                    # on a Mac
 ```
 
 Both builds are linked with iOS 26.2's SDK, so on iOS 26 the app has iOS
-26's design (the owner's choice); CI runs every group but `ios18` on the
-iOS 26.2 simulator runtime (`ios/pick.sh`), and `ios18` shows the older
-design. `build-linux.sh` needs no Mac: the compiler links the executable itself
+26's design (the owner's choice). `build-linux.sh` needs no Mac: the compiler links the executable itself
 (`l8 arm64 --exe`), and the asset catalog (the icon and the named colors) is
 kept compiled in `ios/assets/`. When the icon or colors change, the Smooth
 Bible assets workflow (`.github/workflows/bible-assets.yml`) compiles them
@@ -304,56 +290,11 @@ stops, saying so, until then). On a Mac, the Xcode way still works:
 tools/ios/build.sh sim bible-ios.s build programs/bible/ios
 ```
 
-GitHub builds it on every push to `trunk` that changes it or what it is
-built from (`.github/workflows/bible.yml` lists the paths): a Linux job tests the layout and compiles
-the app, and macOS jobs build it for the simulator, run it there with
-`L8_DEMO=1`, taking it through the books, a psalm, a footnote and John 3
-(each step a Darwin notification, sent with `notifyutil`), and push the screenshots to the `ci-bible-shots` branch, and build
-`SmoothBible.ipa` for an iPhone onto `ci-bible-ipa`. The `versions` group
-runs with the ESV's fixture (`L8_ESV_FIXTURE`), so no key or network is
-needed.
-
-The CI's layout, for speed (a full run takes 12 to 17 minutes, against
-about 27 when each group had a Mac of its own; see the workflow's header):
-
-- `compile` (Linux) builds the compiler only when its sources change (a
-  cache otherwise), then `SmoothBible.app` (`build-linux.sh`), uploaded for
-  the simulator jobs, then the IPA (pushed to `ci-bible-ipa`); `test` runs
-  the tests and the data checks beside it. Both take under half a minute.
-- Five `simulator (…)` jobs (macOS: the account runs at most five at once,
-  so there are five, and none waits for a runner) start at once, boot a
-  simulator and take the app as soon as it is uploaded
-  (`tools/ios/artifact.py`). (With the workflow's `MAC_BUILD` set, the
-  first builds the app and the IPA instead, with Xcode's tools, from
-  `compile`'s `bible-ios.s`; actool's output is cached then,
-  `ACTOOL_CACHE`, since it alone took 81 of the build's 91 s.)
-- A boot is what costs: two to four minutes on these Macs (seven once),
-  before a group's first launch, for a fresh, erased or copied simulator
-  alike, and it slows whatever runs beside it threefold (the first launch
-  after it once waited four minutes). So each Mac boots one simulator and
-  runs two groups on it one after another, `simulate.sh` resetting it
-  between them (the app and its defaults, permissions, keychain,
-  pasteboard, status bar, notification state); a group that leaves
-  something outside the app (plans' alert, more's share sheet) goes
-  last. store and memory share a Mac, each on its own simulator, more
-  third on memory's; ios18 follows ribbons and study on an iOS 18 iPhone of
-  its own; languages (Round 10) goes first on the versions job's iPhone;
-  help (§15) second on the read job's and original (Round 11) third,
-  before plans (grown by §16's day's
-  reader); ipad (§17, on the 13-inch iPad Pro) third on the notes job, its
-  iPad booted when its turn comes (booted beside the others, it slowed them
-  more than its boot costs; `simulate.sh`'s `SIM_KEEP` would leave one
-  booted ahead). Each group is uploaded (`shots-GROUP`) as it ends,
-  and `timing.txt` says when its boot, install, launch and settling came.
-- The groups are paired by their times so the jobs end together (a group
-  takes 1 to 4 minutes once booted; `timing.txt`'s `total` minus its
-  `settled at`); rebalance the workflow's matrix when one grows.
-- `frames` (Linux) makes the notes recording's frames as soon as the notes
-  group is uploaded; `publish` (under a minute) puts it all on
-  `ci-bible-shots`.
-- A push during a run waits for it (and of several only the newest runs),
-  so every run publishes: the screenshots come at most two runs after a
-  push, where before a stream of pushes could cancel run after run.
+GitHub builds it on pushes to `trunk` that change the app or its inputs
+(`.github/workflows/bible.yml` lists the paths). Linux jobs build the iOS
+assembly, simulator app artifact and iPhone IPA, and build the web site.
+The IPA is also pushed to `ci-bible-ipa`. Bible tests, data-check jobs,
+browser checks and simulator screenshot runs have been removed.
 
 ## The ESV proxy: deploying it (each step needs the owner's consent)
 

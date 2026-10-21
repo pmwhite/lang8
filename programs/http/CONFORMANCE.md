@@ -1,10 +1,10 @@
-# Specification and test map
+# Specification and historical test map
 
 The implementation targets the HTTP/1.1 **origin endpoint and user-agent
 messaging roles**, not every optional HTTP extension or intermediary role.
-This matrix is a coverage inventory, not formal certification. All named tests
-are executable with `make http-test`; source RFCs and verified errata are
-pinned by `spec/SOURCES.json`. No test needs a public server.
+The non-compiler test suites have been removed. Test names below are historical
+evidence, not currently executable coverage. Source RFCs and verified errata
+remain pinned by `spec/SOURCES.json`.
 
 ## RFC 9112: HTTP/1.1
 

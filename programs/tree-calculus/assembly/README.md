@@ -18,9 +18,6 @@ build dependencies (the assembler must support
 programs/tree-calculus/assembly/build.sh
 printf '21100\n2100\n' | .build/tree-calculus-asm
 # 2100
-python3 programs/tree-calculus/assembly/test.py
-# Optional additional upstream workload sizes:
-python3 programs/tree-calculus/assembly/test.py --upstream /tmp/tree-calculus
 ```
 
 `build.sh [output]` accepts an alternative output path. Run the executable with
