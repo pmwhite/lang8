@@ -330,7 +330,7 @@ and memorize, and every exercise is a real verse.
    read, ⌥⌘I), and no other sidebar.
 4. **Keyboard and pointer:** ⌘L Go To, ⌘F Search, ⌘] and ⌘[ chapters, ⌘← back, ⌘⇧P Listen,
    in the menu bar; hover on our controls; Practice by keyboard.
-5. **CI:** an `ipad` group on the study job's Mac (13-inch, both orientations, a narrow
+5. **CI:** an `ipad` group on the notes job's Mac (13-inch, both orientations, a narrow
    stand-in), iPad App Store screenshots; iPhone shots unchanged.
 
 ### Out of scope (all rounds so far)
@@ -9835,9 +9835,9 @@ and arrows follow the system's focus.
 - `test_help.l8`: the new condition and part.
 
 #### 17.8.2 The `ipad` demo group
-- **The device:** iPad Pro 13-inch (M4), iOS 26, booted on the **study job's Mac** after its
-  own groups (about 4 minutes), as `languages` runs on the versions job's. No sixth Mac is
-  needed.
+- **The device:** iPad Pro 13-inch (M4), iOS 26, booted on the **notes/listen/help job's
+  Mac** after its own groups (about 5 minutes; that job runs about 9 minutes today, review
+  s16-1), as `languages` runs on the versions job's. No sixth Mac is needed.
 - **Rotation:** through `requestGeometryUpdateWithPreferences:errorHandler:nil` (portrait,
   then landscape), with a 1.5 s settle and the log's "width … kept …".
 - **A narrow window:** a demo-only mode lays the root out at 375 pt wide, centred in the
