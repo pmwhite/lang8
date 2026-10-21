@@ -226,8 +226,11 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   a `region`, reuse them for successive chapters, and consume their buffers
   before the region ends. `layout_chapter_from(source, layout, chapter)`
   and `measure_chapter(layout, ranges, chapter)` leave the selected version
-  and reader buffers alone. Compare and previews use this path; the
-  reader's existing `layout_chapter` API uses a compatibility view.
+  and reader buffers alone. Every renderer owns its buffers: on iOS,
+  `core/reader_rendering.l8` pairs a layout with its ranges, and the main
+  reader and the day's reader each own one (`active_rendering()` is the
+  visible one; table callbacks pick theirs by table). Compare, previews,
+  Memory and the web's `html.l8` keep their own layouts.
 - `ios/app.l8` is the app: the reader and its classes; `ios/look.l8` the themes,
   fonts and styles; `ios/store.l8` what is kept; `ios/select.l8` selection,
   the tray, the edit menu and jumps; `ios/sheets.l8` the sheets;

@@ -259,9 +259,9 @@ builder's to choose):
 
 ### W1.5 The text on the page (`html.l8`)
 
-`html.l8` turns what `text.l8` already produces into HTML: `layout_chapter(c)` fills `out`
-with runs (`run_style`, `run_para`, `run_arg`, `run_end`) and the verse table
-(`verse_num`, `verse_shown`, `verse_begin`, `verse_end`). `html_chapter(c)` writes one
+`html.l8` turns what `layout.l8` already produces into HTML: `layout_chapter_from` fills
+its own `html_layout`'s `out` with runs (`run_style`, `run_para`, `run_arg`, `run_end`) and
+the verse table (`verse_num`, `verse_shown`, `verse_begin`, `verse_end`). `html_chapter(c)` writes one
 chapter as an `<article>`.
 
 **The markup** (classes are short; this is the contract between `html.l8` and the CSS):

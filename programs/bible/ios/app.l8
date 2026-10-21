@@ -29,7 +29,7 @@ import "../../ios/objc.l8";
 
 import "../core/text.l8";
 
-import "../core/chapter_ranges.l8";
+import "../core/reader_rendering.l8";
 
 import "look.l8";
 
@@ -314,66 +314,49 @@ stop_timer(timer: int): int {
 }
 
 // ---- the chapter as an attributed string ----
-// For each byte of out (and its end), how many UTF-16 units come before it.
-u16_at: []int = new int[262145](0);
+main_rendering: ReaderRendering = reader_rendering();
 
-// The verses of the chapter last measured (compute_ranges): their numbers,
-// and where each is in its text (UTF-16), from its number to its end, with
-// the marks put in.
-rv_c: int = -1;
+day_rendering: ReaderRendering = reader_rendering();
 
-rv_count: int = 0;
+// Event handlers work on the visible reader. Table rendering selects its
+// owner explicitly, including callbacks from the main table under a day.
+active_rendering(): *ReaderRendering@immortal {
+    if (day_on) &day_rendering else &main_rendering
+}
 
-rv_num: []int = new int[200](0);
+rendering_for_table(t: int): *ReaderRendering@immortal {
+    if (t == day_table) &day_rendering else &main_rendering
+}
 
-rv_b: []int = new int[200](0);
-
-rv_e: []int = new int[200](0);
-
-// Whether a verse's wash goes on over the space after it (to the next).
-rv_joins: []bool = new bool[200](false);
-
-// The marks put in: where (before them), how many units, and what (0 a
-// bookmark, 1 a note, 2 the chapter's note, after its label), for which
-// verse.
-ev_n: int = 0;
-
-ev_pos: []int = new int[400](0);
-
-ev_len: []int = new int[400](0);
-
-ev_kind: []int = new int[400](0);
-
-ev_verse: []int = new int[400](0);
-
-// Where each chapter's opener ends (its numeral, UTF-16), once laid out.
-opener16: []int = new int[1200](0);
-
-// Chapter c laid out (text.l8), its verses measured (in the day's reader,
-// its row's part of it: the row last named, lay_row, if it is of c).
 compute_ranges(c: int) {
-    r: int = if (day_on) chapter_row(c) else -1;
-    orig_before_layout(c);
-    if (r >= 0) layout_day_row(r) else layout_chapter(c);
-    ctx: ChapterLayout = reader_layout();
-    ranges: ChapterRanges = reader_ranges();
-    measure_chapter(&ctx, &ranges, c);
-    publish_ranges(&ranges, c)
+    rendering: *ReaderRendering = active_rendering();
+    row: int = if (day_on) chapter_row(c) else -1;
+    compute_ranges_in(rendering, c, row)
 }
 
-// The verse table's row for verse v (of the chapter measured), or -1.
+compute_ranges_in(rendering: *ReaderRendering, c: int, row: int) {
+    ctx: *ChapterLayout = &rendering.layout;
+    ctx.lay_verse_numbers = lay_verse_numbers;
+    ctx.lay_headings = lay_headings;
+    ctx.lay_notes = lay_notes;
+    ctx.lay_verse_lines = lay_verse_lines;
+    ctx.lay_accents = lay_accents;
+    ctx.source = text_source(text_cur);
+    orig_before_layout_source(&ctx.source, c);
+    if (row >= 0) layout_day_row(ctx, row) else layout_chapter_from(ctx.source, ctx,
+        c);
+    measure_chapter(ctx, &rendering.ranges, c);
+    rendering.openers[c] = rendering.ranges.opener16
+}
+
 rv_index(v: int): int {
-    for i in 0..rv_count
-        if (rv_num[i] == v) return i;
-    -1
+    rendering: *ReaderRendering = active_rendering();
+    ranges_index(&rendering.ranges, v)
 }
 
-// The verse whose text is at UTF-16 index k (of the chapter measured), or
-// -1.
 rv_at(k: int): int {
-    for i in 0..rv_count
-        if (k >= rv_b[i] && k < rv_e[i]) return i;
-    -1
+    rendering: *ReaderRendering = active_rendering();
+    ranges_at(&rendering.ranges, k)
 }
 
 // An attachment of a symbol's image, h points tall, its foot y above the
@@ -439,8 +422,8 @@ speak_v: int = 0;
 // The washes on chapter c's text s (the chapter measured): highlights,
 // the verses selected, and a verse flashed.
 paint_marks(s: int, c: int) {
-    ranges: ChapterRanges = reader_ranges();
-    paint_marks_in(&ranges, s, c, false)
+    rendering: *ReaderRendering = active_rendering();
+    paint_marks_in(&rendering.ranges, s, c, false)
 }
 
 paint_marks_in(
@@ -491,16 +474,17 @@ bookmarked_at(ctx: *ChapterLayout, c: int, p: int): bool {
 
 // Chapter c as an attributed string (autoreleased).
 chapter_text(c: int): int {
-    compute_ranges(c);
-    ctx: ChapterLayout = reader_layout();
-    ranges: ChapterRanges = reader_ranges();
-    s: int = chapter_text_layout(&ctx, &ranges, c, false);
-    // (The ESV's: its line at the end of a chapter; or, while a chapter is
-    // not here, what stands for it.)
+    row: int = if (day_on) chapter_row(c) else -1;
+    chapter_text_in(active_rendering(), c, row)
+}
+
+chapter_text_in(rendering: *ReaderRendering, c: int, row: int): int {
+    compute_ranges_in(rendering, c, row);
+    s: int = chapter_text_layout(&rendering.layout, &rendering.ranges, c, false);
     if (text_cur == TEXT_ESV) {
-        if (lay_placeholder) {
+        if (rendering.layout.lay_placeholder) {
             esv_placeholder(s, c);
-            compute_ranges(c)
+            compute_ranges_in(rendering, c, row)
         } else esv_footer(s)
     }
     s
@@ -678,10 +662,11 @@ chapter_cell(t: int, path: int): int {
     top: f64 = if (day_on) day_row_gap(row) else if (c == 0) top_gap() else em * 2.4f64;
     msg_rect(tv, sel("setTextContainerInset:"), top, m, if (!day_on && c + 1 == chapters) 120.0f64 else 0.0f64,
         m);
-    msg1(tv, sel("setAttributedText:"), chapter_text(c));
+    msg1(tv, sel("setAttributedText:"), chapter_text_in(rendering_for_table(t), c,
+        if (t == day_table) row else -1));
     // (A day's row says its row too: chapter_of_view.)
     msg1(tv, sel("setTag:"), if (day_on) (row + 1) * 2048 + c + 1 else c + 1);
-    day_cell_access(cell, tv, if (day_on) row else -1, top);
+    day_cell_access(rendering_for_table(t), cell, tv, if (day_on) row else -1, top);
     esv_dress(tv, c);
     esv_row_shown(c);
     cell
@@ -1060,6 +1045,7 @@ set_offset_animated(y: f64) {
 // Where verse v of chapter c begins, down from the table's top (or its
 // chapter's top, for verse 0).
 verse_y(c: int, v: int): f64 {
+    rendering: *ReaderRendering = active_rendering();
     // (In the day's reader, the row holding the verse.)
     if (day_on && v > 0) {
         r: int = day_row_of(c, v);
@@ -1072,7 +1058,7 @@ verse_y(c: int, v: int): f64 {
     compute_ranges(c);
     i: int = rv_index(v);
     if (i < 0) return y;
-    if (!range_rect(tv, rv_b[i], 1)) return y;
+    if (!range_rect(tv, rendering.ranges.rv_b[i], 1)) return y;
     y + hfa[1]
 }
 
@@ -1146,6 +1132,7 @@ place_v: int = 0;
 place_frac: int = 0;
 
 measure_place() {
+    rendering: *ReaderRendering = active_rendering();
     find_place();
     place_v = 0;
     place_frac = (cur_y * 1000.0f64 / em) as int;
@@ -1158,11 +1145,11 @@ measure_place() {
         pos);
     compute_ranges(cur);
     i: int = -1;
-    for x in 0..rv_count
-        if (rv_b[x] <= k) i = x;
+    for x in 0..rendering.ranges.rv_count
+        if (rendering.ranges.rv_b[x] <= k) i = x;
     if (i < 0) return;
-    if (!range_rect(tv, rv_b[i], 1)) return;
-    place_v = rv_num[i];
+    if (!range_rect(tv, rendering.ranges.rv_b[i], 1)) return;
+    place_v = rendering.ranges.rv_num[i];
     place_frac = ((cur_y - hfa[1]) * 1000.0f64 / em) as int
 }
 
@@ -1321,6 +1308,7 @@ tapped(_self: int, _cmd: int, tap: int): int {
 }
 
 reader_tap(tv: int, x: f64, y: f64): int {
+    rendering: *ReaderRendering = active_rendering();
     range: int = msg(tv, sel("selectedTextRange"));
     if (range != 0 && (msg(range, sel("isEmpty")) & 255) == 0) return 0;
     keep_screen_touched();
@@ -1360,7 +1348,7 @@ reader_tap(tv: int, x: f64, y: f64): int {
         compute_ranges(c);
         i: int = rv_at(k);
         if (i >= 0 && near_char(tv, k, x, y, 6.0f64)) {
-            toggle_verse(c, rv_num[i]);
+            toggle_verse(c, rendering.ranges.rv_num[i]);
             return 0
         }
     }
@@ -1643,8 +1631,10 @@ set_title() {
 title_config(i: int, c: int) {
     b: int = title_btn[i];
     title_btn_c[i] = c;
-    title_of(c);
-    name: int = nsstring_at(bytes_address(out), out_n);
+    at: int = fbuf_n;
+    fput_title(c);
+    name: int = nsstring_at(bytes_address(fbuf) + at, fbuf_n - at);
+    fbuf_n = at;
     config: int = msg(cls("UIButtonConfiguration"), sel("plainButtonConfiguration"));
     t: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
         name, title_attrs());
@@ -2303,34 +2293,4 @@ main() noregion: int {
     objc_registerClassPair(scene);
     note("bible: classes made; UIKit next");
     UIApplicationMain(l8rt_argc(), l8rt_argv(), 0, nsstring("L8BibleApp"))
-}
-
-// Compatibility view for callbacks that measure the reader itself.
-reader_ranges(): ChapterRanges {
-    ChapterRanges {
-        u16_at: u16_at,
-        rv_c: rv_c,
-        rv_count: rv_count,
-        rv_num: rv_num,
-        rv_b: rv_b,
-        rv_e: rv_e,
-        rv_joins: rv_joins,
-        ev_n: ev_n,
-        ev_pos: ev_pos,
-        ev_len: ev_len,
-        ev_kind: ev_kind,
-        ev_verse: ev_verse,
-        gw_n: gw_n,
-        gw_b: gw_b,
-        gw_e: gw_e,
-        opener16: 0
-    }
-}
-
-publish_ranges(ranges: *ChapterRanges, c: int) {
-    rv_c = ranges.rv_c;
-    rv_count = ranges.rv_count;
-    ev_n = ranges.ev_n;
-    gw_n = ranges.gw_n;
-    opener16[c] = ranges.opener16
 }
