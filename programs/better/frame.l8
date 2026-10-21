@@ -1,0 +1,190 @@
+tag better;
+
+use_tag std, gl, skate;
+
+// What every way of running Better shares (in a window or a web page, see
+// main.l8; on an iPhone, see ios.l8): its files, its start, and each
+// frame's work once the platform has passed on its events: the app's state
+// stepped on, the picture drawn, then the platform told what has changed
+// and the files saved. Each entry file defines the platform_* functions its
+// own way:
+//
+//   platform_gps(on)          watch where the phone is, or stop
+//   platform_gps_retry()      ask again after the phone refused
+//   platform_wake(on)         keep the screen on, or not
+//   platform_theme(pick, dark) light or dark as picked, and as it is
+//   platform_blur()           put the keyboard away
+//   platform_cue(k)           play a chime (see pace.l8)
+//   platform_goals()          keep the goals (line_goals) on this device
+//   platform_http(m, path, body, n)  ask the worker (see sync.l8, people.l8)
+//   platform_account()        keep the account (a new token, or none: see
+//                             people.l8's acct_tell)
+//   platform_share()          the share sheet, with share_buf's text
+extern open(path: str, flags: int, mode: int): int;
+
+extern close(fd: int): int;
+
+extern clock_gettime(clk: int, ts: *Timespec): int;
+
+type Timespec = {
+    sec: int;
+    nsec: int
+}
+
+clock_ns(clk: int): int {
+    ts: Timespec = Timespec { sec: 0, nsec: 0 };
+    clock_gettime(clk, &ts);
+    ts.sec * 1000000000 + ts.nsec
+}
+
+log_path: str = ".build/better-log.txt";
+
+live_path: str = ".build/better-live.txt";
+
+// A file, into lg_t: how many bytes (-1 if it cannot be read).
+read_file(path: str): int {
+    fd: int = open(path, 0, 0);
+    if (fd < 0) return -1;
+    n: int = 0;
+    more: bool = true;
+    while (more && n < len(lg_t)) {
+        r: int = read(fd, lg_t, n, len(lg_t) - n);
+        if (r <= 0) more = false else n = n + r
+    }
+    close(fd);
+    n
+}
+
+// What is in lt, as the file.
+write_file(path: str) raises IoError {
+    fd: int = open(path, 577, 420);
+    if (fd < 0) return;
+    write_bytes_n(fd, lt, lt_n);
+    close(fd)
+}
+
+// The log, and a recording under way when Better was last shut (taken up
+// again, paused).
+better_open() {
+    k: int = read_file(log_path);
+    read_log(maxi(k, 0));
+    lk: int = read_file(live_path);
+    if (lk > 0 && read_live(lk)) {
+        rec_t = 1.0;
+        pick_sport = rec_sport;
+        line_clear();
+        line_add("Your ");
+        line_add(sport_word[rec_sport]);
+        line_add(" was kept: Resume to go on");
+        toast_line()
+    }
+}
+
+// The app's state, on by dt seconds; now seconds since it started.
+better_step(dt: f32, now: f32) {
+    now_t = now;
+    busy = false;
+    step_app(dt)
+}
+
+// The picture, in a w by h window: whether anything in it is still moving
+// (so that another frame is wanted).
+better_draw(painter: *Painter, w: int, h: int): bool {
+    scr_w = w;
+    scr_h = h;
+    glViewport(0, 0, w, h);
+    glClearColor((C_BG >> 16 & 255) as f32 / 255.0, (C_BG >> 8 & 255) as f32 / 255.0,
+        (C_BG & 255) as f32 / 255.0, 1.0);
+    glClear(16640);
+    p_reset();
+    busy = false;
+    draw_app();
+    p_draw(painter);
+    busy
+}
+
+told_theme: int = -1;
+
+told_goals: int = 0;
+
+// After a frame: the platform told what has changed, and the files saved.
+better_after() raises IoError {
+    if (blur_wanted) {
+        blur_wanted = false;
+        platform_blur()
+    }
+    // Where the phone is is watched while wanted; when it stops, the last
+    // fix is forgotten.
+    gw: int = 0;
+    if (gps_wanted()) gw = 1;
+    if (gw != told_gps) {
+        told_gps = gw;
+        platform_gps(gw == 1);
+        if (gw == 0) {
+            gps_reset();
+            if (gps_state != GPS_DENIED && gps_state != GPS_NONE && gps_state != GPS_INSECURE) gps_state = GPS_OFF
+        }
+        if (gw == 1 && gps_state == GPS_OFF) gps_state = GPS_LOOKING
+    }
+    if (gps_retry) {
+        gps_retry = false;
+        platform_gps_retry()
+    }
+    th: int = theme_pick * 10;
+    if (theme_target() > 0.5) th = th + 1;
+    if (th != told_theme) {
+        told_theme = th;
+        platform_theme(theme_pick, th % 10 == 1)
+    }
+    wk: int = 0;
+    if (rec_on) wk = 1;
+    if (wk != told_wake) {
+        told_wake = wk;
+        platform_wake(wk == 1)
+    }
+    if (cue_wanted != CUE_NONE) {
+        platform_cue(cue_wanted);
+        cue_wanted = CUE_NONE
+    }
+    if (goals_sum() != told_goals) {
+        told_goals = goals_sum();
+        platform_goals()
+    }
+    // (A newer log, from elsewhere: what was here is put back.)
+    if (reload_wanted) {
+        reload_wanted = false;
+        k2: int = read_file(log_path);
+        if (k2 >= 0) {
+            // (The activity on the page stays on it, if it is still there.)
+            was: int = -1;
+            if (page_a >= 0 && page_a < act_n) was = act_start[page_a];
+            read_log(k2);
+            page_a = act_at(was);
+            if (page_a < 0 && page_kind == PG_ACT) close_page()
+        }
+    }
+    // (Signed in or out: kept, or forgotten, before the log is written.)
+    if (acct_tell) {
+        acct_tell = false;
+        platform_account();
+        acct_forget = false;
+        acct_token_n = 0
+    }
+    if (share_wanted) {
+        share_wanted = false;
+        platform_share()
+    }
+    if (live_now) {
+        live_now = false;
+        live_dirty = false;
+        live_saved_ms = clock_ms();
+        write_live();
+        write_file(live_path)
+    }
+    // (A made-up account's log is not written over the real one.)
+    if (wants_save) {
+        wants_save = false;
+        write_log();
+        if (!demo_on) write_file(log_path)
+    }
+}

@@ -63,7 +63,7 @@ l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
 l8 build [--profile|-p] [--unchecked-index] file.l8 -o file
 l8 wasm [--profile|-p] [--unchecked-index] [--async import]... file.l8 -o file.wasm
-l8 arm64 [--target linux|ios|ios-sim] [--unchecked-index] [--exe [--framework NAME]... [--imports FILE] [--sdk X.Y]] file.l8 -o file
+l8 arm64 [--target linux|ios|ios-sim|android] [--unchecked-index] [--exe [--framework NAME]... [--imports FILE] [--sdk X.Y]] file.l8 -o file
 l8 test [--accept] [--wasm] [--arm64] [--unchecked-index] [-j N] file.l8|file.t ...
 ```
 
@@ -90,19 +90,23 @@ that the compiler, built as a module, rebuilds itself unchanged under Node.
 
 `arm64` compiles a program to AArch64 assembly text, with its runtime after
 it: for Linux (ELF, `runtime-arm64-linux.s`) or for iOS and its simulator
-(Mach-O, `runtime-arm64-darwin.s`, over Apple's C library). The x86-64 code
+(Mach-O, `runtime-arm64-darwin.s`, over Apple's C library), or for Android
+(ELF, `runtime-arm64-android.s`, over its C library, as a shared library's
+code with Apple's naming). The x86-64 code
 generator drives it unchanged: `src2/arm64.l8` writes each of the primitives
 in `src2/direct.l8` as arm64, an x86 register standing for an arm64 one, and
 explains the stack and calling conventions that keep L8 and C able to call
-each other. A library's `native "NAME.s"` is `NAME.arm64-linux.s` or
-`NAME.arm64-darwin.s` there. With `--exe` the compiler assembles and links
-that text itself (`src2/a64asm.l8`, `src2/a64link.l8`), with no other
-toolchain: for Linux, a static ELF executable; for iOS (`ios`, an iPhone's)
-or its simulator (`ios-sim`), a Mach-O executable linked to each
-`--framework`, to libobjc and to libSystem, its imports bound to the
-libraries `--imports tools/ios/imports.txt` names, chained fixups and an
-ad hoc code signature as Apple's linker writes them. `tools/ios/build.sh`
-uses Xcode's toolchain on a Mac instead (see `programs/tempo/README.md`).
+each other. A library's `native "NAME.s"` is `NAME.arm64-linux.s`,
+`NAME.arm64-darwin.s` or `NAME.arm64-android.s` there. With `--exe` the
+compiler assembles and links that text itself (`src2/a64asm.l8`,
+`src2/a64link.l8`), with no other toolchain: for Linux, a static ELF
+executable; for iOS (`ios`, an iPhone's) or its simulator (`ios-sim`), a
+Mach-O executable linked to each `--framework`, to libobjc and to
+libSystem, its imports bound to the libraries `--imports
+tools/ios/imports.txt` names, chained fixups and an ad hoc code signature
+as Apple's linker writes them. `tools/ios/build.sh` uses Xcode's toolchain
+on a Mac instead, and `tools/android/build.sh` links Android's library with
+the NDK's (see `programs/better/README.md`).
 `tools/arm64/check.py` compares the encoder with LLVM's: Linux executables
 byte for byte against llvm-mc and ld.lld, and iOS ones instruction by
 instruction against llvm-mc, every relocation checked against its symbol.

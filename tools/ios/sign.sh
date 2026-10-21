@@ -1,19 +1,20 @@
 #!/bin/sh
-# Sign CI's Tempo.ipa (or another app's, as SmoothBible.ipa; ad hoc signed) on Linux, with what apple.py made:
+# Sign CI's Better.ipa (or another app's, as SmoothBible.ipa; ad hoc signed) on Linux,
+# with what apple.py made:
 #   sign.sh dev IN.ipa OUT.ipa [install]   for the phones in the development
 #                                          profile (and put on the iPhone
 #                                          plugged in)
 #   sign.sh store IN.ipa OUT.ipa           for TestFlight and the App Store,
 #                                          with the next build number
 # The certificates, their keys, the profiles and the tools are in
-# ~/.config/tempo-ios: rcodesign (from apple-codesign) in bin/, and
+# ~/.config/better-ios: rcodesign (from apple-codesign) in bin/, and
 # pymobiledevice3 in venv/. A store build's number is kept in build-number
 # there (each upload needs a higher one).
 set -eu
 kind=$1
 in=$(realpath "$2")
 out=$(realpath -m "$3")
-home=$HOME/.config/tempo-ios
+home=$HOME/.config/better-ios
 case "$kind" in
   dev) debug=true; extra= ;;
   store) debug=false; extra='<key>beta-reports-active</key><true/>' ;;

@@ -1,13 +1,13 @@
 #!/bin/sh
-# Run Tempo.app in the iOS simulator, on a Mac, and keep what it showed:
+# Run Better.app in the iOS simulator, on a Mac, and keep what it showed:
 #   simulate.sh APP OUT [CHECK]
-# It boots an iPhone simulator, lets Tempo know where it is, launches it with
-# L8_DEMO=1 (Tempo records a run by itself: ready at first, recording from
-# 3 s, finished at 22 s, saved at 28 s; see programs/tempo/ios.l8) while the
+# It boots an iPhone simulator, lets Better know where it is, launches it with
+# L8_DEMO=1 (Better records a run by itself: ready at first, recording from
+# 3 s, finished at 22 s, saved at 28 s; see programs/better/ios.l8) while the
 # simulator walks a loop, and takes screenshots along the way, then one in
 # dark mode. It starts with a personal link the worker does not know (its
 # console says how the requests went). OUT gets the screenshots,
-# Tempo's output and log, its saved log file, and any crash report. CHECK,
+# Better's output and log, its saved log file, and any crash report. CHECK,
 # if given, is programs/ios/check.l8 built for the simulator: it runs
 # first, and says what of the runtime works.
 set -u
@@ -49,14 +49,14 @@ shot() {
   xcrun simctl io "$dev" screenshot "$out/$1.png" >/dev/null 2>&1 && echo "shot $1"
 }
 # Its log, and its console (what it prints), from before it starts.
-xcrun simctl spawn "$dev" log stream --predicate 'process == "Tempo" AND messageType >= 16' > "$out/log.txt" 2>&1 &
+xcrun simctl spawn "$dev" log stream --predicate 'process == "Better" AND messageType >= 16' > "$out/log.txt" 2>&1 &
 logger=$!
 SIMCTL_CHILD_L8_DEMO=1 SIMCTL_CHILD_L8_LINK="#me=cinotalink0000000000000" xcrun simctl launch --console-pty "$dev" "$id" > "$out/console.txt" 2>&1 &
 console=$!
 sleep 2
 shot 01-ready
 mark launched
-# A loop of about 900 m, walked at 3 m/s while Tempo records (a short run:
+# A loop of about 900 m, walked at 3 m/s while Better records (a short run:
 # enough to see the fixes come and add up).
 xcrun simctl location "$dev" start --speed=3 \
   40.0,-75.0 40.0018,-75.0 40.0018,-74.9965 40.0,-74.9965 40.0,-75.0 \

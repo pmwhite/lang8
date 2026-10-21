@@ -9,7 +9,7 @@
 # frameworks to link, on a line), resources (files to put in the app, a line
 # each, from the repository's top), and Colors/ (named colors, as an asset
 # catalog's colorsets; Accent is the app's accent color). It is tools/ios,
-# Tempo's, if not given. The app is OUT/NAME.app. The code is the same for
+# Better's, if not given. The app is OUT/NAME.app. The code is the same for
 # both; it is linked for one platform or the other.
 set -eu
 # (Each part's time, in the build's output: build.sh: PART N s.)
@@ -31,7 +31,7 @@ name=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$dir/Info.plist")
 app="$out/$name.app"
 rm -rf "$app"
 mkdir -p "$app"
-frameworks="UIKit Foundation CoreLocation QuartzCore OpenGLES"
+frameworks="UIKit Foundation CoreLocation QuartzCore OpenGLES AVFoundation"
 [ -f "$dir/frameworks" ] && frameworks=$(cat "$dir/frameworks")
 links=
 for f in $frameworks; do links="$links -framework $f"; done

@@ -266,21 +266,21 @@ groups are made on `people/admin.html`, opened once with the admin secret
 after its `#` and kept on the device (`people-api/admin.sh link`).
 `?people=URL` points a page on localhost at a people worker run there.
 
-## Tempo
+## Better
 
-The site's `tempo/` page runs `programs/tempo` (see its README) the same
-way, in the page's own pixels. Tempo says `L8GPS 1` while it wants the
+The site's `better/` page runs `programs/better` (see its README) the same
+way, in the page's own pixels. Better says `L8GPS 1` while it wants the
 phone's location (on Record, and while recording) and `L8GPS 0` when not
 (`L8GPSRETRY` asks again after a refusal, `gps denied`); the page watches
 it only then, and writes each fix to `/inbox.txt` only as centimeters east
 and north of the one before, and how much higher (`fix T DX DY ACC SPEED
-DZ ZACC`), with the time (`now MS TZ`), then tells Tempo to read it (key
+DZ ZACC`), with the time (`now MS TZ`), then tells Better to read it (key
 20). The fix before is the only position the page holds, in memory,
 dropped at `L8GPS 0`; no position or height is passed on or saved.
-`L8WAKE 1` keeps the screen on while recording. Tempo writes its log to
-`/log.txt`, kept in IndexedDB (`tempo/store.js`) and, with a personal link
-(`#me=SECRET`), by the worker in `tempo-log/` (Cloudflare D1 at
-`trailingwhite.space/tempo/api`), which refuses a save made from an older
+`L8WAKE 1` keeps the screen on while recording. Better writes its log to
+`/log.txt`, kept in IndexedDB (`better/store.js`) and, with a personal link
+(`#me=SECRET`), by the worker in `better-log/` (Cloudflare D1 at
+`trailingwhite.space/better/api`), which refuses a save made from an older
 log (409) so that the page puts the two together; a recording under way
 goes to `/live.txt`, kept in this browser only. `?sim=K` records a
 made-up course K times as fast as the clock; `?fresh` starts empty, kept

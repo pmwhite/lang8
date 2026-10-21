@@ -48,7 +48,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test game skate malton race race-test character character-test cad cad-test recipes recipes-test tempo tempo-test bible-test bible-wasm-test bible-web bible-spoken stdlib-test \
+.PHONY: all check fmt selfhost compiler-test game skate malton race race-test character character-test cad cad-test recipes recipes-test better better-test bible-test bible-wasm-test bible-web bible-spoken stdlib-test \
 	terminal terminal-test callback-test http http-test websocket websocket-test wasm-test web \
 	profile-explorer profile-explorer-test \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
@@ -60,7 +60,7 @@ all:
 
 check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/character $(OK)/character-tests $(BUILD)/cad $(OK)/cad-tests $(BUILD)/recipes $(OK)/recipes-tests \
 	$(BUILD)/profile-explorer $(OK)/profile-explorer-tests \
-	$(BUILD)/tempo $(OK)/tempo-tests $(BUILD)/tempo-ios.s $(BUILD)/ios-check.s $(BUILD)/tempo-ios-sim $(OK)/bible-tests $(OK)/bible-wasm-tests $(OK)/bible-web $(OK)/dom-test-site $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim
+	$(BUILD)/better $(OK)/better-tests $(BUILD)/better-ios.s $(BUILD)/ios-check.s $(BUILD)/better-ios-sim $(BUILD)/better-android.s $(OK)/bible-tests $(OK)/bible-wasm-tests $(OK)/bible-web $(OK)/dom-test-site $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim
 
 # ---- compiler stages ----
 
@@ -205,21 +205,26 @@ $(OK)/race-tests: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 
 race-test: $(OK)/race-tests
 
-$(BUILD)/tempo: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
-	@$(STEP) 'tempo' sh -c '$(call build,l8c3,programs/tempo/main.l8)'
+$(BUILD)/better: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'better' sh -c '$(call build,l8c3,programs/better/main.l8)'
 
-tempo: $(BUILD)/tempo
+better: $(BUILD)/better
 
-$(OK)/tempo-tests: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
-	+@$(STEP) 'tempo tests' ./l8c3 test programs/tempo/test_tempo.l8
+$(OK)/better-tests: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	+@$(STEP) 'better tests' ./l8c3 test programs/better/test_better.l8
 	@touch $@
 
-tempo-test: $(OK)/tempo-tests
+better-test: $(OK)/better-tests
 
-# Tempo as an iPhone app, and the arm64 runtime's check, as arm64 assembly
-# for iOS (built into an app on a Mac: see programs/tempo/README.md).
-$(BUILD)/tempo-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
-	@$(STEP) 'tempo for iOS' sh -c './l8c3 arm64 --target ios programs/tempo/ios.l8 -o $@.tmp && mv -f $@.tmp $@'
+# Better as an iPhone app, and the arm64 runtime's check, as arm64 assembly
+# for iOS (built into an app on a Mac: see programs/better/README.md).
+$(BUILD)/better-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
+	@$(STEP) 'better for iOS' sh -c './l8c3 arm64 --target ios programs/better/ios.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+# Better as an Android app's code, as arm64 assembly (built into an APK by
+# tools/android/build.sh: see programs/better/README.md).
+$(BUILD)/better-android.s: l8c3 $(PROGRAMS) runtime-arm64-android.s stdlib/write.arm64-android.s | $(OK)
+	@$(STEP) 'better for Android' sh -c './l8c3 arm64 --target android programs/better/android.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 $(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 	@$(STEP) 'iOS check' sh -c './l8c3 arm64 --target ios programs/ios/check.l8 -o $@.tmp && mv -f $@.tmp $@'
@@ -228,8 +233,8 @@ $(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 # for the simulator (see src2/a64link.l8), whose code signatures and fixups
 # tools/ios/macho.py checks.
 IOS_LINK = ./l8c3 arm64 --target ios-sim --exe --imports tools/ios/imports.txt
-$(BUILD)/tempo-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt | $(OK)
-	@$(STEP) 'tempo for the simulator' sh -c '$(IOS_LINK) $(foreach f,UIKit Foundation CoreLocation QuartzCore OpenGLES,--framework $(f)) programs/tempo/ios.l8 -o $@.tmp && python3 -I tools/ios/macho.py check $@.tmp && mv -f $@.tmp $@'
+$(BUILD)/better-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt | $(OK)
+	@$(STEP) 'better for the simulator' sh -c '$(IOS_LINK) $(foreach f,UIKit Foundation CoreLocation QuartzCore OpenGLES AVFoundation,--framework $(f)) programs/better/ios.l8 -o $@.tmp && python3 -I tools/ios/macho.py check $@.tmp && mv -f $@.tmp $@'
 
 # The Bible app: its text's layout, tested; and the app, as arm64 assembly
 # for iOS (see programs/bible/README.md).
@@ -391,7 +396,7 @@ wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume
 # The playground: a static site in .build/web with the compiler as a module.
 # Serve it with `python3 -m http.server -d .build/web`.
 WEB_SITE := $(BUILD)/web
-WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/* web/malton/* web/race/* web/character/* web/cad/* web/recipes/* web/tempo/* web/people/*) programs/cad/handheld.pcb programs/cad/dock.pcb programs/recipes/recipes.txt programs/block-game/world.txt \
+WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/* web/malton/* web/race/* web/character/* web/cad/* web/recipes/* web/better/* web/people/*) programs/cad/handheld.pcb programs/cad/dock.pcb programs/recipes/recipes.txt programs/block-game/world.txt \
 	programs/block-game/garden.txt programs/character/running-back.txt $(wildcard programs/character/motion/*.txt)
 
 $(BUILD)/block-game.wasm: l8c3 $(PROGRAMS) | $(OK)
@@ -412,14 +417,14 @@ $(BUILD)/cad.wasm: l8c3 $(PROGRAMS) | $(OK)
 $(BUILD)/recipes.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'recipes wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/recipes/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
-$(BUILD)/tempo.wasm: l8c3 $(PROGRAMS) | $(OK)
-	@$(STEP) 'tempo wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/tempo/main.l8 -o $@.tmp && mv -f $@.tmp $@'
+$(BUILD)/better.wasm: l8c3 $(PROGRAMS) | $(OK)
+	@$(STEP) 'better wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/better/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 $(BUILD)/race.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'race wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/race/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
-$(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD)/malton.wasm $(BUILD)/race.wasm $(BUILD)/character.wasm $(BUILD)/cad.wasm $(BUILD)/recipes.wasm $(BUILD)/tempo.wasm $(WEB_FILES) $(STDLIB) | $(OK)
-	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game $(WEB_SITE)/skate $(WEB_SITE)/malton $(WEB_SITE)/race $(WEB_SITE)/character $(WEB_SITE)/cad $(WEB_SITE)/recipes $(WEB_SITE)/tempo $(WEB_SITE)/people && \
+$(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD)/malton.wasm $(BUILD)/race.wasm $(BUILD)/character.wasm $(BUILD)/cad.wasm $(BUILD)/recipes.wasm $(BUILD)/better.wasm $(WEB_FILES) $(STDLIB) | $(OK)
+	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game $(WEB_SITE)/skate $(WEB_SITE)/malton $(WEB_SITE)/race $(WEB_SITE)/character $(WEB_SITE)/cad $(WEB_SITE)/recipes $(WEB_SITE)/better $(WEB_SITE)/people && \
 		cp web/index.html web/*.js $(WEB_SITE)/ && cp web/examples/*.l8 $(WEB_SITE)/examples/ && \
 		cp $(STDLIB) $(WEB_SITE)/stdlib/ && cp $(BUILD)/l8.wasm $(WEB_SITE)/ && \
 		cp web/game/* $(BUILD)/block-game.wasm programs/block-game/world.txt programs/block-game/garden.txt $(WEB_SITE)/game/ && \
@@ -428,7 +433,7 @@ $(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD
 		cp web/race/* $(BUILD)/race.wasm $(WEB_SITE)/race/ && \
 		cp web/cad/* $(BUILD)/cad.wasm programs/cad/handheld.pcb programs/cad/dock.pcb $(WEB_SITE)/cad/ && \
 		cp web/recipes/* $(BUILD)/recipes.wasm programs/recipes/recipes.txt $(WEB_SITE)/recipes/ && \
-		cp web/tempo/* $(BUILD)/tempo.wasm $(WEB_SITE)/tempo/ && \
+		cp web/better/* $(BUILD)/better.wasm $(WEB_SITE)/better/ && \
 		cp web/people/* $(WEB_SITE)/people/ && \
 		cp web/character/* $(BUILD)/character.wasm programs/character/running-back.txt $(WEB_SITE)/character/ && \
 		mkdir -p $(WEB_SITE)/character/motion && cp programs/character/motion/*.txt $(WEB_SITE)/character/motion/'
@@ -469,7 +474,7 @@ help:
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
 	@echo '  stdlib-test, game, skate, race, race-test, character, character-test, cad, cad-test, recipes, recipes-test'
-	@echo '  tempo, tempo-test, bible-test, bible-wasm-test, bible-web'
+	@echo '  better, better-test, bible-test, bible-wasm-test, bible-web'
 	@echo '  terminal, terminal-test, callback-test'
 	@echo '  http, http-test, websocket, websocket-test, profile-explorer, profile-explorer-test'
 	@echo '  wasm-test       run the tests as WebAssembly under Node; check the wasm compiler fixpoint'

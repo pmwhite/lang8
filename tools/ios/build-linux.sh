@@ -4,12 +4,12 @@
 #   build-linux.sh sim APP.l8 OUT [DIR]     for the iOS simulator
 #   build-linux.sh device APP.l8 OUT [DIR]  for an iPhone; also OUT/NAME.ipa
 # DIR is as build.sh reads it (Info.plist, frameworks, resources,
-# PrivacyInfo.xcprivacy; tools/ios, Tempo's, if not given), with its asset
+# PrivacyInfo.xcprivacy; tools/ios, Better's, if not given), with its asset
 # catalog compiled in DIR/assets (tools/ios/assets.sh makes that on a Mac;
 # tools/ios/assets.py checks that it is up to date). The compiler links the
 # executable itself (`l8 arm64 --exe`, imports bound as tools/ios/imports.txt
 # says); the bundle is then signed ad hoc with rcodesign ($RCODESIGN, or on
-# the PATH, or ~/.config/tempo-ios/bin), or left with the linker's signature
+# the PATH, or ~/.config/better-ios/bin), or left with the linker's signature
 # if there is none. For TestFlight, tools/ios/sign.sh re-signs the IPA.
 # $L8 is the compiler (./l8c3 if not given); $BUILD_NUMBER, if given, is the
 # bundle's CFBundleVersion; $SDK_VERSION, if given, the SDK the executable
@@ -39,7 +39,7 @@ mkdir -p "$out"
 app="$out/$name.app"
 rm -rf "$app"
 mkdir -p "$app"
-frameworks="UIKit Foundation CoreLocation QuartzCore OpenGLES"
+frameworks="UIKit Foundation CoreLocation QuartzCore OpenGLES AVFoundation"
 [ -f "$dir/frameworks" ] && frameworks=$(cat "$dir/frameworks")
 links=
 for f in $frameworks; do links="$links --framework $f"; done
@@ -62,7 +62,7 @@ fi
 lap "bundle"
 sign=${RCODESIGN:-}
 [ -z "$sign" ] && sign=$(command -v rcodesign 2>/dev/null || true)
-[ -z "$sign" ] && [ -x "$HOME/.config/tempo-ios/bin/rcodesign" ] && sign=$HOME/.config/tempo-ios/bin/rcodesign
+[ -z "$sign" ] && [ -x "$HOME/.config/better-ios/bin/rcodesign" ] && sign=$HOME/.config/better-ios/bin/rcodesign
 if [ -n "$sign" ]; then
   "$sign" sign "$app" > "$out/sign.txt" 2>&1 || { cat "$out/sign.txt"; exit 1; }
   lap "sign (ad hoc, rcodesign)"

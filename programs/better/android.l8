@@ -1,0 +1,400 @@
+tag better;
+
+use_tag std, gl, skate;
+
+// Better as an Android app: the same program as main.l8's, natively, built
+// with `l8 arm64 --target android` into a shared library that the app's
+// Java loads (see tools/android/). It runs on a thread of its own, which
+// the glue (tools/android/glue.c) starts; the Java side passes it lines,
+// as main.l8's page does (where the phone is, touches, the keyboard, the
+// phone's edges), and Better tells the Java side what it wants a line at a
+// time (L8GPS, L8WAKE, L8CUE...): see Better.java. It draws with OpenGL
+// ES on the window the glue has, when there is one (not while the app is
+// away, or the screen is off: then it goes on with the fixes alone).
+//
+// While recording, a foreground service keeps it going with the screen
+// off; the fixes are passed on only as how far each is east and north of
+// the one before, and how much higher (the Java side holds that one fix,
+// and drops it when the watching stops). The log is kept in the app's
+// files, and with the account once signed in (people.l8), as on an iPhone
+// (sync.l8).
+import "../../stdlib/print.l8";
+
+import "../gl/core.l8";
+
+import "../skate/math.l8";
+
+import "../skate/font.l8";
+
+import "paint.l8";
+
+import "text.l8";
+
+import "log.l8";
+
+import "record.l8";
+
+import "pace.l8";
+
+import "ui.l8";
+
+import "touch.l8";
+
+import "app.l8";
+
+import "pages.l8";
+
+import "frame.l8";
+
+import "sync.l8";
+
+import "native.l8";
+
+import "people.l8";
+
+import "people_pages.l8";
+
+// ---- the glue (glue.c) ----
+// Wait until a line has come, or ms have passed.
+extern and_wait(ms: int): int;
+
+// The lines that have come since (at most cap bytes of them, whole
+// lines), into buf: how many bytes.
+extern and_take(buf: []i8, cap: int): int;
+
+// A line for the Java side.
+extern and_say(text: []i8, n: int): int;
+
+// Whether there is a window to draw on (its OpenGL ES 3 context made
+// current, its size in size[0] and size[1]).
+extern and_gl(size: []i32): int;
+
+extern and_swap(): int;
+
+// A request to the worker: the method, the URL, the Authorization
+// header's value, and the body (n bytes; none if 0). Its answer comes as
+// a line (http STATUS), its body by and_http_body.
+extern and_http(
+    method: str,
+    url: []i8,
+    url_n: int,
+    auth: []i8,
+    auth_n: int,
+    body: []i8,
+    n: int
+): int;
+
+extern and_http_body(buf: []i8, cap: int): int;
+
+// ---- telling the Java side ----
+and_line() {
+    and_say(line, line_n)
+}
+
+and_word(t: str) {
+    line_clear();
+    line_add(t);
+    and_line()
+}
+
+platform_gps(on: bool) {
+    if (on) and_word("L8GPS 1") else and_word("L8GPS 0")
+}
+
+platform_gps_retry() {
+    and_word("L8GPSRETRY")
+}
+
+// (Recording: the screen kept on, and the service that keeps it going.)
+platform_wake(on: bool) {
+    if (on) and_word("L8WAKE 1") else and_word("L8WAKE 0");
+    and_style()
+}
+
+platform_theme(_pick: int, _dark: bool) raises IoError {
+    native_save_settings();
+    and_style()
+}
+
+platform_blur() {
+    if (and_keys) {
+        and_keys = false;
+        and_word("L8KEYS 0")
+    }
+}
+
+platform_cue(k: int) {
+    line_clear();
+    line_add("L8CUE ");
+    line_int(k);
+    and_line()
+}
+
+platform_goals() raises IoError {
+    native_save_settings()
+}
+
+platform_account() raises IoError {
+    native_save_settings()
+}
+
+// The share sheet (Android's chooser), with the text: it says how it went
+// (says 13).
+platform_share() {
+    line_share();
+    and_line()
+}
+
+// The system's bars: light icons on Better's dark (and on the recording),
+// dark ones on its light.
+and_bars_light: int = -1;
+
+and_style() {
+    light: int = if (theme_target() > 0.5 || rec_on) 1 else 0;
+    if (light == and_bars_light) return;
+    and_bars_light = light;
+    if (light == 1) and_word("L8BARS light") else and_word("L8BARS dark")
+}
+
+// Whether the keyboard is up (for Better's field), and for which kind.
+and_keys: bool = false;
+
+and_kind: int = -1;
+
+// ---- the log, kept with the account ----
+// (Another worker, for a test: api URL.)
+api_url: []i8 = new i8[256](0i8);
+
+api_n: int = 0;
+
+api_default: str = "https://trailingwhite.space/better/api";
+
+http_got: []i8 = new i8[8388608](0i8);
+
+and_url: []i8 = new i8[512](0i8);
+
+platform_http(
+    method: str,
+    path: str,
+    body: []i8,
+    n: int
+) {
+    line_clear();
+    if (api_n == 0) line_add(api_default) else
+        for i in 0..api_n line_byte(api_url[i] as int);
+    line_add(path);
+    un: int = mini(line_n, len(and_url));
+    for i in 0..un and_url[i] = line[i];
+    line_clear();
+    line_add("Bearer ");
+    for i in 0..sync_secret_n line_byte(sync_secret[i] as int);
+    and_http(method, and_url, un, line, line_n, body, n)
+}
+
+// ---- what the Java side says ----
+//
+//   files DIR          where the app's files are (first, before anything)
+//   now MS TZ          the time, and its minutes ahead of UTC
+//   fix ... / gps ...  where the phone is (see read_inbox in app.l8)
+//   touch K X Y        a finger down (0), moved (1) or up (2), at X, Y in
+//                      hundredths of Better's pixels (the phone's dp)
+//   type TEXT          typed, into Better's field
+//   key K              a key (65288 backspace, 65293 enter)
+//   says WHAT V        as a page says (see page_says): edges, its scale
+//   back               the back gesture
+//   link URL           opened with a link (a code's, ...#c=CODE; or, from
+//                      before codes, better://link#me=SECRET)
+//   api URL            another worker, for a test
+//   people MODE        a made-up account (see people.l8), for a test
+//   shown | hidden     the app looked at again, or put away
+//   http STATUS        the worker's answer to the request made
+//   sim K              a made-up course K times as fast (for a test)
+and_in: []i8 = new i8[262144](0i8);
+
+files_dir: []i8 = new i8[512](0i8);
+
+files_n: int = 0;
+
+// A path in the app's files.
+and_file(name: str): str@new {
+    line_clear();
+    for i in 0..files_n line_byte(files_dir[i] as int);
+    line_byte(47);
+    line_add(name);
+    out: []i8 = new i8[line_n](0i8);
+    for i in 0..line_n out[i] = line[i];
+    cstr(out)
+}
+
+// Whether line i..e of and_in starts with w.
+in_is(i: int, e: int, w: str): bool {
+    if (e - i < len(w)) return false;
+    for k in 0..len(w) {
+        if (and_in[i + k] != w[k]) return false
+    }
+    true
+}
+
+// A whole number at and_in[k] (and where it ends, in in_end).
+in_end: int = 0;
+
+in_int(k: int, e: int): int {
+    i: int = k;
+    while (i < e && and_in[i] as int == 32) i = i + 1;
+    neg: bool = false;
+    if (i < e && and_in[i] as int == 45) {
+        neg = true;
+        i = i + 1
+    }
+    v: int = 0;
+    while (i < e && and_in[i] as int >= 48 && and_in[i] as int <= 57) {
+        v = v * 10 + and_in[i] as int - 48;
+        i = i + 1
+    }
+    in_end = i;
+    if (neg) return -v;
+    v
+}
+
+// Whether anything came that wants a frame drawn.
+and_woken: bool = false;
+
+and_read(n: int) {
+    i: int = 0;
+    while (i < n) {
+        e: int = i;
+        while (e < n && and_in[e] as int != 10) e = e + 1;
+        and_woken = true;
+        if (in_is(i, e, "files ")) {
+            files_n = mini(e - i - 6, len(files_dir));
+            for k in 0..files_n files_dir[k] = and_in[i + 6 + k]
+        } else if (in_is(i, e, "touch ")) {
+            k: int = in_int(i + 6, e);
+            x: f32 = in_int(in_end, e) as f32 * 0.01;
+            y: f32 = in_int(in_end, e) as f32 * 0.01;
+            if (k == 0) finger_down(1, x, y);
+            if (k == 1) finger_move(1 << 8, x, y);
+            if (k == 2) finger_up(1, x, y)
+        } else if (in_is(i, e, "type ")) {
+            for k in i + 5..e {
+                c: int = and_in[k] as int & 255;
+                if (c >= 32 && c < 127) key_press(c)
+            }
+        } else if (in_is(i, e, "key ")) key_press(in_int(i + 4, e)) else if (in_is(i,
+            e, "says ")) {
+            what: int = in_int(i + 5, e);
+            page_says(what, in_int(in_end, e))
+        } else if (in_is(i, e, "back")) {
+            if (!esc_key()) and_word("L8BACK")
+        } else if (in_is(i, e, "link ")) {
+            line_clear();
+            for k in i + 5..e line_byte(and_in[k] as int);
+            if (code_norm(line, 0, line_n) == CODE_LEN) people_code(line, 0, line_n) else if (sync_link_from(line,
+                line_n)) {
+                sync_state = 2;
+                sync_pull()
+            }
+        } else if (in_is(i, e, "api ")) {
+            api_n = mini(e - i - 4, len(api_url));
+            for k in 0..api_n api_url[k] = and_in[i + 4 + k]
+        } else if (in_is(i, e, "shown")) {
+            sync_pull();
+            people_shown()
+        } else if (in_is(i, e, "hidden")) {
+            if (sync_dirty) sync_push()
+        } else if (in_is(i, e, "http ")) {
+            status: int = in_int(i + 5, e);
+            got: int = maxi(and_http_body(http_got, len(http_got)), 0);
+            sync_answer(status, http_got, got)
+        } else if (in_is(i, e, "sim ")) {
+            sim_on = true;
+            sim_k = maxi(in_int(i + 4, e), 1) as f32;
+            clock_set(clock_ms(), clock_tz)
+        } else {
+            // (fix, now, gps: as the page's.)
+            for k in i..e lg_t[k - i] = and_in[k];
+            lg_t[e - i] = 10i8;
+            read_inbox(e - i + 1)
+        }
+        i = e + 1
+    }
+}
+
+// ---- the thread's loop ----
+main() noregion raises IoError: int {
+    on_page = false;
+    sync_native = true;
+    touch_ui = true;
+    // (Where the files are, the time, the phone's edges: said first.)
+    n0: int = and_take(and_in, len(and_in));
+    and_read(n0);
+    log_path = and_file("better-log.txt");
+    live_path = and_file("better-live.txt");
+    settings_path = and_file("better-settings.txt");
+    native_load_settings();
+    told_goals = goals_sum();
+    better_open();
+    tabs_seen = tabs_n();
+    and_style();
+    size: []i32 = new i32[2](0i32);
+    painter: ?*Painter = null;
+    p_gles = true;
+    start_ns: int = clock_ns(1);
+    prev_ns: int = start_ns;
+    // (Frames drawn with nothing changing: after a few, none until
+    // something does.)
+    still: int = 0;
+    while (true) {
+        // (Not drawing: waits until something comes; while recording, a
+        // little at a time, for its clocks.)
+        wait: int = 0;
+        if (still >= 3) {
+            wait = 1000;
+            if (rec_on || g_finger >= 0 || hear_t >= 0.0) wait = 100
+        }
+        if (wait > 0) and_wait(wait);
+        n: int = and_take(and_in, len(and_in));
+        and_woken = false;
+        if (n > 0) and_read(n);
+        if (and_woken || g_finger >= 0) still = 0;
+        now: int = clock_ns(1);
+        dt: f32 = clampf((now - prev_ns) as f32 / 1000000000.0, 0.0, 0.05);
+        prev_ns = now;
+        better_step(dt, (now - start_ns) as f32 / 1000000000.0);
+        saving: bool = wants_save;
+        better_after();
+        if (saving) sync_saved();
+        sync_step();
+        if (sync_settings_changed) {
+            sync_settings_changed = false;
+            native_save_settings()
+        }
+        // The keyboard is up while Better's field is written in, of its
+        // kind.
+        if (field_on >= 0 && field_on != and_kind) {
+            and_kind = field_on;
+            line_clear();
+            line_add("L8FIELDKIND ");
+            line_add(field_kind_word[field_on]);
+            and_line()
+        }
+        if (field_on >= 0 && !and_keys) {
+            and_keys = true;
+            and_word("L8KEYS 1")
+        }
+        if (field_on < 0 && and_keys) platform_blur();
+        if (busy) still = 0;
+        if (and_gl(size) == 1) {
+            if (painter == null) painter = new_painter();
+            w: int = size[0] as int;
+            h: int = size[1] as int;
+            if (w != scr_w || h != scr_h) still = 0;
+            p: ?*Painter = painter;
+            if (still < 3 && p != null) {
+                if (better_draw(p, w, h)) still = 0 else still = still + 1;
+                and_swap()
+            }
+        } else still = 3
+    }
+    0
+}
