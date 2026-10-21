@@ -205,16 +205,6 @@ Integers, pointers, and slices cross as `i64` (a JavaScript `BigInt`), and
 Other imports return `-ENOSYS`. `instantiate(module, sys, extra)` accepts
 extra imports, and `MemFS` is an in-memory file system for browsers.
 
-## Character viewer
-
-The site's `character/` page runs `programs/character` on the same platform,
-with a page round it: the figure's poses, animations, and routes over the ground, its layers and parts
-to show, hide, and pick out, the views, and the figure's text
-([format](../programs/character/FORMAT.md)) to change and bake again. The
-viewer writes lines starting `CHR` that the page reads, and takes the page's
-commands as key codes from 1000000000 up (see `character.js`). A phone bakes
-a coarser mesh unless `?detail=100` asks for the finest.
-
 ## CAD
 
 The site's `cad/` page runs `programs/cad` (see its README) on the same

@@ -27,9 +27,9 @@ fi
 elapsed=$(( ($(date +%s%N) - start) / 1000000 ))
 
 if [[ "$status" -ne 0 ]]; then
-  printf '%-20s FAIL (%d)\n' "$name" "$status" >&2
+  printf '%-28s FAIL (%d)\n' "$name" "$status" >&2
   [[ "${V:-0}" == 1 ]] || cat "$log" >&2
   printf 'log: %s\n' "$log" >&2
   exit "$status"
 fi
-printf '%-20s %6dms\n' "$name" "$elapsed"
+printf '%-28s %6dms\n' "$name" "$elapsed"
