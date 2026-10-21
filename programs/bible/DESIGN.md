@@ -9369,8 +9369,11 @@ Where the build differs from the text above, and why:
     `plan-listen` (set the first time a day is opened, Mark Read tapped, a day listened
     to), so those tips are skipped once done (§15's "skipping what you already do");
     `help.l8` lists them after `unbuilt`.
-13. **CI's layout:** help moves to the notes job (notes, listen, help), plans (now about 7
-    minutes) follows read alone.
+13. **CI's layout:** help moves to the notes job (notes, listen, help), plans (now about 7.5
+    minutes, 459 s in run 39523012543) follows read alone. That run's jobs: read and plans
+    17 minutes, notes listen help 9, languages versions more 16, store and memory 21, ribbons
+    study ios18 22 (ribbons alone 13 of them that run, against 7 in run 39506634363: the
+    Macs' speed varies more from run to run than §16 added).
 14. **Several plans at once (§16.11):**
     - A Chapter a Day is eight plans (`PLAN_DAY1` to `PLAN_ALL`), each from its own chapter,
       its days and passages in a place of their own (150 each), so a plan's passage indices
