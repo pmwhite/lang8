@@ -82,7 +82,7 @@ async function setSettings(page, base, pathname, settings) {
 
 async function axe(ctx, what) {
   if (!fs.existsSync(AXE)) {
-    ctx.log("axe-core is not installed (npm ci in web/bible/test): skipped " + what);
+    ctx.log("axe-core is not installed (npm ci in programs/bible/web/page/test): skipped " + what);
     return;
   }
   await ctx.page.eval(fs.readFileSync(AXE, "utf8") + ";0");

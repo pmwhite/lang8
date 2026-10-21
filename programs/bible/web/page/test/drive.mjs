@@ -2,7 +2,7 @@
 // Protocol (Node's own WebSocket; no dependencies but axe-core, injected
 // into pages), against the site served through the real Worker (serve.mjs).
 //
-//   node web/bible/test/drive.mjs [--site DIR] [--out DIR] [--only NAME,...] [--no-shots]
+//   node programs/bible/web/page/test/drive.mjs [--site DIR] [--out DIR] [--only NAME,...] [--no-shots]
 //
 // Runs flows.mjs's flows: each prints its checks; a failed check, a console
 // error or a request to any other host fails the run. Shots go to OUT
@@ -15,7 +15,7 @@ import { serve } from "./serve.mjs";
 import { sleep } from "./pixels.mjs";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
-const root = path.resolve(here, "../../..");
+const root = path.resolve(here, "../../../../..");
 const arg = (name, fallback) => {
   const i = process.argv.indexOf(name);
   return i >= 0 ? process.argv[i + 1] : fallback;

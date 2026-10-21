@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the web reader's site (WEB.md §W1.9) into SITE (.build/bible-site):
 
-    python3 -I web/bible/build.py SIZES APP_WASM SITE
+    python3 -I programs/bible/web/page/build.py SIZES APP_WASM SITE
 
 The marketing pages (programs/bible/site/, without DESIGN.md) at the root,
 and read/: the assets under hashed names (read.<hash>.css, bible.<hash>.js,
@@ -22,9 +22,9 @@ import shutil
 import subprocess
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(HERE))))
 WEB = os.path.join(ROOT, "web")
-HERE = os.path.join(WEB, "bible")
 DATA = os.path.join(ROOT, "programs", "bible", "data")
 VERSIONS = ["bsb", "kjv", "web", "asv", "ylt"]
 SITE_URL = "https://smoothbible.com"
@@ -51,11 +51,11 @@ BOOT_HASH = os.path.join(ROOT, "programs", "bible", "worker", "boot_hash.js")
 
 
 def boot_hash():
-    """worker/boot_hash.js as it should be for web/bible/boot.js."""
+    """worker/boot_hash.js as it should be for web/page/boot.js."""
     with open(os.path.join(HERE, "boot.js"), "rb") as f:
         h = base64.b64encode(hashlib.sha256(f.read()).digest()).decode()
-    return ("// The CSP hash of web/bible/boot.js, inlined in every reader page (WEB.md\n"
-            "// §W2.1a). Written by web/bible/build.py; test.mjs checks it.\n"
+    return ("// The CSP hash of web/page/boot.js, inlined in every reader page (WEB.md\n"
+            "// §W2.1a). Written by web/page/build.py; test.mjs checks it.\n"
             f'export const BOOT_HASH = "sha256-{h}";\n')
 
 
@@ -109,7 +109,7 @@ def build(sizes, wasm, site):
     names["icons"] = put(read, "icons", "svg", open(os.path.join(HERE, "icons.svg"), "rb").read())
     names["css"] = put(read, "read", "css", css.encode())
     js = text(os.path.join(HERE, "bible.js"))
-    js = js.replace("../l8-runtime.js", "./" + names["runtime"]).replace("../dom.js", "./" + names["dom"])
+    js = js.replace("../../../../web/l8-runtime.js", "./" + names["runtime"]).replace("../../../../web/dom.js", "./" + names["dom"])
     for k, n in names.items():
         js = js.replace("{{" + k + "}}", n)
     names["js"] = put(read, "bible", "js", js.encode())

@@ -404,7 +404,7 @@ const ASSETS = {
 const page = (path) => worker.fetch(new Request("https://smoothbible.com" + path), env({ ASSETS }));
 
 test("the boot script's hash is the one the CSP names", () => {
-  const boot = readFileSync(new URL("../../../web/bible/boot.js", import.meta.url));
+  const boot = readFileSync(new URL("../web/page/boot.js", import.meta.url));
   const hash = "sha256-" + createHash("sha256").update(boot).digest("base64");
   assert.equal(BOOT_HASH, hash, "run make bible-web and commit worker/boot_hash.js");
   assert.ok(CSP.includes(`'${hash}'`));

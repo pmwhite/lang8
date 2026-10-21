@@ -333,18 +333,19 @@ of HTML.
 
 ## Smooth Bible
 
-`bible/` is the Bible reader on the web (`programs/bible/WEB.md`):
-`page.html` the shell every reader's address is answered with (the Worker
-fills its head for the address), `boot.js` its inline boot script (which
-fetches the place's book, the sizes table and the app at once), `read.css`,
-`icons.svg` (Lucide), `fonts/` (Source Serif 4 and Charis SIL, OFL),
-`about.html`, and `bible.js`, which starts `programs/bible/web.l8`. `make
-bible-web` builds the site in `.build/bible-site` (`bible/build.py`: the
-assets under hashed names; each version whole, book by book, and its sizes
-table, `programs/bible/tools/sizes.l8`); `node bible/test/serve.mjs` serves
-it as smoothbible.com does, through the real Worker. `node
-web/bible/test/drive.mjs` (after `npm ci` in `web/bible/test`, for axe-core)
-runs the reader's checks and shots in headless Chrome over CDP
-(`flows.mjs`; `--only scroll,keep`, `--no-shots`), writing them to
-`.build/bible-web-shots`; CI's `web` job runs it and pushes the shots to
-`ci-bible-web-shots`.
+The Bible reader on the web (`programs/bible/WEB.md`) uses the page bridge
+here (`dom.js`, `l8-runtime.js`); its page and its tests live with the app,
+in `programs/bible/web/page/`: `page.html` the shell every reader's address
+is answered with (the Worker fills its head for the address), `boot.js` its
+inline boot script (which fetches the place's book, the sizes table and the
+app at once), `read.css`, `icons.svg` (Lucide), `fonts/` (Source Serif 4 and
+Charis SIL, OFL), `about.html`, and `bible.js`, which starts
+`programs/bible/web/app.l8`. `make bible-web` builds the site in
+`.build/bible-site` (`build.py`: the assets under hashed names; each version
+whole, book by book, and its sizes table, `programs/bible/tools/sizes.l8`);
+`node programs/bible/web/page/test/serve.mjs` serves it as smoothbible.com
+does, through the real Worker. `node programs/bible/web/page/test/drive.mjs`
+(after `npm ci` in `programs/bible/web/page/test`, for axe-core) runs the
+reader's checks and shots in headless Chrome over CDP (`flows.mjs`; `--only
+scroll,keep`, `--no-shots`), writing them to `.build/bible-web-shots`; CI's
+`web` job runs it and pushes the shots to `ci-bible-web-shots`.

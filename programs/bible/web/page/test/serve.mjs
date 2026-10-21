@@ -1,5 +1,5 @@
 // The site as smoothbible.com serves it, for the driver and by hand:
-//   node web/bible/test/serve.mjs [SITE] [PORT]   (.build/bible-site, 8470)
+//   node programs/bible/web/page/test/serve.mjs [SITE] [PORT]   (.build/bible-site, 8470)
 // Requests go to the real Worker (programs/bible/worker/worker.js), with
 // ASSETS standing in for Cloudflare's static assets over SITE as
 // wrangler.toml configures them (html_handling "auto-trailing-slash",
@@ -10,7 +10,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
-import worker from "../../../programs/bible/worker/worker.js";
+import worker from "../../../worker/worker.js";
 
 const types = {
   ".html": "text/html; charset=utf-8",
