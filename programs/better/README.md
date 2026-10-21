@@ -136,8 +136,8 @@ tools/ios/build.sh sim better-ios.s build      # on a Mac: build/Better.app
 tools/ios/simulate.sh build/Better.app shots   # run it in the simulator
 ```
 
-GitHub builds it on every push to the `ios` branch
-(`.github/workflows/ios.yml`): a Linux job compiles it, and a macOS job
+GitHub builds it on every push to `trunk` that changes it or what it is
+built from (`.github/workflows/ios.yml` lists the paths): a Linux job compiles it, and a macOS job
 builds the app, runs it in the simulator with `L8_DEMO=1` (it records a run
 by itself while the simulator walks a loop), and keeps the screenshots, the
 logs and the app (`Better-simulator.zip`, which runs in any iOS simulator,

@@ -300,8 +300,8 @@ stops, saying so, until then). On a Mac, the Xcode way still works:
 tools/ios/build.sh sim bible-ios.s build programs/bible/ios
 ```
 
-GitHub builds it on every push to the `bible` branch
-(`.github/workflows/bible.yml`): a Linux job tests the layout and compiles
+GitHub builds it on every push to `trunk` that changes it or what it is
+built from (`.github/workflows/bible.yml` lists the paths): a Linux job tests the layout and compiles
 the app, and macOS jobs build it for the simulator, run it there with
 `L8_DEMO=1`, taking it through the books, a psalm, a footnote and John 3
 (each step a Darwin notification, sent with `notifyutil`), and push the screenshots to the `ci-bible-shots` branch, and build
