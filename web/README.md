@@ -345,3 +345,12 @@ table, `programs/bible/tools/sizes.l8`); `node web/bible/serve.mjs` from
 the repository root serves it as smoothbible.com does, through the real
 Worker. CI's `web` job builds and uploads the site as `bible-web-site`.
 The browser checks and screenshot runs have been removed.
+
+`make -j4 bible-web` packages each translation independently in
+`.build/bible-data/`, sharing Make's job slots. UI assets reuse those compressed
+files; changing a translation rebuilds that version and the data manifest.
+The size-table tool depends on the text/estimate modules and standard library,
+so UI source edits do not invalidate the data cache. `bible/build.py` implements
+the splitting, hashing and page assembly; Make owns stage dependencies and
+parallelism. The data remains gzip for the browser's explicit
+`DecompressionStream("gzip")` loading path.
