@@ -163,6 +163,7 @@ orig_prepare(c: int) {
         if (og_wanted(w, mode)) og_gloss_into_gt(w);
         og_gt_e[i] = og_gt_n;
         og_gl[i] = og_gt_e[i] > og_gt_b[i];
+        og_sh[i] = (if (og_gl[i]) (if (og_shares_before(w)) 1 else 0) | (if (og_shares_after(w)) 2 else 0) else 0);
         if (og_gl[i]) og_prep_glossed = og_prep_glossed + 1
     }
 }
@@ -206,7 +207,8 @@ fput_og_gloss(w: int) {
             study_load(vi);
             chunk_of(j);
             if (ch_e > ch_b) {
-                low: bool = sentence_start(ch_b) && !keeps_capital(w, ch_b, ch_e);
+                low: bool = sentence_start(ch_b) && !keeps_capital(w, ch_b, ch_e) && lower_in_chapter(v_chapter(vi),
+                    ch_b);
                 for x in ch_b..ch_e {
                     k: int = st[x] as int;
                     if (x == ch_b && low && k >= 65 && k <= 90) k = k + 32;
@@ -245,14 +247,63 @@ sentence_start(b: int): bool {
     true
 }
 
-// Whether a gloss keeps its capital: "I", a name, God.
+// Whether a gloss keeps its capital: "I" and "O" (I am, O king), a word in
+// capitals throughout (LORD), a name, God.
 keeps_capital(w: int, b: int, e: int): bool {
-    if (e - b == 1 || e - b > 1 && (st[b + 1] as int == 39 || (st[b + 1] as int & 255) == 226)) {
-        if (st[b] as int == 73) return true
+    x: int = b;
+    caps: bool = true;
+    while (x < e && is_ascii_letter(st[x] as int)) {
+        if (st[x] as int >= 97) caps = false;
+        x = x + 1
     }
+    if (x - b == 1 && (st[b] as int == 73 || st[b] as int == 79)) return true;
+    if (x - b > 1 && caps) return true;
     if ((og_flags(w) & OG_NAME) != 0) return true;
     num: int = og_strongs(w);
     if (og_greek(w)) num == 2316 || num == 2424 || num == 5547 else num == 430 || num == 410
+}
+
+is_ascii_letter(k: int): bool {
+    k >= 65 && k <= 90 || k >= 97 && k <= 122
+}
+
+// Whether the BSB writes the word at st[b] (its letters) in lower case
+// somewhere in chapter c's verses: only then is a sentence's first word
+// lowered ("The" as "the"; "He makes me lie down" stays, as Psalm 23 has
+// "He" throughout; review r11-1).
+lower_in_chapter(c: int, b: int): bool {
+    n: int = 0;
+    while (b + n < st_n && is_ascii_letter(st[b + n] as int)) n = n + 1;
+    if (n == 0 || c < 0) return false;
+    was: int = text_cur;
+    text_use(TEXT_BSB);
+    found: bool = false;
+    p: int = ch_start[c];
+    e_ch: int = ch_end[c];
+    while (p < e_ch && !found) {
+        e: int = line_end(p);
+        k: int = bsb[p] as int;
+        if (k == 84 || k == 87 || k == 68 || k == 100) {
+            x: int = p + 1;
+            while (x + n <= e && !found) {
+                if ((x == p + 1 || !is_ascii_letter(bsb[x - 1] as int)) && (x + n == e || !is_ascii_letter(bsb[x + n] as int))) {
+                    same: bool = true;
+                    for i in 0..n {
+                        a: int = bsb[x + i] as int;
+                        s: int = st[b + i] as int;
+                        if (i == 0) {
+                            if (a != s + 32 && !(s >= 97 && a == s)) same = false
+                        } else if (a != s) same = false
+                    }
+                    if (same) found = true
+                }
+                x = x + 1
+            }
+        }
+        p = e + 1
+    }
+    text_use(was);
+    found
 }
 
 // The verse (verses.bin's index) word j of words.bin is in (-1: none).
@@ -356,11 +407,32 @@ og_where(w: int): bool {
 }
 
 // Word w's letters into fbuf (its punctuation and maqaf left out).
+// (With the word beside it whose English is its own too, as in the text:
+// "μὴ ἀπόληται", whose "shall not perish" the BSB gives the two together;
+// review r11-1.)
 fput_og_form(w: int) {
-    p: int = og_text_at(w);
+    p: int = og_text_at(if (og_shares_before(w)) w - 1 else w);
     if (p < 0) return;
-    e: int = og_letters_end(p, p + og_len(w));
+    last: int = if (og_shares_after(w)) w + 1 else w;
+    q: int = og_text_at(last);
+    if (q < 0) return;
+    e: int = og_letters_end(q, q + og_len(last));
     for i in p..e fput(bsb[i] as int)
+}
+
+// Whether the word before w has no English of its own, the BSB rendering
+// it with w ("with next" in the tables: μὴ before ἀπόληται); and the word
+// after, with w ("with previous").
+og_shares_before(w: int): bool {
+    if (w <= 0 || !lang_ready) return false;
+    j: int = og_join(w - 1);
+    j >= 0 && og_join(w) == j + 1 && (w_flags(j) & 10) == 2 && w_ntok(j) == 0
+}
+
+og_shares_after(w: int): bool {
+    if (w + 1 >= og_n || !lang_ready) return false;
+    j: int = og_join(w + 1);
+    j > 0 && og_join(w) == j - 1 && (w_flags(j) & 10) == 10 && w_ntok(j) == 0
 }
 
 // Its transliteration (the BSB's tables', through its join), into fbuf;
@@ -596,7 +668,74 @@ og_search_words(s: []i8, n: int) {
     if (osq_words < 2) osq_phrase = false
 }
 
-// Whether word w (its letters bsb's... b[p..e]) is search word k.
+// The Strong's numbers whose lemma a search word names (§14.11.7): a bit
+// per search word (osq's k), Greek and Hebrew. "agape" names ἀγάπη, so it
+// finds ἀγάπην and ἀγάπης; "shalom" and "שלום" name שָׁלוֹם, so they find
+// בְּשָׁלוֹם. A form that is no lemma ("agapen") finds only itself.
+osq_lem_g: []int = new int[STRONGS_MAX](0);
+
+osq_lem_h: []int = new int[STRONGS_MAX](0);
+
+// Each search word marks the numbers whose lemma (Latin: its
+// transliteration; else its letters) folds to it: every entry of every
+// number, each of a field's lemmas apart ("α, Ἀλφα").
+og_search_lemmas() {
+    for i in 0..STRONGS_MAX {
+        osq_lem_g[i] = 0;
+        osq_lem_h[i] = 0
+    }
+    if (!lang_ready) return;
+    for g in 0..2 {
+        for num in 1..STRONGS_MAX {
+            p: int = lex_first(g == 0, num);
+            if (p >= 0) {
+                n: int = lex_count(p);
+                for i in 0..n {
+                    q: int = lex_line(p, i);
+                    for k in 0..osq_words {
+                        lex_field(q, if (osq_latin[k]) 1 else 0);
+                        if (og_lemma_is(k, lf_b, lf_e)) {
+                            if (g == 0) osq_lem_g[num] = osq_lem_g[num] | 1 << k else osq_lem_h[num] = osq_lem_h[num] | 1 << k
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Whether a lexicon field (llex[b..e]) holds search word k as one of its
+// lemmas (split at commas).
+og_lemma_is(k: int, b: int, e: int): bool {
+    q: int = b;
+    while (q < e) {
+        r: int = q;
+        while (r < e && llex[r] as int != 44) r = r + 1;
+        if (osq_latin[k]) {
+            if (latin_first(llex, q, r) == osq[osq_at[k]]) {
+                latin_fold(llex, q, r);
+                if (og_folded_is(k)) return true
+            }
+        } else {
+            script_fold(llex, q, r);
+            if (og_folded_is(k)) return true
+        }
+        q = r + 1
+    }
+    false
+}
+
+// Whether fo_cp (fo_len) is search word k (or begins it, for a k with *).
+og_folded_is(k: int): bool {
+    n: int = osq_len[k];
+    if (fo_len < n || fo_len > n && !osq_prefix[k]) return false;
+    for i in 0..n
+        if (fo_cp[i] != osq[osq_at[k] + i]) return false;
+    true
+}
+
+// Whether word w (its letters bsb's... b[p..e]) is search word k: its
+// lemma's named, or its form is.
 og_word_is(
     k: int,
     w: int,
@@ -604,6 +743,8 @@ og_word_is(
     p: int,
     e: int
 ): bool {
+    num: int = og_strongs(w);
+    if (num > 0 && num < STRONGS_MAX && ((if (og_greek(w)) osq_lem_g[num] else osq_lem_h[num]) & 1 << k) != 0) return true;
     if (osq_latin[k]) {
         j: int = og_join(w);
         if (j < 0) return false;
@@ -612,11 +753,7 @@ og_word_is(
         if (latin_first(lforms, wt_b, wt_e) != osq[osq_at[k]]) return false;
         latin_fold(lforms, wt_b, wt_e)
     } else script_fold(b, p, e);
-    n: int = osq_len[k];
-    if (fo_len < n || fo_len > n && !osq_prefix[k]) return false;
-    for i in 0..n
-        if (fo_cp[i] != osq[osq_at[k] + i]) return false;
-    true
+    og_folded_is(k)
 }
 
 // The verses of books from to last (inclusive) the query finds (every
@@ -633,6 +770,7 @@ og_search(
     hit_more = false;
     og_search_words(q, n);
     if (osq_words == 0) return;
+    og_search_lemmas();
     c: int = book_first[from];
     e_c: int = book_first[last] + book_count[last];
     while (c < e_c && !hit_more) {
@@ -720,24 +858,47 @@ og_search_verse(c: int, v: int) {
 
 // Where the query is in verse v of chapter c: its text in vt (verse_text),
 // and each word it finds there in mr_begin to mr_end (text.l8's), its
-// letters.
+// letters; for a phrase, only its words together ("ho logos" names every
+// article, but only the one before λόγος is the phrase's).
+om_w: []int = new int[512](0);
+
+om_b: []int = new int[512](0);
+
+om_e: []int = new int[512](0);
+
 og_match_ranges(c: int, v: int) {
     verse_text(c, v);
     mr_count = 0;
     og_verse(c, v);
     w: int = og_vb;
     x: int = 0;
+    n: int = 0;
     while (x < vt_n && w < og_ve) {
         if (vt[x] as int == 32) x = x + 1 else {
             we: int = x + og_len(w);
             if (we > vt_n) we = vt_n;
-            le: int = letters_end_of(vt, x, we);
-            hit: bool = false;
-            for k in 0..osq_words
-                if (!hit && og_word_is(k, w, vt, x, le)) hit = true;
-            if (hit) mr_add(x, le);
+            if (n < len(om_w)) {
+                om_w[n] = w;
+                om_b[n] = x;
+                om_e[n] = letters_end_of(vt, x, we);
+                n = n + 1
+            }
             w = w + 1;
             x = we
+        }
+    }
+    for i in 0..n {
+        if (osq_phrase) {
+            run: bool = i + osq_words <= n;
+            for k in 0..osq_words
+                if (run && !og_word_is(k, om_w[i + k], vt, om_b[i + k], om_e[i + k])) run = false;
+            if (run)
+                for k in 0..osq_words mr_add(om_b[i + k], om_e[i + k])
+        } else {
+            hit: bool = false;
+            for k in 0..osq_words
+                if (!hit && og_word_is(k, om_w[i], vt, om_b[i], om_e[i])) hit = true;
+            if (hit) mr_add(om_b[i], om_e[i])
         }
     }
 }

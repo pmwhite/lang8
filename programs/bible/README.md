@@ -127,7 +127,8 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   Learn This Word). Reading settings has Glosses and Show Accents in it;
   Listen has no recording of the original yet. Search finds its words by
   Greek or Hebrew letters (accents and points not needed) or by Latin
-  letters as they sound ("agape", "shalom"); Compare, Copy and Share as
+  letters as they sound ("agape", "shalom"), a word's dictionary form
+  finding every form of it; Compare, Copy and Share as
   Image show it; Memory practises it, typed on a Greek or Hebrew keyboard
   of the app's own; the language page's Read in Greek (Hebrew) opens it.
   Word studies and cards give each word's meaning in its verse and its

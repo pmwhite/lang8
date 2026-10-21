@@ -8303,6 +8303,70 @@ Deviations, each with its reason:
     left; `meanings-LICENSE.txt` says what was changed so. The real-phone list loses its LN
     question.
 
+39. **A search word also finds every word whose lemma it names** (Major 2): before the words are
+    read, each query word marks the Strong's numbers whose lexicon entry's lemma folds to it (Latin
+    letters against the transliteration, as `latin_fold` folds them; Greek or Hebrew against the
+    lemma's letters, `letter_fold`; every entry of a number, each of a field's lemmas apart), a bit
+    per query word; a word whose own number is marked is found, so prefixed Hebrew forms are too. A
+    form that is no lemma ("agapen", 33 verses) finds only that form; `*` and quotes work as before.
+    In `test_learn.l8`: "agape", "αγαπη" and "ἀγάπη" 106 verses (was 56; ἀγάπη's 116 occurrences are
+    in 106 verses, counted from `orig-words.bin`), John 13:35's ἀγάπην among them; "shalom" 209 (was
+    103; שָׁלוֹם is in 209 verses), Psalm 4:8's בְּשָׁלוֹם and Genesis 29:6's הֲשָׁלוֹם among them;
+    "theos" more than the 1,000 verses the results hold (θεός is in 1,155; was 287), John 1:1's θεόν
+    and θεὸς found; "chesed" 243 (was 65); "agap*" 269; "ho logos" 216 (every form of the article
+    before every form of λόγος). **"שלום" finds 238, not "shalom"'s 209:** unpointed, its four letters
+    are also שַׁלּוּם (Shallum, a name several men bear) and שִׁלּוּם (recompense); the test checks that it finds every verse
+    "shalom" does and that none of its 29 more has שָׁלוֹם. Points are folded (§14.11.7), so a pointed
+    query is the same. A phrase's matches are shown only where its words come together (with the
+    article named, every article in the verse was semibold). The marking costs about 17 ms a query
+    on this laptop (50 searches for "agape": 4.35 s, against 3.5 s without it); the first-letter skip
+    (note 28) is unchanged, since a lemma is tested by its number, not its form. The log reads "bible:
+    orig search found 106 verses, … ms" ("1000+ verses" when the results are full). The manual's
+    search paragraph says a dictionary form finds every form.
+40. **Memorize's toast** (Major 3). A toast goes in the window of the topmost presented controller
+    that isn't being dismissed (`isBeingDismissed`), else the app's window, so the popover case
+    stays. But 211 had been missing in some runs since Round 9 (r9's s5 and §17's run1, as well as
+    the last three), with nothing presented at all: its shot waits for the toast's log line, and the
+    console can come late (simulate.sh says so of the launch), while Memorize's toast lasted 1.6 s.
+    In the demo it now lasts 6 s, as the ribbons' and plans' toasts already do, and the demo takes it
+    away (`toast_clear`) before what it opens next: steps 372 (212), 615 (Practice, 285) and 1132
+    (Practice, 287).
+41. **The apparatus keeps an entry whole** (Minor 4): a no-break space between a form and its gloss
+    and before each "·", so a line ends after a dot and the next entry starts the next one; a long
+    gloss can still wrap within itself.
+42. **A gloss whose English is a neighbour's too shows both forms** (Minor 5): where the BSB's tables
+    render the word before with it ("with next", μὴ before ἀπόληται) or the word after ("with
+    previous"), each with no English of its own and next to it in `words.bin`, the entry is "μὴ
+    ἀπόληται shall not perish", the text between them as written, and the popover's form is the same
+    ("orig popover μὴ ἀπόληται" in the log). `orig_prepare` keeps which neighbours a glossed word
+    has (`og_sh`) for the layout. The BSB-order glosses (Psalm 23:2's "דֶּשֶׁא in green") stay.
+43. **A gloss's capital is lowered only where the chapter has the word lower case** (Minor 6): at a
+    sentence's start, the BSB's chapter (its verses and titles) is searched for the word with a
+    small first letter; "I", "O" and a word in capitals throughout (LORD) are never lowered. So
+    "מַלְכָּא O king", "I am", and Psalm 23:2's "He makes me lie down" beside "He leads me" (the
+    test has both); "In the beginning" is still "in the beginning".
+44. **The card's meaning is quieter than its answer** (Minor 8): the sense here ("Here: God") stays
+    at 17 pt in the answer's ink; UBS's meaning follows as the word study sets it, "Here:" (when no
+    sense line said it) and the definition and domain, 15 pt scaled, in the meta line's faint
+    color, hidden until Check as the rest is.
+45. **The word's popover follows the reader's text size** (Minor 9): the gloss is 0.88 em from 15 to
+    22 points, as a footnote's text; the verse, transliteration, meaning, parsing, Ketiv and card
+    lines keep their proportion to it (they were set for a gloss of 19); the form keeps its hero
+    size.
+46. **Shots and logs** (Minor 10): 295b goes to Psalm 23:2, a third of the way down with verse 1
+    above it, both above the tray (at verse 1 the psalm's heading came mid-screen). The log's
+    "Attempt to present <L8Sheet> … not in the window hierarchy" was step 605's: the demo dismissed
+    the word's popover and presented Practice at once, on the popover going away; it now waits
+    until nothing is presented (code 1107). The app can't do that (Practice isn't reached from a
+    popover going away), so nothing else changed.
+47. **Acknowledgements** (Minor 11): the UBS row names its source (github.com/ubsicap/ubs-open-license),
+    the licence's address and the change ("Licensed CC BY-SA 4.0
+    (creativecommons.org/licenses/by-sa/4.0); changed: the dictionaries' meanings given to each word
+    by Smooth Bible, which shares them under the same licence."); the CC BY 4.0 rows (the Hebrew
+    and Greek text, STEP's lexicons, OpenBible.info, MACULA) give creativecommons.org/licenses/by/4.0.
+48. **The rulings:** the Louw–Nida references are gone (note 38); Hebrew search matches stay
+    semibold alone, with no background.
+
 **CI.** The `original` group (shots 270–295, 291b, 294b, 295b, 296, 296b, sequence 17's recording;
 503b and 503c are the ipad group's) runs third on the
 read job's iPhone, reset after help, with plans fourth (still last, for its alert); the workflow
