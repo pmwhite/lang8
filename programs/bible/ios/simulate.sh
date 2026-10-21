@@ -4,7 +4,7 @@
 # It boots an iPhone simulator, launches the app with L8_DEMO=1, and takes it
 # through one group of its demo with Darwin notifications
 # (space.trailingwhite.smoothbible.demoN; see demo_do in
-# programs/bible/ios_demo.l8, and DESIGN.md §5 and §7.10 for what each
+# programs/bible/ios/demo.l8, and DESIGN.md §5 and §7.10 for what each
 # screenshot should show). CI runs the groups on five Macs, two one after
 # another on each, the second on the first's simulator, reset (below):
 #   read    reading, the picker, selection and marks, the collapsing bar,

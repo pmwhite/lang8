@@ -239,7 +239,7 @@ $(BUILD)/better-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/impor
 # The Bible app: its text's layout, tested; and the app, as arm64 assembly
 # for iOS (see programs/bible/README.md).
 $(OK)/bible-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(wildcard programs/bible/tools/*.py programs/bible/tools/*.l8 programs/bible/data/*.txt programs/bible/data/*.bin programs/bible/data/plans/* programs/bible/data/lang/* programs/bible/data/audio/* programs/bible/worker/*.js programs/bible/worker/*.mjs programs/bible/worker/fixtures/*) | $(OK)
-	+@$(STEP) 'bible tests' ./l8c3 test programs/bible/test_text.l8 programs/bible/test_lang.l8 programs/bible/test_store.l8 programs/bible/test_plans.l8 programs/bible/test_ribbons.l8 programs/bible/test_audio.l8 programs/bible/test_memory.l8 programs/bible/test_learn.l8 programs/bible/test_help.l8 programs/bible/test_html.l8
+	+@$(STEP) 'bible tests' ./l8c3 test programs/bible/core/test_text.l8 programs/bible/core/test_lang.l8 programs/bible/core/test_store.l8 programs/bible/core/test_plans.l8 programs/bible/core/test_ribbons.l8 programs/bible/core/test_audio.l8 programs/bible/core/test_memory.l8 programs/bible/core/test_learn.l8 programs/bible/core/test_help.l8 programs/bible/web/test_html.l8
 	+@$(STEP) 'bible worker tests' node --test programs/bible/worker/test.mjs
 	+@$(STEP) 'bible data checks' sh -c 'for t in senses related learn orig ubs; do python3 -I programs/bible/tools/$$t.py --check programs/bible/data || exit 1; done; python3 -I programs/bible/tools/web_audio_manifest.py --check programs/bible/data && python3 -I programs/bible/tools/chrono.py --check programs/bible/data >/dev/null'
 	+@$(STEP) 'bible spoken text' sh -c './l8c3 build programs/bible/tools/spoken.l8 -o $(BUILD)/bible-spoken.tmp && mv -f $(BUILD)/bible-spoken.tmp $(BUILD)/bible-spoken'
@@ -249,7 +249,7 @@ bible-test: $(OK)/bible-tests
 
 # The same tests built as WebAssembly and run under Node (the modules the
 # web app shares with the iPhone's), and the web app's module.
-BIBLE_TESTS := $(wildcard programs/bible/test_*.l8)
+BIBLE_TESTS := $(wildcard programs/bible/core/test_*.l8 programs/bible/web/test_*.l8)
 $(OK)/bible-wasm-tests: l8c3 $(PROGRAMS) web/l8-runtime.js web/run.mjs $(wildcard programs/bible/data/*.txt programs/bible/data/plans/* programs/bible/data/lang/* programs/bible/data/audio/*) | $(OK)
 	+@$(STEP) 'bible wasm tests' ./l8c3 test --wasm $(BIBLE_TESTS)
 	@touch $@
@@ -257,7 +257,7 @@ $(OK)/bible-wasm-tests: l8c3 $(PROGRAMS) web/l8-runtime.js web/run.mjs $(wildcar
 bible-wasm-test: $(OK)/bible-wasm-tests
 
 $(BUILD)/bible.wasm: l8c3 $(PROGRAMS) | $(OK)
-	@$(STEP) 'bible wasm' sh -c './l8c3 wasm programs/bible/web.l8 -o $@.tmp && mv -f $@.tmp $@'
+	@$(STEP) 'bible wasm' sh -c './l8c3 wasm programs/bible/web/app.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 # The web reader's site (WEB.md §W1.9) in .build/bible-site: the marketing
 # pages, and read/: the shell, About, the app and its assets under hashed
@@ -288,10 +288,10 @@ bible-spoken: l8c3 $(PROGRAMS) $(RUNTIME)
 	@./l8c3 build programs/bible/tools/spoken.l8 -o $(BUILD)/bible-spoken && $(BUILD)/bible-spoken programs/bible/data/$(VERSION).txt
 
 $(BUILD)/bible-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
-	@$(STEP) 'bible for iOS' sh -c './l8c3 arm64 --target ios programs/bible/ios.l8 -o $@.tmp && mv -f $@.tmp $@'
+	@$(STEP) 'bible for iOS' sh -c './l8c3 arm64 --target ios programs/bible/ios/app.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 $(BUILD)/bible-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt programs/bible/ios/frameworks | $(OK)
-	@$(STEP) 'bible for the simulator' sh -c '$(IOS_LINK) $(foreach f,$(shell cat programs/bible/ios/frameworks),--framework $(f)) programs/bible/ios.l8 -o $@.tmp && python3 -I tools/ios/macho.py check $@.tmp && mv -f $@.tmp $@'
+	@$(STEP) 'bible for the simulator' sh -c '$(IOS_LINK) $(foreach f,$(shell cat programs/bible/ios/frameworks),--framework $(f)) programs/bible/ios/app.l8 -o $@.tmp && python3 -I tools/ios/macho.py check $@.tmp && mv -f $@.tmp $@'
 
 # A terminal may be running from the previous output; `mv` replaces the
 # directory entry instead of rewriting its live inode.

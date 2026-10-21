@@ -1,0 +1,2561 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// The study screens (DESIGN.md ¬ß7): a verse's interlinear (a sheet from
+// the verse tray's Study), a word's study pushed from it, the word's
+// definition and its concordance, and the acknowledgements pushed from
+// the reading settings. What they show comes from lang.l8; the data
+// (data/lang/, in the app's bundle) is read at the first study, mapped by
+// NSData, not at launch.
+import "../../ios/objc.l8";
+
+import "../core/text.l8";
+
+import "../core/lang.l8";
+
+// ---- the data, at first use ----
+// Each file mapped (mmap) at the first study, never at launch: nothing is
+// read or allocated for a reader who never studies. A mapping is an L8
+// array: its length in the (anonymous, writable) page before the file's
+// pages, the file itself mapped read-only after them.
+extern mmap(
+    addr: int,
+    n: int,
+    prot: int,
+    flags: int,
+    fd: int,
+    offset: int
+): int;
+
+extern open_c(path: int, flags: int, mode: int): int = open;
+
+extern lseek(fd: int, offset: int, whence: int): int;
+
+extern bytes_at(p: int): []i8 = l8_as_int;
+
+extern ints_bytes(a: []int): []i8 = l8_as_int;
+
+extern CFAbsoluteTimeGetCurrent(): f64;
+
+extern dlopen(path: str, mode: int): int;
+
+lang_page: int = 16384;
+
+lang_none: []i8 = new i8[1](0i8);
+
+// The size of the file last mapped (0 if it is missing).
+lang_mapped: int = 0;
+
+lang_map(name: str, ext: str): []i8 {
+    lang_mapped = 0;
+    bundle: int = msg(cls("NSBundle"), sel("mainBundle"));
+    path: int = msg2(bundle, sel("pathForResource:ofType:"), nsstring(name), nsstring(ext));
+    if (path == 0) return lang_none;
+    fd: int = open_c(msg(path, sel("fileSystemRepresentation")), 0, 0);
+    if (fd < 0) return lang_none;
+    // (Its size by seeking to its end: no file attributes read, so none of
+    // its times, which the privacy manifest would have to give a reason for.)
+    n: int = lseek(fd, 0, 2);
+    if (n <= 0) {
+        close(fd);
+        return lang_none
+    }
+    // (PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON; then PROT_READ,
+    // MAP_PRIVATE|MAP_FIXED over all but its first page.)
+    base: int = mmap(0, n + lang_page, 3, 4098, -1, 0);
+    if (base == -1 || base == 0) {
+        close(fd);
+        return lang_none
+    }
+    at: int = mmap(base + lang_page, n, 1, 18, fd, 0);
+    close(fd);
+    if (at != base + lang_page) return lang_none;
+    one[0] = n;
+    memcpy_to(base + lang_page - 8, ints_bytes(one), 8);
+    lang_mapped = n;
+    bytes_at(base + lang_page)
+}
+
+lang_load() {
+    if (lang_ready) return;
+    t0: f64 = CFAbsoluteTimeGetCurrent();
+    lw = lang_map("words", "bin");
+    if (lang_mapped == 0) {
+        note("bible: no language data");
+        return
+    }
+    lw_n = lang_mapped / 12;
+    lv = lang_map("verses", "bin");
+    lv_n = lang_mapped / 8 - 1;
+    lsup = lang_map("supplied", "bin");
+    lsup_n = lang_mapped / 8;
+    lforms = lang_map("forms", "txt");
+    lforms_len = lang_mapped;
+    lmorph = lang_map("morph", "txt");
+    lmorph_len = lang_mapped;
+    lconc = lang_map("conc", "bin");
+    lconc_len = lang_mapped;
+    llex = lang_map("lexicon", "txt");
+    llex_len = lang_mapped;
+    lgram = lang_map("grammar", "txt");
+    lgram_len = lang_mapped;
+    // (Senses and related words: DESIGN.md ¬ß10.3, ¬ß10.4.)
+    lsen = lang_map("senses", "bin");
+    lsen_n = lang_mapped;
+    lrel = lang_map("related", "bin");
+    lrel_n = lang_mapped;
+    // (Cross references and the commentary: DESIGN.md ¬ß9.6, ¬ß9.7.)
+    lxi = lang_map("xref_index", "bin");
+    lxi_n = lang_mapped / 4;
+    lxr = lang_map("xrefs", "bin");
+    lxr_n = lang_mapped;
+    lmh = lang_map("mhcc", "txt");
+    lmh_n = lang_mapped;
+    // (Meanings in context, UBS's: DESIGN.md ¬ß14.10b.3.)
+    lmean = lang_map("meanings", "bin");
+    lmean_n = lang_mapped;
+    lmeant = lang_map("meanings", "txt");
+    lmeant_n = lang_mapped;
+    mean_index();
+    lang_index();
+    note_num("bible: language data mapped, ms ", ((CFAbsoluteTimeGetCurrent() - t0) * 1000.0f64) as int)
+}
+
+// Whether verse v of chapter c can be studied (the data read, if not yet).
+can_study(c: int, v: int): bool {
+    lang_load();
+    vi: int = lang_verse(c, v);
+    vi >= 0 && v_aligned(vi) && v_end(vi) > v_first(vi)
+}
+
+// Whether verse v of chapter c may be studied, as far as is known without
+// reading the data (so the tray does not read it).
+study_maybe(c: int, v: int): bool {
+    if (!lang_ready) return true;
+    vi: int = lang_verse(c, v);
+    vi >= 0 && v_aligned(vi) && v_end(vi) > v_first(vi)
+}
+
+// ---- fonts and text ----
+// Greek in New York, Hebrew in the system's font (its Hebrew), at a size
+// (scaled with the phone's text size).
+scaled(size: f64): f64 {
+    metrics: int = msg1(cls("UIFontMetrics"), sel("metricsForTextStyle:"), objc_const("UIFontTextStyleBody"));
+    msg_f_f(metrics, sel("scaledValueForValue:"), size)
+}
+
+serif(size: f64): int {
+    d: int = msg1(cls("UIFontDescriptor"), sel("preferredFontDescriptorWithTextStyle:"),
+        objc_const("UIFontTextStyleBody"));
+    s: int = msg1(d, sel("fontDescriptorWithDesign:"), objc_const("UIFontDescriptorSystemDesignSerif"));
+    msg1_f(cls("UIFont"), sel("fontWithDescriptor:size:"), if (s != 0) s else d, size)
+}
+
+original_font(greek: bool, greek_size: f64, hebrew_size: f64): int {
+    if (greek) serif(scaled(greek_size)) else sans(scaled(hebrew_size), 0.0f64)
+}
+
+italic_sans(size: f64): int {
+    f: int = sans(size, 0.0f64);
+    d: int = msg1(msg(f, sel("fontDescriptor")), sel("fontDescriptorWithSymbolicTraits:"),
+        1);
+    if (d == 0) return f;
+    msg1_f(cls("UIFont"), sel("fontWithDescriptor:size:"), d, size)
+}
+
+mono(size: f64): int {
+    msg_ff(cls("UIFont"), sel("monospacedDigitSystemFontOfSize:weight:"), size, 0.0f64)
+}
+
+// Bytes a to b of buffer x as an NSString.
+ns_of(x: []i8, a: int, b: int): int {
+    if (b <= a) return nsstring("");
+    nsstring_at(bytes_address(x) + a, b - a)
+}
+
+attributed(text: int, font: int, color: int): int {
+    keys[0] = k_font;
+    values[0] = font;
+    keys[1] = k_color;
+    values[1] = color;
+    msg(msg2(msg(cls("NSMutableAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        text, nsdictionary(keys, values, 2)), sel("autorelease"))
+}
+
+append(
+    s: int,
+    text: int,
+    font: int,
+    color: int
+) {
+    msg1(s, sel("appendAttributedString:"), attributed(text, font, color))
+}
+
+label_of(a: int): int {
+    l: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(l, sel("setAttributedText:"), a);
+    msg1(l, sel("setTextAlignment:"), 1);
+    l
+}
+
+// A label's size: hfa[0], hfa[1].
+label_size(l: int, most: f64) {
+    msg_set_f(l, sel("setPreferredMaxLayoutWidth:"), most);
+    l8_msg_hfa(hfa, l, sel("intrinsicContentSize"), 0, 0, 0)
+}
+
+// A Strong's number into fbuf: G25.
+fput_key(greek: bool, num: int) {
+    fput(if (greek) 71 else 72);
+    fput_int(num)
+}
+
+// The view controller on top of the sheets.
+top_presented(): int {
+    top: int = presented();
+    if (top == 0) return 0;
+    while (msg(top, sel("presentedViewController")) != 0) top = msg(top, sel("presentedViewController"));
+    top
+}
+
+// A page in Safari's own view, over everything.
+open_web(url: str) {
+    u: int = msg1(cls("NSURL"), sel("URLWithString:"), nsstring(url));
+    // (SafariServices loaded at its first use, not linked: nothing more for
+    // the launch to load.)
+    if (cls("SFSafariViewController") == 0) _h: int = dlopen("/System/Library/Frameworks/SafariServices.framework/SafariServices",
+        1);
+    sf: int = cls("SFSafariViewController");
+    if (sf == 0 || u == 0) return;
+    vc: int = msg1(msg(sf, sel("alloc")), sel("initWithURL:"), u);
+    top: int = top_presented();
+    msg3(if (top != 0) top else nav, sel("presentViewController:animated:completion:"),
+        vc, 1, 0);
+    release(vc)
+}
+
+// ---- the interlinear ----
+il_class: int = 0;
+
+il_vc: int = 0;
+
+il_scroll: int = 0;
+
+il_seg: int = 0;
+
+// (The tiles' view, in the scroll view.)
+il_content: int = 0;
+
+// The verse shown, and whether in the original order.
+il_vi: int = -1;
+
+il_original: bool = false;
+
+il_width: f64 = 0.0f64;
+
+tile_ws: []f64 = new f64[300](0.0f64);
+
+tile_hs: []f64 = new f64[300](0.0f64);
+
+tile_views: []int = new int[300](0);
+
+// Each tile's English and transliteration labels (for hiding, ¬ß14.5.1).
+tile_eng: []int = new int[300](0);
+
+tile_tr: []int = new int[300](0);
+
+// Hiding what you know (¬ß14.5.1): whether it applies to the verse shown
+// (Hide What I Know on, the original order), what each tile hides now,
+// and which of the verse's words (by place) a tap has shown.
+il_hide: bool = false;
+
+tile_hid_eng: []bool = new bool[300](false);
+
+tile_hid_tr: []bool = new bool[300](false);
+
+il_shown: []bool = new bool[300](false);
+
+// (A verse pushed from Verses You Can Read: the original order, whatever
+// the setting.)
+il_force_original: bool = false;
+
+// An interlinear pushed over another (Verses You Can Read's, over the Study
+// sheet's): the one under it kept, and given back (its tiles made again)
+// when the pushed one is popped.
+il_pushed_vc: int = 0;
+
+il_s_vc: int = 0;
+
+il_s_scroll: int = 0;
+
+il_s_content: int = 0;
+
+il_s_seg: int = 0;
+
+il_s_vi: int = -1;
+
+il_s_original: bool = false;
+
+il_s_width: f64 = 0.0f64;
+
+push_interlinear_over(vi: int) {
+    il_s_vc = il_vc;
+    il_s_scroll = il_scroll;
+    il_s_content = il_content;
+    il_s_seg = il_seg;
+    il_s_vi = il_vi;
+    il_s_original = il_original;
+    il_s_width = il_width;
+    push_interlinear(vi);
+    il_pushed_vc = il_vc
+}
+
+il_disappearing(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, il_class, cmd, animated);
+    if (self != il_pushed_vc || (msg(self, sel("isMovingFromParentViewController")) & 255) == 0) return 0;
+    il_pushed_vc = 0;
+    il_vc = il_s_vc;
+    il_scroll = il_s_scroll;
+    il_content = il_s_content;
+    il_seg = il_s_seg;
+    il_vi = il_s_vi;
+    il_original = il_s_original;
+    il_width = il_s_width;
+    for x in 0..len(il_shown) il_shown[x] = false;
+    if (il_scroll != 0 && il_vi >= 0) il_build();
+    0
+}
+
+// The interlinear of verse vi pushed in the sheet (from a word study's
+// toolbar).
+push_interlinear(vi: int) {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    vc: int = make_interlinear(vi);
+    msg2(sheet_nav, sel("setToolbarHidden:animated:"), 0, 1);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+make_interlinear(vi: int): int {
+    vc: int = msg(msg(msg(il_class, sel("alloc")), sel("init")), sel("autorelease"));
+    il_vc = vc;
+    view: int = msg(vc, sel("view"));
+    msg1(view, sel("setBackgroundColor:"), c_bg);
+    il_setup(view, vi);
+    item: int = msg(vc, sel("navigationItem"));
+    msg1(item, sel("setLargeTitleDisplayMode:"), 2);
+    il_set_title();
+    il_toolbar(vc, false);
+    vc
+}
+
+// The interlinear's scroll view and the tiles' view, in view, for verse vi.
+il_setup(view: int, vi: int) {
+    il_vi = vi;
+    il_original = def_int("interlinearOrder") == 1 || il_force_original;
+    for x in 0..len(il_shown) il_shown[x] = false;
+    il_scroll = make("UIScrollView");
+    msg1(il_scroll, sel("setAutoresizingMask:"), 18);
+    msg1(il_scroll, sel("setBackgroundColor:"), c_bg);
+    msg1(il_scroll, sel("setAlwaysBounceVertical:"), 1);
+    l8_msg_hfa(hfa, view, sel("bounds"), 0, 0, 0);
+    msg_rect(il_scroll, sel("setFrame:"), 0.0f64, 0.0f64, hfa[2], hfa[3]);
+    msg1(view, sel("addSubview:"), il_scroll);
+    release(il_scroll);
+    il_content = make("UIView");
+    msg1(il_scroll, sel("addSubview:"), il_content);
+    release(il_content);
+    il_width = 0.0f64
+}
+
+// The interlinear's toolbar on vc: the verse before, the order, the verse
+// after (animated, as the Study sheet's segments change).
+il_toolbar(vc: int, animated: bool) {
+    prev: int = msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
+        symbol("chevron.up", 17.0f64, 4, 0), 0, app_obj, sel("ilPrevious:"));
+    msg1(prev, sel("setAccessibilityLabel:"), nsstring("Previous Verse"));
+    next: int = msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
+        symbol("chevron.down", 17.0f64, 4, 0), 0, app_obj, sel("ilNext:"));
+    msg1(next, sel("setAccessibilityLabel:"), nsstring("Next Verse"));
+    one[0] = nsstring("English Order");
+    one[1] = nsstring(if (w_greek(v_first(il_vi))) "Greek Order" else "Hebrew Order");
+    il_seg = msg1(msg(cls("UISegmentedControl"), sel("alloc")), sel("initWithItems:"),
+        nsarray(one, 2));
+    msg1(il_seg, sel("setSelectedSegmentIndex:"), if (def_int("interlinearOrder") == 1) 1 else 0);
+    msg3(il_seg, sel("addTarget:action:forControlEvents:"), app_obj, sel("ilOrder:"),
+        4096);
+    msg_rect(il_seg, sel("setFrame:"), 0.0f64, 0.0f64, 240.0f64, 32.0f64);
+    seg_item: int = msg1(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithCustomView:"),
+        il_seg);
+    release(il_seg);
+    flex: int = msg3(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithBarButtonSystemItem:target:action:"),
+        5, 0, 0);
+    flex2: int = msg3(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithBarButtonSystemItem:target:action:"),
+        5, 0, 0);
+    bar_items[0] = prev;
+    bar_items[1] = flex;
+    bar_items[2] = seg_item;
+    bar_items[3] = flex2;
+    bar_items[4] = next;
+    msg2(vc, sel("setToolbarItems:animated:"), nsarray(bar_items, 5), if (animated) 1 else 0);
+    for i in 0..5 release(bar_items[i])
+}
+
+bar_items: []int = new int[6](0);
+
+il_set_title() {
+    if (il_vc == 0) return;
+    fbuf_n = 0;
+    one_verse[0] = v_num(il_vi);
+    put_ref(v_chapter(il_vi), one_verse, 1);
+    msg1(il_vc, sel("setTitle:"), fstring())
+}
+
+// Laid out again when its width is known or changes.
+il_layout(self: int, cmd: int): int {
+    super0(self, il_class, cmd);
+    w: f64 = view_width(msg(self, sel("view")));
+    if (w != il_width && w > 0.0f64) {
+        il_width = w;
+        il_build()
+    }
+    0
+}
+
+// A tile: its labels, one under another, centered.
+tile_lines: []int = new int[4](0);
+
+make_tile(i: int): int {
+    w: int = tile_word[i];
+    n: int = 0;
+    soft: int = c_faint;
+    tile_eng[i] = 0;
+    tile_tr[i] = 0;
+    tile_hid_eng[i] = false;
+    tile_hid_tr[i] = false;
+    if (w < 0) {
+        tile_lines[0] = label_of(attributed(ns_of(st, tok_b[tile_t0[i]], tok_e[tile_t0[i] + tile_tn[i] - 1]),
+            italic_sans(15.0f64), soft));
+        n = 1
+    } else {
+        fl: int = w_flags(w);
+        eng: int = 0;
+        if (tile_tn[i] > 0) eng = attributed(ns_of(st, tok_b[tile_t0[i]], tok_e[tile_t0[i] + tile_tn[i] - 1]),
+            sans(15.0f64, 0.0f64), c_ink) else if ((fl & 2) != 0) eng = attributed(nsstring(if ((fl & 8) != 0) "(with previous)" else "(with next)"),
+            italic_sans(12.0f64), soft) else eng = attributed(nsstring("\‚\Ä\î"),
+            sans(15.0f64, 0.0f64), soft);
+        tile_lines[0] = label_of(eng);
+        tile_eng[i] = tile_lines[0];
+        form_of(w);
+        tile_lines[1] = label_of(attributed(ns_of(lforms, wf_b, wf_e), original_font(w_greek(w),
+            21.0f64, 25.0f64), c_ink));
+        tile_lines[2] = label_of(attributed(ns_of(lforms, wt_b, wt_e), italic_sans(12.0f64),
+            soft));
+        tile_tr[i] = tile_lines[2];
+        // What it hides (¬ß14.5.1): the English of a word known, the
+        // transliteration once the alphabet is; drawn clear, its space
+        // kept.
+        shown: bool = il_shown[w - v_first(il_vi)];
+        tile_hid_eng[i] = il_hide && !shown && word_known(w);
+        tile_hid_tr[i] = il_hide && !shown && kn_alpha[word_lang(w)];
+        if (tile_hid_eng[i]) msg_set_f(tile_lines[0], sel("setAlpha:"), 0.0f64);
+        if (tile_hid_tr[i]) msg_set_f(tile_lines[2], sel("setAlpha:"), 0.0f64);
+        fbuf_n = 0;
+        if (w_strongs(w) > 0) {
+            fput_key(w_greek(w), w_strongs(w));
+            fput_str(" \¬\∑ ")
+        }
+        morph_of(w_morph(w));
+        for x in mc_b..mc_e fput(lmorph[x] as int);
+        tile_lines[3] = label_of(attributed(fstring(), mono(11.0f64), soft));
+        n = 4
+    }
+    // Its width: the widest line's, and 16; never wider than a row, its
+    // lines wrapping within that rather than cut short.
+    wide: f64 = 0.0f64;
+    for k in 0..n {
+        label_size(tile_lines[k], 2000.0f64);
+        if (hfa[0] > wide) wide = hfa[0]
+    }
+    most: f64 = il_width - 28.0f64 - 16.0f64;
+    if (most > 40.0f64 && wide > most) wide = most;
+    wide = (wide + 0.99f64) as int as f64;
+    h: f64 = 12.0f64;
+    for k in 0..n {
+        msg1(tile_lines[k], sel("setNumberOfLines:"), 0);
+        label_size(tile_lines[k], wide);
+        h = h + hfa[1] + (if (k > 0) 2.0f64 else 0.0f64)
+    }
+    tw: f64 = wide + 16.0f64;
+    t: int = msg(make(if (w >= 0) "UIControl" else "UIView"), sel("autorelease"));
+    y: f64 = 6.0f64;
+    for k in 0..n {
+        label_size(tile_lines[k], wide);
+        lh: f64 = hfa[1];
+        msg_rect(tile_lines[k], sel("setFrame:"), 8.0f64, y, wide, lh);
+        msg1(t, sel("addSubview:"), tile_lines[k]);
+        y = y + lh + 2.0f64
+    }
+    msg_set_f(msg(t, sel("layer")), sel("setCornerRadius:"), 10.0f64);
+    // (Shown by a tap: the helped mark under its English.)
+    if (w >= 0 && il_hide && il_shown[w - v_first(il_vi)] && word_known(w)) tile_underline(t,
+        tile_lines[0]);
+    if (w >= 0) {
+        msg1(t, sel("setTag:"), w + 1);
+        msg3(t, sel("addTarget:action:forControlEvents:"), app_obj, sel("tileTapped:"),
+            64);
+        hover(t);
+        msg1(t, sel("setIsAccessibilityElement:"), 1);
+        tile_label(t, i);
+        msg1(t, sel("setAccessibilityTraits:"), objc_const("UIAccessibilityTraitButton"))
+    }
+    tile_ws[i] = tw;
+    tile_hs[i] = h;
+    t
+}
+
+// A tile's VoiceOver label: "loved, Greek ƒìgapƒìsen, verb, aorist ‚Ä¶"; with
+// its meaning hidden, "Greek ƒìgapƒìsen, verb, aorist ‚Ä¶, meaning hidden",
+// and the actions Show Meaning and Word Study.
+tile_label(t: int, i: int) {
+    w: int = tile_word[i];
+    form_of(w);
+    fbuf_n = 0;
+    if (!tile_hid_eng[i]) {
+        if (tile_tn[i] > 0) {
+            for x in tok_b[tile_t0[i]]..tok_e[tile_t0[i] + tile_tn[i] - 1] fput(st[x] as int)
+        } else fput_str("not translated");
+        fput_str(", ")
+    }
+    fput_str(if (w_greek(w)) "Greek " else "Hebrew ");
+    for x in wt_b..wt_e fput(lforms[x] as int);
+    fput_str(", ");
+    plain_parsing(w_morph(w));
+    for x in 0..pl_n fput(pl[x] as int);
+    if (tile_hid_eng[i]) fput_str(", meaning hidden");
+    msg1(t, sel("setAccessibilityLabel:"), fstring());
+    if (tile_hid_eng[i] || tile_hid_tr[i]) {
+        msg1(t, sel("setAccessibilityHint:"), nsstring("Shows its meaning"));
+        a: int = custom_action("Show Meaning", "learnTileShow:");
+        objc_setAssociatedObject(a, ints_address(ln_action_key), nsnumber_int(w),
+            1);
+        b: int = custom_action("Word Study", "learnTileStudy:");
+        objc_setAssociatedObject(b, ints_address(ln_action_key), nsnumber_int(w),
+            1);
+        one[0] = a;
+        one[1] = b;
+        msg1(t, sel("setAccessibilityCustomActions:"), nsarray(one, 2))
+    } else {
+        msg1(t, sel("setAccessibilityHint:"), nsstring("Shows word study"));
+        msg1(t, sel("setAccessibilityCustomActions:"), 0)
+    }
+}
+
+// The helped mark: 1.5 points of accent at 50% under a tile's English.
+tile_underline(t: int, eng: int) {
+    // (Under its words only: the text's width, centred in the line.)
+    l8_msg_hfa(hfa, eng, sel("frame"), 0, 0, 0);
+    fx: f64 = hfa[0];
+    fy: f64 = hfa[1];
+    fw: f64 = hfa[2];
+    fh: f64 = hfa[3];
+    label_size(eng, fw);
+    tw: f64 = if (hfa[0] > 0.0f64 && hfa[0] < fw) hfa[0] else fw;
+    hfa[0] = fx + (fw - tw) / 2.0f64;
+    hfa[1] = fy;
+    hfa[2] = tw;
+    hfa[3] = fh;
+    u: int = msg(make("UIView"), sel("autorelease"));
+    msg1(u, sel("setBackgroundColor:"), msg_set_f(c_accent, sel("colorWithAlphaComponent:"),
+        0.5f64));
+    msg1(u, sel("setUserInteractionEnabled:"), 0);
+    msg_rect(u, sel("setFrame:"), hfa[0], hfa[1] + hfa[3] - 0.5f64, hfa[2], 1.5f64);
+    msg1(t, sel("addSubview:"), u)
+}
+
+// A tile tapped with something hidden: shown (the English and
+// transliteration fading in at ink, the helped mark under it). True if it
+// had anything hidden.
+tile_show(w: int): bool {
+    // (No interlinear on the screen: nothing to show.)
+    if (il_scroll == 0 || il_vi < 0) return false;
+    i: int = -1;
+    for x in 0..tile_n
+        if (tile_word[x] == w) i = x;
+    if (i < 0 || !(tile_hid_eng[i] || tile_hid_tr[i])) return false;
+    il_shown[w - v_first(il_vi)] = true;
+    t: int = tile_views[i];
+    if (!reduce_motion()) fade_layer(msg(t, sel("layer")), 0.2f64);
+    msg_set_f(tile_eng[i], sel("setAlpha:"), 1.0f64);
+    msg_set_f(tile_tr[i], sel("setAlpha:"), 1.0f64);
+    if (tile_hid_eng[i]) tile_underline(t, tile_eng[i]);
+    tile_hid_eng[i] = false;
+    tile_hid_tr[i] = false;
+    tile_label(t, i);
+    fbuf_n = 0;
+    fput_str("bible: learn shown in the interlinear ");
+    form_of(w);
+    for x in wt_b..wt_e fput(lforms[x] as int);
+    note_ns(fstring());
+    if ((UIAccessibilityIsVoiceOverRunning() & 255) != 0) UIAccessibilityPostNotification(objc_const("UIAccessibilityLayoutChangedNotification"),
+        t);
+    true
+}
+
+learn_tile_show(_self: int, _cmd: int, a: int): int {
+    n: int = objc_getAssociatedObject(a, ints_address(ln_action_key));
+    if (n != 0 && tile_show(msg(n, sel("longValue")))) 1 else 0
+}
+
+learn_tile_study(_self: int, _cmd: int, a: int): int {
+    n: int = objc_getAssociatedObject(a, ints_address(ln_action_key));
+    if (n == 0) return 0;
+    open_study(il_vi, msg(n, sel("longValue")));
+    1
+}
+
+// Whether a verse has Aramaic (no link to a language page there).
+verse_aramaic(vi: int): bool {
+    for w in v_first(vi)..v_end(vi)
+        if (word_aramaic(w)) return true;
+    false
+}
+
+// "bible: learn hide JHN 3:16 known 11 of 14 translit hidden".
+il_hide_log() {
+    if (!diag_on || !il_hide) return;
+    known: int = 0;
+    words: int = 0;
+    tr: bool = false;
+    for i in 0..tile_n {
+        if (tile_word[i] >= 0) {
+            words = words + 1;
+            if (word_known(tile_word[i])) known = known + 1;
+            if (tile_hid_tr[i]) tr = true
+        }
+    }
+    fbuf_n = 0;
+    fput_str("bible: learn hide ");
+    c: int = v_chapter(il_vi);
+    b: int = ch_book[c];
+    for x in 0..3 fput(bsb_code_at(b, x));
+    fput(32);
+    fput_int(ch_num[c]);
+    fput(58);
+    fput_int(v_num(il_vi));
+    fput_str(" known ");
+    fput_int(known);
+    fput_str(" of ");
+    fput_int(words);
+    if (tr) fput_str(" translit hidden");
+    note_ns(fstring())
+}
+
+il_build() {
+    if (il_scroll == 0 || il_vi < 0) return;
+    subs: int = msg(msg(il_content, sel("subviews")), sel("copy"));
+    for i in 0..msg(subs, sel("count")) msg(msg1(subs, sel("objectAtIndex:"), i),
+        sel("removeFromSuperview"));
+    release(subs);
+    // (At most 680 wide, centred: a wide window's form sheet, ¬ß17.3.4.)
+    W: f64 = if (il_width > 680.0f64) 680.0f64 else il_width;
+    // The verse's reference, small, over it (DESIGN.md ¬ß9.6.2).
+    fbuf_n = 0;
+    one_verse[0] = v_num(il_vi);
+    put_ref(v_chapter(il_vi), one_verse, 1);
+    where: int = label_of(attributed(fstring(), sans(13.0f64, 0.3f64), c_faint));
+    msg1(where, sel("setTextAlignment:"), 0);
+    label_size(where, W - 40.0f64);
+    msg_rect(where, sel("setFrame:"), 20.0f64, 16.0f64, W - 40.0f64, hfa[1]);
+    msg1(il_content, sel("addSubview:"), where);
+    top: f64 = 16.0f64 + hfa[1] + 16.0f64;
+    // The verse, as the reader sets it.
+    study_load(il_vi);
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    size: f64 = em * 0.9f64;
+    fbuf_n = 0;
+    fput_int(v_num(il_vi));
+    fput_str("\‚\Ä\Ø");
+    // (Its number exactly as the reader sets one: 0.58 em semibold, faint,
+    // raised 0.36 em, then a narrow no-break space.)
+    append(s, fstring(), msg_ff(cls("UIFont"), sel("monospacedDigitSystemFontOfSize:weight:"),
+        size * 0.58f64, 0.3f64), c_faint);
+    msg4(s, sel("addAttribute:value:range:"), k_baseline, nsnumber_f(size * 0.36f64),
+        0, msg(s, sel("length")));
+    if (st_title > 0) {
+        append(s, ns_of(st, 0, st_title + 1), italic(size), c_faint);
+        append(s, ns_of(st, st_title + 1, st_n), body(size), c_ink)
+    } else append(s, ns_of(st, 0, st_n), body(size), c_ink);
+    caps_into(s, msg(s, sel("length")) - msg(ns_of(st, if (st_title > 0) st_title + 1 else 0,
+        st_n), sel("length")), ns_of(st, if (st_title > 0) st_title + 1 else 0, st_n),
+        true, size);
+    // (In another version, the verse is the BSB's, and says so.)
+    if (text_cur != TEXT_BSB) append(s, nsstring(" BSB"), sans(size * 0.62f64, 0.3f64),
+        c_faint);
+    p: int = msg(para_style(0, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 1.3f64), sel("autorelease"));
+    msg4(s, sel("addAttribute:value:range:"), k_para, p, 0, msg(s, sel("length")));
+    verse: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(verse, sel("setNumberOfLines:"), 0);
+    msg1(verse, sel("setAttributedText:"), s);
+    label_size(verse, W - 40.0f64);
+    msg_rect(verse, sel("setFrame:"), 20.0f64, top, W - 40.0f64, hfa[1]);
+    msg1(il_content, sel("addSubview:"), verse);
+    y: f64 = top + hfa[1] + 14.0f64;
+    rule: int = msg(make("UIView"), sel("autorelease"));
+    msg1(rule, sel("setBackgroundColor:"), c_rule);
+    msg_rect(rule, sel("setFrame:"), 20.0f64, y, W - 40.0f64, 1.0f64);
+    msg1(il_content, sel("addSubview:"), rule);
+    y = y + 15.0f64;
+    // The tiles, in lines (hiding what is known in the original order:
+    // ¬ß14.5.1).
+    il_hide = false;
+    if (il_original && ln_hide()) {
+        ensure_learn_lang();
+        il_hide = learn_ready
+    }
+    interlinear_tiles(il_vi, il_original);
+    for i in 0..tile_n tile_views[i] = make_tile(i);
+    wrap_tiles(tile_ws, tile_n, W - 28.0f64, 6.0f64);
+    rtl: bool = il_original && !w_greek(v_first(il_vi));
+    for l in 0..line_count {
+        a: int = line_first[l];
+        b: int = if (l + 1 < line_count) line_first[l + 1] else tile_n;
+        lh: f64 = 0.0f64;
+        for i in a..b
+            if (tile_hs[i] > lh) lh = tile_hs[i];
+        x: f64 = if (rtl) W - 14.0f64 else 14.0f64;
+        for i in a..b {
+            if (rtl) x = x - tile_ws[i];
+            msg_rect(tile_views[i], sel("setFrame:"), x, y, tile_ws[i], tile_hs[i]);
+            msg1(il_content, sel("addSubview:"), tile_views[i]);
+            if (rtl) x = x - 6.0f64 else x = x + tile_ws[i] + 6.0f64
+        }
+        y = y + lh + 14.0f64
+    }
+    il_hide_log();
+    // The link to the language's page: Learn Greek (or, once started,
+    // Greek); none in an Aramaic verse.
+    il_link = 0;
+    if (!verse_aramaic(il_vi)) {
+        ensure_learn();
+        lang: int = if (w_greek(v_first(il_vi))) 0 else 1;
+        b: int = msg1(cls("UIButton"), sel("buttonWithType:"), 1);
+        msg2(b, sel("setTitle:forState:"), nsstring(if (learn_started(lang)) language_names[lang] else if (lang == 0) "Learn Greek" else "Learn Hebrew"),
+            0);
+        msg1(msg(b, sel("titleLabel")), sel("setFont:"), sans(scaled(15.0f64), 0.0f64));
+        msg2(b, sel("setTitleColor:forState:"), c_accent, 0);
+        msg1(b, sel("setTag:"), lang);
+        msg3(b, sel("addTarget:action:forControlEvents:"), app_obj, sel("learnLink:"),
+            64);
+        msg(b, sel("sizeToFit"));
+        bw: f64 = view_width(b);
+        bh: f64 = view_height(b);
+        y = y + 10.0f64;
+        msg_rect(b, sel("setFrame:"), (W - bw) / 2.0f64, y, bw, bh);
+        msg1(il_content, sel("addSubview:"), b);
+        il_link = b;
+        y = y + bh + 14.0f64
+    }
+    // (Its words are the BSB's, whatever version is read.)
+    if (text_cur != TEXT_BSB) {
+        foot: int = label_of(attributed(nsstring("The interlinear follows the Berean Standard Bible."),
+            sans(13.0f64, 0.0f64), c_faint));
+        msg1(foot, sel("setNumberOfLines:"), 0);
+        label_size(foot, W - 40.0f64);
+        msg_rect(foot, sel("setFrame:"), 20.0f64, y + 6.0f64, W - 40.0f64, hfa[1]);
+        msg1(il_content, sel("addSubview:"), foot);
+        y = y + 6.0f64 + hfa[1] + 10.0f64
+    }
+    msg_rect(il_content, sel("setFrame:"), (il_width - W) / 2.0f64, 0.0f64, W, y + 20.0f64);
+    msg_ff(il_scroll, sel("setContentSize:"), il_width, y + 20.0f64)
+}
+
+// The interlinear's link (the demo's tap).
+il_link: int = 0;
+
+learn_link(_self: int, _cmd: int, b: int): int {
+    open_language(msg(b, sel("tag")));
+    0
+}
+
+il_order(_self: int, _cmd: int, seg: int): int {
+    il_original = msg(seg, sel("selectedSegmentIndex")) == 1;
+    set_def_int("interlinearOrder", if (il_original) 1 else 0);
+    // (The tiles cross-fade into their new order.)
+    fade_layer(msg(il_scroll, sel("layer")), 0.2f64);
+    il_build();
+    0
+}
+
+// A cross-fade of whatever changes in a layer next, over t seconds.
+fade_layer(layer: int, t: f64) {
+    if (layer == 0) return;
+    tr: int = make("CATransition");
+    msg1(tr, sel("setType:"), objc_const("kCATransitionFade"));
+    msg_set_f(tr, sel("setDuration:"), t);
+    msg2(layer, sel("addAnimation:forKey:"), tr, 0);
+    release(tr)
+}
+
+// The verse before or after (across chapters; not one that cannot be
+// studied).
+il_step(d: int) {
+    vi: int = il_vi + d;
+    while (vi >= 0 && vi < lv_n && !(v_aligned(vi) && v_end(vi) > v_first(vi))) vi = vi + d;
+    if (vi < 0 || vi >= lv_n) return;
+    il_vi = vi;
+    for x in 0..len(il_shown) il_shown[x] = false;
+    il_set_title();
+    study_verse_moved(v_chapter(vi), v_num(vi));
+    fade_layer(msg(il_scroll, sel("layer")), 0.2f64);
+    il_build();
+    msg_ff1(il_scroll, sel("setContentOffset:animated:"), 0.0f64, -top_inset(il_scroll),
+        0)
+}
+
+il_previous(_self: int, _cmd: int, _b: int): int {
+    il_step(-1);
+    0
+}
+
+il_next(_self: int, _cmd: int, _b: int): int {
+    il_step(1);
+    0
+}
+
+// One tap shows what is hidden; the next (nothing hidden) studies.
+tile_tapped(_self: int, _cmd: int, t: int): int {
+    w: int = msg(t, sel("tag")) - 1;
+    if (w >= 0 && !tile_show(w)) open_study(il_vi, w);
+    0
+}
+
+// ---- word study ----
+study_table: int = 0;
+
+study_vc: int = 0;
+
+study_class: int = 0;
+
+ws_vi: int = 0;
+
+ws_w: int = 0;
+
+// The number studied (the word's, or a lemma's: ws_lemma, with no verse).
+ws_greek: bool = false;
+
+ws_num: int = 0;
+
+ws_lemma: bool = false;
+
+// How many times the word studied occurs (in its sense, if counted so).
+ws_words: int = 0;
+
+// The word's lexicon entries (where the first is, and how many).
+ws_lex: int = -1;
+
+// Its sense (DESIGN.md ¬ß10.3): which entry (from 1; 0 not known), the
+// entry's line (else the first's), and whether it is counted by sense (the
+// number has more than one sense in use): then how often in it, and in all.
+ws_sense: int = 0;
+
+ws_entry: int = -1;
+
+ws_by_sense: bool = false;
+
+ws_all: int = 0;
+
+// Related words (¬ß10.4): up to 5 of its language, and 3 of the other, each
+// its number and how often it occurs.
+ws_rel_n: int = 0;
+
+ws_rel_greek: []bool = new bool[5](false);
+
+ws_rel_num: []int = new int[5](0);
+
+ws_rel_count: []int = new int[5](0);
+
+ws_far_n: int = 0;
+
+ws_far_num: []int = new int[3](0);
+
+// The word's meaning here (UBS's; 0 none) and the words of its domain.
+ws_mean: int = 0;
+
+ws_dom_n: int = 0;
+
+ws_dom_num: []int = new int[5](0);
+
+ws_dom_count: []int = new int[5](0);
+
+ws_far_count: []int = new int[3](0);
+
+// Its distinct forms (0: no Forms row), and whether it may be a card.
+ws_forms: int = 0;
+
+ws_learnable: bool = false;
+
+// Section 1's rows (¬ß7.5, ¬ß14.5.2): Dictionary Form, Meaning, (a lemma's
+// Forms), Strong's, (a word's Grammar, Forms), Your Words.
+WR_DICT: int = 0;
+
+WR_MEANING: int = 1;
+
+WR_STRONGS: int = 2;
+
+WR_GRAMMAR: int = 3;
+
+WR_FORMS: int = 4;
+
+WR_YOURS: int = 5;
+
+ws_row_kinds: []int = new int[8](0);
+
+ws_row_n: int = 0;
+
+ws_rows_make() {
+    ws_row_n = 0;
+    ws_row_add(WR_DICT);
+    ws_row_add(WR_MEANING);
+    if (ws_lemma && ws_forms > 0) ws_row_add(WR_FORMS);
+    ws_row_add(WR_STRONGS);
+    if (!ws_lemma) ws_row_add(WR_GRAMMAR);
+    if (!ws_lemma && ws_forms > 0) ws_row_add(WR_FORMS);
+    if (ws_learnable) ws_row_add(WR_YOURS)
+}
+
+ws_row_add(k: int) {
+    ws_row_kinds[ws_row_n] = k;
+    ws_row_n = ws_row_n + 1
+}
+
+ws_row_kind(r: int): int {
+    ws_rows_make();
+    if (r < ws_row_n) ws_row_kinds[r] else -1
+}
+
+// A word's study pushed in the sheet (from the interlinear).
+open_study(vi: int, w: int) {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    vc: int = make_study(vi, w, view_width(msg(sheet_nav, sel("view"))), true);
+    msg2(sheet_nav, sel("setToolbarHidden:animated:"), 0, 1);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1);
+    sheet: int = msg(sheet_nav, sel("sheetPresentationController"));
+    if (sheet != 0) msg1(sheet, sel("setSelectedDetentIdentifier:"), objc_const("UISheetPresentationControllerDetentIdentifierLarge"))
+}
+
+// A related word's lemma study pushed (no verse: no grammar, nor Add to
+// Note).
+open_lemma(greek: bool, num: int) {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    vc: int = make_study_of(-1, -1, greek, num, view_width(msg(sheet_nav, sel("view"))),
+        true);
+    msg1(vc, sel("setHidesBottomBarWhenPushed:"), 1);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+// A word's study as a sheet of its own, large (from the edit menu's Study);
+// beside the text, where it fits, pushed in the panel at its verse.
+open_study_sheet(vi: int, w: int) {
+    if (presented() != 0) return;
+    if (beside_fits()) {
+        beside_open(v_chapter(vi), v_num(vi));
+        if (bs_nav != 0) open_study(vi, w);
+        return
+    }
+    beside_discard();
+    vc: int = make_study(vi, w, sheet_content_w(700.0f64), false);
+    origin_c = v_chapter(vi);
+    origin_v = v_num(vi);
+    msg1(msg(vc, sel("navigationItem")), sel("setRightBarButtonItem:"), system_item(0,
+        "closeSheet:"));
+    sheet_form(700.0f64, 860.0f64);
+    sheet_nav: int = sheet_of(vc, 1);
+    msg2(sheet_nav, sel("setToolbarHidden:animated:"), 0, 0);
+    msg1(msg(sheet_nav, sel("toolbar")), sel("setTintColor:"), c_icon);
+    present(sheet_nav)
+}
+
+// The toolbar's items of a word study: Add to Note, and the interlinear
+// (unless it came from there).
+study_toolbar(vc: int, from_il: bool) {
+    bar_items[0] = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:style:target:action:"),
+        nsstring("Add to Note"), 0, app_obj, sel("addToNote:")), sel("autorelease"));
+    bar_items[1] = msg(msg3(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithBarButtonSystemItem:target:action:"),
+        5, 0, 0), sel("autorelease"));
+    n: int = 2;
+    if (!from_il) {
+        bar_items[2] = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:style:target:action:"),
+            nsstring("Interlinear"), 0, app_obj, sel("studyInterlinear:")), sel("autorelease"));
+        n = 3
+    }
+    msg1(vc, sel("setToolbarItems:"), nsarray(bar_items, n))
+}
+
+// The study's numbers made (for word w of verse vi, or a lemma's with no
+// word: w -1): its entries, its sense, its counts and renderings, and its
+// related words.
+study_set(
+    vi: int,
+    w: int,
+    greek: bool,
+    num: int
+) {
+    ws_vi = vi;
+    ws_w = w;
+    ws_lemma = w < 0;
+    ws_greek = greek;
+    ws_num = num;
+    ws_lex = lex_first(greek, num);
+    ws_sense = (if (w >= 0) w_sense(w) else 0);
+    ws_entry = sense_entry(greek, num, ws_sense);
+    if (ws_entry < 0) {
+        ws_entry = ws_lex;
+        ws_sense = 0
+    }
+    _ok: bool = conc_load(greek, num);
+    ws_all = cc_words;
+    ws_by_sense = ws_sense > 0 && senses_in_use() > 1;
+    if (ws_by_sense) conc_sense(ws_sense);
+    ws_words = cc_words;
+    renderings();
+    // (Then the related words, and how often each occurs.)
+    related_load(greek, num);
+    ws_rel_n = 0;
+    ws_far_n = 0;
+    for i in 0..rl_n {
+        if (rl_greek[i] == greek && ws_rel_n < 5) {
+            ws_rel_greek[ws_rel_n] = rl_greek[i];
+            ws_rel_num[ws_rel_n] = rl_num[i];
+            ws_rel_n = ws_rel_n + 1
+        } else if (rl_greek[i] != greek && ws_far_n < 3) {
+            ws_far_num[ws_far_n] = rl_num[i];
+            ws_far_n = ws_far_n + 1
+        }
+    }
+    for i in 0..ws_rel_n ws_rel_count[i] = occurrences(greek, ws_rel_num[i]);
+    for i in 0..ws_far_n ws_far_count[i] = occurrences(!greek, ws_far_num[i]);
+    // (And its meaning here, UBS's, with the words of its domain: the
+    // commonest five not related above.)
+    ws_mean = (if (w >= 0) w_meaning(w) else 0);
+    ws_dom_n = 0;
+    if (ws_mean > 0) {
+        domain_words(ws_mean);
+        for i in 0..dm_n {
+            num_d: int = dm_num[i] & 32767;
+            listed: bool = num_d == num;
+            for x in 0..ws_rel_n
+                if (ws_rel_num[x] == num_d) listed = true;
+            n_d: int = if (listed) 0 else occurrences(greek, num_d);
+            if (n_d > 0) {
+                // (Kept, the commonest five, most first.)
+                at: int = ws_dom_n;
+                while (at > 0 && ws_dom_count[at - 1] < n_d) at = at - 1;
+                if (at < 5) {
+                    y: int = if (ws_dom_n < 5) ws_dom_n else 4;
+                    while (y > at) {
+                        ws_dom_num[y] = ws_dom_num[y - 1];
+                        ws_dom_count[y] = ws_dom_count[y - 1];
+                        y = y - 1
+                    }
+                    ws_dom_num[at] = num_d;
+                    ws_dom_count[at] = n_d;
+                    if (ws_dom_n < 5) ws_dom_n = ws_dom_n + 1
+                }
+            }
+        }
+    }
+    // Its forms (¬ß14.5.3: a verb's, noun's, adjective's, pronoun's or the
+    // article's; not a name's), counted for the Forms row; and whether it
+    // may be learned (its Your Words row).
+    ensure_learn_lang();
+    ws_learnable = learnable(if (greek) 0 else 1, num);
+    ws_forms = 0;
+    if ((vk_flags_of(if (greek) 0 else 1, num) & FL_NAME) == 0) {
+        forms_of(greek, num);
+        forms_layout();
+        if (fs_n > 0) ws_forms = forms_count()
+    }
+    // (The number's own verses loaded again, as the concordance has them.)
+    _again: bool = conc_load(greek, num);
+    if (ws_by_sense) conc_sense(ws_sense)
+}
+
+make_study(
+    vi: int,
+    w: int,
+    W: f64,
+    from_il: bool
+): int {
+    make_study_of(vi, w, w_greek(w), w_strongs(w), W, from_il)
+}
+
+make_study_of(
+    vi: int,
+    w: int,
+    greek: bool,
+    num: int,
+    W: f64,
+    from_il: bool
+): int {
+    study_set(vi, w, greek, num);
+    vc: int = msg(msg1(msg(study_class, sel("alloc")), sel("initWithStyle:"), 2),
+        sel("autorelease"));
+    study_vc = vc;
+    study_table = held(study_table, msg(vc, sel("tableView")));
+    msg1(study_table, sel("setDataSource:"), app_obj);
+    msg1(study_table, sel("setDelegate:"), app_obj);
+    style_table(study_table, true);
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    // (What it studies, kept with it: shown again when it comes back from
+    // a study pushed over it.)
+    one[0] = nsnumber_int(vi);
+    one[1] = nsnumber_int(w);
+    one[2] = nsnumber_int(if (greek) 1 else 0);
+    one[3] = nsnumber_int(num);
+    objc_setAssociatedObject(vc, ints_address(circle_key), nsarray(one, 4), 1);
+    // The title: the lemma's transliteration (or the form's).
+    if (ws_entry >= 0) {
+        lex_field(ws_entry, 1);
+        msg1(vc, sel("setTitle:"), ns_of(llex, lf_b, lf_e))
+    } else if (w >= 0) {
+        form_of(w);
+        msg1(vc, sel("setTitle:"), ns_of(lforms, wt_b, wt_e))
+    }
+    msg1(study_table, sel("setTableHeaderView:"), if (ws_lemma) lemma_header(W) else study_header(W));
+    if (!ws_lemma) study_toolbar(vc, from_il);
+    vc
+}
+
+// A study about to show again (from one pushed over it): its numbers made
+// again, if another's are loaded.
+study_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, study_class, cmd, animated);
+    a: int = objc_getAssociatedObject(self, ints_address(circle_key));
+    if (a == 0) return 0;
+    vi: int = msg(msg1(a, sel("objectAtIndex:"), 0), sel("longValue"));
+    w: int = msg(msg1(a, sel("objectAtIndex:"), 1), sel("longValue"));
+    greek: bool = msg(msg1(a, sel("objectAtIndex:"), 2), sel("longValue")) == 1;
+    num: int = msg(msg1(a, sel("objectAtIndex:"), 3), sel("longValue"));
+    t: int = msg(self, sel("tableView"));
+    if (t == study_table && w == ws_w && num == ws_num && greek == ws_greek) return 0;
+    study_set(vi, w, greek, num);
+    study_vc = self;
+    study_table = held(study_table, t);
+    msg(t, sel("reloadData"));
+    0
+}
+
+// Add to Note: "·ºÄŒ≥Œ±œÄŒ¨œâ (agapa≈ç, G25): to love" on a line of its own at the
+// end of the verse's note (a new note if it has none), and the note's
+// editor over the study, the cursor at its end.
+add_to_note(_self: int, _cmd: int, _b: int): int {
+    c: int = v_chapter(ws_vi);
+    v: int = v_num(ws_vi);
+    i: int = note_of(c, v);
+    n: int = 0;
+    last: int = v;
+    if (i >= 0) {
+        n = nt_len[i];
+        for x in 0..n note_buf[x] = nt_pool[nt_at[i] + x];
+        last = nt_end[i];
+        if (n > 0 && n < len(note_buf)) {
+            note_buf[n] = 10i8;
+            n = n + 1
+        }
+    }
+    fbuf_n = 0;
+    if (ws_lex >= 0) {
+        lex_field(ws_lex, 0);
+        for x in lf_b..lf_e fput(llex[x] as int);
+        fput_str(" (");
+        lex_field(ws_lex, 1);
+        for x in lf_b..lf_e fput(llex[x] as int);
+        fput_str(", ")
+    } else fput_str("(");
+    fput_key(w_greek(ws_w), w_strongs(ws_w));
+    fput_str(")");
+    if (ws_lex >= 0) {
+        fput_str(": ");
+        lex_field(ws_lex, 3);
+        for x in lf_b..lf_e fput(llex[x] as int)
+    }
+    for x in 0..fbuf_n {
+        if (n < len(note_buf)) {
+            note_buf[n] = fbuf[x];
+            n = n + 1
+        }
+    }
+    set_note(c, v, last, note_buf, n);
+    save_notes();
+    remake(c);
+    note_force_edit = true;
+    open_note(c, v, last);
+    0
+}
+
+study_interlinear(_self: int, _cmd: int, _b: int): int {
+    push_interlinear(ws_vi);
+    0
+}
+
+// The header: the form as it is in the verse, its transliteration, and
+// ‚Äúloved‚Äù in John 3:16.
+study_header(W: f64): int {
+    w: int = ws_w;
+    study_load(ws_vi);
+    form_of(w);
+    hero: int = label_of(attributed(ns_of(lforms, wf_b, wf_e), original_font(w_greek(w),
+        34.0f64, 40.0f64), c_ink));
+    tr: int = label_of(attributed(ns_of(lforms, wt_b, wt_e), italic_sans(17.0f64),
+        c_faint));
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    soft: int = msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.8f64);
+    fbuf_n = 0;
+    one_verse[0] = v_num(ws_vi);
+    put_ref(v_chapter(ws_vi), one_verse, 1);
+    where: int = fstring();
+    chunk_of(w);
+    if (ch_e > ch_b) {
+        append(s, nsstring("\‚\Ä\ú"), sans(15.0f64, 0.0f64), soft);
+        append(s, ns_of(st, ch_b, ch_e), sans(15.0f64, 0.4f64), soft);
+        append(s, nsstring("\‚\Ä\ù in "), sans(15.0f64, 0.0f64), soft)
+    } else append(s, nsstring("Not translated in "), sans(15.0f64, 0.0f64), soft);
+    append(s, where, sans(15.0f64, 0.0f64), soft);
+    study_header_of(W, hero, tr, label_of(s))
+}
+
+// A lemma's: its dictionary form, transliteration, and "143 times".
+lemma_header(W: f64): int {
+    lex_field(ws_lex, 0);
+    hero: int = label_of(attributed(ns_of(llex, lf_b, lf_e), original_font(ws_greek,
+        34.0f64, 40.0f64), c_ink));
+    lex_field(ws_lex, 1);
+    tr: int = label_of(attributed(ns_of(llex, lf_b, lf_e), italic_sans(17.0f64), c_faint));
+    fbuf_n = 0;
+    fput_int(ws_all);
+    fput_str(if (ws_all == 1) " time" else " times");
+    line: int = label_of(attributed(fstring(), sans(15.0f64, 0.0f64), msg_set_f(c_ink,
+        sel("colorWithAlphaComponent:"), 0.8f64)));
+    study_header_of(W, hero, tr, line)
+}
+
+study_header_of(
+    W: f64,
+    hero: int,
+    tr: int,
+    line: int
+): int {
+    v: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, W, 100.0f64), sel("autorelease"));
+    // (Made smaller to fit, rather than cut off, at the largest text sizes.)
+    msg1(hero, sel("setAdjustsFontSizeToFitWidth:"), 1);
+    msg_set_f(hero, sel("setMinimumScaleFactor:"), 0.3f64);
+    msg1(tr, sel("setNumberOfLines:"), 0);
+    msg1(line, sel("setNumberOfLines:"), 0);
+    y: f64 = 24.0f64;
+    for x in [hero, tr, line] {
+        label_size(x, W - 40.0f64);
+        h: f64 = hfa[1];
+        msg_rect(x, sel("setFrame:"), 20.0f64, y, W - 40.0f64, h);
+        msg1(v, sel("addSubview:"), x);
+        y = y + h + (if (x == hero) 4.0f64 else 8.0f64)
+    }
+    msg_rect(v, sel("setFrame:"), 0.0f64, 0.0f64, W, y - 8.0f64 + 20.0f64);
+    v
+}
+
+// The sections: 0 the word, 1 its definition, 2 occurrences, 3 Translated
+// As (if any), 4 Related Words, 5 those of the other Testament, 6 In the
+// Same Domain (UBS's, R11.0; if any).
+ws_kinds: []int = new int[7](0);
+
+ws_kinds_n: int = 0;
+
+study_kinds() {
+    ws_kinds_n = 0;
+    for k in 0..7 {
+        if (k <= 2 || k == 3 && rd_n > 0 || k == 4 && ws_rel_n > 0 || k == 5 && ws_far_n > 0 || k == 6 && ws_dom_n > 0) {
+            ws_kinds[ws_kinds_n] = k;
+            ws_kinds_n = ws_kinds_n + 1
+        }
+    }
+}
+
+study_kind(s: int): int {
+    study_kinds();
+    if (s < ws_kinds_n) ws_kinds[s] else -1
+}
+
+study_sections(): int {
+    study_kinds();
+    ws_kinds_n
+}
+
+study_rows(s: int): int {
+    k: int = study_kind(s);
+    if (k == 0) {
+        ws_rows_make();
+        return ws_row_n
+    }
+    if (k == 2) return if (ws_by_sense) 2 else 1;
+    if (k == 3) return if (rd_n > 6) 6 else rd_n;
+    if (k == 4) return ws_rel_n;
+    if (k == 5) return ws_far_n;
+    if (k == 6) return ws_dom_n;
+    1
+}
+
+study_header_title(s: int): int {
+    k: int = study_kind(s);
+    if (k == 1) return nsstring("Definition");
+    if (k == 2) return nsstring("Occurrences");
+    if (k == 3) return nsstring("Translated As");
+    if (k == 4) return nsstring("Related Words");
+    if (k == 5) return nsstring(if (ws_greek) "In the Old Testament" else "In the New Testament");
+    if (k == 6) return nsstring("In the Same Domain");
+    0
+}
+
+study_footer(s: int): int {
+    k: int = study_kind(s);
+    if (k == 1 && ws_lex >= 0) return nsstring("From STEP Bible");
+    if (k == 3 && ws_by_sense) return nsstring("In this sense");
+    // (MACULA's under the last of its sections; UBS's under its own.)
+    if ((k == 4 || k == 5) && (s == ws_kinds_n - 1 || study_kind(s + 1) == 6)) return nsstring("Words used in similar contexts, from MACULA.");
+    if (k == 6) {
+        fbuf_n = 0;
+        fput_str("Words with a meaning in ");
+        mean_field(ws_mean, 3);
+        for x in mf_b..mf_e fput(lmeant[x] as int);
+        fput_str(", as here; from the UBS dictionaries.");
+        return fstring()
+    }
+    0
+}
+
+// The definition's first words, plain: an outline's top senses joined
+// with " ¬∑ ", or its paragraphs run together (lang.l8).
+definition_preview(): int {
+    if (ws_lex < 0) return nsstring("No definition.");
+    n_: int = lex_count(ws_lex);
+    if (!ws_lemma && ws_sense == 0 && n_ > 1) {
+        // A sense not known: which senses it may be, none first.
+        fbuf_n = 0;
+        fput_str("One of ");
+        fput_int(n_);
+        fput_str(" senses, not tagged in this verse: ");
+        for x in 0..n_ {
+            lex_field(lex_line(ws_lex, x), 3);
+            b: int = lf_b;
+            e: int = lf_e;
+            dup: bool = false;
+            for y in 0..x {
+                lex_field(lex_line(ws_lex, y), 3);
+                if (lf_e - lf_b == e - b) {
+                    same: bool = true;
+                    for i in 0..e - b
+                        if (llex[lf_b + i] != llex[b + i]) same = false;
+                    if (same) dup = true
+                }
+            }
+            if (!dup) {
+                if (x > 0) fput_str(" \¬\∑ ");
+                for i in b..e fput(llex[i] as int)
+            }
+        }
+        return fstring()
+    }
+    definition_preview_of(ws_entry);
+    // (Up to 600 bytes, stopping between characters.)
+    n: int = pv_n;
+    if (n > 600) {
+        n = 600;
+        while (n > 0 && byte_of(pv, n) >= 128 && byte_of(pv, n) < 192) n = n - 1
+    }
+    nsstring_of(pv, n)
+}
+
+// A related word's row: its lemma and transliteration, gloss, and count.
+related_cell(
+    t: int,
+    greek: bool,
+    num: int,
+    count: int
+): int {
+    cell: int = list_cell(t, "related", 2);
+    config: int = list_config(2);
+    p: int = lex_first(greek, num);
+    a: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    if (p >= 0) {
+        // (Left to right, a Hebrew lemma held in its place by the marks.)
+        append(a, nsstring("\‚\Ä\é"), sans(17.0f64, 0.0f64), c_ink);
+        lex_field(p, 0);
+        append(a, ns_of(llex, lf_b, lf_e), original_font(greek, 17.0f64, 19.0f64),
+            c_ink);
+        append(a, nsstring("\‚\Ä\é  "), sans(17.0f64, 0.0f64), c_ink);
+        lex_field(p, 1);
+        append(a, ns_of(llex, lf_b, lf_e), italic_sans(17.0f64), c_faint);
+        lex_field(p, 3);
+        msg1(config, sel("setSecondaryText:"), ns_of(llex, lf_b, lf_e))
+    } else {
+        fbuf_n = 0;
+        fput_key(greek, num);
+        append(a, fstring(), mono(17.0f64), c_ink)
+    }
+    msg1(config, sel("setAttributedText:"), a);
+    msg1(detail_props(config), sel("setColor:"), c_faint);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    // (A word known: a faint checkmark after its count, ¬ß14.5.2.)
+    known: bool = learn_ready && word_card_known(if (greek) 0 else 1, num);
+    msg1(cell, sel("setAccessoryView:"), if (known) value_check_disclosure(nsnumber_text(count)) else value_disclosure(nsnumber_text(count),
+        c_faint));
+    if (known && p >= 0) {
+        fbuf_n = 0;
+        lex_field(p, 1);
+        for x in lf_b..lf_e fput(llex[x] as int);
+        fput_str(", ");
+        lex_field(p, 3);
+        for x in lf_b..lf_e fput(llex[x] as int);
+        fput_str(", ");
+        fput_int(count);
+        fput_str(" times, known");
+        msg1(cell, sel("setAccessibilityLabel:"), fstring())
+    } else msg1(cell, sel("setAccessibilityLabel:"), 0);
+    msg1(cell, sel("setSelectionStyle:"), 3);
+    cell
+}
+
+// The count, a faint checkmark, and the disclosure.
+value_check_disclosure(text: int): int {
+    v: int = value_disclosure(text, c_faint);
+    iv: int = msg(msg1(msg(cls("UIImageView"), sel("alloc")), sel("initWithImage:"),
+        symbol("checkmark", 13.0f64, 6, c_faint)), sel("autorelease"));
+    msg(iv, sel("sizeToFit"));
+    l8_msg_hfa(hfa, v, sel("frame"), 0, 0, 0);
+    vw: f64 = hfa[2];
+    vh: f64 = hfa[3];
+    iw: f64 = view_width(iv);
+    ih: f64 = view_height(iv);
+    // (The checkmark between the count and the chevron.)
+    subs: int = msg(v, sel("subviews"));
+    label: int = msg1(subs, sel("objectAtIndex:"), 0);
+    chevron: int = msg1(subs, sel("objectAtIndex:"), 1);
+    l8_msg_hfa(hfa, chevron, sel("frame"), 0, 0, 0);
+    cx: f64 = hfa[0];
+    msg_rect(chevron, sel("setFrame:"), cx + iw + 6.0f64, hfa[1], hfa[2], hfa[3]);
+    msg_rect(iv, sel("setFrame:"), cx, (vh - ih) / 2.0f64, iw, ih);
+    msg1(v, sel("addSubview:"), iv);
+    msg_rect(v, sel("setFrame:"), 0.0f64, 0.0f64, vw + iw + 6.0f64, vh);
+    _l: int = label;
+    v
+}
+
+// The Meaning row with UBS's meaning here (R11.0): the gloss, then "Here:
+// to have love for someone ‚Ä¶ ¬∑ Love, Affection, Compassion", faint.
+meaning_here_cell(t: int): int {
+    cell: int = list_cell(t, "meaning-here", 2);
+    config: int = list_config(2);
+    msg1(config, sel("setText:"), nsstring("Meaning"));
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    a: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    me: int = if (ws_lemma) ws_entry else meaning_entry(ws_greek, ws_num, ws_sense);
+    if (me >= 0) {
+        lex_field(me, 3);
+        append(a, ns_of(llex, lf_b, lf_e), msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
+            objc_const("UIFontTextStyleBody")), c_ink);
+        append(a, nsstring("\n"), sans(6.0f64, 0.0f64), c_faint)
+    }
+    fbuf_n = 0;
+    fput_str("Here: ");
+    fput_meaning(ws_mean);
+    append(a, fstring(), msg1(cls("UIFont"), sel("preferredFontForTextStyle:"), objc_const("UIFontTextStyleFootnote")),
+        c_faint);
+    msg1(config, sel("setSecondaryAttributedText:"), a);
+    msg1(detail_props(config), sel("setNumberOfLines:"), 0);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    cell
+}
+
+// ---- the word study's Your Words row (¬ß14.5.2) ----
+// No card: Learn This Word (accent, a button's row); a card: its state.
+yours_cell(t: int): int {
+    lang: int = if (ws_greek) 0 else 1;
+    k: int = card_of_word(lang, ws_num);
+    if (k < 0) {
+        cell: int = list_cell(t, "yours-learn", 0);
+        config: int = list_config(0);
+        msg1(config, sel("setText:"), nsstring("Learn This Word"));
+        msg1(text_props(config), sel("setColor:"), c_accent);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessibilityTraits:"), objc_const("UIAccessibilityTraitButton"));
+        msg1(cell, sel("setSelectionStyle:"), 3);
+        return cell
+    }
+    cell: int = list_cell(t, "yours", 1);
+    config: int = list_config(1);
+    msg1(config, sel("setText:"), nsstring("Your Words"));
+    fbuf_n = 0;
+    if (cd_state[k] == MS_NEW) fput_str("New \¬\∑ in your next practice") else fput_card_state(k,
+        today());
+    msg1(config, sel("setSecondaryText:"), fstring());
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(detail_props(config), sel("setColor:"), c_faint);
+    msg1(detail_props(config), sel("setNumberOfLines:"), 2);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    cell
+}
+
+// Learn This Word: the card added (from study), the row changed in place,
+// and a toast.
+yours_learn() {
+    lang: int = if (ws_greek) 0 else 1;
+    k: int = learn_add_word(lang, ws_num, FROM_STUDY, today(), time(0));
+    if (k < 0) return;
+    cards_changed();
+    if (study_table != 0) {
+        ws_rows_make();
+        for r in 0..ws_row_n {
+            if (ws_row_kinds[r] == WR_YOURS) {
+                one[0] = msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"),
+                    r, 0);
+                msg2(study_table, sel("reloadRowsAtIndexPaths:withRowAnimation:"),
+                    nsarray(one, 1), if (reduce_motion()) 5 else 0)
+            }
+        }
+    }
+    toast_symbol(nsstring(if (lang == 0) "Added to Greek Words" else "Added to Hebrew Words"),
+        "plus", 1.6f64);
+    note(if (lang == 0) "bible: toast Added to Greek Words" else "bible: toast Added to Hebrew Words")
+}
+
+// The sense's code (H430G), or the number's (H430).
+fput_sense_code() {
+    if (ws_sense > 0 && ws_entry >= 0) {
+        lex_code(ws_entry);
+        if (lf_e > lf_b) {
+            for x in lf_b..lf_e fput(llex[x] as int);
+            return
+        }
+    }
+    fput_key(ws_greek, ws_num)
+}
+
+study_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    r: int = msg(path, sel("row"));
+    k: int = study_kind(s);
+    w: int = ws_w;
+    rk: int = if (k == 0) ws_row_kind(r) else -1;
+    if (rk == WR_FORMS) {
+        cell: int = list_cell(t, "value", 1);
+        config: int = list_config(1);
+        msg1(config, sel("setText:"), nsstring("Forms"));
+        fbuf_n = 0;
+        fput_int(ws_forms);
+        fput_str(if (ws_forms == 1) " form" else " forms");
+        msg1(config, sel("setSecondaryText:"), fstring());
+        msg1(text_props(config), sel("setColor:"), c_ink);
+        msg1(detail_props(config), sel("setColor:"), c_faint);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        msg1(cell, sel("setSelectionStyle:"), 3);
+        return cell
+    }
+    if (rk == WR_YOURS) return yours_cell(t);
+    if (rk == WR_GRAMMAR) {
+        cell: int = list_cell(t, "grammar", 2);
+        config: int = list_config(2);
+        msg1(config, sel("setText:"), nsstring("Grammar"));
+        plain_parsing(w_morph(w));
+        msg1(config, sel("setSecondaryText:"), nsstring_of(pl, pl_n));
+        msg1(text_props(config), sel("setColor:"), c_ink);
+        msg1(detail_props(config), sel("setColor:"), c_faint);
+        msg1(detail_props(config), sel("setNumberOfLines:"), 2);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        msg1(cell, sel("setSelectionStyle:"), 3);
+        return cell
+    }
+    if (k == 1) {
+        cell: int = list_cell(t, "definition", 0);
+        config: int = list_config(0);
+        msg1(config, sel("setText:"), definition_preview());
+        msg1(text_props(config), sel("setColor:"), c_ink);
+        msg1(text_props(config), sel("setNumberOfLines:"), 5);
+        msg1(text_props(config), sel("setLineBreakMode:"), 4);
+        msg1(text_props(config), sel("setFont:"), body(scaled(16.0f64)));
+        msg1(cell, sel("setContentConfiguration:"), config);
+        if (ws_lex >= 0) msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    if (k == 4) return related_cell(t, ws_greek, ws_rel_num[r], ws_rel_count[r]);
+    if (k == 5) return related_cell(t, !ws_greek, ws_far_num[r], ws_far_count[r]);
+    if (k == 6) return related_cell(t, ws_greek, ws_dom_num[r], ws_dom_count[r]);
+    if (rk == WR_MEANING && ws_mean > 0) return meaning_here_cell(t);
+    cell: int = list_cell(t, "value", 1);
+    config: int = list_config(1);
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(detail_props(config), sel("setColor:"), c_faint);
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    msg1(cell, sel("setAccessibilityLabel:"), 0);
+    if (k == 0) {
+        if (rk == WR_DICT) {
+            msg1(config, sel("setText:"), nsstring("Dictionary Form"));
+            if (ws_entry >= 0) {
+                a: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+                // (Left to right, though it begins in Hebrew.)
+                append(a, nsstring("\‚\Ä\é"), sans(17.0f64, 0.0f64), c_faint);
+                lex_field(ws_entry, 0);
+                append(a, ns_of(llex, lf_b, lf_e), original_font(ws_greek, 17.0f64,
+                    19.0f64), c_faint);
+                lex_field(ws_entry, 1);
+                append(a, nsstring(" ("), sans(17.0f64, 0.0f64), c_faint);
+                append(a, ns_of(llex, lf_b, lf_e), italic_sans(17.0f64), c_faint);
+                append(a, nsstring(")"), sans(17.0f64, 0.0f64), c_faint);
+                msg1(config, sel("setSecondaryAttributedText:"), a)
+            }
+        } else if (rk == WR_MEANING) {
+            msg1(config, sel("setText:"), nsstring("Meaning"));
+            // (A sense not known among differing entries shows none of
+            // them: review r5-1.)
+            me: int = if (ws_lemma) ws_entry else meaning_entry(ws_greek, ws_num,
+                ws_sense);
+            if (me >= 0) {
+                lex_field(me, 3);
+                msg1(config, sel("setSecondaryText:"), ns_of(llex, lf_b, lf_e));
+                msg1(detail_props(config), sel("setColor:"), c_ink)
+            } else if (ws_lex >= 0) msg1(config, sel("setSecondaryText:"), nsstring("Sense not tagged"))
+        } else {
+            msg1(config, sel("setText:"), nsstring("Strong\‚\Ä\ôs"));
+            fbuf_n = 0;
+            fput_sense_code();
+            code: int = fstring();
+            msg1(config, sel("setSecondaryText:"), code);
+            msg1(detail_props(config), sel("setFont:"), mono(17.0f64));
+            // (Read as "Strong's H 430 G".)
+            fbuf_n = 0;
+            fput_str("Strong\‚\Ä\ôs ");
+            n: int = nsstring_into(code, link_buf);
+            for i in 0..n {
+                x: int = link_buf[i] as int;
+                if (i > 0 && is_digit(x) != is_digit(link_buf[i - 1] as int)) fput(32);
+                fput(x)
+            }
+            msg1(cell, sel("setAccessibilityLabel:"), fstring())
+        }
+    } else if (k == 2) {
+        msg1(config, sel("setText:"), nsstring(if (r == 1) "All Senses" else "Concordance"));
+        fbuf_n = 0;
+        if (r == 1) fput_int(ws_all) else {
+            fput_int(ws_words);
+            if (ws_by_sense) fput_str(" in this sense") else fput_str(if (ws_words == 1) " time" else " times")
+        }
+        msg1(config, sel("setSecondaryText:"), fstring());
+        msg1(cell, sel("setAccessoryType:"), 1);
+        msg1(cell, sel("setSelectionStyle:"), 3)
+    } else {
+        msg1(config, sel("setText:"), nsstring_at(bytes_address(rd_pool) + rd_at[r],
+            rd_len[r]));
+        msg1(config, sel("setSecondaryText:"), nsnumber_text(rd_count[r]))
+    }
+    msg1(cell, sel("setContentConfiguration:"), config);
+    cell
+}
+
+study_picked(s: int, r: int) {
+    k: int = study_kind(s);
+    rk: int = if (k == 0) ws_row_kind(r) else -1;
+    if (rk == WR_GRAMMAR) open_grammar();
+    if (rk == WR_FORMS) open_forms(ws_greek, ws_num);
+    if (rk == WR_YOURS && card_of_word(if (ws_greek) 0 else 1, ws_num) < 0) yours_learn();
+    if (k == 1 && ws_lex >= 0) open_definition();
+    if (k == 2) open_concordance_of(-1, ws_by_sense && r == 0);
+    if (k == 3) open_concordance_of(r, ws_by_sense);
+    if (k == 4) open_lemma(ws_greek, ws_rel_num[r]);
+    if (k == 5) open_lemma(!ws_greek, ws_far_num[r]);
+    if (k == 6) open_lemma(ws_greek, ws_dom_num[r])
+}
+
+// ---- grammar (DESIGN.md ¬ß7.5.3) ----
+grammar_table: int = 0;
+
+gr_morph: int = 0;
+
+// The parsing's parts shown as sections (one, or prefix, word and suffix).
+gr_sections: []int = new int[3](0);
+
+gr_n: int = 0;
+
+open_grammar() {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    gr_morph = w_morph(ws_w);
+    parse_terms(gr_morph);
+    gr_n = 0;
+    for part in 0..3 {
+        any: bool = false;
+        for t in 0..pt_n
+            if (pt_part[t] == part) any = true;
+        if (any) {
+            gr_sections[gr_n] = part;
+            gr_n = gr_n + 1
+        }
+    }
+    vc: int = msg(msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
+        2), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Grammar"));
+    msg1(vc, sel("setHidesBottomBarWhenPushed:"), 1);
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    grammar_table = held(grammar_table, msg(vc, sel("tableView")));
+    msg1(grammar_table, sel("setDataSource:"), app_obj);
+    msg1(grammar_table, sel("setDelegate:"), app_obj);
+    style_table(grammar_table, true);
+    // The header: the form and its code, centered.
+    W: f64 = view_width(msg(sheet_nav, sel("view")));
+    form_of(ws_w);
+    a: int = attributed(ns_of(lforms, wf_b, wf_e), original_font(w_greek(ws_w), 17.0f64,
+        19.0f64), c_ink);
+    morph_of(gr_morph);
+    append(a, nsstring(" \¬\∑ "), sans(15.0f64, 0.0f64), c_faint);
+    append(a, ns_of(lmorph, mc_b, mc_e), mono(15.0f64), c_faint);
+    head: int = label_of(a);
+    msg1(head, sel("setNumberOfLines:"), 0);
+    label_size(head, W - 40.0f64);
+    h: f64 = hfa[1];
+    box: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, W, h + 32.0f64), sel("autorelease"));
+    msg_rect(head, sel("setFrame:"), 20.0f64, 18.0f64, W - 40.0f64, h);
+    msg1(box, sel("addSubview:"), head);
+    msg1(grammar_table, sel("setTableHeaderView:"), box);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+grammar_rows(s: int): int {
+    parse_terms(gr_morph);
+    n: int = 0;
+    for t in 0..pt_n
+        if (pt_part[t] == gr_sections[s]) n = n + 1;
+    n
+}
+
+// A Hebrew word's Prefix and Suffix sections name its joined words' cards
+// (¬ß14.5.2): "Joined word: ◊ï÷∞ and ¬∑ known".
+grammar_footer(s: int): int {
+    if (s >= gr_n || w_greek(ws_w) || !learn_ready) return 0;
+    part: int = gr_sections[s];
+    if (part == 1) return 0;
+    bits: int = word_parts(ws_w);
+    fbuf_n = 0;
+    for j in 0..len(jp_ids) {
+        mine: bool = if (part == 0) j < 6 else j >= 6;
+        i: int = jp_lt[j];
+        if (mine && (bits & 1 << j) != 0 && i >= 0) {
+            if (fbuf_n > 0) fput_str("; ");
+            fput_str("Joined word: \‚\Å\ß");
+            // (Its glyph without the dotted circle.)
+            x: int = lt_fb[i * 9 + LF_GLYPH];
+            e: int = lt_fe[i * 9 + LF_GLYPH];
+            while (x < e) {
+                cp: int = cp_at(llet, x, e);
+                if (cp != 9676) fbuf_n = cp_put(fbuf, fbuf_n, cp);
+                x = x + cp_len
+            }
+            fput_str("\‚\Å\© ");
+            fput_lt(i, LF_NAME);
+            k: int = cl_of[i];
+            if (cd_known(k)) fput_str(" \¬\∑ known") else if (k >= 0) fput_str(" \¬\∑ learning")
+        }
+    }
+    if (fbuf_n == 0) 0 else fstring()
+}
+
+grammar_header(s: int): int {
+    if (gr_n < 2) return 0;
+    part: int = gr_sections[s];
+    nsstring(if (part == 0) "Prefix" else if (part == 1) "Word" else "Suffix")
+}
+
+grammar_cell(t: int, path: int): int {
+    parse_terms(gr_morph);
+    s: int = msg(path, sel("section"));
+    r: int = msg(path, sel("row"));
+    term: int = -1;
+    k: int = 0;
+    for x in 0..pt_n {
+        if (pt_part[x] == gr_sections[s]) {
+            if (k == r) term = x;
+            k = k + 1
+        }
+    }
+    cell: int = list_cell(t, "term", 2);
+    config: int = list_config(2);
+    if (term >= 0) {
+        // The term, each word capitalized ("3rd Person"), and what it means.
+        fbuf_n = 0;
+        cap: bool = true;
+        for i in pt_b[term]..pt_e[term] {
+            c: int = pt_buf[i] as int;
+            if (cap && c >= 97 && c <= 122) c = c - 32;
+            cap = c == 32;
+            fput(c)
+        }
+        msg1(config, sel("setText:"), fstring());
+        if (pt_gram[term] >= 0) {
+            gram_parts(pt_gram[term]);
+            msg1(config, sel("setSecondaryText:"), ns_of(lgram, gx_b, gx_e))
+        }
+    }
+    msg1(text_props(config), sel("setFont:"), sans(17.0f64, 0.4f64));
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(detail_props(config), sel("setFont:"), sans(15.0f64, 0.0f64));
+    msg1(detail_props(config), sel("setColor:"), msg_set_f(c_ink, sel("colorWithAlphaComponent:"),
+        0.75f64));
+    msg_set_f(config, sel("setTextToSecondaryTextVerticalPadding:"), 3.0f64);
+    msg_rect(config, sel("setDirectionalLayoutMargins:"), 11.0f64, 20.0f64, 11.0f64,
+        20.0f64);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    cell
+}
+
+// ---- the definition ----
+def_tv: int = 0;
+
+open_definition() {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    vc: int = msg(make("UIViewController"), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Definition"));
+    msg1(vc, sel("setHidesBottomBarWhenPushed:"), 1);
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    view: int = msg(vc, sel("view"));
+    msg1(view, sel("setBackgroundColor:"), c_bg);
+    tv: int = make("UITextView");
+    def_tv = tv;
+    msg1(tv, sel("setEditable:"), 0);
+    msg1(tv, sel("setBackgroundColor:"), c_bg);
+    msg_rect(tv, sel("setTextContainerInset:"), 20.0f64, 20.0f64, 28.0f64, 20.0f64);
+    msg_set_f(msg(tv, sel("textContainer")), sel("setLineFragmentPadding:"), 0.0f64);
+    msg1(tv, sel("setAutoresizingMask:"), 18);
+    l8_msg_hfa(hfa, view, sel("bounds"), 0, 0, 0);
+    msg_rect(tv, sel("setFrame:"), 0.0f64, 0.0f64, hfa[2], hfa[3]);
+    msg1(tv, sel("setAttributedText:"), definition_text());
+    tap: int = msg2(msg(cls("UITapGestureRecognizer"), sel("alloc")), sel("initWithTarget:action:"),
+        app_obj, sel("definitionTapped:"));
+    msg1(tap, sel("setDelegate:"), app_obj);
+    msg1(tv, sel("addGestureRecognizer:"), tap);
+    release(tap);
+    msg1(view, sel("addSubview:"), tv);
+    release(tv);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+k_web: str = "L8Web";
+
+// A paragraph style for the definition: hung for a sense; an outline's
+// line indented 1.2 em a level (level 1 at the margin), its wrapped lines
+// hung past its label.
+def_para(hang: bool, after: f64): int {
+    p: int = msg(para_style(0, 0.0f64, if (hang) scaled(16.0f64) * 1.4f64 else 0.0f64,
+        0.0f64, after, 1.3f64), sel("autorelease"));
+    p
+}
+
+def_outline_para(level: int, after: f64): int {
+    size: f64 = scaled(16.0f64);
+    x: f64 = (level - 1) as f64 * 1.2f64 * size;
+    msg(para_style(0, x, x + 1.4f64 * size, 0.0f64, after, 1.3f64), sel("autorelease"))
+}
+
+definition_text(): int {
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    greek: bool = ws_greek;
+    size: f64 = scaled(16.0f64);
+    n: int = lex_count(ws_lex);
+    // (The verse's sense first, captioned "In John 3:16"; the rest in
+    // their order.)
+    first: int = if (ws_sense > 0 && !ws_lemma) ws_sense - 1 else 0;
+    for e in 0..n {
+        x_: int = if (e == 0) first else if (e <= first) e - 1 else e;
+        p: int = lex_line(ws_lex, x_);
+        start: int = msg(s, sel("length"));
+        if (e == 0 && ws_sense > 0 && !ws_lemma && n > 1) {
+            fbuf_n = 0;
+            fput_str("In ");
+            one_verse[0] = v_num(ws_vi);
+            put_ref(v_chapter(ws_vi), one_verse, 1);
+            fput_str("\n");
+            append(s, fstring(), sans(12.0f64, 0.3f64), c_accent)
+        }
+        if (e == 0) {
+            lex_field(p, 0);
+            append(s, ns_of(llex, lf_b, lf_e), original_font(greek, 34.0f64, 40.0f64),
+                c_ink);
+            append(s, nsstring("\n"), sans(10.0f64, 0.0f64), c_ink);
+            lex_field(p, 1);
+            append(s, ns_of(llex, lf_b, lf_e), italic_sans(17.0f64), c_faint);
+            fbuf_n = 0;
+            fput_str(" \¬\∑ ");
+            if (e == 0 && ws_sense > 0 && !ws_lemma) fput_sense_code() else fput_key(greek,
+                ws_num);
+            fput_str("\n");
+            append(s, fstring(), mono(15.0f64), c_faint);
+            lex_field(p, 3);
+            append(s, ns_of(llex, lf_b, lf_e), sans(20.0f64, 0.4f64), c_ink);
+            append(s, nsstring("\n"), sans(20.0f64, 0.0f64), c_ink);
+            msg4(s, sel("addAttribute:value:range:"), k_para, def_para(false, 16.0f64),
+                start, msg(s, sel("length")) - start)
+        } else {
+            fbuf_n = 0;
+            fput_str("Also: ");
+            lex_field(p, 0);
+            for x in lf_b..lf_e fput(llex[x] as int);
+            lex_field(p, 3);
+            fput_str(" \¬\∑ ");
+            for x in lf_b..lf_e fput(llex[x] as int);
+            fput_str("\n");
+            append(s, fstring(), sans(15.0f64, 0.4f64), c_heading);
+            msg4(s, sel("addAttribute:value:range:"), k_para, def_para(false, 6.0f64),
+                start, msg(s, sel("length")) - start)
+        }
+        lex_field(p, 4);
+        lex_markup(lf_b, lf_e);
+        a: int = 0;
+        for r in 0..lx_runs {
+            st_: int = lx_style[r];
+            f: int = 0;
+            if ((st_ & LX_HEBREW) != 0) f = sans(scaled(19.0f64), 0.0f64) else if ((st_ & LX_BOLD) != 0) f = bold(size) else if ((st_ & LX_ITALIC) != 0) f = italic(size) else f = body(size);
+            color: int = if ((st_ & LX_REF) != 0) c_accent else if ((st_ & LX_LABEL) != 0) c_faint else c_ink;
+            at: int = msg(s, sel("length"));
+            append(s, ns_of(lx, a, lx_end[r]), f, color);
+            n2: int = msg(s, sel("length")) - at;
+            msg4(s, sel("addAttribute:value:range:"), k_para, if (lx_level[r] > 0) def_outline_para(lx_level[r],
+                size * 0.25f64) else def_para(lx_sense[r], size * 0.5f64), at, n2);
+            if ((st_ & LX_REF) != 0 && lx_book[r] >= 0) {
+                xr_book = lx_book[r];
+                xr_c = lx_ch[r];
+                xr_v = lx_verse[r];
+                xr_ce = 0;
+                xr_ve = 0;
+                msg4(s, sel("addAttribute:value:range:"), nsstring(k_xref), nsnumber_int(xref_both()),
+                    at, n2)
+            }
+            a = lx_end[r]
+        }
+        append(s, nsstring("\n"), body(size), c_ink)
+    }
+    // The credit (CC BY): STEP Bible, linked.
+    at: int = msg(s, sel("length"));
+    append(s, nsstring("""
+
+Source: """), sans(13.0f64, 0.0f64), c_faint);
+    l: int = msg(s, sel("length"));
+    append(s, nsstring("STEP Bible"), sans(13.0f64, 0.0f64), c_accent);
+    msg4(s, sel("addAttribute:value:range:"), nsstring(k_web), nsnumber_int(1), l,
+        10);
+    msg4(s, sel("addAttribute:value:range:"), k_para, def_para(false, 0.0f64), at,
+        msg(s, sel("length")) - at);
+    s
+}
+
+// A tap on the definition: a reference's preview pushed (DESIGN.md ¬ß8.1);
+// the credit opens STEP Bible.
+definition_tapped(_self: int, _cmd: int, tap: int): int {
+    tv: int = msg(tap, sel("view"));
+    l8_msg_hfa(hfa, tap, sel("locationInView:"), tv, 0, 0);
+    x: f64 = hfa[0];
+    y: f64 = hfa[1];
+    if (link_at(tv, x, y, k_web) > 0) {
+        open_web("https://www.STEPBible.org");
+        return 0
+    }
+    ref_tap_at(tv, x, y);
+    0
+}
+
+// ---- the concordance ----
+conc_table: int = 0;
+
+// Its sections (a book each): first verse (of cc_vi) and how many.
+cs_n: int = 0;
+
+cs_book: []int = new int[66](0);
+
+cs_start: []int = new int[66](0);
+
+cs_count: []int = new int[66](0);
+
+// The verses shown (indexes into cc_vi): all, or those the filter finds.
+cf: []int = new int[8192](0);
+
+cf_n: int = 0;
+
+// The filter typed (lower case).
+cq: []i8 = new i8[256](0i8);
+
+cq_n: int = 0;
+
+conc_search: int = 0;
+
+// The concordance of the word studied: all its verses, or (r >= 0) those
+// where it is rendered as rendering r; in its sense only, if sensed (with
+// This Sense and All above it, when it was asked for from "in this sense").
+conc_by_sense: bool = false;
+
+conc_r: int = -1;
+
+conc_seg: int = 0;
+
+conc_head: int = 0;
+
+open_concordance(r: int) {
+    open_concordance_of(r, false)
+}
+
+conc_reload_data() {
+    _ok: bool = conc_load(ws_greek, ws_num);
+    if (conc_by_sense) conc_sense(ws_sense);
+    if (conc_r >= 0) conc_only(conc_r);
+    if (conc_form >= 0) conc_of_form(conc_form);
+    conc_sections()
+}
+
+// A parsing's concordance (Forms' tap): its parsing (lang.l8's fo_*), or
+// -1.
+conc_form: int = -1;
+
+open_form_concordance(g: int) {
+    conc_form = g;
+    // (Its lemma's study's numbers: the header names its entry.)
+    if (ws_num != fo_num || ws_greek != fo_greek) {
+        ws_num = fo_num;
+        ws_greek = fo_greek;
+        ws_lex = lex_first(fo_greek, fo_num);
+        ws_entry = ws_lex;
+        ws_sense = 0
+    }
+    open_concordance_of(-1, false);
+    conc_form = -1
+}
+
+open_concordance_of(r: int, sensed: bool) {
+    sheet_nav: int = study_host();
+    if (sheet_nav == 0) return;
+    mk_form = conc_form;
+    conc_r = r;
+    conc_by_sense = sensed;
+    cq_n = 0;
+    conc_reload_data();
+    vc: int = msg(msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
+        0), sel("autorelease"));
+    fbuf_n = 0;
+    if (r >= 0) {
+        fput_str("\‚\Ä\ú");
+        for x in 0..rd_len[r] fput(rd_pool[rd_at[r] + x] as int);
+        fput_str("\‚\Ä\ù")
+    } else fput_str("Concordance");
+    msg1(vc, sel("setTitle:"), fstring());
+    msg1(vc, sel("setHidesBottomBarWhenPushed:"), 1);
+    item: int = msg(vc, sel("navigationItem"));
+    msg1(item, sel("setLargeTitleDisplayMode:"), 2);
+    conc_table = held(conc_table, msg(vc, sel("tableView")));
+    msg1(conc_table, sel("setDataSource:"), app_obj);
+    msg1(conc_table, sel("setDelegate:"), app_obj);
+    style_table(conc_table, false);
+    msg1(conc_table, sel("setSectionIndexColor:"), c_accent);
+    msg1(conc_table, sel("setSectionIndexBackgroundColor:"), msg(cls("UIColor"), sel("clearColor")));
+    msg_rect(conc_table, sel("setSeparatorInset:"), 0.0f64, 20.0f64, 0.0f64, 0.0f64);
+    msg1(conc_table, sel("setKeyboardDismissMode:"), 1);
+    // The filter: a plain substring of the verse or its reference.
+    sc: int = msg1(msg(cls("UISearchController"), sel("alloc")), sel("initWithSearchResultsController:"),
+        0);
+    msg1(sc, sel("setObscuresBackgroundDuringPresentation:"), 0);
+    msg1(sc, sel("setHidesNavigationBarDuringPresentation:"), 0);
+    msg1(sc, sel("setSearchResultsUpdater:"), app_obj);
+    msg1(msg(sc, sel("searchBar")), sel("setPlaceholder:"), nsstring("Filter Verses"));
+    msg1(msg(sc, sel("searchBar")), sel("setAutocorrectionType:"), 1);
+    msg1(sc, sel("setAutomaticallyShowsCancelButton:"), 0);
+    msg1(item, sel("setSearchController:"), sc);
+    search_stacked(item);
+    msg1(item, sel("setHidesSearchBarWhenScrolling:"), 0);
+    conc_search = sc;
+    release(sc);
+    W: f64 = view_width(msg(sheet_nav, sel("view")));
+    conc_seg = 0;
+    if (sensed && r < 0) {
+        // This Sense (42) | All (173).
+        fbuf_n = 0;
+        fput_str("This Sense (");
+        fput_int(ws_words);
+        fput_str(")");
+        one[0] = fstring();
+        fbuf_n = 0;
+        fput_str("All (");
+        fput_int(ws_all);
+        fput_str(")");
+        one[1] = fstring();
+        conc_seg = msg(msg1(msg(cls("UISegmentedControl"), sel("alloc")), sel("initWithItems:"),
+            nsarray(one, 2)), sel("autorelease"));
+        msg1(conc_seg, sel("setSelectedSegmentIndex:"), 0);
+        msg3(conc_seg, sel("addTarget:action:forControlEvents:"), app_obj, sel("concSense:"),
+            4096)
+    }
+    msg1(conc_table, sel("setTableHeaderView:"), conc_header_view(W));
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+// The header: ·ºÄŒ≥Œ±œÄŒ¨œâ ¬∑ agapa≈ç ¬∑ G25 ‚Äî 143 times in 110 verses; or agapa≈ç
+// translated ‚Äúloved‚Äù ‚Äî 22 times (and This Sense and All above it).
+conc_header_view(W: f64): int {
+    fbuf_n = 0;
+    // (Left to right, though it may begin in Hebrew.)
+    fput_str("\‚\Ä\é");
+    r: int = conc_r;
+    if (r >= 0) {
+        if (ws_entry >= 0) {
+            lex_field(ws_entry, 1);
+            for x in lf_b..lf_e fput(llex[x] as int)
+        } else fput_key(ws_greek, ws_num);
+        fput_str(" translated \‚\Ä\ú");
+        for x in 0..rd_len[r] fput(rd_pool[rd_at[r] + x] as int);
+        fput_str("\‚\Ä\ù \‚\Ä\î ");
+        fput_int(cc_words);
+        fput_str(if (cc_words == 1) " time" else " times")
+    } else if (conc_form >= 0) {
+        // "·º†Œ≥Œ¨œÄŒ∑œÉŒµŒΩ ¬∑ aorist active indicative 3rd singular ‚Äî 6 times".
+        frm_put_form(conc_form);
+        fput_str(" \¬\∑ ");
+        frm_put_parsing(conc_form);
+        fput_str(" \‚\Ä\î ");
+        fput_int(cc_words);
+        fput_str(if (cc_words == 1) " time" else " times")
+    } else {
+        if (ws_entry >= 0) {
+            lex_field(ws_entry, 0);
+            for x in lf_b..lf_e fput(llex[x] as int);
+            fput_str(" \¬\∑ ");
+            lex_field(ws_entry, 1);
+            for x in lf_b..lf_e fput(llex[x] as int);
+            fput_str(" \¬\∑ ")
+        }
+        if (conc_by_sense) fput_sense_code() else fput_key(ws_greek, ws_num);
+        fput_str(" \‚\Ä\î ");
+        fput_int(cc_words);
+        fput_str(if (cc_words == 1) " time in " else " times in ");
+        fput_int(cc_n);
+        fput_str(if (cc_n == 1) " verse" else " verses")
+    }
+    head: int = label_of(attributed(fstring(), sans(13.0f64, 0.0f64), c_faint));
+    msg1(head, sel("setNumberOfLines:"), 0);
+    label_size(head, W - 40.0f64);
+    h: f64 = hfa[1];
+    y: f64 = 10.0f64;
+    box: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, W, h + 20.0f64), sel("autorelease"));
+    if (conc_seg != 0) {
+        msg_rect(conc_seg, sel("setFrame:"), 20.0f64, 10.0f64, W - 40.0f64, 32.0f64);
+        msg1(box, sel("addSubview:"), conc_seg);
+        y = 52.0f64
+    }
+    msg_rect(head, sel("setFrame:"), 20.0f64, y, W - 40.0f64, h);
+    msg1(box, sel("addSubview:"), head);
+    msg_rect(box, sel("setFrame:"), 0.0f64, 0.0f64, W, y + h + 10.0f64);
+    conc_head = box;
+    box
+}
+
+// This Sense or All: the verses loaded again, faded in.
+conc_sense_switched(_self: int, _cmd: int, seg: int): int {
+    conc_by_sense = msg(seg, sel("selectedSegmentIndex")) == 0;
+    conc_reload_data();
+    if (conc_table == 0) return 0;
+    fade_layer(msg(conc_table, sel("layer")), 0.2f64);
+    W: f64 = view_width(conc_table);
+    msg1(conc_table, sel("setTableHeaderView:"), conc_header_view(W));
+    msg(conc_table, sel("reloadData"));
+    0
+}
+
+// The sections (a book each) of the verses the filter finds.
+conc_sections() {
+    cf_n = 0;
+    for i in 0..cc_n {
+        if (cq_n == 0 || conc_matches(cc_vi[i])) {
+            cf[cf_n] = i;
+            cf_n = cf_n + 1
+        }
+    }
+    cs_n = 0;
+    for i in 0..cf_n {
+        b: int = ch_book[v_chapter(cc_vi[cf[i]])];
+        if (cs_n == 0 || cs_book[cs_n - 1] != b) {
+            cs_book[cs_n] = b;
+            cs_start[cs_n] = i;
+            cs_count[cs_n] = 0;
+            cs_n = cs_n + 1
+        }
+        cs_count[cs_n - 1] = cs_count[cs_n - 1] + 1
+    }
+}
+
+// Whether verse vi's words or reference have the filter's (case aside).
+conc_matches(vi: int): bool {
+    study_load(vi);
+    if (has_lower(st, st_n)) return true;
+    _name: int = place_name(v_chapter(vi), v_num(vi));
+    has_lower(fbuf, fbuf_n)
+}
+
+has_lower(b: []i8, n: int): bool {
+    for i in 0..n - cq_n + 1 {
+        same: bool = true;
+        j: int = 0;
+        while (same && j < cq_n) {
+            k: int = b[i + j] as int;
+            if (k >= 65 && k <= 90) k = k + 32;
+            if (k != cq[j] as int) same = false;
+            j = j + 1
+        }
+        if (same) return true
+    }
+    false
+}
+
+conc_filtered(text: int) {
+    cq_n = nsstring_into(text, cq);
+    for i in 0..cq_n {
+        k: int = cq[i] as int;
+        if (k >= 65 && k <= 90) cq[i] = (k + 32) trunc i8
+    }
+    conc_sections();
+    if (conc_table == 0) return;
+    msg(conc_table, sel("reloadData"));
+    vc: int = msg(study_host(), sel("topViewController"));
+    if (cf_n == 0) empty_state(vc, conc_table, "magnifyingglass", nsstring("No Matches"),
+        "") else empty_state(vc, conc_table, "", 0, "")
+}
+
+conc_header(s: int): int {
+    fbuf_n = 0;
+    b: int = cs_book[s];
+    for i in book_name_start(b)..book_name_end(b) fput(bsb[i] as int);
+    fput_str(" \¬\∑ ");
+    fput_int(cs_count[s]);
+    fstring()
+}
+
+// Short book names for the index, when there are many books.
+conc_index(): int {
+    if (cs_n <= 8) return 0;
+    a: int = make("NSMutableArray");
+    for s in 0..cs_n {
+        book_short(cs_book[s]);
+        msg1(a, sel("addObject:"), nsstring_of(short_name, short_n))
+    }
+    msg(a, sel("autorelease"))
+}
+
+// A verse of the concordance: its words, the number's English bold and
+// washed.
+conc_text(vi: int): int {
+    conc_marks(vi);
+    size: f64 = scaled(16.0f64);
+    soft: int = msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.8f64);
+    start: int = 0;
+    if (mk_n > 0 && mk_b[0] > 170) {
+        words: int = 0;
+        start = mk_b[0];
+        while (start > 0 && words < 9) {
+            start = start - 1;
+            if (st[start] as int == 32) words = words + 1
+        }
+        if (st[start] as int == 32) start = start + 1
+    }
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    if (start > 0) append(s, nsstring("\‚\Ä\¶ "), body(size), soft);
+    lead: int = msg(s, sel("length"));
+    text: int = ns_of(st, start, st_n);
+    append(s, text, body(size), soft);
+    caps_into(s, lead, text, true, size);
+    for i in 0..mk_n {
+        if (mk_b[i] >= start) {
+            b: int = lead + st_utf16(start, mk_b[i]);
+            n: int = st_utf16(mk_b[i], mk_e[i]);
+            msg4(s, sel("addAttribute:value:range:"), k_font, bold(size), b, n);
+            msg4(s, sel("addAttribute:value:range:"), k_color, c_ink, b, n);
+            msg4(s, sel("addAttribute:value:range:"), k_background, c_sel, b, n)
+        }
+    }
+    p: int = msg(para_style(0, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 1.25f64), sel("autorelease"));
+    msg1(p, sel("setLineBreakMode:"), 4);
+    msg4(s, sel("addAttribute:value:range:"), k_para, p, 0, msg(s, sel("length")));
+    s
+}
+
+st_utf16(p: int, e: int): int {
+    n: int = 0;
+    for i in p..e {
+        k: int = st[i] as int & 255;
+        if (k < 128 || k >= 192) n = n + 1;
+        if (k >= 240) n = n + 1
+    }
+    n
+}
+
+conc_cell(t: int, path: int): int {
+    vi: int = cc_vi[cf[cs_start[msg(path, sel("section"))] + msg(path, sel("row"))]];
+    cell: int = list_cell(t, "conc", 2);
+    config: int = list_config(2);
+    a: int = attributed(place_name(v_chapter(vi), v_num(vi)), sans(13.0f64, 0.3f64),
+        c_accent);
+    msg1(config, sel("setSecondaryAttributedText:"), conc_text(vi));
+    if (mk_untranslated) append(a, nsstring(" \¬\∑ not translated"), sans(13.0f64,
+        0.0f64), c_faint);
+    msg1(config, sel("setAttributedText:"), a);
+    msg1(detail_props(config), sel("setNumberOfLines:"), 4);
+    msg1(detail_props(config), sel("setLineBreakMode:"), 4);
+    msg_set_f(config, sel("setTextToSecondaryTextVerticalPadding:"), 3.0f64);
+    msg_rect(config, sel("setDirectionalLayoutMargins:"), 12.0f64, 20.0f64, 12.0f64,
+        20.0f64);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    cell
+}
+
+conc_picked(s: int, r: int) {
+    vi: int = cc_vi[cf[cs_start[s] + r]];
+    jump(v_chapter(vi), v_num(vi))
+}
+
+// ---- acknowledgements ----
+ack_table: int = 0;
+
+changes_table: int = 0;
+
+open_acknowledgements() {
+    if (settings_nav == 0) return;
+    vc: int = msg(msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
+        2), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Acknowledgements"));
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    // (Kept while the sheet is up, as the Versions list is.)
+    release(ack_table);
+    ack_table = keep(msg(vc, sel("tableView")));
+    msg1(ack_table, sel("setDataSource:"), app_obj);
+    msg1(ack_table, sel("setDelegate:"), app_obj);
+    style_table(ack_table, true);
+    sheet: int = msg(settings_nav, sel("sheetPresentationController"));
+    one[0] = msg(cls("UISheetPresentationControllerDetent"), sel("mediumDetent"));
+    one[1] = msg(cls("UISheetPresentationControllerDetent"), sel("largeDetent"));
+    if (sheet != 0) {
+        msg1(sheet, sel("setDetents:"), nsarray(one, 2));
+        msg1(sheet, sel("setSelectedDetentIdentifier:"), objc_const("UISheetPresentationControllerDetentIdentifierLarge"))
+    }
+    msg2(settings_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+// The sections (DESIGN.md ¬ß9.8): the texts; the ESV (its copyright
+// page, while it is listed); the original languages; the lexicons; the
+// study resources; and privacy, over the app's version and build.
+ACK_TEXT: int = 0;
+
+// (The recordings, after the texts: ¬ß12.5.)
+ACK_AUDIO: int = 1;
+
+ACK_ESV: int = 2;
+
+ACK_LANG: int = 3;
+
+ACK_LEX: int = 4;
+
+ACK_STUDY: int = 5;
+
+ACK_PRIVACY: int = 6;
+
+// The section shown as s (the ESV's left out unless it is listed).
+ack_kind(s: int): int {
+    if (s >= ACK_ESV && !esv_listed()) s + 1 else s
+}
+
+ack_sections(): int {
+    if (esv_listed()) 7 else 6
+}
+
+ack_headers: []str = ["Text", "Audio", "English Standard Version", "Original Languages",
+    "Lexicons", "Study", ""];
+
+ack_header(s: int): int {
+    k: int = ack_kind(s);
+    if (k == ACK_PRIVACY) return 0;
+    nsstring(ack_headers[k])
+}
+
+// Each row: its title, its line, its page (by section, then row).
+ack_titles: []str = ["Berean Standard Bible", "King James Version", "World English Bible",
+    "American Standard Version", "Young\‚\Ä\ôs Literal Translation", "Hebrew and Greek",
+    "Berean Standard Bible", "World English Bible", "Verse Timings", "ESV.org", "ESV Audio",
+    "Berean Bible Translation Tables", "STEP Bible", "UBS Dictionaries", "Cross References",
+    "Matthew Henry\‚\Ä\ôs Concise Commentary", "Related Words", "Privacy"];
+
+ack_lines: []str = ["The BSB text is in the public domain.", "The 1769 standard text, from eBible.org. Public domain outside the United Kingdom, where the rights are vested in the Crown.",
+    "Public domain. \‚\Ä\úWorld English Bible\‚\Ä\ù is a trademark of eBible.org; the text here is unchanged.",
+    "1901. Public domain.", "1898. Public domain.", "Hebrew Bible and Greek New Testament: STEP Bible\‚\Ä\ôs Translators Amalgamated texts (TAHOT, TAGNT), CC BY 4.0 (creativecommons.org/licenses/by/4.0), from the Leningrad Codex and the editions of the Greek New Testament.",
+    "Read by Bob Souer, Barry Hays and Jordan Gilbert. Dedicated to the public domain (CC0 1.0). Streamed from OpenBible.com.",
+    "Read by Winfred W. Henson. Public domain. Streamed from eBible.org.", "Computed by Smooth Bible from these recordings. They may be a moment early or late.",
+    "", "Read by David Cochran Heath. Provided by the ESV API from Crossway.", "Hebrew and Greek words, transliterations, parsing and Strong\‚\Ä\ôs numbers aligned to the BSB. Public domain.",
+    "Definitions from STEP Bible\‚\Ä\ôs brief Hebrew and Greek lexicons (TBESH, TBESG), and the senses of words from their Translators Amalgamated Hebrew OT and Greek NT (TAHOT, TAGNT), licensed CC BY 4.0 (creativecommons.org/licenses/by/4.0).",
+    "Meanings in context and semantic domains: UBS Dictionary of the Greek New Testament, \¬\© United Bible Societies 2023 (after Louw and Nida\‚\Ä\ôs lexicon), and UBS Dictionary of Biblical Hebrew, \¬\© United Bible Societies 2023 (from SDBH), from github.com/ubsicap/ubs-open-license. Licensed CC BY-SA 4.0 (creativecommons.org/licenses/by-sa/4.0); changed: the dictionaries\‚\Ä\ô meanings given to each word by Smooth Bible, which shares them under the same licence.",
+    "From OpenBible.info, licensed CC BY 4.0 (creativecommons.org/licenses/by/4.0). Ranked by votes; those without a positive vote are left out.",
+    "From the Christian Classics Ethereal Library. Public domain.", "From MACULA Greek Linguistic Datasets, available at https://github.com/Clear-Bible/macula-greek/ (Clear Bible / Biblica), licensed CC BY 4.0 (creativecommons.org/licenses/by/4.0).",
+    ""];
+
+ack_links: []str = ["https://bereanbible.com", "https://ebible.org/eng-kjv2006/",
+    "https://ebible.org/engwebp/", "https://ebible.org/eng-asv/", "https://ebible.org/engylt/",
+    "https://github.com/STEPBible/STEPBible-Data", "https://bereanbible.com/audio/",
+    "https://ebible.org/eng-web/audio/", "", "https://www.esv.org", "https://www.esv.org",
+    "https://bereanbible.com", "https://www.STEPBible.org", "https://github.com/ubsicap/ubs-open-license",
+    "https://www.openbible.info/labs/cross-references/", "https://ccel.org/ccel/henry/mhcc",
+    "https://github.com/Clear-Bible/macula-greek/", "https://smoothbible.com/privacy/"];
+
+// Where section kind k's rows begin in those lists.
+ack_first: []int = [0, 6, 9, 11, 12, 14, 17];
+
+ack_rows(s: int): int {
+    k: int = ack_kind(s);
+    if (k == ACK_TEXT) 6 else if (k == ACK_AUDIO || k == ACK_STUDY || k == ACK_LEX) 3 else if (k == ACK_ESV)
+        if (esv_audio_listed()) 2 else 1 else 1
+}
+
+ack_footer(s: int): int {
+    k: int = ack_kind(s);
+    if (k == ACK_ESV) return nsstring("Scripture quotations marked \‚\Ä\úESV\‚\Ä\ù are from the ESV\¬\Æ Bible (The Holy Bible, English Standard Version\¬\Æ), \¬\© 2001 by Crossway, a publishing ministry of Good News Publishers. Used by permission. All rights reserved. The ESV text may not be quoted in any publication made available to the public by a Creative Commons license. The ESV may not be translated into any other language. Users may not copy or download more than 500 verses of the ESV Bible or more than one half of any book of the ESV Bible.");
+    if (k != ACK_PRIVACY) return 0;
+    app_version_line()
+}
+
+// "Smooth Bible 1.0 (21)": the acknowledgements' last footer, and the
+// Manual's.
+app_version_line(): int {
+    bundle: int = msg(cls("NSBundle"), sel("mainBundle"));
+    fbuf_n = 0;
+    fput_str("Smooth Bible ");
+    for key in ["CFBundleShortVersionString", "CFBundleVersion"] {
+        // (Read from the bundle's own Info.plist at run time: the build
+        // number written into it when it was built or signed.)
+        v: int = msg1(msg(bundle, sel("infoDictionary")), sel("objectForKey:"), nsstring(key));
+        if (key[8] as int == 86) fput_str(" (");
+        if (v != 0) {
+            n: int = nsstring_into(v, number_buf);
+            for i in 0..n fput(number_buf[i] as int)
+        }
+    }
+    fput_str(")");
+    fstring()
+}
+
+ack_cell(t: int, path: int): int {
+    k: int = ack_kind(msg(path, sel("section")));
+    r: int = msg(path, sel("row"));
+    if (k == ACK_LEX && r == 2) {
+        cell: int = list_cell(t, "changes", 0);
+        config: int = list_config(0);
+        msg1(config, sel("setText:"), nsstring("Changes to the Lexicon Data"));
+        msg1(text_props(config), sel("setColor:"), c_ink);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    i: int = ack_first[k] + r;
+    cell: int = list_cell(t, "credit", 2);
+    config: int = list_config(if (len(ack_lines[i]) > 0) 2 else 0);
+    msg1(config, sel("setText:"), nsstring(ack_titles[i]));
+    if (len(ack_lines[i]) > 0) msg1(config, sel("setSecondaryText:"), nsstring(ack_lines[i]));
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(detail_props(config), sel("setColor:"), c_faint);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    iv: int = msg1(msg(cls("UIImageView"), sel("alloc")), sel("initWithImage:"), symbol("arrow.up.right",
+        13.0f64, 6, c_faint));
+    // (Verse Timings: a credit, not a page.)
+    if (len(ack_links[i]) > 0) msg1(cell, sel("setAccessoryView:"), iv) else msg1(cell,
+        sel("setSelectionStyle:"), 0);
+    release(iv);
+    cell
+}
+
+ack_picked(s: int, r: int) {
+    k: int = ack_kind(s);
+    if (k == ACK_LEX && r == 2) open_changes() else if (len(ack_links[ack_first[k] + r]) > 0) open_web(ack_links[ack_first[k] + r])
+}
+
+change_lines: []str = ["STEP Bible\‚\Ä\ôs HTML was converted to plain styled text: bold, italic, paragraphs and references kept; other markup dropped, and entities decoded.",
+    "Entries were grouped by base Strong\‚\Ä\ôs number, the sense matching the word\‚\Ä\ôs part of speech first.",
+    "Hebrew cantillation and paragraph marks were removed for display; vowel points kept.",
+    "Psalm titles were mapped to verse 1, as the BSB\‚\Ä\ôs tables have them.", "Transliterations of Hebrew lemmas are the tables\‚\Ä\ô own, or made in their style.",
+    "Cross references to 3 John 1:15 are given at 1:14, as the BSB numbers it.", "The commentary\‚\Ä\ôs markup was converted to plain styled text.",
+    "Each word\‚\Ä\ôs sense is STEP\‚\Ä\ôs disambiguated Strong\‚\Ä\ôs number in TAHOT and TAGNT, matched to the BSB\‚\Ä\ôs words of the verse by base number, in the original order.",
+    "MACULA\‚\Ä\ôs Proximity pairs were reduced to base Strong\‚\Ä\ôs numbers (Aramaic as Hebrew), each word\‚\Ä\ôs ten nearest kept.",
+    "Recordings are played as published. Verse timings for them were computed by forced alignment.",
+    "The Hebrew and Greek is TAHOT\‚\Ä\ôs Leningrad text with the Qere read (its cantillation and paseq removed, kept for Show Accents) and TAGNT\‚\Ä\ôs NA28 words with their punctuation, each verse keyed by the BSB\‚\Ä\ôs numbers; words restored from the Septuagint are left out.",
+    "Each word\‚\Ä\ôs meaning is the UBS dictionaries\‚\Ä\ô meaning listed for its place in its verse, or, where the places differ, for its Strong\‚\Ä\ôs number in order."];
+
+open_changes() {
+    if (settings_nav == 0) return;
+    vc: int = msg(msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
+        2), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Changes"));
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    changes_table = held(changes_table, msg(vc, sel("tableView")));
+    msg1(changes_table, sel("setDataSource:"), app_obj);
+    msg1(changes_table, sel("setDelegate:"), app_obj);
+    style_table(changes_table, true);
+    msg2(settings_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+changes_cell(t: int, path: int): int {
+    cell: int = list_cell(t, "change", 0);
+    config: int = list_config(0);
+    msg1(config, sel("setText:"), nsstring(change_lines[msg(path, sel("row"))]));
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(text_props(config), sel("setNumberOfLines:"), 0);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    cell
+}
+
+// ---- classes and methods ----
+make_study_classes() {
+    study_class = objc_allocateClassPair(cls("UITableViewController"), "L8Study",
+        0);
+    add_method1(study_class, sel("viewWillAppear:"), &study_will_appear, "v@:B");
+    objc_registerClassPair(study_class);
+    il_class = objc_allocateClassPair(cls("UIViewController"), "L8Interlinear", 0);
+    add_method0(il_class, sel("viewDidLayoutSubviews"), &il_layout, "v@:");
+    add_method1(il_class, sel("viewWillDisappear:"), &il_disappearing, "v@:B");
+    objc_registerClassPair(il_class)
+}
+
+study_index_titles(_self: int, _cmd: int, t: int): int {
+    if (t == conc_table && t != 0) return conc_index();
+    0
+}
+
+add_study_methods(app: int) {
+    add_method1(app, sel("concSense:"), &conc_sense_switched, "v@:@");
+    add_method1(app, sel("ilPrevious:"), &il_previous, "v@:@");
+    add_method1(app, sel("ilNext:"), &il_next, "v@:@");
+    add_method1(app, sel("ilOrder:"), &il_order, "v@:@");
+    add_method1(app, sel("tileTapped:"), &tile_tapped, "v@:@");
+    add_method1(app, sel("learnTileShow:"), &learn_tile_show, "B@:@");
+    add_method1(app, sel("learnTileStudy:"), &learn_tile_study, "B@:@");
+    add_method1(app, sel("learnLink:"), &learn_link, "v@:@");
+    add_method1(app, sel("definitionTapped:"), &definition_tapped, "v@:@");
+    add_method1(app, sel("addToNote:"), &add_to_note, "v@:@");
+    add_method1(app, sel("studyInterlinear:"), &study_interlinear, "v@:@");
+    add_method1(app, sel("sectionIndexTitlesForTableView:"), &study_index_titles,
+        "@@:@")
+}
