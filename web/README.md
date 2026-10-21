@@ -245,20 +245,25 @@ The program lives on in callbacks: `fn(data: int)` function values, called
 with the data given when they were set up, the event record (`dom_ev`,
 `dom_evf`, `dom_evs`: the target as the nearest node with a handle, the
 type, key, pointer, modifiers, a fetch's status and size, a frame's time)
-filled first. It covers creating, inserting and removing nodes; text,
-attributes, classes, styles and any property or no-argument method (an
-`<audio>` element's `play`, `currentTime`); boxes and scrolling; listeners,
-with `preventDefault`; the selection as handles and byte offsets;
-`pushState`, `replaceState` and `popstate`; `fetch`; `localStorage`;
-timers and animation frames; media queries; and, for the Bible's reader,
-HTML put in beside or inside a node (answering the first element as a
-handle), a class on every match of a selector, every box of a node, the
-element at a point, the attribute or selector nearest an event's own
-target (actions written into HTML as `data-act`), history entries with a
-state string, gzipped fetches unzipped, and the screen wake lock. A
-callback cannot be
-`noregion`, so a fetched body it keeps comes as memory from the host
-(`dom_fetch_body`), as a mapped file does on an iPhone.
+filled first. A callback cannot be `noregion`, so a fetched body it keeps
+comes as memory from the host (`dom_fetch_body`, `dom_bytes`), as a mapped
+file does on an iPhone. The calls, by group:
+
+| Group | Calls |
+|---|---|
+| Nodes | `dom_create`, `dom_create_svg`, `dom_text(_of)`, `dom_fragment`, `dom_by_id`, `dom_query(_of)`, `dom_parent`, `dom_append`, `dom_insert`, `dom_remove`, `dom_clear`, `dom_free`, `dom_free_tree`, `dom_handles` |
+| Content | `dom_set_text(_of)`, `dom_get_text`, `dom_set_html(_of)`, `dom_insert_html_of` (beside or inside a node; the first element put in) |
+| Attributes, classes, styles | `dom_set_attr(_of)`, `dom_set_attr_int`, `dom_remove_attr`, `dom_get_attr`, `dom_set_class`, `dom_add_class`, `dom_remove_class`, `dom_toggle_class`, `dom_class_all(_of)` (every match of a selector), `dom_count`, `dom_set_style(_of)`, `dom_children_px` (a px property on many children in one call), `dom_style_num` (a computed style as a number) |
+| Any property or method | `dom_set_prop`, `dom_set_prop_s`, `dom_set_prop_of`, `dom_get_prop`, `dom_get_prop_s`, `dom_has_prop`, `dom_prop_handle`, `dom_call`, `dom_call_s` (an `<audio>`'s `play`, a dialog's `showModal`) |
+| Boxes and scrolling | `dom_rect`, `dom_rects` (every box of a node), `dom_rects_all(_of)` (of every match), `dom_point` (the element at a point, or its nearest match), `dom_scroll`, `dom_scroll_to`, `dom_scroll_into_view` |
+| Events | `dom_listen`, `dom_unlisten`, `dom_event_is`, `dom_key_is`, `dom_event_attr` and `dom_event_closest` (from the event's own target: actions written into HTML as `data-act`), `dom_prevent_default`, `dom_stop_propagation` |
+| Selection | `dom_selection` (handles and UTF-8 offsets), `dom_selection_text`, `dom_select`, `dom_select_none` |
+| History | `dom_push_state(_of)`, `dom_replace_state(_of)`; `dom_push`, `dom_replace` and `dom_state`, with a state string; `popstate` is a window event |
+| Fetch | `dom_fetch`, `dom_fetch_gz(_of)` (unzipped), `dom_fetch_gz_low(_of)` (at low priority), `dom_fetch_take`, `dom_fetch_body`; a fetch the page began early for the same address (`window.l8Prefetch`) is taken up |
+| Memory | `dom_bytes` (new memory a callback can keep) |
+| Storage | `dom_store_get`, `dom_store_set(_s)`, `dom_store_remove`, `dom_store_count`, `dom_store_key` (`localStorage`) |
+| Time | `dom_now`, `dom_date_now`, `dom_timeout`, `dom_interval`, `dom_frame`, `dom_cancel` |
+| Media and device | `dom_media`, `dom_media_listen`, `dom_wake_lock`, `dom_log(_of)` |
 
 Calls cost about a microsecond each: Psalm 119 as 378 paragraphs and 608
 spans, built call by call, takes 14 ms with the browser's layout, against

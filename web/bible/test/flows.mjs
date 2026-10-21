@@ -437,16 +437,18 @@ export const flows = {
       };
       requestAnimationFrame(f);
     })()`;
-    let shot = false;
+    // (A shot mid-motion: CDP answers a screenshot only after a gesture ends,
+    // so a scripted scroll as fast, not awaited.)
+    await page.send("Runtime.evaluate", { expression: `(() => { const t0 = performance.now(); const y0 = scrollY; const f = (t) => { scrollTo(0, y0 + (t - t0) * 20); if (t - t0 < 1500) requestAnimationFrame(f); }; requestAnimationFrame(f); })()` });
+    await sleep(500);
+    await ctx.shot("wa-21-fling-phone-paper");
+    await sleep(1200);
+    await page.rest();
     for (const [speed, dir] of [[8000, -1], [8000, 1], [20000, -1], [20000, 1]]) {
       const w0 = await page.eval("window.sbWrites || 0");
       await page.eval(RECORD);
       const g = page.send("Input.synthesizeScrollGesture", { x: 200, y: 400, yDistance: dir * speed * 3, speed, gestureSourceType: "touch", repeatCount: 1 });
-      if (!shot && speed === 20000) {
-        await sleep(350);
-        await ctx.shot("wa-21-fling-phone-paper");
-        shot = true;
-      }
+
       await g;
       await page.eval("window.__on = false");
       const bad = await page.eval("window.__bad");
@@ -456,6 +458,19 @@ export const flows = {
       ctx.check(`a fling at ${speed} px/s ${dir < 0 ? "down" : "up"}: no scroll position written`, writes === 0, String(writes));
       await page.rest();
     }
+  },
+
+  // §W3.3: the slack above Genesis 1 takes up every correction above the
+  // place: from Revelation 22 (the most above it), as the whole text comes
+  // and every chapter is measured, it never runs out.
+  async slack(ctx) {
+    const { page, base } = ctx;
+    await page.size(...ctx.SIZES.phone);
+    await page.open(base + "/read/bsb/revelation/22");
+    await page.waitFor("window.sbWhole > 0");
+    await page.waitFor("window.sbAllMeasured === 1", 180000);
+    const least = await page.eval("window.sbSlackLeast");
+    ctx.check("the slack above Genesis 1 never runs out", least >= 0, Math.round(least) + " px at the least");
   },
 
   // §W3.3's estimates: every BSB chapter estimated against its measured
