@@ -147,19 +147,25 @@ part("C4", "c0603", 25.0, 17.5, 90, "100n")
 # The charge lights, between the arrows and A and B, up through holes in
 # the front: four for the battery's level and one for full. They need no
 # program: run from the charger's input, they light only on a charger.
-# A quad comparator weighs the battery (halved, by its own divider: the
+# Two dual comparators (LM393, in JLCPCB's basic library) weigh the battery (halved, by its own divider: the
 # ADC's would be pulled down by the ESP32-S3 when it is off) against four
 # steps of a 2.5 V reference (3.6, 3.75, 3.9 and 4.05 V, as the battery
 # reads while charging); each lights its LED as the battery passes it.
 # Full is the charger's own STAT2.
 LX = [-7.0, -3.5, 0.0, 3.5, 7.0]
 for i, x in enumerate(LX):
-    part(f"D{3 + i}", "led0603", x, -31.0, 0, "green")
+    part(f"D{3 + i}", "led0603", x, -31.0, 0, "white")
     part(f"R{11 + i}", "r0603", x, -28.6, 90, "1k")
-part("U7", "soic14", 0.0, -21.5, 180, "LM339")   # its outputs down to the lights, its inputs up to the steps
-part("C5", "c0603", 4.8, -20.2, 90, "100n")
-part("U8", "sot23r", 8.0, -16.0, 0, "LM4040-2.5")
-part("R16", "r0603", 8.0, -12.8, 0, "10k")         # the reference's bias, from the charger's input
+# (The left one for the two lower lights, the right one for the two upper.)
+part("U7", "soic8", knob("U7X", -3.0), knob("U7Y", -21.5), int(knob("U7R", 90)), "LM393")
+part("U11", "soic8", knob("U11X", 3.0), knob("U11Y", -21.5), int(knob("U7R", 90)), "LM393")
+part("C5", "c0603", knob("C5X", -6.6), knob("C5Y", -21.5), 90, "100n")
+part("C24", "c0603", knob("C24X", 6.8), knob("C24Y", -24.0), 90, "100n")
+# (A TL431, its reference tied to its cathode: 2.5 V, 1% at worst. It
+# wants 1 mA at least: 2 mA through 1k from the charger's input, only on
+# a charger.)
+part("U8", "sot23k", 8.0, -16.0, 0, "CJ431")
+part("R16", "r0603", 8.0, -12.8, 0, "1k")         # the reference's bias, from the charger's input
 part("R17", "r0603", 7.5, -20.0, 90, "20k")        # 2.5 V down to the steps
 part("R18", "r0603", 9.0, -20.0, 90, "3k")
 part("R19", "r0603", 10.5, -20.0, 90, "3k")
@@ -245,21 +251,21 @@ net("VPCC", 0, "U3.VPCC", "R31.2", "R32.1")
 # (The charger's input: the receiver's, or a jig's 5 V; and what lights
 # the charge lights.)
 net("CHG_IN", 0.4, "Q2.S", "D2.K", "U3.IN18", "U3.IN19", "R31.1", "U3.CE", "U3.PROG2",
-    "U7.VCC", "C5.1", "R16.1", "C19.1", *[f"R{11 + i}.1" for i in range(5)])
-net("VREF", 0, "R16.2", "U8.K", "R17.1")
-# (The comparators in the order their outputs meet the lights, left to
-# right: 4, 3, 2, 1; so the steps go to them that way round.)
-net("T4", 0, "R17.2", "R18.1", "U7.IN1+")
-net("T3", 0, "R18.2", "R19.1", "U7.IN2+")
-net("T2", 0, "R19.2", "R20.1", "U7.IN3+")
-net("T1", 0, "R20.2", "R21.1", "U7.IN4+")
-net("BAT_LVL", 0, "R22.2", "R23.1", "U7.IN1-", "U7.IN2-", "U7.IN3-", "U7.IN4-")
+    "U7.VCC", "U11.VCC", "C5.1", "C24.1", "R16.1", "C19.1", *[f"R{11 + i}.1" for i in range(5)])
+net("VREF", 0, "R16.2", "U8.K", "U8.REF", "R17.1")
+# (Each comparator's output to the light nearest it: the left chip's to
+# the lower two, the right's to the upper two, by the steps' end of it.)
+net("T4", 0, "R17.2", "R18.1", "U11.IN2+")
+net("T3", 0, "R18.2", "R19.1", "U11.IN1+")
+net("T2", 0, "R19.2", "R20.1", "U7.IN2+")
+net("T1", 0, "R20.2", "R21.1", "U7.IN1+")
+net("BAT_LVL", 0, "R22.2", "R23.1", "U7.IN1-", "U7.IN2-", "U11.IN1-", "U11.IN2-")
 for i in range(5):
     net(f"LED{i + 1}", 0, f"R{11 + i}.2", f"D{3 + i}.A")
-net("LVL1", 0, "D3.K", "U7.OUT4")
-net("LVL2", 0, "D4.K", "U7.OUT3")
-net("LVL3", 0, "D5.K", "U7.OUT2")
-net("LVL4", 0, "D6.K", "U7.OUT1")
+net("LVL1", 0, "D3.K", "U7.OUT1")
+net("LVL2", 0, "D4.K", "U7.OUT2")
+net("LVL3", 0, "D5.K", "U11.OUT1")
+net("LVL4", 0, "D6.K", "U11.OUT2")
 net("FULL", 0, "D7.K", "U3.STAT2")
 # (The system supply: the LDO's input, and the backlight's anode, straight
 # up from the screen's connector to it.)
@@ -276,7 +282,7 @@ net("3V3", 0.4, "U4.VOUT", "C11.1", "U1.3V3", "C2.1", "C3.1", "R1.1",
 gnd = ["U1.GND1", "U1.GND40", "U1.GND41", "C1.2", "C2.2", "C3.2", "C4.2", "R10.2", "TP4.1",
        "J3.GND1", "J3.IM1", "J3.IM2", "J3.MP1", "J3.MP2", "R2.2", "U9.GND", "C18.2", "R26.2", "R27.2",
        "C19.2", "C20.2", "C22.2", "R32.2",
-       "U7.GND", "U8.A", "RT1.2", "R25.2", "R21.2", "R23.2", "C5.2", "U3.VSS10", "U3.VSS11", "U3.EP", "U3.SEL", "R29.2",
+       "U7.GND", "U11.GND", "C24.2", "U8.A", "RT1.2", "R25.2", "R21.2", "R23.2", "C5.2", "U3.VSS10", "U3.VSS11", "U3.EP", "U3.SEL", "R29.2",
        "R6.2", "U4.GND", "U4.EP", "J2.GND", "J4.GND", "U10.GND", "U10.TS", "U10.TST", "C23.2"]
 # (The screen's second ground pin, 39, is joined to its first on its flex:
 # the board leaves it be, and its backlight's anode beside it has the way
@@ -328,7 +334,7 @@ for name, w, pins in N:
 out.append("route 3V3 0.5 bottom locked U4.VOUT U1.3V3")
 # (The reference's ground to the comparator's bypass, beside it: the
 # pour under them is cut up by the lights' tracks.)
-out.append("route GND 0.25 top locked U8.A C5.2")
+out.append("route GND 0.25 top locked U8.A C24.2")
 # (The reset timer's TS and TST, side by side, to ground together: its
 # pads are too small for the pour to reach each.)
 out.append("route GND 0.15 top locked U10.TS U10.TST")

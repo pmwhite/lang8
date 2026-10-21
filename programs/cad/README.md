@@ -292,11 +292,12 @@ through the board's corners, so the case's rim is thin all round.
 - Charge lights, between the arrows and A and B, through five holes in
   the front: four for the battery's level and one for full. They need no
   program, and light only on a charger: run from the charger's input, a
-  quad comparator (LM339) weighs the battery, halved by its own divider
+  pair of dual comparators (LM393) weighs the battery, halved by its own divider
   (330k each, 6 uA: the four inputs' bias moves it 4 mV as they usually
   are, 41 at the worst), against four
-  steps of a 2.5 V reference (LM4040): 3.6, 3.75, 3.9 and 4.05 V, as the
-  battery reads while charging. Full is the charger's own STAT2 (which
+  steps of a 2.5 V reference (CJ431, a TL431, 1% at worst: 2 mA through
+  1k, on a charger only): 3.6, 3.75, 3.9 and 4.05 V, as the battery
+  reads while charging. The lights are white. Full is the charger's own STAT2 (which
   also goes low when it stops for heat or cold: too warm on the dock,
   "full" lights though it is not charging; the program can tell, from
   the battery's voltage).
@@ -647,7 +648,12 @@ The *Make it* panel lists who makes or sells each part of the thing:
 
 Each part on the board has a manufacturer's and an LCSC part number
 (`sourcing.l8`, found in JLCPCB's parts library and in stock on
-2026-10-15 and 16). Each DigiKey number was checked on DigiKey's own page,
+2026-10-15 and 16). Where one does the job, a part is from JLCPCB's basic
+library or its "preferred" extended parts, which carry no fee of their
+own; each other kind costs $3 an order to load. The handheld has ten such
+kinds (the ESP32-S3, the charger, the regulator, the reset timer, the
+screen's and battery's sockets, the thermistor, the fuse, the posts and
+the 1.7 mm switches: none has a basic equivalent), the dock eight. Each DigiKey number was checked on DigiKey's own page,
 in stock, on 2026-10-16. None of these lets a program pay, so the panel goes as far
 as there is to go: each button opens the site with what to send or buy,
 and paying is yours.
@@ -667,7 +673,8 @@ design, unless a check fails):
   connectors). For each of these, pin 1 in the preview must sit on pin
   1's pad (the silkscreen's dot), or its line in `SRC_ROT` set to the
   turn that puts it there: the handheld's ESP32-S3 (U1), MCP73871 (U3,
-  QFN-20), TLV75533 (U4, WSON-6), LM339 (U7, SOIC-14), LM4040 (U8),
+  QFN-20), TLV75533 (U4, WSON-6), LM393s (U7, U11, SOIC-8), CJ431 (U8, whose SOT-23 pins are not TI's
+  order),
   LMV321 (U9), TPS3422 (U10, USON-6), the MOSFETs (Q1, Q2), the
   Schottky (D2), the five lights (their cathodes), the battery's
   socket (J2) and the screen's (J3); the dock's ESP32-S3, regulator,
