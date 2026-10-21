@@ -1519,6 +1519,10 @@ original)
   step 619 289-search-shalom 10
   step 620 290-compare 12
   step 627 291-share-hebrew 12
+  # (The card at full size: Psalm 23:1 in Hebrew, right to left.)
+  data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
+  cp "$data/Documents/share-card-hebrew.png" "$out/291b-share-card-hebrew.png" 2>/dev/null || \
+    { echo "FAILED: no share-card-hebrew.png" | tee -a "$out/original.txt"; failed=1; }
   step 628 294-greek-page 12
   step 629 294b-read-in-greek 10
   step 621 292-night-hebrew 10
