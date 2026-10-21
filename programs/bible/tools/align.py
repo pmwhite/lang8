@@ -131,7 +131,7 @@ def spoken_lines(text):
     exe = os.path.join(WORK, "spoken")
     src = "programs/bible/tools/spoken.l8"
     if not os.path.exists(exe) or os.path.getmtime(exe) < max(
-            os.path.getmtime(src), os.path.getmtime("programs/bible/text.l8")):
+            os.path.getmtime(src), os.path.getmtime("programs/bible/core/text.l8")):
         subprocess.run(["./l8c3", "build", src, "-o", exe], check=True)
     out = subprocess.run([exe, os.path.join(DATA, text + ".txt")], check=True,
                          capture_output=True).stdout.decode("utf-8")

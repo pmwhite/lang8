@@ -1,6 +1,6 @@
 // The ESV API's HTML (v3/passage/html, with the options worker.js asks
 // for) as the app's records: the format of data/bsb.txt (see
-// programs/bible/text.l8), so the app lays the ESV out as any version. A
+// programs/bible/core/text.l8), so the app lays the ESV out as any version. A
 // tolerant scanner of the tags the API is known to send, no DOM:
 //
 //   <b class="chapter-num">3:1 </b>     C3 (a request's later chapters), V1

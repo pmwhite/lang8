@@ -1,0 +1,1393 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// The day's reader (DESIGN.md ยง16): a plan's day read on a page of its own.
+// It is the reader in a mode, not a second app: while it is up, the reader's
+// globals (table, cur, the bar's title) are the day's, its table a second
+// one over the reader's in the navigation controller's view, under the bar,
+// laid out a row a chapter's part (plans.l8's day_rows and layout_day_row),
+// so the tray, marks, footnotes, previews, Study and Aa work as in the
+// reader. The reader's own table and place are left as they were, and
+// given back by Done. It comes up as the system's full-screen presentation
+// does (the screen before it, as a snapshot, under it; a cross-fade with
+// Reduce Motion), and goes down the same way. The bar has Done and Aa, and
+// a title of two lines: the passage under the bar, and the day. Mark Read,
+// a capsule at the bottom right, marks the passage under the bar; a
+// passage marks itself when its end has been seen and it has been rested
+// in 20 s, or Listen has read it to its end. The page ends with the day's
+// end: Mark Day as Read, and the next day. A reference opened from it
+// leaves it, the reader's capsule then reading "โ€น Day 32", which reopens
+// it. Its place is kept (dayPlace), and whether it was up (dayOpen).
+import "../../ios/objc.l8";
+
+import "../core/text.l8";
+
+import "../core/plans.l8";
+
+// ---- the state ----
+// Whether the day's reader is up; its table; the reader's own (kept while
+// the day's is up).
+day_on: bool = false;
+
+day_table: int = 0;
+
+reader_table: int = 0;
+
+// The day shown: its plan and number (from 1).
+day_plan: int = -1;
+
+day_num: int = 0;
+
+// The reader's place when the day came up, and whether its capsule was
+// shown: given back by Done.
+dm_c: int = 0;
+
+dm_v: int = 0;
+
+dm_f: int = 0;
+
+dm_back: bool = false;
+
+// The passage under the bar (its index among the plans'), as the title and
+// the capsule show it (-1: none yet).
+day_k: int = -1;
+
+// Whether the day shown is of the plan followed (a day of another plan is
+// read, not marked).
+day_followed(): bool {
+    day_plan >= 0 && plan_slot(day_plan) >= 0
+}
+
+// A row's chapter (the reader's rows are its chapters), and a chapter's
+// row (-1: not in the day).
+row_chapter(r: int): int {
+    if (day_on) {
+        if (r >= 0 && r < dy_n) dy_c[r] else -1
+    } else r
+}
+
+// A chapter's row: its row last named (lay_row: a tap's, a cell's, the
+// verse's of verse_y, the top's) if that is one of its, else its first. (A
+// day may read parts of a chapter in two places.)
+lay_row: int = -1;
+
+// The row at the top (find_place's).
+cur_row: int = -1;
+
+chapter_row(c: int): int {
+    if (!day_on) return c;
+    if (lay_row >= 0 && lay_row < dy_n && dy_c[lay_row] == c) return lay_row;
+    day_row_first(c)
+}
+
+// ---- its table ----
+make_day_table() {
+    if (day_table != 0) return;
+    root: int = msg(nav, sel("view"));
+    l8_msg_hfa(hfa, root, sel("bounds"), 0, 0, 0);
+    t: int = msg(msg_rect(msg(cls("UITableView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, hfa[2], hfa[3]), sel("autorelease"));
+    day_table = keep(t);
+    keys_scroll(t);
+    msg1(t, sel("setAutoresizingMask:"), 18);
+    msg1(t, sel("setDataSource:"), app_obj);
+    msg1(t, sel("setDelegate:"), app_obj);
+    msg1(t, sel("setSeparatorStyle:"), 0);
+    msg1(t, sel("setAllowsSelection:"), 0);
+    msg_set_f(t, sel("setRowHeight:"), objc_const_f("UITableViewAutomaticDimension"));
+    msg_set_f(t, sel("setEstimatedRowHeight:"), em * 60.0f64);
+    if (responds(t, "setSectionHeaderTopPadding:")) msg_set_f(t, sel("setSectionHeaderTopPadding:"),
+        0.0f64);
+    msg_set_f(t, sel("setSectionHeaderHeight:"), 0.0f64);
+    msg_set_f(t, sel("setSectionFooterHeight:"), 0.0f64);
+    msg_set_f(t, sel("setEstimatedSectionHeaderHeight:"), 0.0f64);
+    msg_set_f(t, sel("setEstimatedSectionFooterHeight:"), 0.0f64);
+    msg1(t, sel("setContentInsetAdjustmentBehavior:"), 2);
+    if (responds(t, "topEdgeEffect")) msg1(msg(t, sel("topEdgeEffect")), sel("setHidden:"),
+        1);
+    msg1(t, sel("setHidden:"), 1);
+    msg2(root, sel("insertSubview:belowSubview:"), t, rbar)
+}
+
+// ---- opening and closing ----
+// A day to open once the sheets over the reader have gone (its plan, its
+// number, and the passage to open at, -1: where it was left, or its first
+// unread).
+do_plan: int = -1;
+
+do_num: int = 0;
+
+do_k: int = -1;
+
+do_tries: int = 0;
+
+do_toast: int = 0;
+
+// Day d of plan p opened: up from the reader (or, if it is up, the page
+// replaced), at passage k (-1: where it was left in it, else its first
+// unread passage).
+day_open(p: int, d: int, k: int) {
+    daily_ready();
+    if (p < 0 || d < 1 || d > plan_lengths[p] || !restored) return;
+    if (presented() != 0) {
+        // (Put away first: the day comes up once the sheet has gone.)
+        do_plan = p;
+        do_num = d;
+        do_k = k;
+        do_tries = 0;
+        dismiss_sheets();
+        _t: int = after_common(0.15f64, "dayOpenLater:");
+        return
+    }
+    if (day_on) {
+        day_replace(p, d, k);
+        return
+    }
+    day_enter(p, d, k, true)
+}
+
+day_open_later(_self: int, _cmd: int, _timer: int): int {
+    if (do_plan < 0) return 0;
+    if (presented() != 0) {
+        do_tries = do_tries + 1;
+        if (do_tries < 40) _t: int = after_common(0.1f64, "dayOpenLater:") else note("bible: day not opened, a sheet stayed");
+        return 0
+    }
+    p: int = do_plan;
+    do_plan = -1;
+    day_open(p, do_num, do_k);
+    if (do_toast != 0) {
+        toast_symbol(do_toast, "checkmark", if (demo_on) 6.0f64 else 1.6f64);
+        release(do_toast);
+        do_toast = 0
+    }
+    0
+}
+
+// Today's day of the first plan followed (the demo's), and of slot i's.
+day_open_today() {
+    day_open_today_of(0)
+}
+
+day_open_today_of(i: int) {
+    if (i < 0 || i >= fw_n) return;
+    daily_ready();
+    day_open(fw_plan[i], plan_today_of(i, today()), -1)
+}
+
+// The snapshot of the screen the day comes up over, or goes down from.
+day_snap: int = 0;
+
+day_snap_timer: int = 0;
+
+// (The screen to slide down taken after a sheet was put away at once.)
+day_snap_fresh: bool = false;
+
+// Up from the reader: the reader's place kept; the day's rows laid out and
+// placed; the bar's Done, title and capsule; the slide up.
+day_enter(
+    p: int,
+    d: int,
+    k: int,
+    animated: bool
+) {
+    stop_moving();
+    clear_selection();
+    if (ls_active && !ls_day) listen_stop();
+    measure_place();
+    dm_c = cur;
+    dm_v = place_v;
+    dm_f = place_frac;
+    save_place();
+    reading_rest_now();
+    plan_rest_ended();
+    dm_back = back_shown;
+    hide_back();
+    slide: bool = animated && !reduce_motion() && window != 0;
+    snap: int = if (slide) msg1(window, sel("snapshotViewAfterScreenUpdates:"), 0) else 0;
+    make_day_table();
+    day_on = true;
+    day_plan = p;
+    day_num = d;
+    day_k = -1;
+    day_rows(p, d);
+    lay_row = -1;
+    cur_row = -1;
+    table = day_table;
+    msg1(day_table, sel("setBackgroundColor:"), c_bg);
+    msg1(day_table, sel("setHidden:"), 0);
+    bar_stop();
+    bar_p = 0.0f64;
+    bars_hidden = false;
+    last_scroll_y = 0.0f64;
+    set_insets();
+    day_footer();
+    msg(day_table, sel("reloadData"));
+    msg(day_table, sel("layoutIfNeeded"));
+    day_bar(true);
+    day_place_open(k);
+    day_title_update(false);
+    mark_show();
+    set_def_bool("dayOpen", true);
+    day_esv_want();
+    if (slide && snap != 0) {
+        root: int = msg(nav, sel("view"));
+        day_snap_drop();
+        day_snap = keep(snap);
+        msg2(window, sel("insertSubview:atIndex:"), snap, 0);
+        animate(msg(root, sel("layer")), "transform.translation.y", view_height(root),
+            0.0f64, true, 0.0f64);
+        day_snap_timer = after_common(0.7f64, "daySnapDone:")
+    } else if (animated) fade_layer(msg(window, sel("layer")), 0.25f64);
+    page_focus();
+    day_log("bible: day open ");
+    demo_settle_start()
+}
+
+day_snap_drop() {
+    day_snap_timer = stop_timer(day_snap_timer);
+    if (day_snap != 0) {
+        msg(day_snap, sel("removeFromSuperview"));
+        release(day_snap);
+        day_snap = 0
+    }
+}
+
+day_snap_done(_self: int, _cmd: int, _timer: int): int {
+    day_snap_timer = 0;
+    day_snap_drop();
+    0
+}
+
+// "bible: day open 6 32 at Genesis 12 (Genesis 12โ€“14)".
+day_log(what: str) {
+    if (!diag_on) return;
+    fbuf_n = 0;
+    fput_str(what);
+    fput_int(day_plan);
+    fput(32);
+    fput_int(day_num);
+    fput_str(" at ");
+    if (cur >= 0) fput_title(cur);
+    if (day_k >= 0) {
+        fput_str(" (");
+        fput_reading(day_k, false);
+        fput(41)
+    }
+    note_ns(fstring())
+}
+
+// Done: down to the reader, where it was (its rows made again, for what
+// the day changed: marks, the look, the version).
+day_done_tapped(_self: int, _cmd: int, _b: int): int {
+    day_close(true);
+    0
+}
+
+day_close(animated: bool) {
+    if (!day_on) return;
+    stop_moving();
+    day_save_place();
+    clear_selection();
+    if (ls_active && ls_day) listen_stop();
+    slide: bool = animated && !reduce_motion() && window != 0;
+    snap: int = if (slide) msg1(window, sel("snapshotViewAfterScreenUpdates:"), if (day_snap_fresh) 1 else 0) else 0;
+    mark_hide(false);
+    day_log("bible: day closed ");
+    day_on = false;
+    day_k = -1;
+    msg1(day_table, sel("setHidden:"), 1);
+    table = reader_table;
+    day_bar(false);
+    bar_stop();
+    bar_p = 0.0f64;
+    bars_hidden = false;
+    set_insets();
+    msg(table, sel("reloadData"));
+    msg(table, sel("layoutIfNeeded"));
+    go_place(dm_c, dm_v, dm_f);
+    set_title();
+    title_menus_refresh();
+    layout_bar();
+    set_def_bool("dayOpen", false);
+    if (dm_back) show_back();
+    page_focus();
+    if (slide && snap != 0) {
+        day_snap_drop();
+        day_snap = keep(snap);
+        msg1(window, sel("addSubview:"), snap);
+        layer: int = msg(snap, sel("layer"));
+        H: f64 = view_height(window);
+        msg2(layer, sel("setValue:forKeyPath:"), nsnumber_f(H), nsstring("transform.translation.y"));
+        animate(layer, "transform.translation.y", 0.0f64, H, false, 0.35f64);
+        day_snap_timer = after_common(0.4f64, "daySnapDone:")
+    } else if (animated) fade_layer(msg(window, sel("layer")), 0.25f64);
+    demo_settle_start()
+}
+
+// Another day in place of the one shown (Next, the plan's days): the page
+// cross-faded (0.2 s), its title and capsule with it.
+day_replace(p: int, d: int, k: int) {
+    clear_selection();
+    if (ls_active && ls_day) listen_stop();
+    day_save_place();
+    if (!reduce_motion()) {
+        fade_layer(msg(day_table, sel("layer")), 0.2f64);
+        fade_layer(msg(title_btn[0], sel("layer")), 0.2f64);
+        if (mark_btn != 0) fade_layer(msg(mark_btn, sel("layer")), 0.2f64)
+    }
+    day_plan = p;
+    day_num = d;
+    day_k = -1;
+    day_rows(p, d);
+    lay_row = -1;
+    cur_row = -1;
+    bar_stop();
+    bar_p = 0.0f64;
+    day_footer();
+    msg(day_table, sel("reloadData"));
+    msg(day_table, sel("layoutIfNeeded"));
+    day_place_open(k);
+    day_title_update(false);
+    mark_update(false, false);
+    layout_bar();
+    day_esv_want();
+    day_log("bible: day replaced ");
+    demo_settle_start()
+}
+
+// ---- its place ----
+// dayPlace: "plan day passage chapter verse frac" (the passage's index in
+// its day).
+dp_buf: []i8 = new i8[96](0i8);
+
+dp_nums: []int = new int[6](0);
+
+day_save_place() {
+    if (!day_on || cur < 0) return;
+    measure_place();
+    r: int = day_row_of(cur, if (place_v > 0) place_v else 1);
+    if (r < 0) r = day_row_first(cur);
+    if (r < 0) return;
+    fbuf_n = 0;
+    fput_int(day_plan);
+    fput(32);
+    fput_int(day_num);
+    fput(32);
+    fput_int(dy_k[r] - pl_r0[dy_di]);
+    fput(32);
+    fput_int(cur);
+    fput(32);
+    fput_int(place_v);
+    fput(32);
+    fput_int(place_frac);
+    set_def_string("dayPlace", fbuf, fbuf_n)
+}
+
+// dayPlace read into dp_nums (false if there is none, or it is not six
+// numbers).
+day_place_read(): bool {
+    n: int = def_string("dayPlace", dp_buf);
+    i: int = 0;
+    for f in 0..6 {
+        while (i < n && dp_buf[i] as int == 32) i = i + 1;
+        neg: bool = i < n && dp_buf[i] as int == 45;
+        if (neg) i = i + 1;
+        x: int = 0;
+        digits: int = 0;
+        while (i < n && dp_buf[i] as int >= 48 && dp_buf[i] as int <= 57) {
+            x = x * 10 + dp_buf[i] as int - 48;
+            i = i + 1;
+            digits = digits + 1
+        }
+        if (digits == 0) return false;
+        dp_nums[f] = (if (neg) -x else x)
+    }
+    true
+}
+
+// The page placed: at passage k's heading under the bar; or (k -1) where
+// it was left in this day, else at its first unread passage's heading.
+day_place_open(k: int) {
+    if (k < 0 && day_place_read() && dp_nums[0] == day_plan && dp_nums[1] == day_num) {
+        c: int = dp_nums[3];
+        if (c >= 0 && c < chapters && day_row_first(c) >= 0) {
+            go_place(c, dp_nums[4], dp_nums[5]);
+            return
+        }
+    }
+    // (Next: the new day's top.)
+    if (k == -2) {
+        day_go_row(0);
+        return
+    }
+    kk: int = if (k >= 0) k else day_first_unread(dy_di);
+    if (!day_followed() && k < 0) kk = pl_r0[dy_di];
+    r: int = -1;
+    for x in 0..dy_n
+        if (r < 0 && dy_k[x] == kk) r = x;
+    day_go_row(if (r < 0) 0 else r)
+}
+
+// Row r's top (its passage's heading) under the bar.
+day_go_row(r: int) {
+    if (r <= 0) {
+        set_offset(-top_inset(table));
+        cur = -1;
+        find_place();
+        return
+    }
+    path: int = msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), r, 0);
+    for _i in 0..2 {
+        msg3(table, sel("scrollToRowAtIndexPath:atScrollPosition:animated:"), path,
+            1, 0);
+        msg(table, sel("layoutIfNeeded"))
+    }
+    l8_msg_hfa(hfa, table, sel("rectForRowAtIndexPath:"), path, 0, 0);
+    set_offset(hfa[1] + day_row_gap(r) - em * 0.8f64 - top_inset(table));
+    cur = -1;
+    find_place()
+}
+
+// The space above row r's text: the day's top, a passage's 1.5 em, or a
+// chapter's in a passage, as the reader's.
+day_row_gap(r: int): f64 {
+    if (r == 0) top_gap() else if (day_row_begins(r)) em * 1.5f64 else em * 2.4f64
+}
+
+// ---- the rows ----
+// A passage's heading, a header for VoiceOver (the rotor's Headings move by
+// passage, ยง16.7): an element of its own over its lines, then the text.
+day_cell_access(
+    cell: int,
+    tv: int,
+    r: int,
+    top: f64
+) {
+    if (r < 0 || !day_row_begins(r)) {
+        msg1(cell, sel("setAccessibilityElements:"), 0);
+        return
+    }
+    hb: int = -1;
+    he: int = -1;
+    for i in 0..runs {
+        if (hb < 0 && run_style[i] == STYLE_PASSAGE) {
+            hb = (if (i == 0) 0 else run_end[i - 1]);
+            he = run_end[i]
+        }
+    }
+    if (hb < 0) {
+        msg1(cell, sel("setAccessibilityElements:"), 0);
+        return
+    }
+    s: int = msg(tv, sel("attributedText"));
+    b16: int = u16_at[hb];
+    e16: int = u16_at[he];
+    before: f64 = if (b16 > 0) esv_height_of(msg2(s, sel("attributedSubstringFromRange:"),
+        0, b16)) else 0.0f64;
+    h: f64 = esv_height_of(msg2(s, sel("attributedSubstringFromRange:"), b16, e16 - b16));
+    m: f64 = side_margin();
+    el: int = msg(msg1(msg(cls("UIAccessibilityElement"), sel("alloc")), sel("initWithAccessibilityContainer:"),
+        cell), sel("autorelease"));
+    fbuf_n = 0;
+    fput_reading(dy_k[r], true);
+    msg1(el, sel("setAccessibilityLabel:"), fstring());
+    msg1(el, sel("setAccessibilityTraits:"), objc_const("UIAccessibilityTraitHeader"));
+    msg_rect(el, sel("setAccessibilityFrameInContainerSpace:"), m, top + before, view_width(table) - 2.0f64 * m,
+        h);
+    one[0] = el;
+    one[1] = tv;
+    msg1(cell, sel("setAccessibilityElements:"), nsarray(one, 2))
+}
+
+// The reader's own table, under the day's, asking for a row (as it lays
+// itself out): its chapter, as the reader has it.
+reader_cell_under_day(t: int, path: int): int {
+    day_on = false;
+    table = reader_table;
+    cell: int = chapter_cell(t, path);
+    table = day_table;
+    day_on = true;
+    cell
+}
+
+// The look changed with the day up: its end, title, capsule and Done made
+// again.
+day_restyle() {
+    if (!day_on) return;
+    day_footer();
+    day_bar(true);
+    day_title_config();
+    title_place();
+    mark_style()
+}
+
+// ---- the title: the passage under the bar, and the day ----
+// The row holding the bar's bottom line (-1 if none).
+day_row_at_bar(): int {
+    if (table == 0) return -1;
+    line: f64 = offset_y(table) + bar_bottom();
+    path: int = msg_ff(table, sel("indexPathForRowAtPoint:"), 40.0f64, line + 1.0f64);
+    if (path != 0) return msg(path, sel("row"));
+    // (Above the first row, or below the last: the first or the last.)
+    if (line < 0.0f64 || dy_n == 0) 0 else dy_n - 1
+}
+
+// The title follows the passage under the bar (cross-faded, ยง0.5 item 1's
+// rule); the capsule follows it too.
+day_title_update(fade: bool) {
+    if (title_view == 0 || dy_n == 0) return;
+    r: int = day_row_at_bar();
+    if (r < 0) r = 0;
+    k: int = dy_k[r];
+    title_btn_c[0] = dy_c[r];
+    if (k != day_k) {
+        was: int = day_k;
+        day_k = k;
+        day_title_config();
+        if (fade && was >= 0 && !reduce_motion()) {
+            tr: int = make("CATransition");
+            msg1(tr, sel("setType:"), objc_const("kCATransitionFade"));
+            msg_set_f(tr, sel("setDuration:"), 0.18f64);
+            msg2(msg(title_btn[0], sel("layer")), sel("addAnimation:forKey:"), tr,
+                nsstring("title"));
+            release(tr)
+        }
+        mark_update(fade && was >= 0, false);
+        if (diag_on && was >= 0) {
+            fbuf_n = 0;
+            fput_str("bible: day title ");
+            fput_reading(k, false);
+            fput_str(" (was ");
+            fput_reading(was, false);
+            fput_str(if (fade && !reduce_motion()) "), faded" else "), at once");
+            note_ns(fstring())
+        }
+    }
+    title_place()
+}
+
+// "Day 32 ยท Chronological".
+fput_day_line() {
+    fput_str("Day ");
+    fput_int(day_num);
+    fput_str(" \ย\ท ");
+    fput_plan_name(day_plan)
+}
+
+day_title_config() {
+    b: int = title_btn[0];
+    if (b == 0 || day_k < 0) return;
+    fbuf_n = 0;
+    fput_reading(day_k, false);
+    t: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        fstring(), title_attrs());
+    fbuf_n = 0;
+    fput_day_line();
+    keys[0] = k_font;
+    values[0] = sans(12.0f64, 0.0f64);
+    keys[1] = k_color;
+    values[1] = c_faint;
+    sub: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        fstring(), nsdictionary(keys, values, 2));
+    config: int = msg(cls("UIButtonConfiguration"), sel("plainButtonConfiguration"));
+    msg1(config, sel("setAttributedTitle:"), t);
+    msg1(config, sel("setAttributedSubtitle:"), sub);
+    msg1(config, sel("setTitleAlignment:"), 2);
+    msg_set_f(config, sel("setTitlePadding:"), 0.0f64);
+    msg1(config, sel("setImage:"), symbol("chevron.down", 10.0f64, 7, c_faint));
+    msg1(config, sel("setImagePlacement:"), 8);
+    msg_set_f(config, sel("setImagePadding:"), 4.0f64);
+    msg_rect(config, sel("setContentInsets:"), 0.0f64, 10.0f64, 0.0f64, 10.0f64);
+    msg1(config, sel("setTitleLineBreakMode:"), 4);
+    msg1(config, sel("setSubtitleLineBreakMode:"), 4);
+    msg1(b, sel("setConfiguration:"), config);
+    // (One element: "Psalm 105, Day 32, Chronological"; ยง16.7.)
+    fbuf_n = 0;
+    fput_reading(day_k, false);
+    fput_str(", Day ");
+    fput_int(day_num);
+    fput_str(", ");
+    fput_plan_name(day_plan);
+    msg1(b, sel("setAccessibilityLabel:"), fstring());
+    msg1(b, sel("setLargeContentTitle:"), fstring());
+    msg1(b, sel("setAccessibilityHint:"), nsstring("Shows the plan\โ\€\s days"));
+    msg1(b, sel("setMenu:"), 0);
+    msg1(b, sel("setAccessibilityCustomActions:"), 0);
+    msg1(b, sel("setAccessibilityValue:"), 0);
+    // (Its width: the wider line's, as title_config measures it.)
+    l8_msg_hfa(hfa, t, sel("size"), 0, 0, 0);
+    w: f64 = hfa[0];
+    l8_msg_hfa(hfa, sub, sel("size"), 0, 0, 0);
+    if (hfa[0] > w) w = hfa[0];
+    title_text_w = w + 24.0f64;
+    title_btn_w[0] = w + 48.0f64;
+    release(t);
+    release(sub)
+}
+
+// The title tapped: the plan's days, as a sheet, at this day.
+day_title_tapped() {
+    if (day_plan < 0) return;
+    open_plan_sheet(day_plan, day_num)
+}
+
+// ---- the bar: Done and Aa ----
+// The bar's first button as Done (with the day up) or Search; the Library
+// left out (layout_bar).
+day_done_w: f64 = 60.0f64;
+
+day_bar(on: bool) {
+    b: int = bar_buttons[0];
+    if (b == 0) return;
+    config: int = msg(cls("UIButtonConfiguration"), sel("plainButtonConfiguration"));
+    if (on) {
+        keys[0] = k_font;
+        values[0] = sans(17.0f64, 0.4f64);
+        keys[1] = k_color;
+        values[1] = c_accent;
+        t: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+            nsstring("Done"), nsdictionary(keys, values, 2));
+        msg1(config, sel("setAttributedTitle:"), t);
+        l8_msg_hfa(hfa, t, sel("size"), 0, 0, 0);
+        day_done_w = hfa[0] + 20.0f64;
+        release(t);
+        msg_rect(config, sel("setContentInsets:"), 0.0f64, 10.0f64, 0.0f64, 10.0f64);
+        msg3(b, sel("removeTarget:action:forControlEvents:"), app_obj, sel("showSearch:"),
+            64);
+        msg3(b, sel("addTarget:action:forControlEvents:"), app_obj, sel("dayDone:"),
+            64);
+        msg1(b, sel("setAccessibilityLabel:"), nsstring("Done"));
+        msg1(b, sel("setLargeContentTitle:"), nsstring("Done"));
+        msg1(b, sel("setLargeContentImage:"), 0);
+        msg_rect(b, sel("setBounds:"), 0.0f64, 0.0f64, day_done_w, 44.0f64)
+    } else {
+        msg1(config, sel("setImage:"), symbol("magnifyingglass", 17.0f64, 4, 0));
+        msg3(b, sel("removeTarget:action:forControlEvents:"), app_obj, sel("dayDone:"),
+            64);
+        msg3(b, sel("addTarget:action:forControlEvents:"), app_obj, sel("showSearch:"),
+            64);
+        msg1(b, sel("setAccessibilityLabel:"), nsstring("Search"));
+        msg1(b, sel("setLargeContentTitle:"), nsstring("Search"));
+        msg1(b, sel("setLargeContentImage:"), symbol("magnifyingglass", 17.0f64, 4,
+            0));
+        msg_rect(b, sel("setBounds:"), 0.0f64, 0.0f64, 44.0f64, 44.0f64)
+    }
+    msg1(b, sel("setConfiguration:"), config);
+    msg1(b, sel("setTintColor:"), c_icon);
+    // (The carried ribbon's glyph by the title: not the day's.)
+    title_ribbon_update();
+    layout_bar()
+}
+
+// ---- Mark Read: the capsule at the bottom right ----
+mark_btn: int = 0;
+
+mark_material: int = 0;
+
+mark_shown: bool = false;
+
+make_mark() {
+    if (mark_btn != 0) return;
+    mark_btn = keep(msg2(cls("UIButton"), sel("buttonWithConfiguration:primaryAction:"),
+        msg(cls("UIButtonConfiguration"), sel("plainButtonConfiguration")), 0));
+    msg3(mark_btn, sel("addTarget:action:forControlEvents:"), app_obj, sel("dayMark:"),
+        64);
+    layer: int = msg(mark_btn, sel("layer"));
+    msg1(layer, sel("setShadowColor:"), msg(msg(cls("UIColor"), sel("blackColor")),
+        sel("CGColor")));
+    msg_set_f(layer, sel("setShadowRadius:"), 12.0f64);
+    msg_ff(layer, sel("setShadowOffset:"), 0.0f64, 4.0f64);
+    msg1(mark_btn, sel("setShowsLargeContentViewer:"), 1);
+    msg1(mark_btn, sel("setHidden:"), 1);
+    hover(mark_btn);
+    msg1(window, sel("addSubview:"), mark_btn)
+}
+
+// Its look for the passage under the bar: not read, the circle and Mark
+// Read (ink); read, the filled check and Read (accent). At the
+// accessibility sizes, its image only (as the back capsule's).
+mark_style() {
+    if (mark_btn == 0 || dy_di < 0) return;
+    // (The day's state: every passage read; owner, 2026-10-21.)
+    read: bool = day_state(dy_di) == 2;
+    glass: bool = responds(cls("UIButtonConfiguration"), "prominentGlassButtonConfiguration");
+    config: int = if (glass) msg(cls("UIButtonConfiguration"), sel("prominentGlassButtonConfiguration")) else msg(cls("UIButtonConfiguration"),
+        sel("plainButtonConfiguration"));
+    if (glass) msg1(config, sel("setBaseBackgroundColor:"), if (is_dark()) color_hex("4A4744",
+        0.95f64) else color_hex("FFFFFF", 0.92f64));
+    color: int = if (read) c_accent else c_ink;
+    msg1(config, sel("setBaseForegroundColor:"), color);
+    msg_set_f32(msg(mark_btn, sel("layer")), sel("setShadowOpacity:"), (if (glass) 0.0f64 else 0.12f64) as f32);
+    msg1(config, sel("setCornerStyle:"), 4);
+    small: bool = ax_size();
+    msg_rect(config, sel("setContentInsets:"), 0.0f64, if (small) 10.0f64 else 14.0f64,
+        0.0f64, if (small) 10.0f64 else 14.0f64);
+    msg1(config, sel("setImage:"), symbol(if (read) "checkmark.circle.fill" else "circle",
+        15.0f64, 5, color));
+    msg_set_f(config, sel("setImagePadding:"), 6.0f64);
+    if (!small) {
+        // (14 points at the default size, growing with the phone's text size
+        // to 18; ยง16.7.)
+        size: f64 = 14.0f64 * scaled(17.0f64) / 17.0f64;
+        if (size > 18.0f64) size = 18.0f64;
+        keys[0] = k_font;
+        values[0] = sans(size, 0.3f64);
+        keys[1] = k_color;
+        values[1] = color;
+        t: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+            nsstring(if (read) "Read" else "Mark Read"), nsdictionary(keys, values,
+            2));
+        msg1(config, sel("setAttributedTitle:"), t);
+        release(t)
+    }
+    msg1(mark_btn, sel("setConfiguration:"), config);
+    // "Mark Day 32 as read"; "Day 32, read", to unmark (ยง16.13).
+    fbuf_n = 0;
+    if (read) {
+        fput_str("Day ");
+        fput_int(day_num);
+        fput_str(", read")
+    } else {
+        fput_str("Mark Day ");
+        fput_int(day_num);
+        fput_str(" as read")
+    }
+    msg1(mark_btn, sel("setAccessibilityLabel:"), fstring());
+    msg1(mark_btn, sel("setAccessibilityHint:"), if (read) nsstring("Double-tap to mark it unread.") else 0);
+    msg1(mark_btn, sel("setLargeContentTitle:"), nsstring(if (read) "Read" else "Mark Read"));
+    l8_msg_hfa(hfa, mark_btn, sel("intrinsicContentSize"), 0, 0, 0);
+    mark_w = hfa[0];
+    if (!glass) {
+        if (mark_material == 0) {
+            mark_material = msg1(msg(cls("UIVisualEffectView"), sel("alloc")), sel("initWithEffect:"),
+                msg1(cls("UIBlurEffect"), sel("effectWithStyle:"), 9));
+            msg1(mark_material, sel("setUserInteractionEnabled:"), 0);
+            msg_set_f(msg(mark_material, sel("layer")), sel("setCornerRadius:"), 18.0f64);
+            msg1(mark_material, sel("setClipsToBounds:"), 1);
+            msg2(mark_btn, sel("insertSubview:atIndex:"), mark_material, 0)
+        }
+        msg_rect(mark_material, sel("setFrame:"), 0.0f64, 0.0f64, mark_w, 36.0f64)
+    }
+    mark_place(false)
+}
+
+mark_w: f64 = 0.0f64;
+
+// Its place: 16 points from the trailing edge, 12 above the safe area, or
+// above the tray or the mini player while they are up (moved with their
+// spring).
+mark_place(animated: bool) {
+    if (mark_btn == 0) return;
+    root: int = window;
+    W: f64 = view_width(root);
+    H: f64 = view_height(root);
+    l8_msg_hfa(hfa, root, sel("safeAreaInsets"), 0, 0, 0);
+    foot: f64 = H - hfa[2] - 12.0f64;
+    if (listen_shown && mp != 0) {
+        l8_msg_hfa(hfa, mp, sel("frame"), 0, 0, 0);
+        if (hfa[1] - 12.0f64 < foot) foot = hfa[1] - 12.0f64
+    }
+    if (tray_shown && tray != 0) {
+        l8_msg_hfa(hfa, tray, sel("frame"), 0, 0, 0);
+        if (hfa[1] - 12.0f64 < foot) foot = hfa[1] - 12.0f64
+    }
+    l8_msg_hfa(hfa, mark_btn, sel("frame"), 0, 0, 0);
+    was: f64 = hfa[1];
+    y: f64 = foot - 36.0f64;
+    msg_rect(mark_btn, sel("setFrame:"), mark_right(W) - mark_w, y, mark_w, 36.0f64);
+    if (animated && mark_shown && was != y && !reduce_motion()) animate(msg(mark_btn,
+        sel("layer")), "transform.translation.y", was - y, 0.0f64, true, 0.0f64)
+}
+
+// The tray or the mini player came or went: the capsule rides with them.
+mark_reposition() {
+    if (day_on && mark_shown) {
+        msg(window, sel("layoutIfNeeded"));
+        mark_place(true)
+    }
+}
+
+mark_show() {
+    make_mark();
+    if (!day_followed()) {
+        mark_hide(false);
+        return
+    }
+    mark_shown = true;
+    mark_style();
+    msg1(window, sel("bringSubviewToFront:"), mark_btn);
+    msg1(mark_btn, sel("setHidden:"), 0);
+    layer: int = msg(mark_btn, sel("layer"));
+    msg_set_f32(layer, sel("setOpacity:"), 1.0f64 as f32);
+    animate(layer, "opacity", 0.0f64, 1.0f64, false, 0.25f64)
+}
+
+mark_hide(animated: bool) {
+    if (mark_btn == 0) return;
+    mark_shown = false;
+    if (animated) {
+        layer: int = msg(mark_btn, sel("layer"));
+        msg_set_f32(layer, sel("setOpacity:"), 0.0f64 as f32);
+        animate(layer, "opacity", 1.0f64, 0.0f64, false, 0.2f64)
+    } else msg1(mark_btn, sel("setHidden:"), 1)
+}
+
+// The capsule's state again (a 0.15 s cross-fade, the haptic for a tap).
+mark_update(fade: bool, haptic: bool) {
+    if (!mark_shown) return;
+    if (fade && !reduce_motion()) fade_layer(msg(mark_btn, sel("layer")), 0.15f64);
+    mark_style();
+    if (haptic) haptic_select()
+}
+
+// Mark Read tapped: the whole day read, or (read) not; Day Done if it
+// finished today's day. The only way a day is marked in its reader:
+// nothing marks itself (owner, 2026-10-21; DESIGN.md ยง16.13).
+day_mark_tapped(_self: int, _cmd: int, _b: int): int {
+    if (!day_followed() || dy_di < 0) return 0;
+    on: bool = day_state(dy_di) != 2;
+    mark_day(dy_di, on, time(0));
+    save_plan_p(day_plan);
+    fbuf_n = 0;
+    fput_str(if (on) "bible: day marked read " else "bible: day marked unread ");
+    fput_int(day_num);
+    fput_str(" (by hand)");
+    note_ns(fstring());
+    mark_update(true, true);
+    day_footer_update();
+    if (on && day_num == plan_today_p(day_plan, today())) day_done(plan_slot(day_plan));
+    daily_reschedule();
+    demo_settle_start();
+    0
+}
+
+// ---- the day's end (DESIGN.md ยง16.3.2) ----
+day_footer_v: int = 0;
+
+day_footer() {
+    if (day_table == 0) return;
+    W: f64 = view_width(day_table);
+    if (W < 100.0f64) W = view_width(window);
+    v: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, W, 100.0f64), sel("autorelease"));
+    pw: f64 = W - 32.0f64;
+    if (pw > 560.0f64) pw = 560.0f64;
+    px: f64 = (W - pw) / 2.0f64;
+    panel: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        px, 32.0f64, pw, 100.0f64), sel("autorelease"));
+    msg1(panel, sel("setBackgroundColor:"), c_cell);
+    msg_set_f(msg(panel, sel("layer")), sel("setCornerRadius:"), 12.0f64);
+    curve: int = objc_const("kCACornerCurveContinuous");
+    if (curve != 0) msg1(msg(panel, sel("layer")), sel("setCornerCurve:"), curve);
+    msg1(v, sel("addSubview:"), panel);
+    iw: f64 = pw - 32.0f64;
+    y: f64 = 16.0f64;
+    // "End of Day 32".
+    fbuf_n = 0;
+    fput_str("End of Day ");
+    fput_int(day_num);
+    y = day_footer_label(panel, fstring(), text_style_font("UIFontTextStyleFootnote"),
+        c_faint, y, iw);
+    // (Read, a quiet line; the capsule is what marks it: ยง16.13.)
+    if (day_followed() && day_state(dy_di) == 2) {
+        y = y + 6.0f64;
+        fbuf_n = 0;
+        fput_str("Day ");
+        fput_int(day_num);
+        fput_str(" is read");
+        y = day_footer_read(panel, fstring(), y, iw)
+    }
+    y = y + 18.0f64;
+    rule: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        16.0f64, y, iw, 0.5f64), sel("autorelease"));
+    msg1(rule, sel("setBackgroundColor:"), msg(cls("UIColor"), sel("separatorColor")));
+    msg1(panel, sel("addSubview:"), rule);
+    y = y + 14.0f64;
+    if (day_num < plan_lengths[day_plan]) {
+        y = day_footer_label(panel, nsstring("Next"), text_style_font("UIFontTextStyleCaption1"),
+            c_faint, y, iw);
+        y = y + 2.0f64;
+        fbuf_n = 0;
+        fput_str("Day ");
+        fput_int(day_num + 1);
+        fput_str(" \ย\ท ");
+        fput_day(plan_day(day_plan, day_num + 1));
+        y = day_footer_button(panel, fstring(), 0, c_ink, "dayNext:", y, iw)
+    } else {
+        fbuf_n = 0;
+        fput_str("The last day of ");
+        fput_plan_name(day_plan);
+        y = day_footer_label(panel, fstring(), text_style_font("UIFontTextStyleBody"),
+            c_faint, y, iw)
+    }
+    // (Also today: each other plan followed whose today isn't read;
+    // ยง16.11.4.)
+    also_today(day_plan, today());
+    for j in 0..al_n {
+        i: int = al_slot[j];
+        fbuf_n = 0;
+        fput_str("Also today: ");
+        fput_plan_name(fw_plan[i]);
+        fput_str(" \ย\ท Day ");
+        fput_int(plan_today_of(i, today()));
+        y = y + (if (j == 0) 8.0f64 else 0.0f64);
+        y = day_footer_button_font(panel, fstring(), i + 1, c_accent, "dayAlso:",
+            y, iw, text_style_font("UIFontTextStyleSubheadline"))
+    }
+    y = y + 16.0f64;
+    msg_rect(panel, sel("setFrame:"), px, 32.0f64, pw, y);
+    // (A container for VoiceOver, each line in it; room below it for the
+    // capsule, 12 + 36 + 12 points and some.)
+    msg1(panel, sel("setAccessibilityContainerType:"), 4);
+    fbuf_n = 0;
+    fput_str("End of Day ");
+    fput_int(day_num);
+    msg1(panel, sel("setAccessibilityLabel:"), fstring());
+    msg_rect(v, sel("setFrame:"), 0.0f64, 0.0f64, W, 32.0f64 + y + 84.0f64);
+    day_footer_v = v;
+    msg1(day_table, sel("setTableFooterView:"), v)
+}
+
+// The end changed (a passage marked): made again, cross-faded.
+day_footer_update() {
+    if (!day_on || day_table == 0) return;
+    day_footer();
+    if (!reduce_motion() && day_footer_v != 0) fade_layer(msg(day_footer_v, sel("layer")),
+        0.15f64)
+}
+
+text_style_font(style: str): int {
+    msg1(cls("UIFont"), sel("preferredFontForTextStyle:"), objc_const(style))
+}
+
+// A centered line of the panel at y (its width w): its bottom.
+day_footer_label(
+    panel: int,
+    text: int,
+    font: int,
+    color: int,
+    y: f64,
+    w: f64
+): f64 {
+    l: int = label_of(attributed(text, font, color));
+    msg1(l, sel("setNumberOfLines:"), 0);
+    label_size(l, w);
+    h: f64 = hfa[1];
+    msg_rect(l, sel("setFrame:"), 16.0f64, y, w, h);
+    msg1(panel, sel("addSubview:"), l);
+    y + h
+}
+
+// A centered button of the panel at y (the body's text, in color): its
+// bottom.
+day_footer_button(
+    panel: int,
+    text: int,
+    tag: int,
+    color: int,
+    action: str,
+    y: f64,
+    w: f64
+): f64 {
+    day_footer_button_font(panel, text, tag, color, action, y, w, text_style_font("UIFontTextStyleBody"))
+}
+
+day_footer_button_font(
+    panel: int,
+    text: int,
+    tag: int,
+    color: int,
+    action: str,
+    y: f64,
+    w: f64,
+    font: int
+): f64 {
+    config: int = msg(cls("UIButtonConfiguration"), sel("plainButtonConfiguration"));
+    a: int = attributed(text, font, color);
+    msg1(config, sel("setAttributedTitle:"), a);
+    msg1(config, sel("setTitleAlignment:"), 2);
+    msg_rect(config, sel("setContentInsets:"), 6.0f64, 0.0f64, 6.0f64, 0.0f64);
+    b: int = msg2(cls("UIButton"), sel("buttonWithConfiguration:primaryAction:"),
+        config, 0);
+    msg3(b, sel("addTarget:action:forControlEvents:"), app_obj, sel(action), 64);
+    msg1(b, sel("setTag:"), tag);
+    // (Its height as a wrapping label would have it.)
+    l: int = label_of(a);
+    msg1(l, sel("setNumberOfLines:"), 0);
+    label_size(l, w);
+    h: f64 = hfa[1] + 12.0f64;
+    if (h < 44.0f64) h = 44.0f64;
+    msg1(msg(b, sel("titleLabel")), sel("setNumberOfLines:"), 0);
+    msg_rect(b, sel("setFrame:"), 16.0f64, y, w, h);
+    msg1(panel, sel("addSubview:"), b);
+    y + h
+}
+
+// "Day 32 is read", quiet (the subheadline's size, faint), after the filled
+// check (accent): its bottom.
+day_footer_read(
+    panel: int,
+    text: int,
+    y: f64,
+    w: f64
+): f64 {
+    a: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    // (The check at the body's size, which grows with the phone's text size:
+    // review s16-1, Minor 3.)
+    font: int = text_style_font("UIFontTextStyleSubheadline");
+    size: f64 = msg_f(font, sel("pointSize"));
+    att: int = msg1(cls("NSTextAttachment"), sel("textAttachmentWithImage:"), symbol("checkmark.circle.fill",
+        size, 5, c_accent));
+    // (Its bounds the size itself: an attachment keeps its image's first
+    // size otherwise.)
+    msg_rect(att, sel("setBounds:"), 0.0f64, -0.18f64 * size, size, size);
+    msg1(a, sel("appendAttributedString:"), msg1(cls("NSAttributedString"), sel("attributedStringWithAttachment:"),
+        att));
+    msg1(a, sel("appendAttributedString:"), attributed(ustr(32, 0), font, c_faint));
+    msg1(a, sel("appendAttributedString:"), attributed(text, font, c_faint));
+    l: int = label_of(a);
+    msg1(l, sel("setNumberOfLines:"), 0);
+    msg1(l, sel("setAccessibilityLabel:"), text);
+    label_size(l, w);
+    h: f64 = hfa[1] + 8.0f64;
+    msg_rect(l, sel("setFrame:"), 16.0f64, y, w, h);
+    msg1(panel, sel("addSubview:"), l);
+    y + h
+}
+
+// Also today: that plan's today in place of this day (Next's cross-fade).
+day_also(_self: int, _cmd: int, b: int): int {
+    i: int = msg(b, sel("tag")) - 1;
+    if (i < 0 || i >= fw_n) return 0;
+    note_num("bible: day also today, plan ", fw_plan[i]);
+    day_replace(fw_plan[i], plan_today_of(i, today()), -1);
+    0
+}
+
+// Next: the next day in place of this one.
+day_next(_self: int, _cmd: int, _b: int): int {
+    if (day_plan < 0 || day_num >= plan_lengths[day_plan]) return 0;
+    day_replace(day_plan, day_num + 1, -2);
+    0
+}
+
+// ---- a reference opened from the day: it leaves, the capsule comes back
+// to it (DESIGN.md ยง16.0 decision 3) ----
+// Whether the jump being made is one out of the day (the capsule's entry
+// is the day's).
+day_left: bool = false;
+
+// The day closed for a jump to chapter c: the way back is the day.
+day_jump_out() {
+    day_save_place();
+    p: int = day_plan;
+    d: int = day_num;
+    // (The sheet it came from put away at once, so the day slides down
+    // without it.)
+    if (presented() != 0) {
+        sheet_gone();
+        msg2(nav, sel("dismissViewControllerAnimated:completion:"), 0, 0);
+        day_snap_fresh = true
+    }
+    day_close(true);
+    day_snap_fresh = false;
+    back_push_day(p, d);
+    day_left = true
+}
+
+// ---- the ESV: every passage's chapters asked for (ยง16.6) ----
+day_esv_want() {
+    if (text_cur != TEXT_ESV || !day_on) return;
+    esv_pump()
+}
+
+// The ESV's next chapter for the day: one on the screen not here, else the
+// day's first not here (by the cache's rules); true if one was asked for.
+day_esv_pump(): bool {
+    if (!day_on) return false;
+    paths: int = msg(table, sel("indexPathsForVisibleRows"));
+    if (paths != 0) {
+        for i in 0..msg(paths, sel("count")) {
+            r: int = msg(msg1(paths, sel("objectAtIndex:"), i), sel("row"));
+            if (r >= 0 && r < dy_n && esv_askable(dy_c[r], true)) {
+                esv_ask(dy_c[r], 1);
+                return true
+            }
+        }
+    }
+    for r in 0..dy_n {
+        if (esv_askable(dy_c[r], false)) {
+            esv_ask(dy_c[r], 1);
+            return true
+        }
+    }
+    true
+}
+
+// A chapter of the day came: the rows made again, the place kept.
+day_esv_reload() {
+    if (!day_on) return;
+    measure_place();
+    pc: int = cur;
+    pv: int = place_v;
+    pf: int = place_frac;
+    fade_layer(msg(day_table, sel("layer")), 0.2f64);
+    msg(day_table, sel("reloadData"));
+    msg(day_table, sel("layoutIfNeeded"));
+    go_place(pc, pv, pf);
+    note("bible: day esv rows filled")
+}
+
+// Change Version: Reading settings, then its versions.
+day_versions(_self: int, _cmd: int, _timer: int): int {
+    if (settings_table != 0) open_versions();
+    0
+}
+
+// The chapters of the rows on the screen (the least and the most).
+day_visible_chapters() {
+    ec_vis_lo = -1;
+    ec_vis_hi = -1;
+    paths: int = msg(table, sel("indexPathsForVisibleRows"));
+    if (paths == 0) return;
+    for i in 0..msg(paths, sel("count")) {
+        r: int = msg(msg1(paths, sel("objectAtIndex:"), i), sel("row"));
+        if (r >= 0 && r < dy_n) {
+            c: int = dy_c[r];
+            if (ec_vis_lo < 0 || c < ec_vis_lo) ec_vis_lo = c;
+            if (c > ec_vis_hi) ec_vis_hi = c
+        }
+    }
+}
+
+// ---- Listen through the day (DESIGN.md ยง16.3.3) ----
+// Whether Listen reads the day (from the passage under the bar to the
+// day's end, then stops).
+ls_day: bool = false;
+
+// The row Listen is in (-1: none).
+ls_row: int = -1;
+
+// Where Listen begins in the day: the passage under the bar's first verse,
+// or the verse at the top if it is inside it.
+day_listen_start() {
+    if (!day_on || dy_n == 0) return;
+    r: int = day_row_at_bar();
+    if (r < 0) r = 0;
+    k: int = dy_k[r];
+    while (r > 0 && dy_k[r - 1] == k) r = r - 1;
+    c: int = dy_c[r];
+    v: int = dy_v1[r];
+    v_top: int = listen_top_verse();
+    rt: int = day_row_of(cur, v_top);
+    if (rt >= 0 && dy_k[rt] == k && (rt > r || v_top > v)) {
+        r = rt;
+        c = cur;
+        v = v_top
+    }
+    ls_day = true;
+    ls_row = r;
+    listen_start(c, v)
+}
+
+// The last verse Listen reads of chapter c in the day (its row's), or its
+// own last outside the day.
+listen_last_of(c: int): int {
+    if (!ls_day || ls_row < 0 || ls_row >= dy_n || dy_c[ls_row] != c) return ch_verses[c];
+    if (dy_v2[ls_row] > 0) dy_v2[ls_row] else ch_verses[c]
+}
+
+// The row after Listen's (-1: the day's end).
+listen_next_row(): int {
+    if (ls_row + 1 < dy_n) ls_row + 1 else -1
+}
+
+// Listen's row heard to its end: said in the log, nothing marked
+// (ยง16.13: only Mark Read marks).
+day_row_heard() {
+    if (!ls_day || ls_row < 0) return;
+    r: int = ls_row;
+    if (day_row_ends(r) && day_on) {
+        fbuf_n = 0;
+        fput_str("bible: day passage heard ");
+        fput_reading(dy_k[r], false);
+        note_ns(fstring())
+    }
+}
+
+// The last verse of row r (its own end, or its chapter's).
+day_row_last(r: int): int {
+    if (dy_v2[r] > 0) dy_v2[r] else ch_verses[dy_c[r]]
+}
+
+// The voice began verse v of chapter c: the row it is in.
+day_listen_at(c: int, v: int) {
+    r: int = day_row_of(c, v);
+    if (r >= 0) ls_row = r
+}
+
+// The source for verse v of chapter c in a plan's day: a part of a chapter
+// is read by the voice from the ESV's recording, or one without timings,
+// which can't be sought into and stopped in (ยง16.3.3).
+day_source(s: int, c: int, v: int): int {
+    if (!ls_day || s == SRC_VOICE) return s;
+    r: int = day_row_of(c, v);
+    if (r >= 0) ls_row = r;
+    if (day_row_partial(r) && (s == SRC_ESV || !follows_verses(s, c))) {
+        fbuf_n = 0;
+        fput_str("bible: day listen by the voice, a part of ");
+        fput_code_ref(c, 0);
+        note_ns(fstring());
+        return SRC_VOICE
+    }
+    s
+}
+
+// A recording past its row's last verse: the passage heard (if the row
+// ends it), and on to the next row (sought), or the day's end.
+day_row_end_reached() {
+    day_row_heard();
+    nr: int = listen_next_row();
+    if (nr < 0) {
+        note("bible: day listen ended");
+        listen_stop();
+        return
+    }
+    ls_row = nr;
+    listen_restart_at(dy_c[nr], dy_v1[nr])
+}
+
+// A recording's chapter played to its end, in a plan's day.
+day_item_ended(c: int) {
+    if (ls_row < 0 || dy_c[ls_row] != c) return;
+    if (dy_v2[ls_row] > 0) return;
+    day_row_heard();
+    nr: int = listen_next_row();
+    if (nr < 0) {
+        note("bible: day listen ended");
+        listen_stop();
+        return
+    }
+    // (Queued: the queue goes on to it; else sought there.)
+    if (ap_index_of_c(dy_c[nr]) >= 0 && dy_v1[nr] <= 1) return;
+    ls_row = nr;
+    listen_restart_at(dy_c[nr], dy_v1[nr])
+}
+
+// The lock screen's Next and Previous in a plan's day: by passage.
+day_listen_step(d: int) {
+    if (!ls_active || ls_row < 0) return;
+    k: int = dy_k[ls_row];
+    r: int = ls_row;
+    if (d > 0) {
+        while (r < dy_n && dy_k[r] == k) r = r + 1;
+        if (r >= dy_n) return
+    } else {
+        while (r > 0 && dy_k[r - 1] == k) r = r - 1;
+        // (More than a verse into the passage: its start; else the one
+        // before's.)
+        if (speak_c == dy_c[r] && speak_v <= dy_v1[r] + 1 && r > 0) {
+            r = r - 1;
+            k2: int = dy_k[r];
+            while (r > 0 && dy_k[r - 1] == k2) r = r - 1
+        }
+    }
+    ls_row = r;
+    listen_restart_at(dy_c[r], dy_v1[r])
+}
+
+// Listen moved to row r (a chapter queued or begun).
+day_listen_row(c: int) {
+    if (!ls_day) return;
+    for r in 0..dy_n
+        if (dy_c[r] == c && r >= ls_row) {
+            ls_row = r;
+            return
+        }
+}
+
+// Whether row r is part of a chapter (it starts after verse 1 or ends
+// before its last), so a recording must be sought into and stopped in.
+day_row_partial(r: int): bool {
+    r >= 0 && r < dy_n && (dy_v1[r] > 1 || dy_v2[r] > 0)
+}
+
+// Reading settings' button: "Listen to Day 32", or "Listen to Day 32 from
+// Psalm 105" when it would begin past the day's first passage.
+fput_listen_day_button() {
+    fbuf_n = 0;
+    fput_str("Listen to Day ");
+    fput_int(day_num);
+    r: int = day_row_at_bar();
+    if (r > 0 && dy_k[r] != dy_k[0]) {
+        fput_str(" from ");
+        fput_reading(dy_k[r], false)
+    }
+}
+
+// The mini player's name: the passage and the day ("Hebrews 11:8โ€“19 ยท Day
+// 32").
+fput_listen_day_name() {
+    if (ls_row >= 0 && ls_row < dy_n) fput_reading(dy_k[ls_row], false);
+    fput_str(" \ย\ท Day ");
+    fput_int(day_num)
+}
+
+// ---- the plan's days, as a sheet (from the title) ----
+open_plan_sheet(p: int, d: int) {
+    if (presented() != 0) return;
+    daily_ready();
+    detail_plan = p;
+    fbuf_n = 0;
+    fput_plan_name(p);
+    vc: int = pushed_list_ns(detail_class, fstring());
+    detail_vc = vc;
+    detail_table = held(detail_table, msg(vc, sel("tableView")));
+    sheet_form(540.0f64, 720.0f64);
+    sheet: int = sheet_of(vc, 0);
+    W: f64 = sheet_content_w(540.0f64);
+    msg1(detail_table, sel("setTableHeaderView:"), detail_header(W));
+    detail_items(vc, false);
+    detail_scroll_to = d;
+    detail_select = d;
+    present(sheet)
+}
+
+// A day of the plan's days chosen (with the day's reader up: the page
+// replaced, once the sheet has gone; else, up).
+day_picked_in_days(p: int, d: int) {
+    day_open(p, d, -1)
+}
+
+// ---- at launch: the day's reader as it was ----
+day_restore() {
+    if (!def_bool("dayOpen") || !day_place_read()) return;
+    p: int = dp_nums[0];
+    d: int = dp_nums[1];
+    if (p < 0 || p >= PLAN_ALL || plan_slot(p) < 0 || d < 1 || d > plan_lengths[p]) {
+        set_def_bool("dayOpen", false);
+        return
+    }
+    note_num("bible: day reopened at launch ", d);
+    day_enter(p, d, -1, false)
+}
+
+// ---- the demo: where things are ----
+// (The row of the day whose passage is passage i of the day.)
+demo_day_row(i: int): int {
+    for r in 0..dy_n
+        if (dy_k[r] == pl_r0[dy_di] + i) return r;
+    -1
+}
+
+add_day_methods(app: int) {
+    add_method1(app, sel("dayOpenLater:"), &day_open_later, "v@:@");
+    add_method1(app, sel("daySnapDone:"), &day_snap_done, "v@:@");
+    add_method1(app, sel("dayDone:"), &day_done_tapped, "v@:@");
+    add_method1(app, sel("dayMark:"), &day_mark_tapped, "v@:@");
+    add_method1(app, sel("dayNext:"), &day_next, "v@:@");
+    add_method1(app, sel("dayAlso:"), &day_also, "v@:@");
+    add_method1(app, sel("dayVersions:"), &day_versions, "v@:@")
+}

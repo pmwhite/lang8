@@ -27,13 +27,19 @@ controls named in §W1.4; and an SF Symbol becomes the web icon named in §W1.7.
 John 3 in a spike; §W1 and §W3 (phase a) were pushed first so the work can follow them.
 Phases (a)–(f) are specified; none is built.
 
+**Revised 2026-10-21 (§W17):** phase (a) is built; the owner asked for the rest to be finished
+and made more web-native. §W17, at the end, replaces the iPhone-shaped forms of phases
+(b)–(f) (sheets with pushed screens, the bottom tray, the back capsule, the collapsing bar)
+with web ones (a side panel and pages with URLs, a selection toolbar, browser Back, a
+header with a search box). Read §W17 first; where it disagrees with an earlier section, it wins.
+
 Contents: W0 principles · W1 architecture · W2 URLs, history and the site · W3 phase (a),
 the reader alone · W4 phases at a glance · W5 phase (b), navigation, search and versions ·
 W6 phase (c), marks, notes, ribbons, plans and the rest · W7 phase (d), Listen and Study ·
 W8 phase (e), Memory and languages · W9 phase (f), offline and installing · W10
 keyboard, mouse and touch · W11 accessibility · W12 data, storage, export and licences ·
 W13 performance · W14 testing and CI · W15 out of scope, deferred and iPhone-only · W16
-questions for the owner.
+questions for the owner · **W17 the web-native revision (2026-10-21), which supersedes parts of W2–W9**.
 
 ---
 
@@ -2147,3 +2153,272 @@ Each is decided above; the owner may overrule.
     0.3 factor), or off.
 12. **Offline recordings** (§W15.2 item 4): later, served from smoothbible.com, or never.
 13. **No reminders on the web** (decided; they'd need push messages from a server).
+
+---
+
+## W17. The web-native revision (owner, 2026-10-21) — read this first
+
+**The owner's words (2026-10-21):** the web version "is a little incomplete. Please finish
+it up, and also make it more web native instead of trying to match iPhone behavior in all
+respects. … feel free to adjust the codebase so that it is less tied to the iPhone app. It
+would be nice if by making this second version, future versions, such as an android app,
+get easier to make as well."
+
+**What this section does.** It keeps every *feature* of phases (b)–(f) and DESIGN.md's
+behaviour, rules and words for them (what a ribbon does, the ESV's limits, Practice's
+levels, the backup's format), but **replaces the iPhone-shaped forms** those phases gave
+them: sheets with screens pushed inside, the bottom tray, the back capsule, the collapsing
+large-title bar, iOS grouped-table styling. **Where §W17 and an earlier section disagree,
+§W17 wins.** Where §W17 is silent, the earlier sections hold. Phase (a)'s reader (the
+whole-Bible scroller, the height table, the place, footnotes, print) is kept as built; its
+chrome changes as below.
+
+### W17.1 Principles of the revision
+
+1. **Pages and panels, not sheets.** A web reading app shows secondary content *beside*
+   the text when there is room and *instead of* it when there isn't, each view with its
+   own URL. No view is ever a stack of screens inside a modal.
+2. **Browser Back is the only Back.** Every view that replaces or adds content is a
+   history entry; nothing draws its own "‹ previous place" capsule. A view's own back
+   link (inside the panel) is just `history.back()` with a name.
+3. **Web controls that look like the web.** Native `<select>`, checkboxes, radio buttons,
+   range inputs and buttons, styled lightly with the theme's colours (`accent-color`,
+   borders in `rule`, the chrome font). No iOS grouped "cards", no iOS switches, no
+   segmented controls imitating UIKit (a row of radio buttons styled as a compact
+   button group is fine). Lists are plain lists with hairline separators.
+4. **Mouse, keyboard and touch are all first-class.** Hover states and `title` tooltips
+   on icon buttons; compact targets for a fine pointer (32 px), 44 px for a coarse one
+   (`@media (pointer: coarse)`); every action reachable by keyboard.
+5. **Same data, same files.** Storage stays §W12 (the iPhone's TSV files in IndexedDB),
+   so a backup is the iPhone's files and a future import works both ways.
+
+### W17.2 The layout
+
+```
+wide (≥ 1000 px)                                   narrow (< 1000 px)
+┌──────────────────────────────────────────────┐   ┌────────────────────────┐
+│ John 3 ▾  [ Search or go to…        ] BSB ▾  │   │ John 3 ▾       ⌕  ☰  Aa│
+│                         ▶  ☰  Aa             │   ├────────────────────────┤
+├───────────────────────────┬──────────────────┤   │                        │
+│                           │ Study · John 3:16│   │   the text             │
+│      the text             │  Words  Refs  …  │   │                        │
+│      (column, centred     │                  │   │                        │
+│       in what's left)     │  (the panel)     │   ├────────────────────────┤
+│                           │                  │   │ selection bar / player │
+└───────────────────────────┴──────────────────┘   └────────────────────────┘
+```
+
+- **The header** replaces the phase (a) bar. One row, 48 px (plus the top safe area),
+  opaque `bg` with a `rule` hairline under it:
+  - Left: **the passage button**, "John 3 ▾" (17 px semibold), opening the passage menu
+    (§W17.4). Its text changes in place as the chapter at the reading line changes, as
+    §W3.4 says (cross-fade, never empty).
+  - Wide: **the search box** in the middle (`<input type=search>`, placeholder "Search or
+    go to — jn 3:16", up to 420 px), the omnibox of §W17.5. Then, on the right, the
+    **version menu** (a button "BSB ▾" opening a menu of the versions with their full
+    names and a check; §W5.6's behaviour), **Listen** (`play`, phase d), **Library**
+    (`library`), **Aa**.
+  - Narrow: the passage button, then on the right a search button (opens the search page,
+    §W17.5), Library, Aa. The version is in the passage menu and in Aa.
+  - **Narrow screens hide the header while reading down and show it on any upward scroll**
+    (a `translateY` transition of 0.2 s; it overlays the text, so the text never moves).
+    It is always shown at the top of the page, when focus is in it, and while a menu,
+    panel page or the selection bar is open. **Wide screens keep it fixed.** This
+    replaces §W3.4's collapse to a small title (the iPhone's large-title behaviour).
+  - The skip link, landmarks and the reading line (§W3.5, now just under the header) as
+    before.
+- **The panel** (wide only): an `<aside>` on the right, 400 px (the reader may drag its
+  left edge between 320 and 640 px; the width is a setting, `panel_w`), the full height
+  under the header, its own scroll. The column re-centres in the space left, the place
+  kept (§W3.5). It holds one **panel view** at a time (§W17.3): Study, Compare, a note,
+  Search's results, the Library, History, Plans, Memory, a language page, the Manual.
+  Its header: the view's title, a back link when the view was reached from another panel
+  view ("‹ Library"), and a close button (`x`, also Escape when focus is in the panel).
+  Selecting another verse while Study, Compare or a note is open moves that view to the
+  new verse (§17.3.8). The panel stays open while you read and scroll.
+- **Narrow:** the same panel views open as **a page over the reader** (a full-screen
+  `<section>` above the hidden reader, which keeps its DOM and scroll so returning is
+  instant and exact), with a header of a back arrow (`history.back()`), the title, and
+  the view's actions.
+- **Dialogs** (`<dialog>` with `showModal`) are left only for things that must be
+  answered: Restore's summary, Erase Everything, and the list of keys (?). Popovers
+  (`popover` attribute) are for small things anchored to something: the passage menu,
+  the version menu, Aa (wide), footnotes, reference previews, a row's "…" menu, the
+  selection toolbar (wide).
+
+### W17.3 URLs of views
+
+Every panel view and page is in the URL, as a query on the reading place, so a view can
+be shared, reloaded, opened in a new tab, and closed with Back:
+
+| URL | View |
+|---|---|
+| `/read/bsb/john/3?search=born+again&in=nt` | Search results (`in`: all, ot, nt, or a book) |
+| `/read/bsb/john/3?study=john/3/16` · `&word=2` · `&tab=refs` | Study at a verse, a word's study, a tab |
+| `/read/bsb/john/3?compare=john/3/16-18` | Compare |
+| `/read/bsb/john/3?note=john/3/16` · `?note=john/3` | A verse's note · a chapter's note |
+| `/read/bsb/john/3?library=notes` | The Library at a tab (highlights, notes, bookmarks, ribbons, memory) |
+| `/read/bsb/john/3?history` | History |
+| `/read/bsb/john/3?plans` · `?plans=mcheyne` | Plans · one plan's days |
+| `/read/bsb/john/3?memory=12` · `?learn=greek` | A memory passage · a language page (and `&page=alphabet` etc.) |
+| `/read/bsb/john/3?manual=ribbons` | The Manual at a page |
+| `/read/plans/mcheyne/32` | A plan's day in the day reader (a page of its own, §W17.9) |
+| `/read/practice/12` | Practice (a page of its own, §W17.11) |
+| `/read/about` | About (static, as before) |
+
+- Opening a view pushes an entry; moving within the panel (word study → concordance)
+  pushes too; closing the panel goes back to the first entry without a view (or replaces
+  with the bare place if the view was the page's first entry, e.g. a shared link).
+- Reading on while a view is open updates the path by `replaceState` as before, keeping
+  the query, so the panel survives a reload at the new chapter.
+- `/read/search?q=…` (§W2.2) redirects to the place with `?search=`.
+- The Worker's shell routing (§W2.1a) needs no change: queries reach the same shell.
+
+### W17.4 The passage menu (Go To)
+
+A popover under the passage button (wide), or a panel-less full page (narrow), opened by
+the button and **G**. It replaces §W5.2's dialog:
+- **Top:** Ribbons (each a link; the carried one first, "Reading with it now", with its
+  "…" menu holding Leave Here, Rename, Delete; and New Ribbon Here…), then **Today's
+  reading** (one row per followed plan, §16.11, a link to the day), then **Recent** (up to
+  4 links and "History" opening the History view).
+- **The books** as a compact grid of names in canon order, Old Testament and New
+  Testament under small headings (on wide: four columns; narrow: two), the current book
+  in accent. Choosing a book replaces the grid with its chapters (a grid of numbers, 36 px
+  cells, 44 px on touch; the current chapter filled) and a "‹ Books" link; a one-chapter
+  book goes straight there. Every chapter is an `<a href>`.
+- **Typing a letter** while the menu is open moves focus to the search box with that
+  letter (wide) or into a filter field at the menu's top (narrow), so "jn 3:16" works from
+  here too.
+- The version list (narrow only) at the menu's foot.
+
+### W17.5 The search box and Search
+
+- **One box for going and searching** (wide: in the header; narrow: the search page's
+  field, focused on open), focused by **/**. As you type, a listbox under it offers, in
+  order: "Go to John 3:16" when `parse_ref` reads the text as a place, up to 5 matching
+  books ("John", "1 John"…), and "Search for “…”". ↑ ↓ move, Enter takes the highlighted
+  row (the first by default), Escape clears and leaves. A combobox with
+  `aria-activedescendant`, as §W5.2 described.
+- **Search's results are a panel view** (§W17.3) with the field's query, a scope
+  `<select>` (All, Old Testament, New Testament, the current book), the count, and the
+  results as §3.6 says (reference in accent, matched words bold, "1000+"), each an
+  `<a href>`; a click goes there and keeps the results open beside the text on wide
+  screens (so you can go through them), and goes back to the reader on narrow ones.
+  Recent searches show under an empty field. The ESV row as §W5.4.
+
+### W17.6 Selecting verses, and the selection toolbar
+
+Replaces §W5.5's tray:
+- **Fine pointer (mouse, trackpad):** a click on a **verse number** selects that verse
+  (shift-click extends to a range, ⌘/Ctrl-click adds); a **text selection** inside the
+  text selects the verses it touches. A click on the text itself does nothing but what a
+  browser does (place the caret, clear a selection), so reading and selecting text
+  behave like any page. Verse numbers get `cursor: pointer` and a hover underline.
+- **Coarse pointer (touch):** a tap on a verse's text toggles it, as on the iPhone
+  (tapping tiny numbers isn't reasonable on a phone); long-press is the browser's text
+  selection, which also selects the verses it touches.
+- **The toolbar.** Wide/fine: a small floating toolbar (`popover`, `role="toolbar"`,
+  labelled with the reference) just above the selection's first line (below it if there
+  is no room), never covering the selected text: five colour swatches (and the clear
+  swatch when one is set), then icon buttons with tooltips: Note, Bookmark, Copy, Share
+  (only where `navigator.share` exists), Study, Compare, Memorize. Narrow/touch: the same
+  buttons in **a bar fixed to the bottom edge** (full width, `cellBg`, a hairline on top,
+  icons with 11 px labels, safe-area padding), the reference at its left, sliding up
+  0.2 s. It isn't a floating rounded tray.
+- Escape or a click on empty space clears the selection. The keyboard path of §W5.5
+  (Enter at the reading line, ↓/↑, Shift+↓/↑) stays.
+- Copy and Share as §W5.5 (text, reference, link). Toasts are a small `role="status"`
+  message at the bottom centre for 2 s ("Copied"), above the bar if it shows.
+
+### W17.7 Back, jumps, and History
+
+- **No back capsule.** After a jump, the jump flash (§4.4) shows where you landed; Back
+  (the browser's, Alt+←, the edge swipe, Android's back) returns to the exact verse.
+  §W2.3 holds otherwise. A ribbon put down by a jump is picked up again by Back (§11's
+  "capsule back" rule applies to the Back that undoes the jump).
+- **History** is a panel view: the places visited (§8.3), newest first, by day, each a
+  link; Clear History at its foot.
+
+### W17.8 Reading settings (Aa)
+
+A popover under Aa (wide) or a bottom sheet (narrow, non-modal, as built), styled as a
+plain web form: `<fieldset>`s with small `<legend>`s, native controls with
+`accent-color`, no grouped cards:
+- **Version** (a `<select>`), **Text size** (range with − and + buttons), **Theme** (the
+  swatches, as built: they are good web controls), **Font** (radio list), **Line
+  spacing** and **Margins** (radio button groups), **Show** (checkboxes: verse numbers,
+  headings, footnote marks, a verse a line, words of Jesus in red, keep the screen on),
+  **Keyboard shortcuts** (checkbox).
+- **Your data** (from phase c): one sentence ("Kept in this browser on this device."),
+  then buttons Back Up…, Restore…, Export Notes (Markdown), Erase Everything… (§W12.4).
+- **Help:** Manual, Keyboard Shortcuts, About Smooth Bible.
+
+### W17.9 Marks, notes, the Library, ribbons and plans (phase c, revised)
+
+- **Highlights and bookmarks** from the selection toolbar, as §W6.2.
+- **Notes** open in the panel (wide) beside the verse, or as a page (narrow): the verse
+  quoted, a `<textarea>` that saves as you type, Delete with an Undo toast; read mode with
+  linked references (§W6.3) when an existing note is opened by its glyph.
+- **The Library** is a panel view with tabs (`role=tablist`): Highlights, Notes,
+  Bookmarks, Ribbons, Memory (e). A filter field and a sort `<select>`; rows are links;
+  a row's delete button on hover/focus (always visible on touch) with Undo; Export at the
+  foot (§W6.4).
+- **Ribbons:** listed in the passage menu and the Library's Ribbons tab, created by New
+  Ribbon Here… (a small inline name field in the menu, not a pushed screen); carrying,
+  putting down and picking up as §11 (Back picks it up, §W17.7).
+- **Plans:** the Plans panel view (from the passage menu's "Reading plans…" and the
+  Library), a plan's days, Start Plan, several plans followed (§16.11).
+- **The day reader** (`/read/plans/<plan>/<day>`): the reader's column holding only that
+  day's passages (as §W6.6), the header's passage button reading "Day 32 · M'Cheyne ▾"
+  (its menu: the days around, Plans, Back to Reading), and **one toggle button in the
+  header**, "Mark as Read" / "✓ Read" (also **M**), marking the whole day (the owner's
+  2026-10-21 change to §16: no automatic marking, no end-of-day button). At the page's
+  end: "Next: Day 33" as a link. Leaving is Back, or "Back to Reading" which returns to
+  the place before the day.
+
+### W17.10 Listen and Study (phase d, revised)
+
+- **Listen** is a **player bar at the bottom** (like a podcast site's): play/pause,
+  previous and next chapter, the verse being read ("John 3:16", a link to it), the reader's
+  name as a `<select>` of the version's voices, a speed `<select>` (0.85×, 1×, 1.25×), and
+  close. Started by the header's ▶ (wide), Aa (narrow), **L**, or the verse's toolbar
+  ("Listen from here" in the toolbar's overflow). Sources, timings, verse following, the
+  device voice, Media Session: all §W7.1.
+- **Study** is a panel view (§W7.2's tabs and content; the word study, definition,
+  concordance, senses and related words are further panel views, each a URL, each with
+  "‹ back"). On narrow screens it is a page. §W7.3's "Study beside the text" *is* the
+  panel; there is no separate dialog form.
+
+### W17.11 Memory and languages (phase e, revised)
+
+- The Library's Memory tab and the language pages are panel views.
+- **Practice is a page of its own** (`/read/practice/<id>`): the reader's column with the
+  passage at the reader's type, the level as a radio button group (Full, Some, Letters,
+  Blank), Listen, Echo and Type, and the judgement buttons (Not Yet, Mostly, Knew It, keys
+  1 2 3); Back returns. Its layout rules are §W8.1's (hidden letters keep their space).
+- Word cards practise in the same page. The Hebrew and Greek version (Round 11) joins the
+  version list as on the iPhone, with its glosses and word popover, if the data and
+  `orig.l8` allow it cleanly; otherwise it is deferred and said so.
+
+### W17.12 Offline and installing (phase f)
+
+As §W9, unchanged: it is already the web's own way.
+
+### W17.13 Sharing code with the iPhone, and the next platform
+
+The web is the second client of the portable modules; Android will be the third. So,
+beside §W1.2's "moved, not copied" rule:
+- The code is organised by platform: `core/` (portable modules and their tests, no
+  platform calls), `ios/` (UIKit), `web/` (the DOM, and its page assets in `web/page/`).
+  `ARCHITECTURE.md` says what a platform must provide and what `core/` gives it.
+- **When the web needs a decision the iPhone makes in `ios/`** (a reference's label, the
+  copy and share text, what the toolbar offers for a selection, the Library's rows and
+  their grouping and sorting, Go To's sections, History's days, a plan's rows, Study's
+  sections and lines, Compare's order, a Practice session's steps, the backup's format,
+  the settings' names, defaults and ranges), it is moved into `core/` with a test, and
+  `ios/` changed to call it, keeping the iPhone's behaviour; the iOS app must still build
+  (`make bible-ios-sim` on Linux). The words a screen says belong in `core/` too, so a
+  third platform doesn't re-type them.
+- Nothing in `core/` reads files, clocks or the platform; data and "today" come in as
+  arguments, as now.

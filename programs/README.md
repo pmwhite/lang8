@@ -18,7 +18,7 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `cad/` | `main.l8` | — | CAD viewer drawn by its own renderer: a handheld and its dock, their boards, cases and 3D, step by step how they go together, and how to order them ([README](cad/README.md)) |
 | `recipes/` | `main.l8` | — | Recipe book drawn by its own renderer: say what is in the kitchen and the recipes rank by it, with what a serving gives ([README](recipes/README.md)) |
 | `lemma/` | `main.l8` | `lemma` | A puzzle game made of real proofs: each level a theorem, proved by tapping and picking moves a small kernel checks ([README](lemma/README.md)) |
-| `bible/` | `ios.l8`, `web.l8` | — | Smooth Bible: a Bible reader for iPhone and iPad in UIKit, and for the web through `web/dom.js`, with study, notes, plans, listening and the original languages ([README](bible/README.md)) |
+| `bible/` | `ios/app.l8`, `web/app.l8` | — | Smooth Bible: a Bible reader for iPhone and iPad in UIKit, and for the web through `web/dom.js`, with study, notes, plans, listening and the original languages ([README](bible/README.md)) |
 | `better/` | `main.l8`, `ios.l8`, `android.l8` | — | Runs, rides and walks recorded and logged, drawn by its own renderer, in a page or as a native iPhone or Android app; the phone's location measures distance, speed and climbing, and where you went is never kept ([README](better/README.md)) |
 
 Import the entry point relative to your source file, then activate the public

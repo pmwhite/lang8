@@ -1,0 +1,1319 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// Memory (DESIGN.md ยง13): what is kept (memory.tsv, the log, the ESV's
+// pinned verses), the tray's seventh action (Memorize, or Memorizing),
+// the Library's Memory segment (Today, New and Later, the toolbar's
+// Practice and Add, the Daily Reminder's rows), Add Passage, a passage's
+// details (Passage) and the versions' checklist. memory.l8 is its
+// portable part; Practice is ios/practice.l8.
+import "../../ios/objc.l8";
+
+import "../core/text.l8";
+
+import "../core/memory.l8";
+
+import "../core/esv_cache.l8";
+
+// ---- kept ----
+// Memory's reason for the daily reminder (ยง13.5).
+mm_reminder: bool = false;
+
+load_memory() {
+    read_file("memory.tsv");
+    parse_memory();
+    mev_n = 0;
+    mlog_n = 0;
+    mm_reminder = def_bool("memoryReminder");
+    mm_load_pins();
+    note_num("bible: memory passages ", mq_n)
+}
+
+save_memory() {
+    format_memory();
+    write_file("memory.tsv");
+    memory_flush()
+}
+
+// What memory.l8 says happened, into the log ("bible: memory added: JHN
+// 3:16-17 bsb (id 4)"), and its log's lines onto memory-log.tsv.
+memory_flush() {
+    if (diag_on) {
+        s: int = 0;
+        for i in 0..mev_n {
+            if (mev[i] as int == 10) {
+                fbuf_n = 0;
+                fput_str("bible: ");
+                for k in s..i fput(mev[k] as int);
+                note_ns(fstring());
+                s = i + 1
+            }
+        }
+    }
+    mev_n = 0;
+    if (mlog_n > 0) {
+        fbuf_n = 0;
+        for k in 0..mlog_n fput(mlog[k] as int);
+        append_file("memory-log.tsv");
+        mlog_n = 0
+    }
+}
+
+// A passage added, deleted, begun again, graded: kept, logged, the
+// reminders scheduled again.
+memory_changed() {
+    save_memory();
+    daily_reschedule()
+}
+
+// ---- the ESV's pinned verses (ยง13.6): Library/Caches/SmoothBible/esv/memory.txt ----
+// (The ESV passages' ids, whatever their size: review r9-1 Minor 10.)
+mm_keep: []int = new int[256](0);
+
+pins_path(): int {
+    msg1(esv_dir(), sel("stringByAppendingPathComponent:"), nsstring("memory.txt"))
+}
+
+mm_load_pins() {
+    fbuf_n = 0;
+    data: int = msg1(cls("NSData"), sel("dataWithContentsOfFile:"), pins_path());
+    if (data != 0) {
+        n: int = msg(data, sel("length"));
+        if (n > len(fbuf)) n = len(fbuf);
+        if (n > 0) memcpy_from(fbuf, msg(data, sel("bytes")), n);
+        fbuf_n = n
+    }
+    kn: int = 0;
+    for i in 0..mq_n {
+        if (mq_ver[i] == TEXT_ESV && kn < len(mm_keep)) {
+            mm_keep[kn] = mq_id[i];
+            kn = kn + 1
+        }
+    }
+    parse_pins(mm_keep, kn);
+    // (An ESV passage without its pins, its file gone: pinned again, to be
+    // fetched.)
+    for i in 0..mq_n {
+        if (mq_ver[i] == TEXT_ESV && !mm_pinned(mq_id[i])) _a: bool = esv_pin_add(mq_id[i],
+            mq_c1[i], mq_v1[i], mq_c2[i], mq_v2[i])
+    }
+    note_num("bible: memory esv pins ", pn_n)
+}
+
+mm_pinned(id: int): bool {
+    for k in 0..pn_n
+        if (pn_id[k] == id) return true;
+    false
+}
+
+save_pins() {
+    format_pins();
+    data: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(fbuf),
+        fbuf_n);
+    msg2(data, sel("writeToFile:atomically:"), pins_path(), 1)
+}
+
+// Passage i's verses asked of the ESV (each chapter, unless here and
+// fresh).
+// A chapter the reader holds fresh fills the pins from what it holds; one
+// it doesn't is asked for the pins alone (esv_pin_only: its records go to
+// the pins, not into the reading cache, so they count once: review r9-1
+// Minor 9). Pins fetched more than 30 days ago are fetched again (ยง13.6;
+// Major 6); offline, the held text is kept.
+mm_fetch(i: int) {
+    if (mq_ver[i] != TEXT_ESV || !esv_listed()) return;
+    now: int = time(0);
+    for c in mq_c1[i]..mq_c2[i] + 1 {
+        if (esv_pin_wants(c, now)) {
+            stale: bool = esv_pin_stale(c, now);
+            if (esv_pin_from_cache(c, now) > 0) {
+                save_pins();
+                note_num("bible: memory esv verses kept from the cache, chapter ",
+                    c)
+            } else {
+                if (stale) note_num("bible: esv pin refetched, chapter ", c);
+                held: bool = esv_find(c) >= 0;
+                esv_want(c, 1);
+                if (!held) esv_pin_only[c] = true
+            }
+        }
+    }
+}
+
+// Every ESV passage's pins fetched if missing or stale (at launch, on
+// return to the app, and when Practice opens).
+memory_esv_refresh() {
+    for i in 0..mq_n
+        if (mq_ver[i] == TEXT_ESV) mm_fetch(i)
+}
+
+// An ESV chapter came (its records, n bytes of b): the pins of it filled,
+// and kept; what shows them told.
+memory_esv_came(c: int, b: []i8, n: int) {
+    if (esv_pin_fill(c, b, n, time(0)) == 0) return;
+    save_pins();
+    note_num("bible: memory esv verses kept, chapter ", c);
+    if (lib_table != 0 && lib_seg == 3) {
+        lib_build();
+        lib_reload(false)
+    }
+    practice_esv_came()
+}
+
+// The message an ESV passage that would not fit is refused with (0: it
+// fits).
+mm_esv_refusal(
+    c1: int,
+    v1: int,
+    c2: int,
+    v2: int
+): int {
+    k: int = esv_pin_check(c1, v1, c2, v2);
+    if (k == 0) return 0;
+    fbuf_n = 0;
+    if (k == 1) fput_str("ESV passages are limited to 200 verses") else {
+        fput_str("ESV passages are limited to half of ");
+        b: int = ch_book[c1];
+        fput_bytes(tx_buf[0], tx_book_line[0][b] + 5, mm_book_end(b))
+    }
+    fstring()
+}
+
+mm_book_end(b: int): int {
+    p: int = tx_book_line[0][b];
+    while (p < tx_n[0] && tx_buf[0][p] as int != 10) p = p + 1;
+    p
+}
+
+// A passage made: its id (0, none). ESV: pinned and fetched, or refused
+// with the toast.
+mm_add(
+    ver: int,
+    c1: int,
+    v1: int,
+    c2: int,
+    v2: int
+): int {
+    if (ver == TEXT_ESV) {
+        why: int = mm_esv_refusal(c1, v1, c2, v2);
+        if (why != 0) {
+            toast_symbol(why, "brain", 1.6f64);
+            note_ns(why);
+            return 0
+        }
+    }
+    id: int = memory_add(ver, c1, v1, c2, v2, time(0));
+    if (id == 0) return 0;
+    if (ver == TEXT_ESV) {
+        _p: bool = esv_pin_add(id, c1, v1, c2, v2);
+        save_pins();
+        mm_fetch(mem_index(id))
+    }
+    memory_changed();
+    id
+}
+
+mm_delete(i: int) {
+    if (i < 0) return;
+    id: int = mq_id[i];
+    was_esv: bool = mq_ver[i] == TEXT_ESV;
+    memory_delete(i, time(0));
+    if (was_esv) {
+        esv_pin_remove(id);
+        save_pins()
+    }
+    memory_changed()
+}
+
+// ---- a passage's text ----
+// Passage i laid out (memory.l8's mt, words, parts), from its own version
+// (the ESV's from its pins): whether it has words.
+// Whose words mt holds now (a passage's id; 0, none or another's).
+mm_text_id: int = 0;
+
+mm_text(i: int): bool {
+    mm_text_id = 0;
+    mt_n = 0;
+    mw_n = 0;
+    mv_n = 0;
+    mpt_n = 0;
+    if (i < 0 || i >= mq_n) return false;
+    t: int = mq_ver[i];
+    if (t == TEXT_ESV) {
+        if (!esv_pin_ready(mq_id[i])) return false;
+        esv_pin_build(mq_id[i]);
+        t = TEXT_PIN
+    } else ensure_text(t);
+    if (!tx_ready[t]) return false;
+    was: int = text_cur;
+    text_use(t);
+    memory_layout(mq_c1[i], mq_v1[i], mq_c2[i], mq_v2[i], mq_id[i]);
+    text_use(was);
+    mm_text_id = mq_id[i];
+    mw_n > 0
+}
+
+// Its first words (about two lines' worth), into fbuf.
+fput_first_words(most: int) {
+    p: int = 0;
+    start: int = fbuf_n;
+    space: bool = false;
+    while (p < mt_n && fbuf_n - start < most) {
+        k: int = mt[p] as int & 255;
+        if (mt_vn[p]) {
+            if (fbuf_n > start) space = true
+        } else if (k == 10 || k == 32) space = fbuf_n > start else {
+            if (space) fput(32);
+            space = false;
+            fput(k)
+        }
+        p = p + 1
+    }
+    // (Not cut inside a character, and an ellipsis if cut.)
+    if (p < mt_n) {
+        while (fbuf_n > start && (fbuf[fbuf_n - 1] as int & 192) == 128) fbuf_n = fbuf_n - 1;
+        if (fbuf_n > start && (fbuf[fbuf_n - 1] as int & 255) >= 192) fbuf_n = fbuf_n - 1;
+        fput_str("\โ\€\ฆ")
+    }
+}
+
+// The verses passage i's learned parts cover (its text laid out).
+mm_learned_verses(i: int): int {
+    if (mq_state[i] != MS_LEARNING || !mm_text(i)) return 0;
+    memory_verses_learned(mq_learned[i])
+}
+
+// Its state line, into fbuf (after what is there).
+fput_mm_state(i: int) {
+    if (mq_ver[i] == TEXT_ESV && !esv_pin_ready(mq_id[i])) {
+        if (esv_listed()) fput_str("Waiting for the ESV\โ\€\ฆ") else fput_str("The ESV isn\โ\€\t available. Change this passage\โ\€\s version in its details.");
+        return
+    }
+    fput_memory_state(i, today(), mm_learned_verses(i), mem_verses(i))
+}
+
+// ---- the tray's seventh action (ยง13.2.1) ----
+// The verses selected: whether they may be a passage (40 at most), and the
+// passage holding them all (-1: none).
+tray_memory_ok(): bool {
+    sel_n > 0 && sel_v[sel_n - 1] - sel_v[0] + 1 <= MEM_VERSES
+}
+
+tray_memory_holding(): int {
+    if (sel_n == 0) return -1;
+    memory_holding(sel_c, sel_v[0], sel_v[sel_n - 1])
+}
+
+// Memorize: a passage of the first selected verse to the last, in the
+// reader's version; or Memorizing: its Practice.
+tray_memorize() {
+    if (sel_n == 0) return;
+    held_i: int = tray_memory_holding();
+    c: int = sel_c;
+    if (held_i >= 0) {
+        clear_selection();
+        practice_open_one(held_i);
+        return
+    }
+    if (!tray_memory_ok()) return;
+    first: int = sel_v[0];
+    last: int = sel_v[sel_n - 1];
+    clear_selection();
+    id: int = mm_add(text_cur, c, first, c, last);
+    if (id == 0) return;
+    haptic_impact(0);
+    // (Longer in the demo, as the ribbons' and plans' are: its shot waits for
+    // the log's line, which can come late; review r11-1's 211 and 284.)
+    toast_symbol(nsstring("Added to Memory"), "brain", if (demo_on) 6.0f64 else 1.6f64);
+    note("bible: toast Added to Memory")
+}
+
+// ---- the Library's Memory segment (ยง13.4) ----
+// The rows shown, by section (ls_start, ls_count: passages' indices in
+// mm_row), and what each section is (0 Today, 1 New, 2 Later, 3 the Daily
+// Reminder).
+mm_row: []int = new int[260](0);
+
+mm_sec: []int = new int[8](0);
+
+// What the rows say, lower case, for the search.
+mm_matches(i: int): bool {
+    if (lq_n == 0) return true;
+    fbuf_n = 0;
+    fput_passage(i);
+    fput(10);
+    if (mm_text(i)) fput_first_words(100000);
+    for x in 0..fbuf_n {
+        k: int = fbuf[x] as int;
+        if (k >= 65 && k <= 90) fbuf[x] = (k + 32) trunc i8
+    }
+    for x in 0..fbuf_n - lq_n + 1 {
+        same: bool = true;
+        j: int = 0;
+        while (same && j < lq_n) {
+            if (fbuf[x + j] != lq[j]) same = false;
+            j = j + 1
+        }
+        if (same) return true
+    }
+    false
+}
+
+mm_lib_build() {
+    memory_today(today(), if (lib_sort == 1) 2 else 1);
+    n: int = 0;
+    ls_n = 0;
+    from: int = 0;
+    // (No passages: an empty first section saying how to add one, ยง14.3.1.)
+    if (mq_n == 0 && lq_n == 0) mm_lib_section(5, 0, 0);
+    for kind in 0..3 {
+        cnt: int = if (kind == 0) td_today else if (kind == 1) td_new else td_later;
+        start: int = n;
+        for k in from..from + cnt {
+            if (mm_matches(td[k])) {
+                mm_row[n] = td[k];
+                n = n + 1
+            }
+        }
+        // (Today's cards after its passages: a row a language, -1 Greek, -2
+        // Hebrew.)
+        if (kind == 0 && lq_n == 0) {
+            for lang in 0..2 {
+                if (cd_due_on(today(), lang) > 0) {
+                    mm_row[n] = -1 - lang;
+                    n = n + 1
+                }
+            }
+        }
+        from = from + cnt;
+        if (n > start) mm_lib_section(kind, start, n - start)
+    }
+    lr_n = n;
+    if (lq_n == 0) mm_lib_section(4, 0, 2);
+    if ((mq_n > 0 || cd_n > 0) && lq_n == 0) mm_lib_section(3, 0, mm_remind_rows())
+}
+
+mm_lib_section(kind: int, start: int, count: int) {
+    ls_book[ls_n] = -1;
+    ls_start[ls_n] = start;
+    ls_count[ls_n] = count;
+    mm_sec[ls_n] = kind;
+    ls_n = ls_n + 1
+}
+
+mm_sec_names: []str = ["Today", "New", "Later", "Daily Reminder", "Languages", "Verses"];
+
+mm_lib_header(s: int): int {
+    if (s < ls_n) nsstring(mm_sec_names[mm_sec[s]]) else 0
+}
+
+mm_lib_footer(s: int): int {
+    if (s < ls_n && mm_sec[s] == 3) return mm_remind_footer();
+    if (s < ls_n && mm_sec[s] == 5) return nsstring("Select verses while reading and choose Memorize.");
+    0
+}
+
+// Whether a section of the Library's is of passages (Today, New, Later:
+// Today's may end in its cards' rows).
+mm_lib_passage(s: int): bool {
+    s < ls_n && mm_sec[s] <= 2
+}
+
+// A row's passage (-1: a card's row, or none).
+mm_lib_index(path: int): int {
+    s: int = msg(path, sel("section"));
+    if (!mm_lib_passage(s)) return -1;
+    i: int = mm_row[ls_start[s] + msg(path, sel("row"))];
+    if (i < 0) -1 else i
+}
+
+mm_lib_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    r: int = msg(path, sel("row"));
+    if (s < ls_n && mm_sec[s] == 4) return mm_language_cell(t, r);
+    if (!mm_lib_passage(s)) return mm_remind_cell(t, r);
+    i: int = mm_row[ls_start[s] + r];
+    if (i < 0) return mm_cards_cell(t, -1 - i);
+    cell: int = list_cell(t, "memory", 2);
+    config: int = list_config(2);
+    config_image(config, "brain", 17.0f64, c_accent);
+    // The reference (and its version, when it isn't the reader's), at 15
+    // points grown with the text size (lib_pt).
+    pt: f64 = lib_pt(15.0f64);
+    keys[0] = k_font;
+    values[0] = sans(pt, 0.3f64);
+    keys[1] = k_color;
+    values[1] = c_ink;
+    title: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    fbuf_n = 0;
+    fput_passage(i);
+    if (mq_ver[i] != text_cur) {
+        fput_str(" \ย\ท ");
+        fput_version_short(mq_ver[i], mq_c1[i])
+    }
+    msg1(title, sel("appendAttributedString:"), attributed_str(fstring(), nsdictionary(keys,
+        values, 2)));
+    msg1(config, sel("setAttributedText:"), title);
+    // Its first words, then its state.
+    words: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    fbuf_n = 0;
+    if (mm_text(i)) {
+        fput_first_words(84);
+        fput(10)
+    }
+    keys[0] = k_font;
+    values[0] = body(pt);
+    values[1] = msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.8f64);
+    msg1(words, sel("appendAttributedString:"), attributed_str(fstring(), nsdictionary(keys,
+        values, 2)));
+    fbuf_n = 0;
+    fput_mm_state(i);
+    values[0] = msg1(cls("UIFont"), sel("preferredFontForTextStyle:"), objc_const("UIFontTextStyleFootnote"));
+    values[1] = c_faint;
+    msg1(words, sel("appendAttributedString:"), attributed_str(fstring(), nsdictionary(keys,
+        values, 2)));
+    msg1(config, sel("setSecondaryAttributedText:"), words);
+    msg1(detail_props(config), sel("setNumberOfLines:"), 0);
+    msg_set_f(config, sel("setTextToSecondaryTextVerticalPadding:"), 3.0f64);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryType:"), 4);
+    // VoiceOver: "Psalm 23, King James Version. Next review Thursday."
+    fbuf_n = 0;
+    fput_passage(i);
+    fput_str(", ");
+    if (mq_ver[i] == TEXT_ORIG) fput_version_short(TEXT_ORIG, mq_c1[i]) else fput_str(text_names[mq_ver[i]]);
+    fput_str(". ");
+    fput_mm_state(i);
+    fput(46);
+    msg1(cell, sel("setAccessibilityLabel:"), fstring());
+    one[0] = mm_row_action("Passage Details", "memoryRowDetails:", mq_id[i]);
+    one[1] = mm_row_action("Delete", "memoryRowDelete:", mq_id[i]);
+    msg1(cell, sel("setAccessibilityCustomActions:"), nsarray(one, 2));
+    msg1(cell, sel("setTag:"), 7000 + i);
+    cell
+}
+
+mm_lib_picked(s: int, r: int) {
+    if (s < ls_n && mm_sec[s] == 4) {
+        open_language(r);
+        return
+    }
+    if (!mm_lib_passage(s)) {
+        mm_remind_picked(r);
+        return
+    }
+    i: int = mm_row[ls_start[s] + r];
+    if (i < 0) practice_open_cards(-1 - i, false) else practice_open_one(i)
+}
+
+// Today's row of a language's cards (ยง14.3.1): "Greek Words", "14 to
+// review".
+mm_cards_cell(t: int, lang: int): int {
+    cell: int = list_cell(t, "memory-cards", 2);
+    config: int = list_config(2);
+    config_image(config, "character.book.closed", 17.0f64, c_accent);
+    keys[0] = k_font;
+    values[0] = sans(lib_pt(15.0f64), 0.3f64);
+    keys[1] = k_color;
+    values[1] = c_ink;
+    msg1(config, sel("setAttributedText:"), attributed_str(nsstring(if (lang == 0) "Greek Words" else "Hebrew Words"),
+        nsdictionary(keys, values, 2)));
+    fbuf_n = 0;
+    fput_cards_due(lang, today());
+    msg1(config, sel("setSecondaryText:"), fstring());
+    row_text_style(config);
+    msg1(text_props(config), sel("setFont:"), sans(lib_pt(15.0f64), 0.3f64));
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryType:"), 1);
+    // VoiceOver: "Greek words, 14 to review."
+    fbuf_n = 0;
+    fput_str(if (lang == 0) "Greek words, " else "Hebrew words, ");
+    fput_cards_due(lang, today());
+    fput(46);
+    msg1(cell, sel("setAccessibilityLabel:"), fstring());
+    cell
+}
+
+// The Languages section's rows: Greek, Hebrew.
+mm_language_cell(t: int, r: int): int {
+    cell: int = list_cell(t, "memory-language", 2);
+    config: int = list_config(2);
+    msg1(config, sel("setText:"), nsstring(if (r == 0) "Greek" else "Hebrew"));
+    fbuf_n = 0;
+    if (cd_n > 0 || ln_mapped) {
+        ensure_learn();
+        fput_language_row(r)
+    } else fput_str(if (r == 0) "The language of the New Testament" else "The language of the Old Testament");
+    msg1(config, sel("setSecondaryText:"), fstring());
+    row_text_style(config);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryType:"), 1);
+    cell
+}
+
+mm_lib_delete(path: int) {
+    i: int = mm_lib_index(path);
+    if (i < 0) return;
+    s: int = msg(path, sel("section"));
+    had: int = ls_count[s];
+    sections: int = ls_n;
+    mm_delete(i);
+    lib_build();
+    one[0] = path;
+    if (had == 1 || ls_n != sections) {
+        ls_shown = ls_n;
+        msg(lib_table, sel("reloadData"))
+    } else {
+        msg2(lib_table, sel("deleteRowsAtIndexPaths:withRowAnimation:"), nsarray(one,
+            1), 100);
+        ls_shown = ls_n
+    }
+    lib_empty_state();
+    lib_toolbar(lib_vc, true)
+}
+
+// A row's custom actions (VoiceOver): its passage's id, kept with the
+// action.
+mm_action_key: []int = new int[1](0);
+
+mm_row_action(name: str, action: str, id: int): int {
+    a: int = custom_action(name, action);
+    objc_setAssociatedObject(a, ints_address(mm_action_key), nsnumber_int(id), 1);
+    a
+}
+
+mm_action_index(a: int): int {
+    n: int = objc_getAssociatedObject(a, ints_address(mm_action_key));
+    if (n == 0) -1 else mem_index(msg(n, sel("longValue")))
+}
+
+memory_row_details(_self: int, _cmd: int, a: int): int {
+    i: int = mm_action_index(a);
+    if (i >= 0) mm_open_passage(i);
+    1
+}
+
+memory_row_delete(_self: int, _cmd: int, a: int): int {
+    i: int = mm_action_index(a);
+    if (i < 0) return 0;
+    mm_delete(i);
+    lib_build();
+    lib_reload(true);
+    1
+}
+
+mm_lib_accessory(path: int) {
+    i: int = mm_lib_index(path);
+    if (i >= 0) mm_open_passage(i)
+}
+
+// (No passages: no longer the whole page's empty state, but the Verses
+// section's footer, the Languages section after it: ยง14.3.1.)
+mm_lib_empty() {
+    empty_state(lib_vc, lib_table, "", 0, "")
+}
+
+// The toolbar on Memory: Practice in the middle (while Today has a
+// passage), Add on the right.
+mm_lib_items: []int = new int[5](0);
+
+mm_lib_toolbar(vc: int, animated: bool) {
+    memory_today(today(), 0);
+    cards: int = cd_due_on(today(), 0) + cd_due_on(today(), 1);
+    n: int = 0;
+    flex: int = msg(msg3(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithBarButtonSystemItem:target:action:"),
+        5, 0, 0), sel("autorelease"));
+    mm_lib_items[n] = flex;
+    n = n + 1;
+    if (td_today + cards > 0) {
+        p: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:style:target:action:"),
+            nsstring("Practice"), 2, app_obj, sel("memoryPractice:")), sel("autorelease"));
+        fbuf_n = 0;
+        fput_str("Practice, ");
+        if (td_today > 0) {
+            fput_int(td_today);
+            fput_str(if (td_today == 1) " passage" else " passages");
+            if (cards > 0) fput_str(" and ")
+        }
+        if (cards > 0) {
+            fput_int(cards);
+            fput_str(if (cards == 1) " card" else " cards")
+        }
+        msg1(p, sel("setAccessibilityLabel:"), fstring());
+        mm_lib_items[n] = p;
+        n = n + 1;
+        mm_lib_items[n] = msg(msg3(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithBarButtonSystemItem:target:action:"),
+            5, 0, 0), sel("autorelease"));
+        n = n + 1
+    }
+    add: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
+        symbol("plus", 17.0f64, 4, 0), 0, app_obj, sel("memoryAdd:")), sel("autorelease"));
+    msg1(add, sel("setAccessibilityLabel:"), nsstring("Add Passage"));
+    mm_lib_items[n] = add;
+    n = n + 1;
+    msg2(vc, sel("setToolbarItems:animated:"), nsarray(mm_lib_items, n), if (animated) 1 else 0)
+}
+
+memory_practice(_self: int, _cmd: int, _item: int): int {
+    practice_open_today();
+    0
+}
+
+memory_add_tapped(_self: int, _cmd: int, _item: int): int {
+    mm_open_add();
+    0
+}
+
+// ---- the Daily Reminder's rows (ยง13.5) ----
+mm_switch: int = 0;
+
+mm_remind_rows(): int {
+    1 + (if (mm_reminder) 1 else 0) + (if (nt_denied && !mm_reminder) 1 else 0)
+}
+
+mm_remind_footer(): int {
+    if (nt_denied && !mm_reminder) return nsstring("Notifications are turned off for Smooth Bible in Settings.");
+    if (reminders_any()) return nsstring("A notification on days a passage is due. It comes with your reading plan\โ\€\s reminder, at the same time.");
+    nsstring("A notification on days a passage is due.")
+}
+
+mm_remind_cell(t: int, r: int): int {
+    cell: int = fresh_cell(t);
+    config: int = list_config(0);
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    if (r == 0) {
+        msg1(config, sel("setText:"), nsstring("Remind Me to Practise"));
+        sw: int = make("UISwitch");
+        msg1(sw, sel("setOn:"), if (mm_reminder) 1 else 0);
+        msg1(sw, sel("setOnTintColor:"), c_accent);
+        msg3(sw, sel("addTarget:action:forControlEvents:"), app_obj, sel("memorySwitched:"),
+            4096);
+        msg1(cell, sel("setAccessoryView:"), sw);
+        mm_switch = held(mm_switch, sw);
+        release(sw)
+    } else if (r == 1 && mm_reminder) {
+        msg1(config, sel("setText:"), nsstring("Time"));
+        picker: int = make("UIDatePicker");
+        msg1(picker, sel("setDatePickerMode:"), 0);
+        if (responds(picker, "setPreferredDatePickerStyle:")) msg1(picker, sel("setPreferredDatePickerStyle:"),
+            2);
+        msg1(picker, sel("setDate:"), date_at_minutes(nt_minutes));
+        msg3(picker, sel("addTarget:action:forControlEvents:"), app_obj, sel("dailyTime:"),
+            4096);
+        msg(picker, sel("sizeToFit"));
+        msg1(cell, sel("setAccessoryView:"), picker);
+        release(picker)
+    } else {
+        msg1(config, sel("setText:"), nsstring("Open Settings"));
+        msg1(text_props(config), sel("setColor:"), c_accent);
+        msg1(cell, sel("setSelectionStyle:"), 3)
+    }
+    msg1(cell, sel("setContentConfiguration:"), config);
+    cell
+}
+
+mm_remind_picked(r: int) {
+    if (r == mm_remind_rows() - 1 && nt_denied && !mm_reminder) {
+        app: int = msg(cls("UIApplication"), sel("sharedApplication"));
+        url: int = msg1(cls("NSURL"), sel("URLWithString:"), objc_const("UIApplicationOpenSettingsURLString"));
+        msg3(app, sel("openURL:options:completionHandler:"), url, nsdictionary(keys,
+            values, 0), 0)
+    }
+}
+
+// The switch: on asks for permission (ยง10.2.3's, why 3); off schedules
+// again without Memory.
+memory_switched(_self: int, _cmd: int, sw: int): int {
+    on: bool = (msg(sw, sel("isOn")) & 255) != 0;
+    if (on) {
+        notify_ask(3);
+        return 0
+    }
+    mm_reminder = false;
+    set_def_bool("memoryReminder", false);
+    note("bible: memory reminder off");
+    mm_remind_changed(false);
+    daily_reschedule();
+    0
+}
+
+// The reminder's section changed: its Time row faded in or out, or (the
+// denied) the section reloaded.
+mm_remind_changed(insert: bool) {
+    if (lib_table == 0 || lib_seg != 3 || msg(lib_table, sel("window")) == 0) return;
+    s: int = -1;
+    for k in 0..ls_n
+        if (mm_sec[k] == 3) s = k;
+    if (s < 0) return;
+    was: int = ls_count[s];
+    ls_count[s] = mm_remind_rows();
+    if (insert && ls_count[s] == was + 1 || !insert && ls_count[s] == was - 1 && was == 2) {
+        one[0] = msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), 1, s);
+        if (insert) msg2(lib_table, sel("insertRowsAtIndexPaths:withRowAnimation:"),
+            nsarray(one, 1), 0) else msg2(lib_table, sel("deleteRowsAtIndexPaths:withRowAnimation:"),
+            nsarray(one, 1), 0);
+        // (The footer's words, in place.)
+        mm_footer_refresh(s);
+        return
+    }
+    msg2(lib_table, sel("reloadSections:withRowAnimation:"), msg1(cls("NSIndexSet"),
+        sel("indexSetWithIndex:"), s), 0)
+}
+
+mm_footer_refresh(s: int) {
+    fv: int = msg1(lib_table, sel("footerViewForSection:"), s);
+    if (fv == 0) return;
+    if (responds(fv, "textLabel")) {
+        l: int = msg(fv, sel("textLabel"));
+        if (l != 0) msg1(l, sel("setText:"), mm_remind_footer())
+    }
+    msg(fv, sel("setNeedsLayout"))
+}
+
+// The authorization answered for Memory's switch.
+mm_remind_answer(granted: bool) {
+    if (granted) {
+        was: bool = mm_reminder;
+        mm_reminder = true;
+        set_def_bool("memoryReminder", true);
+        note("bible: memory reminder on");
+        // (On, as the switch was turned; and so if it was not.)
+        if (mm_switch != 0) msg2(mm_switch, sel("setOn:animated:"), 1, 1);
+        if (!was) mm_remind_changed(true)
+    } else {
+        mm_reminder = false;
+        set_def_bool("memoryReminder", false);
+        if (mm_switch != 0) msg2(mm_switch, sel("setOn:animated:"), 0, 1);
+        mm_remind_changed(false)
+    }
+    daily_reschedule()
+}
+
+// ---- Add Passage (ยง13.2.2) ----
+mm_add_class: int = 0;
+
+mm_add_vc: int = 0;
+
+mm_add_table: int = 0;
+
+mm_add_cell: int = 0;
+
+mm_add_field: int = 0;
+
+mm_add_footer: int = 0;
+
+mm_add_ver: int = 0;
+
+mm_add_item: int = 0;
+
+// The reference as parsed: whether it is one, and whether it may be added.
+mm_add_parsed: bool = false;
+
+mm_add_ok: bool = false;
+
+mm_add_appeared: bool = false;
+
+mm_open_add() {
+    sheet_nav: int = presented();
+    if (sheet_nav == 0) return;
+    mm_add_ver = text_cur;
+    mm_add_parsed = false;
+    mm_add_ok = false;
+    mm_add_appeared = false;
+    vc: int = msg(msg1(msg(mm_add_class, sel("alloc")), sel("initWithStyle:"), 2),
+        sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Add Passage"));
+    item: int = msg(vc, sel("navigationItem"));
+    msg1(item, sel("setLargeTitleDisplayMode:"), 2);
+    add: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:style:target:action:"),
+        nsstring("Add"), 2, app_obj, sel("memoryAddDone:")), sel("autorelease"));
+    msg1(add, sel("setEnabled:"), 0);
+    msg1(item, sel("setRightBarButtonItem:"), add);
+    mm_add_item = held(mm_add_item, add);
+    mm_add_vc = held(mm_add_vc, vc);
+    mm_add_table = held(mm_add_table, msg(vc, sel("tableView")));
+    msg1(mm_add_table, sel("setDataSource:"), app_obj);
+    msg1(mm_add_table, sel("setDelegate:"), app_obj);
+    style_table(mm_add_table, true);
+    field_cell(field_pair);
+    mm_add_cell = held(mm_add_cell, field_pair[0]);
+    mm_add_field = held(mm_add_field, field_pair[1]);
+    msg1(mm_add_field, sel("setAutocapitalizationType:"), 2);
+    msg1(mm_add_field, sel("setAutocorrectionType:"), 1);
+    msg1(mm_add_field, sel("setAccessibilityLabel:"), nsstring("Passage"));
+    keys[0] = k_color;
+    values[0] = c_faint;
+    msg1(mm_add_field, sel("setAttributedPlaceholder:"), attributed_str(nsstring("Psalm 23, Romans 8:28\โ\€\“39"),
+        nsdictionary(keys, values, 1)));
+    msg3(mm_add_field, sel("addTarget:action:forControlEvents:"), app_obj, sel("memoryAddTyped:"),
+        131072);
+    // The footer, kept, its words set in place as the reference is typed.
+    fv: int = msg1(msg(cls("UITableViewHeaderFooterView"), sel("alloc")), sel("initWithReuseIdentifier:"),
+        0);
+    mm_add_footer = held(mm_add_footer, fv);
+    release(fv);
+    mm_add_footer_set(nsstring("Not a passage yet."));
+    note("bible: add passage");
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+mm_add_footer_set(text: int) {
+    if (mm_add_footer == 0) return;
+    config: int = msg(cls("UIListContentConfiguration"), sel("groupedFooterConfiguration"));
+    msg1(config, sel("setText:"), text);
+    msg1(mm_add_footer, sel("setContentConfiguration:"), config)
+}
+
+mm_add_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, mm_add_class, cmd, animated);
+    if (!mm_add_appeared) {
+        mm_add_appeared = true;
+        if (mm_add_field != 0 && !demo_no_keyboard) msg(mm_add_field, sel("becomeFirstResponder"));
+        return 0
+    }
+    // (Back from the versions: the version and its text.)
+    if (mm_add_table != 0) {
+        mm_add_parse();
+        msg(mm_add_table, sel("reloadData"))
+    }
+    0
+}
+
+mm_add_rows(_s: int): int {
+    1
+}
+
+mm_add_header(s: int): int {
+    if (s == 1) nsstring("Version") else if (s == 2) nsstring("Text") else 0
+}
+
+memory_add_typed(_self: int, _cmd: int, _field: int): int {
+    mm_add_parse();
+    // (The text's row changed in place, the field not moved.)
+    if (mm_add_table != 0) {
+        one[0] = msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), 0, 2);
+        msg2(mm_add_table, sel("reloadRowsAtIndexPaths:withRowAnimation:"), nsarray(one,
+            1), 5)
+    }
+    0
+}
+
+// What is typed, parsed: the footer and Add follow it.
+mm_add_parse() {
+    if (mm_add_field == 0) return;
+    n: int = field_text(mm_add_field);
+    was: int = text_cur;
+    text_use(TEXT_BSB);
+    mm_add_parsed = n > 0 && parse_range(nm_in, n);
+    text_use(was);
+    mm_add_ok = mm_add_parsed && rg_verses <= MEM_VERSES;
+    refusal: int = 0;
+    if (mm_add_ok && mm_add_ver == TEXT_ESV) refusal = mm_esv_refusal(rg_c1, rg_v1,
+        rg_c2, rg_v2);
+    if (refusal != 0) mm_add_ok = false;
+    if (!mm_add_parsed) mm_add_footer_set(nsstring("Not a passage yet.")) else {
+        fbuf_n = 0;
+        fput_range(rg_c1, rg_v1, rg_c2, rg_v2);
+        fput_str(" \ย\ท ");
+        fput_int(rg_verses);
+        fput_str(if (rg_verses == 1) " verse" else " verses");
+        if (rg_verses > MEM_VERSES) fput_str(". A passage is up to 40 verses.");
+        if (refusal != 0) {
+            fput_str(". ");
+            n2: int = nsstring_into(refusal, nm_in);
+            for x in 0..n2 fput(nm_in[x] as int);
+            fput(46)
+        }
+        mm_add_footer_set(fstring())
+    }
+    if (mm_add_item != 0) msg1(mm_add_item, sel("setEnabled:"), if (mm_add_ok) 1 else 0)
+}
+
+mm_add_cell_at(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    if (s == 0 && mm_add_cell != 0) return mm_add_cell;
+    if (s == 1) {
+        cell: int = list_cell(t, "mm-version", 1);
+        config: int = list_config(1);
+        msg1(config, sel("setText:"), nsstring(text_names[mm_add_ver]));
+        row_text_style(config);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    cell: int = list_cell(t, "mm-text", 0);
+    config: int = list_config(0);
+    msg1(text_props(config), sel("setFont:"), body(15.0f64));
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(text_props(config), sel("setNumberOfLines:"), 8);
+    msg1(text_props(config), sel("setLineBreakMode:"), 4);
+    fbuf_n = 0;
+    if (mm_add_parsed && mm_range_text(mm_add_ver, rg_c1, rg_v1, rg_c2, rg_v2)) fput_first_words(2000) else fput_str(" ");
+    msg1(config, sel("setText:"), fstring());
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    cell
+}
+
+// A range's words in version ver laid out (the ESV's only if its chapter
+// is held now).
+mm_range_text(
+    ver: int,
+    c1: int,
+    v1: int,
+    c2: int,
+    v2: int
+): bool {
+    mw_n = 0;
+    mt_n = 0;
+    mm_text_id = 0;
+    t: int = ver;
+    ensure_text(t);
+    if (!tx_ready[t]) return false;
+    was: int = text_cur;
+    text_use(t);
+    memory_layout(c1, v1, c2, v2, 1);
+    text_use(was);
+    mt_n > 0
+}
+
+mm_add_picked(s: int, _r: int) {
+    if (s == 1) mm_open_versions(1, mm_add_ver)
+}
+
+memory_add_done(_self: int, _cmd: int, _b: int): int {
+    mm_add_now();
+    0
+}
+
+// Add: the passage made (new), popped back to the list, which shows it.
+mm_add_now() {
+    mm_add_parse();
+    if (!mm_add_ok) return;
+    id: int = mm_add(mm_add_ver, rg_c1, rg_v1, rg_c2, rg_v2);
+    if (id == 0) return;
+    if (mm_add_field != 0) msg(mm_add_field, sel("resignFirstResponder"));
+    top: int = presented();
+    if (top != 0) msg1(top, sel("popViewControllerAnimated:"), 1);
+    lib_build();
+    lib_reload(true);
+    lib_toolbar(lib_vc, true)
+}
+
+// ---- the versions' checklist (Add Passage's and Passage's) ----
+mm_vl_class: int = 0;
+
+mm_vl_table: int = 0;
+
+mm_vl_owner: int = 0;
+
+mm_vl_ver: int = 0;
+
+// The versions offered: the five, and the ESV when it can be had.
+mm_vl_count(): int {
+    if (esv_listed() || mm_vl_ver == TEXT_ESV) 6 else 5
+}
+
+mm_open_versions(owner: int, ver: int) {
+    sheet_nav: int = presented();
+    if (sheet_nav == 0) return;
+    mm_vl_owner = owner;
+    mm_vl_ver = ver;
+    vc: int = pushed_list(mm_vl_class, "Version");
+    mm_vl_table = held(mm_vl_table, msg(vc, sel("tableView")));
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+mm_vl_cell(t: int, path: int): int {
+    r: int = msg(path, sel("row"));
+    cell: int = list_cell(t, "mm-vl", 2);
+    config: int = list_config(2);
+    msg1(config, sel("setText:"), nsstring(text_names[r]));
+    msg1(config, sel("setSecondaryText:"), nsstring(text_abbrs[r]));
+    row_text_style(config);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryType:"), if (r == mm_vl_ver) 3 else 0);
+    cell
+}
+
+mm_vl_picked(r: int) {
+    if (r < 0 || r >= 6) return;
+    mm_vl_ver = r;
+    if (mm_vl_owner == 1) mm_add_ver = r else mm_ps_set_version(r);
+    if (mm_vl_table != 0) msg(mm_vl_table, sel("reloadData"));
+    top: int = presented();
+    if (top != 0) msg1(top, sel("popViewControllerAnimated:"), 1)
+}
+
+// ---- Passage (pushed by โ“, ยง13.4.1) ----
+mm_ps_class: int = 0;
+
+mm_ps_vc: int = 0;
+
+mm_ps_table: int = 0;
+
+mm_ps_id: int = 0;
+
+mm_open_passage(i: int) {
+    sheet_nav: int = presented();
+    if (sheet_nav == 0 || i < 0) return;
+    mm_ps_id = mq_id[i];
+    fbuf_n = 0;
+    fput_passage(i);
+    vc: int = pushed_list_ns(mm_ps_class, fstring());
+    mm_ps_vc = held(mm_ps_vc, vc);
+    mm_ps_table = held(mm_ps_table, msg(vc, sel("tableView")));
+    note_num("bible: memory passage details ", mm_ps_id);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+mm_ps_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, mm_ps_class, cmd, animated);
+    if (mm_ps_table != 0) msg(mm_ps_table, sel("reloadData"));
+    0
+}
+
+// Its sections: the text, Version, its Greek or Hebrew words (ยง14.3.6),
+// Schedule, Open in Reader, Start Over, Delete Passage.
+mm_ps_kinds: []int = [0, 1, 6, 2, 3, 4, 5];
+
+mm_ps_kind(s: int): int {
+    if (s >= 0 && s < len(mm_ps_kinds)) mm_ps_kinds[s] else -1
+}
+
+mm_ps_header(s_: int): int {
+    s: int = mm_ps_kind(s_);
+    i: int = mem_index(mm_ps_id);
+    if (s == 0 && i >= 0) nsstring(text_names[mq_ver[i]]) else if (s == 1) nsstring("Version") else if (s == 2) nsstring("Schedule") else 0
+}
+
+mm_ps_cell(t: int, path: int): int {
+    s: int = mm_ps_kind(msg(path, sel("section")));
+    i: int = mem_index(mm_ps_id);
+    if (s == 6 && i >= 0) return mm_ps_words_cell(t, i);
+    if (i < 0) return fresh_cell(t);
+    if (s == 0) {
+        cell: int = list_cell(t, "mm-ps-text", 0);
+        config: int = list_config(0);
+        msg1(text_props(config), sel("setFont:"), body(15.0f64));
+        msg1(text_props(config), sel("setColor:"), c_ink);
+        msg1(text_props(config), sel("setNumberOfLines:"), 12);
+        msg1(text_props(config), sel("setLineBreakMode:"), 4);
+        fbuf_n = 0;
+        if (mm_text(i)) fput_first_words(4000) else fput_mm_state(i);
+        msg1(config, sel("setText:"), fstring());
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setSelectionStyle:"), 0);
+        return cell
+    }
+    if (s == 1) {
+        cell: int = list_cell(t, "mm-ps-version", 1);
+        config: int = list_config(1);
+        msg1(config, sel("setText:"), nsstring("Version"));
+        msg1(config, sel("setSecondaryText:"), nsstring(text_abbrs[mq_ver[i]]));
+        row_text_style(config);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    if (s == 2) {
+        cell: int = list_cell(t, "mm-ps-schedule", 2);
+        config: int = list_config(2);
+        fbuf_n = 0;
+        fput_mm_state(i);
+        msg1(config, sel("setText:"), fstring());
+        fbuf_n = 0;
+        fput_str("Added ");
+        tz: int = local_offset();
+        fput_day_word(day_of(mq_added[i] + tz), day_of(mq_added[i] + tz));
+        msg1(config, sel("setSecondaryText:"), fstring());
+        row_text_style(config);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setSelectionStyle:"), 0);
+        return cell
+    }
+    cell: int = list_cell(t, "mm-ps-action", 0);
+    config: int = list_config(0);
+    msg1(config, sel("setText:"), nsstring(if (s == 3) "Open in Reader" else if (s == 4) "Start Over" else "Delete Passage"));
+    msg1(text_props(config), sel("setColor:"), if (s == 5) msg(cls("UIColor"), sel("systemRedColor")) else c_accent);
+    if (s == 5) msg1(text_props(config), sel("setAlignment:"), 1);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessibilityTraits:"), 1);
+    cell
+}
+
+mm_ps_picked(s_: int, _r: int) {
+    s: int = mm_ps_kind(s_);
+    i: int = mem_index(mm_ps_id);
+    if (i < 0) return;
+    if (s == 6) {
+        mm_ps_words_open(i);
+        return
+    }
+    if (s == 1) mm_open_versions(2, mq_ver[i]) else if (s == 3) jump(mq_c1[i], mq_v1[i]) else if (s == 4) {
+        memory_start_over(i, today(), time(0));
+        memory_changed();
+        if (!reduce_motion() && mm_ps_table != 0) fade_layer(msg(mm_ps_table, sel("layer")),
+            0.2f64);
+        one[0] = msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), 0, 3);
+        msg2(mm_ps_table, sel("reloadRowsAtIndexPaths:withRowAnimation:"), nsarray(one,
+            1), 5)
+    } else if (s == 5) {
+        mm_delete(i);
+        mm_ps_id = 0;
+        top: int = presented();
+        if (top != 0) msg1(top, sel("popViewControllerAnimated:"), 1);
+        lib_build();
+        lib_reload(true);
+        lib_toolbar(lib_vc, true)
+    }
+}
+
+// Its version changed: the state and schedule kept, learning's verses
+// learned rounded down to a part's end; the ESV's pins made or let go.
+mm_ps_set_version(ver: int) {
+    i: int = mem_index(mm_ps_id);
+    if (i < 0 || ver == mq_ver[i]) return;
+    if (ver == TEXT_ESV) {
+        why: int = mm_esv_refusal(mq_c1[i], mq_v1[i], mq_c2[i], mq_v2[i]);
+        if (why != 0) {
+            toast_symbol(why, "brain", 1.6f64);
+            return
+        }
+    }
+    learned_v: int = mm_learned_verses(i);
+    old: int = mq_ver[i];
+    mq_ver[i] = ver;
+    k: int = 0;
+    if (mq_state[i] == MS_LEARNING && ver != TEXT_ESV && mm_text(i)) k = memory_parts_for_verses(learned_v);
+    mq_ver[i] = old;
+    memory_set_version(i, ver, k);
+    if (old == TEXT_ESV) esv_pin_remove(mq_id[i]);
+    if (ver == TEXT_ESV) {
+        _p: bool = esv_pin_add(mq_id[i], mq_c1[i], mq_v1[i], mq_c2[i], mq_v2[i]);
+        mm_fetch(i)
+    }
+    if (old == TEXT_ESV || ver == TEXT_ESV) save_pins();
+    memory_changed()
+}
+
+// The passage's Greek (or Hebrew) Words row: "12 to learn", "All
+// learned".
+mm_ps_words_cell(t: int, i: int): int {
+    ensure_learn_lang();
+    learn_words_of(mq_c1[i], mq_v1[i], mq_c2[i], mq_v2[i]);
+    lang: int = ch_lang(mq_c1[i]);
+    cell: int = list_cell(t, "mm-ps-words", 1);
+    config: int = list_config(1);
+    msg1(config, sel("setText:"), nsstring(if (lang == 0) "Greek Words" else "Hebrew Words"));
+    fbuf_n = 0;
+    if (wu_n == 0) fput_str("All learned") else {
+        fput_int(wu_n);
+        fput_str(" to learn")
+    }
+    msg1(config, sel("setSecondaryText:"), fstring());
+    row_text_style(config);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryType:"), 1);
+    // VoiceOver: "Greek words in this passage, 12 to learn."
+    fbuf_n = 0;
+    fput_str(if (lang == 0) "Greek words in this passage, " else "Hebrew words in this passage, ");
+    if (wu_n == 0) fput_str("all learned") else {
+        fput_int(wu_n);
+        fput_str(" to learn")
+    }
+    fput(46);
+    msg1(cell, sel("setAccessibilityLabel:"), fstring());
+    cell
+}
+
+// Its preview (ยง14.3.5) of the passage's words not learned.
+mm_ps_words_open(i: int) {
+    ensure_learn_lang();
+    lg = ch_lang(mq_c1[i]);
+    fbuf_n = 0;
+    fput_passage(i);
+    open_word_preview_range(mq_c1[i], mq_v1[i], mq_c2[i], mq_v2[i])
+}
+
+// ---- the tables' data (dispatched from ios/sheets.l8) ----
+mm_is_table(t: int): bool {
+    t != 0 && (t == mm_add_table || t == mm_ps_table || t == mm_vl_table)
+}
+
+mm_sections(t: int): int {
+    if (t == mm_add_table) 3 else if (t == mm_ps_table) 7 else 1
+}
+
+mm_rows(t: int, s: int): int {
+    if (t == mm_vl_table) mm_vl_count() else mm_add_rows(s)
+}
+
+mm_header(t: int, s: int): int {
+    if (t == mm_add_table) mm_add_header(s) else if (t == mm_ps_table) mm_ps_header(s) else 0
+}
+
+mm_footer_view(t: int, s: int): int {
+    if (t == mm_add_table && s == 0) mm_add_footer else 0
+}
+
+mm_cell(t: int, path: int): int {
+    if (t == mm_add_table) mm_add_cell_at(t, path) else if (t == mm_ps_table) mm_ps_cell(t,
+        path) else mm_vl_cell(t, path)
+}
+
+mm_picked(t: int, s: int, r: int) {
+    if (t == mm_add_table) mm_add_picked(s, r) else if (t == mm_ps_table) mm_ps_picked(s,
+        r) else mm_vl_picked(r)
+}
+
+// The sheets gone: what they held let go.
+memory_sheet_gone() {
+    if (mm_add_field != 0 && (msg(mm_add_field, sel("isFirstResponder")) & 255) != 0) msg(mm_add_field,
+        sel("resignFirstResponder"));
+    mm_add_vc = held(mm_add_vc, 0);
+    mm_add_table = held(mm_add_table, 0);
+    mm_add_cell = held(mm_add_cell, 0);
+    mm_add_field = held(mm_add_field, 0);
+    mm_add_footer = held(mm_add_footer, 0);
+    mm_add_item = held(mm_add_item, 0);
+    mm_ps_vc = held(mm_ps_vc, 0);
+    mm_ps_table = held(mm_ps_table, 0);
+    mm_vl_table = held(mm_vl_table, 0);
+    mm_switch = held(mm_switch, 0)
+}
+
+style_memory_sheets() {
+    for t in [mm_add_table, mm_ps_table, mm_vl_table] {
+        if (t != 0) {
+            style_table(t, true);
+            msg(t, sel("reloadData"))
+        }
+    }
+}
+
+make_memory_classes() {
+    mm_add_class = objc_allocateClassPair(cls("UITableViewController"), "L8MemoryAdd",
+        0);
+    add_method1(mm_add_class, sel("viewWillAppear:"), &mm_add_will_appear, "v@:B");
+    objc_registerClassPair(mm_add_class);
+    mm_ps_class = objc_allocateClassPair(cls("UITableViewController"), "L8MemoryPassage",
+        0);
+    add_method1(mm_ps_class, sel("viewWillAppear:"), &mm_ps_will_appear, "v@:B");
+    objc_registerClassPair(mm_ps_class);
+    mm_vl_class = objc_allocateClassPair(cls("UITableViewController"), "L8MemoryVersions",
+        0);
+    objc_registerClassPair(mm_vl_class)
+}
+
+add_memory_methods(app: int) {
+    add_method1(app, sel("memoryPractice:"), &memory_practice, "v@:@");
+    add_method1(app, sel("memoryAdd:"), &memory_add_tapped, "v@:@");
+    add_method1(app, sel("memoryAddDone:"), &memory_add_done, "v@:@");
+    add_method1(app, sel("memoryAddTyped:"), &memory_add_typed, "v@:@");
+    add_method1(app, sel("memorySwitched:"), &memory_switched, "v@:@");
+    add_method1(app, sel("memoryOpenLibrary:"), &memory_open_library, "v@:@");
+    add_method1(app, sel("memoryRowDetails:"), &memory_row_details, "B@:@");
+    add_method1(app, sel("memoryRowDelete:"), &memory_row_delete, "B@:@")
+}
