@@ -10087,7 +10087,11 @@ Where the build differs from the text above, and why:
     it during help, 2.5 → 10.6 minutes; 39541699431 beside notes' iPhone, notes 6.5 → 12.4,
     listen 4 → 6.3). Run 39544870211 (277be25c7): notes listen help ipad 21.7 minutes
     (notes 5.5, listen 3.8, help 2.1, ipad 8.4 with its boot), languages versions more 18.1,
-    ribbons study ios18 17.2, store memory 12.8, read plans 10.0. The 13-inch simulator is
+    ribbons study ios18 17.2, store memory 12.8, read plans 10.0. After review s17-1's
+    rebalance, run 39550899446 (5306f49c3): read help plans 13.5, languages versions 14.6,
+    store memory more 16.1, ribbons study ios18 17.4, notes listen ipad 27.4 (ipad 15.4: its
+    first launch after the iPad's boot waited 260 s, against 73 s in the run before; without
+    that stall about 20). The 13-inch simulator is
     1376 points wide in landscape (not 1366): 975 → 985 points of page beside the panel.
 17. **The iPhone's portrait shots:** compared with run 39530638707's (before §17), none
     changed in layout; the shots that differ do so by the run's timing as two runs before
