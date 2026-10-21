@@ -17,7 +17,6 @@ make terminal
 .build/terminal 'ls -l; sleep 5'       # run a shell command
 .build/terminal --font-size 22
 .build/terminal --font /path/to/monospace.ttf --font-size 18
-make terminal-test
 ```
 
 The terminal runs the absolute path in `$SHELL`, falling back to `/bin/sh` when
@@ -122,32 +121,6 @@ ignored. `screen.l8` owns UTF-8 decoding and the codepoint grid, `scene.l8` owns
 region inference and animation state, `presentation.l8` owns redraw settling and
 cursor motion, `render.l8` owns OpenGL, pane clipping, and the dynamic font atlas, `pty.l8` owns PTY setup and shell execution,
 and `terminal.l8` connects window events, keyboard encoding, output parsing, and
-cleanup. The `terminal` tag is internal to this application and its tests.
+cleanup. The `terminal` tag is internal to this application.
 
-`test.l8` runs without a display and checks screen operations, fragmented and
-malformed escapes and UTF-8, combining/wide cells, resize behavior, and 100,000
-deterministic arbitrary bytes.
-`test_scene.l8` also runs without a display. It checks full-screen and split-pane
-scrolling, nested and borderless layouts, independent directions, stationary
-chrome, protocol hints, interrupted motion, wide/combining cells, ordinary edits,
-and resizing, including sixteen panes at the maximum grid size. Regression cases
-also cover repeated prefixes, coincidentally identical incoming code lines, and
-changing status counters. Held-scroll tests check that each cell is covered exactly
-once throughout repeated half-page and full-page animations, in both directions
-and in split panes, including concurrent edits, changing pane edges, reversals,
-and line-number gutters above fixed status rows.
-`test_presentation.l8` checks split insert-mode redraws, hidden and incomplete
-cursor updates, smooth final movement, and the bounded output settling delay.
-`test_pty.l8` builds as a static executable and checks PTY setup, environment
-inheritance/overrides, canonical input, dimensions, exit status, and startup with
-closed standard streams, without a display or shared libraries.
-`test_integration.py` starts its own headless Sway compositor with XWayland
-disabled and `DISPLAY` empty. It tests a real PTY, virtual-keyboard input,
-Compose and repeat, status replies, SIGWINCH, child exit, and window close. A
-Wayland screencopy verifies rendered pixels and saves `.build/terminal-wayland.png`
-(or `TERMINAL_SCREENSHOT`). Continuous-scroll screenshots also verify that the
-content stays visible during key repeat and save `.build/terminal-scroll-wayland.png`.
-These graphical tests require `sway`, `swaymsg`,
-Mesa software EGL/OpenGL, and the font; they skip if Sway is not installed.
-They do not send input to your desktop session. Startup, screen, and PTY tests
-run without a compositor.
+Application test suites have been removed; `make terminal` builds the app.

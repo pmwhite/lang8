@@ -54,14 +54,10 @@ make game
 .build/block-game                         # programs/block-game/world.txt
 make terminal
 .build/terminal
-make terminal-test
 make profile-explorer
 .build/profile-explorer trace.json        # or: perf script | .build/profile-explorer -
-make profile-explorer-test
 make http
-make http-test
 make websocket
-make websocket-test
 ./l8 build programs/examples/tri.l8 -o .build/tri
 ./l8 build programs/examples/balls.l8 -o .build/balls
 ./l8 build programs/examples/xwin.l8 -o .build/xwin

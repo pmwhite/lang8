@@ -1,5 +1,9 @@
 # Smooth Bible: design specification
 
+> 2026-10-21: Bible test suites, browser checks and simulator screenshot
+> automation were removed at the owner's request. Test/screenshot instructions
+> below are historical; current build commands are in README.md.
+
 The product designer writes this, the builder implements it exactly as written, and the
 designer reviews CI screenshots against it. If something here can't be built under the
 constraints in `/tmp/bsb/brief.md`, the builder says so in the commit message and builds

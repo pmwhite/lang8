@@ -35,5 +35,4 @@ main() raises IoError: int {
 The compiler uses `raw_write.l8` for its low-level diagnostic output. Both
 modules are ordinary L8 source; `raw_write.l8` declares a native assembly
 dependency. Import and native paths are relative to the file that declares
-them. Run the library tests with `make stdlib-test`; they are `l8 test` files in
-`stdlib/tests/`.
+them.

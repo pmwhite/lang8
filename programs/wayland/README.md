@@ -42,7 +42,6 @@ scaling are not implemented. Surface buffers currently use scale 1.
 ```sh
 python3 programs/wayland/generate.py
 python3 programs/wayland/generate.py --check
-make terminal-test
 ```
 
 The XML retains upstream copyright/license notices. Core metadata comes from

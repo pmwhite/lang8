@@ -341,10 +341,7 @@ fetches the place's book, the sizes table and the app at once), `read.css`,
 `about.html`, and `bible.js`, which starts `programs/bible/web.l8`. `make
 bible-web` builds the site in `.build/bible-site` (`bible/build.py`: the
 assets under hashed names; each version whole, book by book, and its sizes
-table, `programs/bible/tools/sizes.l8`); `node bible/test/serve.mjs` serves
-it as smoothbible.com does, through the real Worker. `node
-web/bible/test/drive.mjs` (after `npm ci` in `web/bible/test`, for axe-core)
-runs the reader's checks and shots in headless Chrome over CDP
-(`flows.mjs`; `--only scroll,keep`, `--no-shots`), writing them to
-`.build/bible-web-shots`; CI's `web` job runs it and pushes the shots to
-`ci-bible-web-shots`.
+table, `programs/bible/tools/sizes.l8`); `node web/bible/serve.mjs` from
+the repository root serves it as smoothbible.com does, through the real
+Worker. CI's `web` job builds and uploads the site as `bible-web-site`.
+The browser checks and screenshot runs have been removed.

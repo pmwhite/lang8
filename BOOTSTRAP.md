@@ -156,15 +156,15 @@ Test runners take their parallelism from make's job slots.
 | Target | What it does |
 |--------|--------------|
 | `all` (default) | Format `src2/` with `l8c2`, then everything in `check` |
-| `check` | Stage-1 fixtures, `selfhost`, standard-library tests, and the block game build |
+| `check` | Stage-1 fixtures, `selfhost`, and application builds; only compiler tests run |
 | `selfhost` | Build `l8c1` from `src1/` and `l8c2/l8c3/l8c4` from `src2/`, require the `l8c3 == l8c4` fixpoint, check `src2` formatting, run the compiler fixtures and CLI cram tests under `tests/`, then install `./l8` |
 | `fmt` | Format `src2/` with the stage-2 compiler |
 | `install-bootstrap` | Copy the saved bootstrap executable to `l8c0` |
 | `compiler-test` | Run the stage-1 fixture subset (`STAGE1_TESTS`) with `l8c1`, then every fixture and CLI cram test under `tests/` with `l8c3` |
-| `stdlib-test`, `game` | Standard-library tests; build `.build/block-game` |
-| `http`, `http-test` | Build the L8 HTTP/1.1 client and server in `.build/http/`; verify the downloaded RFCs and run the protocol, API, and socket tests |
-| `websocket`, `websocket-test` | Build and test the WebSocket client and server in `.build/websocket/` |
-| `terminal`, `terminal-test` | Build the OpenGL/FreeType terminal emulator in `.build/terminal`; run parser and PTY tests, plus graphical integration tests when a display is available. Terminal tests always run |
+| `game` | Build `.build/block-game` |
+| `http` | Build the L8 HTTP/1.1 client and server in `.build/http/` |
+| `websocket` | Build the WebSocket client and server in `.build/websocket/` |
+| `terminal` | Build the OpenGL/FreeType terminal emulator in `.build/terminal` |
 | `callback-test` | Build stage 1 and run the C callback tests (needs `cc` and `as`) |
 | `promote-bin1` | Promote the stage-1 executable to `bootstrap` |
 | `promote-bin2` | Promote the stage-2 fixpoint executable to `bootstrap` |

@@ -8,7 +8,6 @@ what was eaten is added up by the day.
 
 ```sh
 make recipes && .build/recipes [BOOK [KITCHEN]]
-make recipes-test                    # programs/recipes/test_book.l8
 make web                             # the page is .build/web/recipes/
 ```
 

@@ -88,5 +88,4 @@ down; the knee from about 20 degrees at touchdown to 55-60.
 Video of real players was used only to check the side view, not as a source: one camera cannot
 see across, and a tracker's hip points sit at the back of the pelvis.
 
-`gen/stats.py` and `gen/norms.py` measure the dataset's runners in all planes; the viewer's test
-(`test_figure.l8`, "routes") measures the figure the same way.
+`gen/stats.py` and `gen/norms.py` measure the dataset's runners in all planes.

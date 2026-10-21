@@ -16,7 +16,6 @@ worker, the same on every device signed in to it, and only there.
 ```sh
 make better && .build/better [LOG [LIVE]]
 L8_PEOPLE=demo .build/better           # a made-up account and friends
-make better-test                      # programs/better/test_better.l8
 make web                             # the page is .build/web/better/
 ```
 
@@ -133,16 +132,12 @@ sent a second after each save.
 ```sh
 ./l8c3 arm64 --target ios programs/better/ios.l8 -o better-ios.s
 tools/ios/build.sh sim better-ios.s build      # on a Mac: build/Better.app
-tools/ios/simulate.sh build/Better.app shots   # run it in the simulator
 ```
 
 GitHub builds it on every push to `trunk` that changes it or what it is
-built from (`.github/workflows/ios.yml` lists the paths): a Linux job compiles it, and a macOS job
-builds the app, runs it in the simulator with `L8_DEMO=1` (it records a run
-by itself while the simulator walks a loop), and keeps the screenshots, the
-logs and the app (`Better-simulator.zip`, which runs in any iOS simulator,
-or online at appetize.io) as the run's artifacts and on the `ci-shots`
-branch. It builds `Better.ipa` for an iPhone too, as **Better** (Better Late Than
+built from (`.github/workflows/ios.yml` lists the paths): Linux compiles the
+app, and macOS builds the iPhone and simulator artifacts. UI test runs and
+screenshot publishing have been removed. It builds `Better.ipa` for an iPhone too, as **Better** (Better Late Than
 Never on the App Store), which `tools/ios/sign.sh` signs on Linux, for a
 phone plugged in or for TestFlight, and `tools/ios/apple.py` sends to App
 Store Connect through its API (the keys in `~/.config/better-ios`).

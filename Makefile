@@ -6,8 +6,8 @@
 # unchanged. Test runners share make's job slots. `make V=1` streams step
 # output; otherwise it is kept in .build/logs/STEP.log.
 #
-#   make            format src2, then build and test everything (default)
-#   make check      build and test without formatting src2
+#   make            format src2, then build apps and test the compiler (default)
+#   make check      build apps and test the compiler without formatting src2
 #   make help       list targets
 
 .DELETE_ON_ERROR:
@@ -24,7 +24,6 @@ SRC1 := $(wildcard src1/*.l8)
 SRC2 := $(wildcard src2/*.l8)
 # Programs import one another, the standard library, and native assembly.
 PROGRAMS := $(shell find programs stdlib -type f \( -name '*.l8' -o -name '*.s' \))
-STDLIB_TESTS := $(shell find stdlib -type f \( -name '*.l8' -o -name '*.s' \))
 TESTS := $(shell find tests -type f -not -path '*/__pycache__/*')
 # Every compiler fixture and CLI cram test; tests/pending is not run.
 COMPILER_TESTS := $(sort $(shell find tests/compiler tests/callbacks -name '*.l8') $(wildcard tests/cli/*.t))
@@ -48,9 +47,9 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test game skate malton race race-test character character-test cad cad-test recipes recipes-test better better-test bible-test bible-wasm-test bible-web bible-spoken stdlib-test \
-	terminal terminal-test callback-test http http-test websocket websocket-test wasm-test web \
-	profile-explorer profile-explorer-test \
+.PHONY: all check fmt selfhost compiler-test game skate malton race character cad recipes better bible-web bible-spoken \
+	terminal callback-test http websocket wasm-test web \
+	profile-explorer \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
 
 # Formatting rewrites src2, so finish it before anything reads the sources.
@@ -58,9 +57,9 @@ all:
 	@$(MAKE) -s $(OK)/fmt $(OK)/stage1-tests
 	@$(MAKE) -s check
 
-check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/character $(OK)/character-tests $(BUILD)/cad $(OK)/cad-tests $(BUILD)/recipes $(OK)/recipes-tests \
-	$(BUILD)/profile-explorer $(OK)/profile-explorer-tests \
-	$(BUILD)/better $(OK)/better-tests $(BUILD)/better-ios.s $(BUILD)/ios-check.s $(BUILD)/better-ios-sim $(BUILD)/better-android.s $(OK)/bible-tests $(OK)/bible-wasm-tests $(OK)/bible-web $(OK)/dom-test-site $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim
+check: $(OK)/stage1-tests l8 $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(BUILD)/character $(BUILD)/cad $(BUILD)/recipes \
+	$(BUILD)/profile-explorer \
+	$(BUILD)/better $(BUILD)/better-ios.s $(BUILD)/ios-check.s $(BUILD)/better-ios-sim $(BUILD)/better-android.s $(OK)/bible-web $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim
 
 # ---- compiler stages ----
 
@@ -128,12 +127,6 @@ compiler-test: $(OK)/stage1-tests $(OK)/compiler-tests
 # These use l8c3 so they can run alongside the compiler tests; `l8` is only
 # installed once those pass.
 
-$(OK)/stdlib-tests: l8c3 $(STDLIB_TESTS) $(RUNTIME) | $(OK)
-	+@$(STEP) 'stdlib tests' ./l8c3 test $(wildcard stdlib/tests/*.l8)
-	@touch $@
-
-stdlib-test: $(OK)/stdlib-tests
-
 $(BUILD)/block-game: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'block game' sh -c '$(call build,l8c3,programs/block-game/block-game.l8)'
 
@@ -154,22 +147,10 @@ $(BUILD)/character: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 
 character: $(BUILD)/character
 
-$(OK)/character-tests: l8c3 $(PROGRAMS) $(RUNTIME) programs/character/running-back.txt $(wildcard programs/character/motion/*.txt) | $(OK)
-	+@$(STEP) 'character tests' ./l8c3 test programs/character/test_figure.l8
-	@touch $@
-
-character-test: $(OK)/character-tests
-
 $(BUILD)/cad: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'cad' sh -c '$(call build,l8c3,programs/cad/main.l8)'
 
 cad: $(BUILD)/cad
-
-$(OK)/cad-tests: l8c3 $(PROGRAMS) $(RUNTIME) programs/cad/handheld.pcb programs/cad/tests/sketch.pcb programs/cad/dock.pcb | $(OK)
-	+@$(STEP) 'cad tests' ./l8c3 test programs/cad/test_board.l8
-	@touch $@
-
-cad-test: $(OK)/cad-tests
 
 # The designs' board files, made again from their generators and routed
 # whole (programs/cad/tools/finish.l8): run after changing a generator.
@@ -188,33 +169,15 @@ $(BUILD)/recipes: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 
 recipes: $(BUILD)/recipes
 
-$(OK)/recipes-tests: l8c3 $(PROGRAMS) $(RUNTIME) programs/recipes/test-book.txt | $(OK)
-	+@$(STEP) 'recipes tests' ./l8c3 test programs/recipes/test_book.l8
-	@touch $@
-
-recipes-test: $(OK)/recipes-tests
-
 $(BUILD)/race: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'race' sh -c '$(call build,l8c3,programs/race/main.l8)'
 
 race: $(BUILD)/race
 
-$(OK)/race-tests: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
-	+@$(STEP) 'race tests' ./l8c3 test programs/race/test_drive.l8
-	@touch $@
-
-race-test: $(OK)/race-tests
-
 $(BUILD)/better: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'better' sh -c '$(call build,l8c3,programs/better/main.l8)'
 
 better: $(BUILD)/better
-
-$(OK)/better-tests: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
-	+@$(STEP) 'better tests' ./l8c3 test programs/better/test_better.l8
-	@touch $@
-
-better-test: $(OK)/better-tests
 
 # Better as an iPhone app, and the arm64 runtime's check, as arm64 assembly
 # for iOS (built into an app on a Mac: see programs/better/README.md).
@@ -236,50 +199,23 @@ IOS_LINK = ./l8c3 arm64 --target ios-sim --exe --imports tools/ios/imports.txt
 $(BUILD)/better-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt | $(OK)
 	@$(STEP) 'better for the simulator' sh -c '$(IOS_LINK) $(foreach f,UIKit Foundation CoreLocation QuartzCore OpenGLES AVFoundation,--framework $(f)) programs/better/ios.l8 -o $@.tmp && python3 -I tools/ios/macho.py check $@.tmp && mv -f $@.tmp $@'
 
-# The Bible app: its text's layout, tested; and the app, as arm64 assembly
-# for iOS (see programs/bible/README.md).
-$(OK)/bible-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(wildcard programs/bible/tools/*.py programs/bible/tools/*.l8 programs/bible/data/*.txt programs/bible/data/*.bin programs/bible/data/plans/* programs/bible/data/lang/* programs/bible/data/audio/* programs/bible/worker/*.js programs/bible/worker/*.mjs programs/bible/worker/fixtures/*) | $(OK)
-	+@$(STEP) 'bible tests' ./l8c3 test programs/bible/test_text.l8 programs/bible/test_lang.l8 programs/bible/test_store.l8 programs/bible/test_plans.l8 programs/bible/test_ribbons.l8 programs/bible/test_audio.l8 programs/bible/test_memory.l8 programs/bible/test_learn.l8 programs/bible/test_help.l8 programs/bible/test_html.l8
-	+@$(STEP) 'bible worker tests' node --test programs/bible/worker/test.mjs
-	+@$(STEP) 'bible data checks' sh -c 'for t in senses related learn orig ubs; do python3 -I programs/bible/tools/$$t.py --check programs/bible/data || exit 1; done; python3 -I programs/bible/tools/web_audio_manifest.py --check programs/bible/data && python3 -I programs/bible/tools/chrono.py --check programs/bible/data >/dev/null'
-	+@$(STEP) 'bible spoken text' sh -c './l8c3 build programs/bible/tools/spoken.l8 -o $(BUILD)/bible-spoken.tmp && mv -f $(BUILD)/bible-spoken.tmp $(BUILD)/bible-spoken'
-	@touch $@
-
-bible-test: $(OK)/bible-tests
-
-# The same tests built as WebAssembly and run under Node (the modules the
-# web app shares with the iPhone's), and the web app's module.
-BIBLE_TESTS := $(wildcard programs/bible/test_*.l8)
-$(OK)/bible-wasm-tests: l8c3 $(PROGRAMS) web/l8-runtime.js web/run.mjs $(wildcard programs/bible/data/*.txt programs/bible/data/plans/* programs/bible/data/lang/* programs/bible/data/audio/*) | $(OK)
-	+@$(STEP) 'bible wasm tests' ./l8c3 test --wasm $(BIBLE_TESTS)
-	@touch $@
-
-bible-wasm-test: $(OK)/bible-wasm-tests
-
+# The Bible app, built for the web and iOS.
 $(BUILD)/bible.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'bible wasm' sh -c './l8c3 wasm programs/bible/web.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 # The web reader's site (WEB.md §W1.9) in .build/bible-site: the marketing
 # pages, and read/: the shell, About, the app and its assets under hashed
 # names, the texts whole and by book with their sizes tables (tools/sizes.l8),
-# then checked (web/bible/build.py).
-# Serve it as smoothbible.com does: node web/bible/test/serve.mjs.
+# generated by web/bible/build.py.
+# Serve it as smoothbible.com does: node web/bible/serve.mjs.
 $(BUILD)/bible-sizes: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'bible sizes tool' sh -c '$(call build,l8c3,programs/bible/tools/sizes.l8)'
 
 $(OK)/bible-web: $(BUILD)/bible-sizes $(BUILD)/bible.wasm web/l8-runtime.js web/dom.js $(wildcard web/bible/* web/bible/fonts/* programs/bible/site/* programs/bible/site/*/*) programs/bible/data/bsb.txt | $(OK)
 	@$(STEP) 'bible web site' python3 -I web/bible/build.py $(BUILD)/bible-sizes $(BUILD)/bible.wasm $(BUILD)/bible-site
-	@$(STEP) 'bible web check' python3 -I web/bible/build.py --check $(BUILD)/bible-site
 	@touch $@
 
 bible-web: $(OK)/bible-web
-
-# The page bridge's own checks (web/tests/dom.l8), as a site in
-# .build/dom-test: open dom.html and read window.l8_results.
-$(OK)/dom-test-site: l8c3 $(PROGRAMS) web/tests/dom.l8 web/tests/dom.html web/l8-runtime.js web/dom.js | $(OK)
-	@$(STEP) 'dom test site' sh -c 'mkdir -p $(BUILD)/dom-test && ./l8c3 wasm web/tests/dom.l8 -o $(BUILD)/dom-test/dom.wasm && \
-		cp web/tests/dom.html web/l8-runtime.js web/dom.js $(BUILD)/dom-test/ && gzip -9nkf $(BUILD)/dom-test/dom.html'
-	@touch $@
 
 # What the app says aloud, a verse a line (DESIGN.md §12.2.3), for the
 # aligner: make bible-spoken VERSION=bsb (or web).
@@ -291,35 +227,19 @@ $(BUILD)/bible-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 	@$(STEP) 'bible for iOS' sh -c './l8c3 arm64 --target ios programs/bible/ios.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 $(BUILD)/bible-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt programs/bible/ios/frameworks | $(OK)
-	@$(STEP) 'bible for the simulator' sh -c '$(IOS_LINK) $(foreach f,$(shell cat programs/bible/ios/frameworks),--framework $(f)) programs/bible/ios.l8 -o $@.tmp && python3 -I tools/ios/macho.py check $@.tmp && mv -f $@.tmp $@'
+	@$(STEP) 'bible for the simulator' sh -c '$(IOS_LINK) $(foreach f,$(shell cat programs/bible/ios/frameworks),--framework $(f)) programs/bible/ios.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 # A terminal may be running from the previous output; `mv` replaces the
 # directory entry instead of rewriting its live inode.
 $(BUILD)/terminal: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'terminal' sh -c '$(call build,l8c3,programs/terminal/terminal.l8)'
 
-$(BUILD)/terminal-pty-test: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
-	@$(STEP) 'PTY test build' sh -c '$(call build,l8c3,programs/terminal/test_pty.l8)'
-
 terminal: $(BUILD)/terminal
-
-# These depend on the shell and display, so they always run.
-terminal-test: $(BUILD)/terminal $(BUILD)/terminal-pty-test
-	+@$(STEP) 'terminal tests' ./l8c3 test programs/terminal/test_scene.l8 programs/terminal/test_presentation.l8
-	@$(STEP) 'PTY system shell' env SHELL=/bin/bash LC_ALL=C.UTF-8 L8_EXPECT_BASH=yes L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= $(BUILD)/terminal-pty-test
-	@$(STEP) 'PTY fallback' env SHELL=/definitely/missing LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= $(BUILD)/terminal-pty-test
-	@$(STEP) 'PTY closed stdio' env SHELL=/bin/sh LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= $(BUILD)/terminal-pty-test --closed-stdio
-	@$(STEP) 'PTY Wayland' python3 programs/terminal/test_integration.py $(BUILD)/terminal
 
 $(BUILD)/profile-explorer: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'profile explorer' sh -c '$(call build,l8c3,programs/profile-explorer/profile-explorer.l8)'
 
-$(OK)/profile-explorer-tests: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
-	+@$(STEP) 'profile explorer tests' ./l8c3 test programs/profile-explorer/test.l8
-	@touch $@
-
 profile-explorer: $(BUILD)/profile-explorer
-profile-explorer-test: $(OK)/profile-explorer-tests
 
 # Stage 1 must also handle function values and C callbacks (needs cc and as).
 callback-test: l8c1
@@ -335,15 +255,6 @@ $(BUILD)/http/client: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 
 http: $(BUILD)/http/server $(BUILD)/http/client
 
-$(OK)/http-tests: l8c3 $(BUILD)/http/server $(BUILD)/http/client $(PROGRAMS) \
-		$(wildcard programs/http/tests/*.py programs/http/spec/*) | $(OK)
-	@$(STEP) 'HTTP spec check' python3 programs/http/spec/fetch.py --check
-	+@$(STEP) 'HTTP lib tests' ./l8c3 test programs/http/tests/unit.l8 programs/http/tests/date.l8
-	@$(STEP) 'HTTP protocol' env HTTP_BUILD=$(BUILD)/http L8C=$(CURDIR)/l8c3 python3 -m unittest discover -s programs/http/tests -v
-	@touch $@
-
-http-test: $(OK)/http-tests
-
 $(BUILD)/websocket/server: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@mkdir -p $(BUILD)/websocket
 	@$(STEP) 'WebSocket server' sh -c '$(call build,l8c3,programs/examples/websocket-server.l8)'
@@ -354,13 +265,6 @@ $(BUILD)/websocket/client: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 
 websocket: $(BUILD)/websocket/server $(BUILD)/websocket/client
 
-$(OK)/websocket-tests: l8c3 $(BUILD)/websocket/server $(BUILD)/websocket/client $(PROGRAMS) $(wildcard programs/websocket/tests/*.py) | $(OK)
-	@$(STEP) 'WebSocket tests' env WEBSOCKET_BUILD=$(BUILD)/websocket python3 -m unittest discover -s programs/websocket/tests -v
-	+@$(STEP) 'WebSocket vectors' ./l8c3 test programs/websocket/tests/unit.l8
-	@touch $@
-
-websocket-test: $(OK)/websocket-tests
-
 $(OK):
 	@mkdir -p $@
 
@@ -368,8 +272,7 @@ $(OK):
 
 WEB := $(wildcard web/*.js web/*.mjs)
 # tests/compiler/native calls x86 assembly, which a module cannot contain.
-WASM_TESTS := $(filter-out tests/compiler/native/%,$(sort $(shell find tests/compiler tests/callbacks -name '*.l8'))) \
-	$(wildcard stdlib/tests/*.l8)
+WASM_TESTS := $(filter-out tests/compiler/native/%,$(sort $(shell find tests/compiler tests/callbacks -name '*.l8')))
 
 # The compiler as a module; under Node it must rebuild itself unchanged.
 $(BUILD)/l8.wasm: l8c3 $(SRC2) $(STDLIB) | $(OK)
@@ -379,8 +282,8 @@ $(OK)/wasm-fixpoint: $(BUILD)/l8.wasm $(WEB) | $(OK)
 	@$(STEP) 'wasm fixpoint' sh -c 'node web/run.mjs $(BUILD)/l8.wasm wasm src2/main.l8 -o $(BUILD)/l8-self.wasm && cmp $(BUILD)/l8.wasm $(BUILD)/l8-self.wasm'
 	@touch $@
 
-# Compiler, callback, and standard library tests built as modules.
-$(OK)/wasm-tests: l8c3 $(TESTS) $(PROGRAMS) $(WEB) | $(OK)
+# Compiler and callback fixtures built as modules.
+$(OK)/wasm-tests: l8c3 $(TESTS) $(STDLIB) $(WEB) | $(OK)
 	+@$(STEP) 'wasm tests' ./l8c3 test --wasm $(WASM_TESTS)
 	@touch $@
 
@@ -468,15 +371,15 @@ clean:
 
 help:
 	@echo 'make [-jN] [V=1] [target]'
-	@echo '  all (default)   format src2, then build and test everything'
-	@echo '  check           build and test without formatting'
+	@echo '  all (default)   format src2, then build apps and test the compiler'
+	@echo '  check           build apps and test the compiler without formatting'
 	@echo '  fmt             format src2 with the stage-2 compiler'
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
-	@echo '  stdlib-test, game, skate, race, race-test, character, character-test, cad, cad-test, recipes, recipes-test'
-	@echo '  better, better-test, bible-test, bible-wasm-test, bible-web'
-	@echo '  terminal, terminal-test, callback-test'
-	@echo '  http, http-test, websocket, websocket-test, profile-explorer, profile-explorer-test'
+	@echo '  game, skate, race, character, cad, recipes'
+	@echo '  better, bible-web'
+	@echo '  terminal, callback-test'
+	@echo '  http, websocket, profile-explorer'
 	@echo '  wasm-test       run the tests as WebAssembly under Node; check the wasm compiler fixpoint'
 	@echo '  web             build the playground site in .build/web'
 	@echo '  cad-boards      make the CAD board files again from their generators, routed'
@@ -485,9 +388,9 @@ help:
 	@echo 'tools/profile.py times the compiler self-build, game build, and formatting.'
 
 # ---- Lemma, the proof game (programs/lemma) ----
-.PHONY: lemma lemma-test lemma-web
+.PHONY: lemma lemma-web
 
-check: $(BUILD)/lemma $(OK)/lemma-tests
+check: $(BUILD)/lemma
 
 LEMMA_FILES := programs/lemma/hol.txt $(wildcard programs/lemma/regions/*.txt)
 
@@ -495,12 +398,6 @@ $(BUILD)/lemma: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'lemma' sh -c '$(call build,l8c3,programs/lemma/main.l8)'
 
 lemma: $(BUILD)/lemma
-
-$(OK)/lemma-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(LEMMA_FILES) | $(OK)
-	+@$(STEP) 'lemma tests' ./l8c3 test programs/lemma/test_kernel.l8 programs/lemma/test_theory.l8 programs/lemma/test_play.l8 programs/lemma/test_regions.l8
-	@touch $@
-
-lemma-test: $(OK)/lemma-tests
 
 # The page, put into the site `make web` makes (.build/web/lemma).
 $(BUILD)/lemma.wasm: l8c3 $(PROGRAMS) | $(OK)

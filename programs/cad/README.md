@@ -19,7 +19,6 @@ not change them.
 ```sh
 make cad && .build/cad [BOARD...]    # the handheld and its dock if none
 make cad-boards                      # the designs, from their generators
-make cad-test                        # programs/cad/test_board.l8
 make web                             # the page is .build/web/cad/
 ```
 
@@ -171,11 +170,7 @@ Pours join what they touch of their net.
 routes that must be laid first, then `tools/finish.l8`, which presses
 Route all on it (laying those, and pouring ground, first) and writes it
 with its copper, failing if anything is left to connect or any rule is
-broken. The routing comes out the same every time; the tests check that
-each board as kept is whole and clean, and that it routes whole and
-clean again from the generator's placing. `tests/sketch.pcb` is the first
-sketch, as `design.ml` placed it, kept only as a hard board for the
-router's tests.
+broken. The routing comes out the same every time.
 
 The board is 79 x 86 mm and 1.2 mm thick, as small as its screen and
 buttons allow (the thickness sets the buttons' room: see below). A 2.8
