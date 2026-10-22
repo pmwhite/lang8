@@ -20,6 +20,9 @@ import "chapter_ranges.l8";
 type SkinHost = {
     // The settings kept (prefs_format into fbuf, then kept).
     save_prefs: fn();
+    // What is kept (SK_KEPT_HISTORY, ...) changed: kept now, the platform's
+    // way (store.l8's lines in its files).
+    save_kept: fn(what: int);
     // The reader switched to version t, as the platform does it (none:
     // core's own, sk_switch_version); whether it was.
     switch_version: ?fn(t: int): bool
@@ -32,7 +35,18 @@ sk_want_text: int = -1;
 
 sk_no_save() { }
 
-sk_host: SkinHost = SkinHost { save_prefs: &sk_no_save, switch_version: null };
+sk_no_save_kept(_what: int) { }
+
+SK_KEPT_HISTORY: int = 1;
+
+// The local time's offset from UTC (seconds), as the host says.
+sk_tz: int = 0;
+
+sk_local_day(t: int): int {
+    day_of(t + sk_tz)
+}
+
+sk_host: SkinHost = SkinHost { save_prefs: &sk_no_save, save_kept: &sk_no_save_kept, switch_version: null };
 
 // What the platform has, as its host says: the Hebrew and Greek's data,
 // and the ESV (listed once our server has said it can give it), and what
@@ -52,6 +66,8 @@ SCR_VERSIONS: int = 3;
 
 SCR_SETTINGS: int = 4;
 
+SCR_HISTORY: int = 5;
+
 ACT_BOOK: int = 1;
 
 ACT_CHAPTER: int = 2;
@@ -67,6 +83,12 @@ ACT_SPACING: int = 6;
 ACT_MARGINS: int = 7;
 
 ACT_SHOW: int = 8;
+
+ACT_VISIT: int = 9;
+
+ACT_VISIT_DELETE: int = 10;
+
+ACT_HISTORY_CLEAR: int = 11;
 
 // The versions offered: those a skin bundles (not the ESV, nor the
 // original's, yet).
@@ -246,7 +268,7 @@ sk_build(i: int) {
     k: int = sk_kinds[i];
     a: int = sk_args[i];
     if (k == SCR_GOTO) sk_build_goto(sk_ids[i]) else if (k == SCR_CHAPTERS) sk_build_chapters(sk_ids[i],
-        a) else if (k == SCR_VERSIONS) sk_build_versions(sk_ids[i]) else if (k == SCR_SETTINGS) sk_build_settings(sk_ids[i]);
+        a) else if (k == SCR_VERSIONS) sk_build_versions(sk_ids[i]) else if (k == SCR_SETTINGS) sk_build_settings(sk_ids[i]) else if (k == SCR_HISTORY) sk_build_history(sk_ids[i]);
     ui_write()
 }
 
@@ -379,6 +401,47 @@ sk_version_row(t: int) {
     ui_set_label_fbuf()
 }
 
+// History (DESIGN.md §8.3): the trail of chapters read (store.l8 keeps it),
+// newest first, a section a day (Today, Yesterday, a weekday, then a date),
+// each row its place, its first words and when; a row goes there, swiped
+// away is deleted; Clear's menu clears it all.
+sk_build_history(id: int) {
+    ui_begin(id, SCR_HISTORY, 0, "History");
+    ui_set_empty("clock.arrow.circlepath", "No History", "Places you read will appear here.");
+    if (hs_n > 0) {
+        ui_set_button("Clear");
+        ui_command("Clear History", ACT_HISTORY_CLEAR, 0, true)
+    }
+    today: int = sk_local_day(time(0));
+    day: int = -1;
+    i: int = hs_n - 1;
+    while (i >= 0) {
+        d: int = sk_local_day(visits[i].time);
+        if (d != day) {
+            day = d;
+            ui_section("", "");
+            fbuf_n = 0;
+            if (d == today) fput_str("Today") else if (d == today - 1) fput_str("Yesterday") else if (d > today - 7 && d < today) fput_str(weekday_names[weekday_of(d)]) else fput_date(d);
+            ui_set_header_fbuf()
+        }
+        c: int = visits[i].chapter;
+        v: int = if (visits[i].exact) visits[i].verse else 0;
+        ui_row(UI_ITEM, ACT_VISIT, i);
+        fbuf_n = 0;
+        fput_ref(c, v, v);
+        ui_set_title_fbuf();
+        fbuf_n = 0;
+        fput_opening_words(c, if (visits[i].verse > 0) visits[i].verse else 1, 50);
+        ui_set_detail_fbuf();
+        ui_set_scripture();
+        fbuf_n = 0;
+        fput_clock(visits[i].time + sk_tz);
+        ui_set_trailing_fbuf();
+        ui_set_delete(ACT_VISIT_DELETE);
+        i = i - 1
+    }
+}
+
 // The reading settings: the text's size, its theme, its layout, and what
 // is shown.
 sk_build_settings(id: int) {
@@ -424,8 +487,18 @@ sk_act(
         return
     }
     if (action == ACT_CHAPTER) {
-        sk_dismiss();
         sk_goto(arg, 0);
+        return
+    }
+    if (action == ACT_VISIT) {
+        if (arg >= 0 && arg < hs_n) sk_goto(visits[arg].chapter, if (visits[arg].exact) visits[arg].verse else 0);
+        return
+    }
+    if (action == ACT_VISIT_DELETE || action == ACT_HISTORY_CLEAR) {
+        if (action == ACT_VISIT_DELETE) history_delete(arg) else hs_n = 0;
+        kept: fn(what: int) = sk_host.save_kept;
+        kept(SK_KEPT_HISTORY);
+        sk_update_all();
         return
     }
     if (action == ACT_VERSION) {
@@ -440,13 +513,15 @@ sk_act(
     sk_update_all()
 }
 
-// The reader at chapter c, verse v.
+// The reader at chapter c, verse v, the screens put away (goto: the
+// platform's own jump, which may put a sheet away its way).
 sk_goto(c: int, v: int) {
     if (c < 0 || c >= chapters) return;
     sk_c = c;
     sk_v = v;
     sk_frac = 0;
-    ui_effect("jump", c, v);
+    sk_n = 0;
+    ui_effect("goto", c, v);
     sk_write_title();
     sk_keep_place();
     sk_save()
@@ -562,7 +637,8 @@ sk_line(line: []i8, b: int, e: int) {
     } else if (sk_word_is(line, b, e, "tap")) {
         if (sk_word_is(line, b + 4, e, "goto")) sk_open(SCR_GOTO, 0, false) else if (sk_word_is(line,
             b + 4, e, "versions")) sk_open(SCR_VERSIONS, 0, false) else if (sk_word_is(line,
-            b + 4, e, "settings")) sk_open(SCR_SETTINGS, 0, false)
+            b + 4, e, "settings")) sk_open(SCR_SETTINGS, 0, false) else if (sk_word_is(line,
+            b + 4, e, "history")) sk_open(SCR_HISTORY, 0, false)
     } else if (sk_word_is(line, b, e, "closed")) {
         i: int = sk_find(sk_num(line, b + 6, e));
         if (i >= 0) sk_n = i

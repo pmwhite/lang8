@@ -31,7 +31,7 @@ final class Panel extends FrameLayout {
   final HashMap<Integer, Screen> screens = new HashMap<>();
   final ArrayList<Integer> stack = new ArrayList<>();
   private final LinearLayout page;
-  private final TextView title, back;
+  private final TextView title, back, button, empty;
   private final ListView list;
   private final Rows rows = new Rows();
 
@@ -52,14 +52,25 @@ final class Panel extends FrameLayout {
     title.setTypeface(Typeface.DEFAULT_BOLD);
     title.setSingleLine();
     title.setEllipsize(TextUtils.TruncateAt.END);
+    button = new TextView(c);
+    button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+    button.setPadding(dp(12), dp(8), dp(4), dp(8));
+    button.setOnClickListener(v -> commands());
     bar.addView(back, new LinearLayout.LayoutParams(-2, dp(56)));
     bar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+    bar.addView(button);
     page.addView(bar, new LinearLayout.LayoutParams(-1, dp(56)));
     list = new ListView(c);
     list.setAdapter(rows);
     list.setDivider(null);
     list.setOnItemClickListener((p, v, i, id) -> tapped(i));
+    list.setOnItemLongClickListener((p, v, i, id) -> held(v, i));
     page.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
+    empty = new TextView(c);
+    empty.setGravity(Gravity.CENTER);
+    empty.setPadding(dp(32), dp(32), dp(32), dp(32));
+    empty.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+    page.addView(empty, new LinearLayout.LayoutParams(-1, 0, 1));
     addView(page, new LayoutParams(-1, -1));
     setVisibility(GONE);
   }
@@ -113,6 +124,8 @@ final class Panel extends FrameLayout {
     setBackgroundColor(look.bg);
     title.setTextColor(look.ink);
     back.setTextColor(look.accent);
+    button.setTextColor(look.accent);
+    empty.setTextColor(look.faint);
     rows.notifyDataSetChanged();
   }
 
@@ -120,6 +133,16 @@ final class Panel extends FrameLayout {
     Screen s = screens.get(stack.get(stack.size() - 1));
     if (s == null) return;
     title.setText(s.title);
+    button.setText(s.button);
+    button.setVisibility(s.button.isEmpty() ? GONE : VISIBLE);
+    button.setEnabled(!s.commands.isEmpty());
+    button.setAlpha(s.commands.isEmpty() ? 0.4f : 1);
+    boolean none = true;
+    for (Screen.Section sec : s.sections) if (!sec.rows.isEmpty()) none = false;
+    boolean showEmpty = none && !s.emptyTitle.isEmpty();
+    empty.setText(showEmpty ? s.emptyTitle + "\n\n" + s.emptyLine : "");
+    empty.setVisibility(showEmpty ? VISIBLE : GONE);
+    list.setVisibility(showEmpty ? GONE : VISIBLE);
     back.setText(stack.size() > 1 ? "‹" : "✕");
     back.setContentDescription(stack.size() > 1 ? "Back" : "Close");
     rows.set(s);
@@ -134,6 +157,35 @@ final class Panel extends FrameLayout {
     if (r.flag('d')) return;
     if (r.kind.equals("item") || r.kind.equals("button")) act(r, 0);
     else if (r.kind.equals("toggle")) act(r, r.flag('o') ? 0 : 1);
+  }
+
+  // The screen's button: its commands in a menu.
+  private void commands() {
+    Screen s = rows.screen;
+    if (s == null || s.commands.isEmpty()) return;
+    android.widget.PopupMenu m = new android.widget.PopupMenu(getContext(), button);
+    for (int i = 0; i < s.commands.size(); i++) m.getMenu().add(0, i, i, s.commands.get(i).title);
+    m.setOnMenuItemClickListener(item -> {
+      Screen.Command c = s.commands.get(item.getItemId());
+      Native.send("act " + s.id + " " + c.action + " " + c.arg + " 0");
+      return true;
+    });
+    m.show();
+  }
+
+  // A row held: Delete, if it can be (Android's lists don't swipe).
+  private boolean held(View v, int i) {
+    Object o = rows.getItem(i);
+    if (!(o instanceof Screen.Row) || ((Screen.Row) o).deleteAction == 0) return false;
+    Screen.Row r = (Screen.Row) o;
+    android.widget.PopupMenu m = new android.widget.PopupMenu(getContext(), v);
+    m.getMenu().add("Delete");
+    m.setOnMenuItemClickListener(item -> {
+      Native.send("act " + rows.screen.id + " " + r.deleteAction + " " + r.arg + " 0");
+      return true;
+    });
+    m.show();
+    return true;
   }
 
   private void act(Screen.Row r, int value) {
@@ -232,6 +284,14 @@ final class Panel extends FrameLayout {
       }
       line.addView(words, slider ? new LinearLayout.LayoutParams(-1, -2)
           : new LinearLayout.LayoutParams(0, -2, 1));
+      if (!r.trailing.isEmpty()) {
+        TextView tr = new TextView(c);
+        tr.setText(r.trailing);
+        tr.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        tr.setTextColor(look.faint);
+        tr.setPadding(dp(12), 0, 0, 0);
+        line.addView(tr);
+      }
       if (r.kind.equals("item")) {
         if (!r.detail.isEmpty() && valueDetail) {
           TextView d = new TextView(c);

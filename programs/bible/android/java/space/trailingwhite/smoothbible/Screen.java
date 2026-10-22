@@ -6,6 +6,15 @@ import java.util.ArrayList;
 final class Screen {
   int id, kind, arg;
   String title = "", search = "";
+  // What it shows with no rows, and its button's title and commands.
+  String emptySymbol = "", emptyTitle = "", emptyLine = "", button = "";
+  final ArrayList<Command> commands = new ArrayList<>();
+
+  static final class Command {
+    int action, arg;
+    String title = "";
+    boolean destructive;
+  }
   final ArrayList<Section> sections = new ArrayList<>();
 
   static final class Section {
@@ -15,8 +24,8 @@ final class Screen {
 
   static final class Row {
     String kind = "", title = "", detail = "", icon = "", acc = "", flags = "", options = "",
-        label = "";
-    int action, arg, value, lo, hi;
+        label = "", trailing = "";
+    int action, arg, value, lo, hi, deleteAction;
 
     boolean flag(char c) {
       return flags.indexOf(c) >= 0;
@@ -39,6 +48,8 @@ final class Screen {
     r.lo = w.fieldNum(11);
     r.hi = w.fieldNum(12);
     r.label = w.field(13);
+    r.trailing = w.field(14);
+    r.deleteAction = w.fieldNum(15);
     return r;
   }
 }

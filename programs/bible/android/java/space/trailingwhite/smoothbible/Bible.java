@@ -195,6 +195,19 @@ public final class Bible extends Activity {
         section.footer = w.field(2);
         building.sections.add(section);
       } else if (word.equals("row") && section != null) section.rows.add(Screen.row(w));
+      else if (word.equals("empty")) {
+        building.emptySymbol = w.field(1);
+        building.emptyTitle = w.field(2);
+        building.emptyLine = w.field(3);
+      } else if (word.equals("button")) building.button = w.field(1);
+      else if (word.equals("command")) {
+        Screen.Command c = new Screen.Command();
+        c.action = w.fieldNum(1);
+        c.arg = w.fieldNum(2);
+        c.title = w.field(3);
+        c.destructive = w.field(4).contains("x");
+        building.commands.add(c);
+      }
       else if (word.equals("end")) {
         panel.screens.put(building.id, building);
         building = null;
@@ -242,6 +255,10 @@ public final class Bible extends Activity {
         reader.setCount(w.num(1));
         break;
       case "jump":
+        reader.jump(w.num(1), w.num(2));
+        break;
+      case "goto":
+        panel.dismiss();
         reader.jump(w.num(1), w.num(2));
         break;
       case "relayout":

@@ -117,9 +117,17 @@ From core:
 | `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE` | sizes in thousandths of the default (19 points), margins in points, colors as hex: all a skin needs of look.l8 |
 | `title` TEXT, `version` TEXT | the bar's title (the chapter at the top) and the version's abbreviation |
 
+After `screen`, an `empty` SYMBOL TITLE LINE line says what it shows with
+no rows, and a `button` TITLE line its button at the top, followed by
+`command` ACTION ARG TITLE FLAGS lines, its menu (`x`: destructive).
+A row ends with TRAILING (words at its end: a time) and DELETE (the action
+swiping it away does; 0: it can't be). `goto C V` puts the screens away and
+moves the reader (the iPhone's own jump).
+
 A row's KIND is `item`, `toggle`, `choice`, `slider`, `field`, `button` or
 `custom`; ACC is empty, `more`, `check` or `info`; FLAGS are letters: `d`
-disabled, `x` destructive, `o` on, `v` the detail is a value on the right; a
+disabled, `x` destructive, `o` on, `v` the detail is a value on the right, `s`
+the detail is the Bible's words (the divine name in small capitals); a
 choice's OPTIONS are its labels split by `|`, VALUE the one chosen; a slider
 goes from LO to HI.
 
@@ -128,7 +136,7 @@ From the skin:
 | Line | Meaning |
 |---|---|
 | `start W H DENSITY DARK` | the app begun: the window (points), its scale (hundredths), the system's appearance |
-| `tap goto`, `tap versions`, `tap settings` | the bar's buttons |
+| `tap goto`, `tap versions`, `tap settings`, `tap history` | the bar's buttons (History, for now) |
 | `act ID ACTION ARG VALUE` | a row's action (VALUE: a toggle's 1 or 0, a choice's index, a slider's value) |
 | `closed ID` | the skin closed screen ID (and those over it) |
 | `want C` | chapter C's text, to show |
@@ -151,7 +159,7 @@ action goes to core (`sk_act`); its effects are done the iPhone's way
 (`push` into the navigation the action came from, `present` as a sheet,
 `update` a cross-fade and reload, `dismiss`). The platform's work stays the
 app's: core's version switch is the iPhone's `switch_version`. Moved so far:
-Versions (2026-10-21).
+Versions and History (2026-10-21).
 
 ## Moving the iPhone
 
