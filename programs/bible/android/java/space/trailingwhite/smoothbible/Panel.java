@@ -77,7 +77,12 @@ final class Panel extends FrameLayout {
     back = new TextView(c);
     back.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
     back.setPadding(dp(12), dp(8), dp(16), dp(8));
-    back.setOnClickListener(v -> back());
+    back.setOnClickListener(v -> {
+      // (The screen's own left button, a note's Cancel; else Back.)
+      Screen s = rows.screen;
+      if (s != null && !s.left.isEmpty()) Native.send("act " + s.id + " " + s.leftAction + " 0 0");
+      else back();
+    });
     title = new TextView(c);
     title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
     title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -317,8 +322,9 @@ final class Panel extends FrameLayout {
     empty.setText(showEmpty ? s.emptyTitle + "\n\n" + s.emptyLine : "");
     empty.setVisibility(showEmpty ? VISIBLE : GONE);
     list.setVisibility(showEmpty ? GONE : VISIBLE);
-    back.setText(stack.size() > 1 ? "‹" : "✕");
-    back.setContentDescription(stack.size() > 1 ? "Back" : "Close");
+    back.setText(!s.left.isEmpty() ? s.left : stack.size() > 1 ? "‹" : "✕");
+    back.setTextSize(TypedValue.COMPLEX_UNIT_SP, s.left.isEmpty() ? 22 : 17);
+    back.setContentDescription(!s.left.isEmpty() ? s.left : stack.size() > 1 ? "Back" : "Close");
     rows.set(s);
     restyle();
     if (fresh && rows.focusItem >= 0) list.setSelectionFromTop(rows.focusItem, dp(160));
@@ -638,8 +644,21 @@ final class Panel extends FrameLayout {
         TextView t = new TextView(c);
         t.setText(((Intro) o).text);
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        t.setTextColor((look.ink & 0x00ffffff) | 0xcc000000);
+        t.setTextColor(screen.introQuote ? look.faint : (look.ink & 0x00ffffff) | 0xcc000000);
         t.setPadding(dp(20), dp(16), dp(20), dp(4));
+        if (screen.introQuote) {
+          // (A quote: an accent's bar beside it.)
+          t.setMaxLines(4);
+          t.setEllipsize(TextUtils.TruncateAt.END);
+          t.setPadding(dp(14), dp(2), 0, dp(2));
+          LinearLayout q = new LinearLayout(c);
+          q.setPadding(dp(20), dp(16), dp(20), dp(12));
+          View bar = new View(c);
+          bar.setBackgroundColor(look.accent);
+          q.addView(bar, new LinearLayout.LayoutParams(dp(3), -1));
+          q.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+          return q;
+        }
         return t;
       }
       if (o instanceof Footer) {
@@ -1116,7 +1135,14 @@ final class Panel extends FrameLayout {
         f.setSingleLine();
         f.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         f.setText(r.detail);
-        f.setInputType(r.fieldKind == 1 ? InputType.TYPE_CLASS_TEXT
+        if (r.fieldKind == 2) {
+          // (Many lines: a note's.)
+          f.setSingleLine(false);
+          f.setMinLines(6);
+          f.setGravity(Gravity.TOP);
+        }
+        f.setInputType(r.fieldKind == 2 ? InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES : r.fieldKind == 1 ? InputType.TYPE_CLASS_TEXT
             | InputType.TYPE_TEXT_FLAG_CAP_WORDS | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         f.setImeOptions(r.flag('r') ? EditorInfo.IME_ACTION_DONE : EditorInfo.IME_ACTION_DONE);

@@ -218,6 +218,11 @@ public final class Bible extends Activity {
       } else if (word.equals("intro")) {
         building.intro = w.field(1);
         building.introRuns = Screen.runs(w.field(2));
+        building.introQuote = w.fieldNum(3) == 1;
+      } else if (word.equals("left")) {
+        building.leftAction = w.fieldNum(1);
+        building.left = w.field(2);
+        building.leftDestructive = w.fieldNum(4) == 2;
       } else if (word.equals("hero")) {
         building.hero = w.field(1);
         building.heroScript = w.fieldNum(2);
@@ -301,6 +306,12 @@ public final class Bible extends Activity {
         panel.update(w.num(1));
         break;
       case "pop":
+        panel.back();
+        break;
+      case "present_over":
+        panel.push(w.num(1));
+        break;
+      case "close":
         panel.back();
         break;
       case "pop_to":

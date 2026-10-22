@@ -29,6 +29,11 @@ final class Screen {
   int[] heroRuns = new int[0];
   // The buttons at its foot.
   final ArrayList<Tool> tools = new ArrayList<>();
+  // A button at the left of its bar (a note's Cancel), its action, and
+  // whether it is destructive; and whether its intro is a quote.
+  String left = "";
+  int leftAction;
+  boolean leftDestructive, introQuote;
   // Its confirming button at the top (New Ribbon's Add), off or not.
   String confirm = "";
   int confirmAction;
