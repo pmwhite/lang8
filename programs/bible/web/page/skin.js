@@ -614,7 +614,7 @@ function line(w) {
       voice.say(w.num(1), w.num(2), w.num(3) / 1000 || 1, w.field(1), w.field(2));
       break;
     case "player":
-      player.show(w.field(1), w.field(2), w.field(3) !== "0");
+      player.show(w.field(1), w.field(2), w.field(3) !== "0", w.field(4), w.field(5));
       break;
     case "audio_play":
       sound.play(w.num(1), w.num(3), w.num(4), w.num(5) / 1000 || 1, w.field(1));
@@ -2190,7 +2190,8 @@ const player = {
     button("stop", "Stop Listening", "x", "listenstop");
     document.body.appendChild(this.box);
   },
-  show(title, state, playing) {
+  show(title, state, playing, reader, version) {
+    this.session(title, playing, reader, version);
     $(".pt", this.box).textContent = title;
     $(".ps", this.box).textContent = state;
     this.playing = playing;
@@ -2200,6 +2201,34 @@ const player = {
   },
   hide() {
     this.box.hidden = true;
+    if (navigator.mediaSession) {
+      navigator.mediaSession.metadata = null;
+      navigator.mediaSession.playbackState = "none";
+    }
+  },
+  // The platform's own player (a lock screen's, a headset's buttons):
+  // what plays, and its controls core's.
+  session(title, playing, reader, version) {
+    const ms = navigator.mediaSession;
+    if (!ms || !window.MediaMetadata) return;
+    if (!this.handled) {
+      this.handled = true;
+      const on = (a, line) => {
+        try {
+          ms.setActionHandler(a, () => send(line));
+        } catch {}
+      };
+      on("play", "listenplay");
+      on("pause", "listenpause");
+      on("previoustrack", "listenprev");
+      on("nexttrack", "listennext");
+      on("stop", "listenstop");
+    }
+    const m = ms.metadata;
+    if (!m || m.title !== title || m.artist !== reader || m.album !== version) {
+      ms.metadata = new MediaMetadata({ title, artist: reader, album: version, artwork: [{ src: "/img/apple-touch-icon.png", sizes: "180x180", type: "image/png" }] });
+    }
+    ms.playbackState = playing ? "playing" : "paused";
   },
 };
 
