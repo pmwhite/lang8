@@ -26,6 +26,7 @@ public final class Bible extends Activity {
   final Look look = new Look();
   Reader reader;
   Panel panel;
+  Tray tray;
   FrameLayout root;
   LinearLayout bar;
   TextView title, version, settings, library;
@@ -76,6 +77,8 @@ public final class Bible extends Activity {
     bar.addView(settings);
     root.addView(bar, new FrameLayout.LayoutParams(-1, dp(52), Gravity.TOP));
     reader.topInset = dp(52);
+    tray = new Tray(this, look);
+    root.addView(tray, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
     panel = new Panel(this, look);
     root.addView(panel, new FrameLayout.LayoutParams(-1, -1));
     setContentView(root);
@@ -91,6 +94,7 @@ public final class Bible extends Activity {
       reader.setPadding(0, 0, 0, bars.bottom);
       reader.setClipToPadding(false);
       panel.setPadding(0, bars.top, 0, bars.bottom);
+      tray.setPadding(dp(16), dp(10), dp(16), dp(10) + bars.bottom);
       return insets;
     });
     restyle();
@@ -340,6 +344,38 @@ public final class Bible extends Activity {
         // (What is kept changed: every screen shown made again.)
         Native.send("refresh");
         break;
+      case "tray":
+        tray.show(panel.screens.get(0));
+        break;
+      case "tray_away":
+        tray.hide();
+        break;
+      case "clear_selection":
+        reader.clearSelection();
+        tray.hide();
+        break;
+      case "highlighted":
+        reader.reask(reader.selC);
+        break;
+      case "bookmarked":
+        reader.reask(reader.selC);
+        android.widget.Toast.makeText(this, w.num(1) == 1 ? "Bookmarked" : "Bookmark Removed",
+            android.widget.Toast.LENGTH_SHORT).show();
+        break;
+      case "copy": {
+        android.content.ClipboardManager cb = (android.content.ClipboardManager)
+            getSystemService(CLIPBOARD_SERVICE);
+        if (cb != null) cb.setPrimaryClip(android.content.ClipData.newPlainText("Verses", w.field(1)));
+        android.widget.Toast.makeText(this, "Copied", android.widget.Toast.LENGTH_SHORT).show();
+        break;
+      }
+      case "share": {
+        android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_SEND);
+        i.setType("text/plain");
+        i.putExtra(android.content.Intent.EXTRA_TEXT, w.field(1));
+        startActivity(android.content.Intent.createChooser(i, null));
+        break;
+      }
       case "memorized":
         android.widget.Toast.makeText(this, "Added to Memory", android.widget.Toast.LENGTH_SHORT).show();
         break;

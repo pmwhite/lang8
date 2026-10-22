@@ -5,6 +5,8 @@ import android.text.Layout;
 import android.text.SpannableStringBuilder;
 import android.util.SparseArray;
 import android.util.TypedValue;
+import android.view.GestureDetector;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.AbsListView;
@@ -28,6 +30,10 @@ final class Reader extends ListView {
   // is laid out.
   int jumpC = -1, jumpV;
   private int saidC = -1, saidV = -1, saidF = -1;
+  // The verses selected (of chapter selC, -1 none), in order: core's tray
+  // shows what can be done with them.
+  int selC = -1;
+  final java.util.TreeSet<Integer> sel = new java.util.TreeSet<>();
 
   Reader(Context c, Look look) {
     super(c);
@@ -35,6 +41,18 @@ final class Reader extends ListView {
     setDivider(null);
     setSelector(android.R.color.transparent);
     setAdapter(adapter);
+    // (A tap on a verse selects it, or lets it go.)
+    GestureDetector taps = new GestureDetector(c, new GestureDetector.SimpleOnGestureListener() {
+      @Override
+      public boolean onSingleTapUp(MotionEvent e) {
+        tapped(e.getX(), e.getY());
+        return false;
+      }
+    });
+    setOnTouchListener((v, e) -> {
+      taps.onTouchEvent(e);
+      return false;
+    });
     setOnScrollListener(new OnScrollListener() {
       @Override
       public void onScrollStateChanged(AbsListView v, int state) {}
@@ -93,6 +111,15 @@ final class Reader extends ListView {
     }
     texts.put(c, s);
     verses.put(c, java.util.Arrays.copyOf(vs, nv * 3));
+    // (What is marked: a highlight's color behind its verse.)
+    for (Wire w : lines) {
+      if (!w.word(0).equals("mark") || w.word(2).equals("-")) continue;
+      int[] r = range(c, w.num(1));
+      if (r != null) s.setSpan(new android.text.style.BackgroundColorSpan(
+          Look.alpha(Look.color(w.word(2)), look.dark ? 0.32f : 0.4f)), r[0], r[1],
+          android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    }
+    if (c == selC) markSelection(c);
     changed();
     if (c == jumpC) post(this::finishJump);
   }
@@ -150,6 +177,83 @@ final class Reader extends ListView {
     }
     jumpC = -1;
     setSelectionFromTop(c, topInset - y);
+  }
+
+  // Verse v's place in chapter c's text (null: not there).
+  private int[] range(int c, int v) {
+    int[] vs = verses.get(c);
+    SpannableStringBuilder s = texts.get(c);
+    if (vs == null || s == null) return null;
+    for (int i = 0; i < vs.length; i += 3) {
+      if (vs[i] == v) {
+        int a = Math.min(vs[i + 1], s.length()), b = Math.min(vs[i + 2], s.length());
+        return b > a ? new int[] {a, b} : null;
+      }
+    }
+    return null;
+  }
+
+  // A tap at x, y: the verse there selected, or let go; core told the
+  // verses selected now (none: the tray away).
+  private void tapped(float x, float y) {
+    int c = pointToPosition((int) x, (int) y);
+    View row = c == INVALID_POSITION ? null : childFor(c);
+    if (!(row instanceof TextView)) return;
+    TextView tv = (TextView) row;
+    Layout l = tv.getLayout();
+    int[] vs = verses.get(c);
+    if (l == null || vs == null) return;
+    int line = l.getLineForVertical((int) y - row.getTop() - tv.getPaddingTop());
+    int off = l.getOffsetForHorizontal(line, x - tv.getPaddingLeft());
+    int v = 0;
+    for (int i = 0; i < vs.length; i += 3) if (off >= vs[i + 1] && off < vs[i + 2]) v = vs[i];
+    if (v <= 0) return;
+    if (c != selC) clearSelection();
+    selC = c;
+    if (!sel.remove(v)) sel.add(v);
+    markSelection(c);
+    changed();
+    StringBuilder b = new StringBuilder("select " + c);
+    for (int k : sel) b.append(' ').append(k);
+    Native.send(b.toString());
+    if (sel.isEmpty()) selC = -1;
+  }
+
+  // The selection washed (an underline of the accent's color under it).
+  static final class Sel extends android.text.style.BackgroundColorSpan {
+    Sel(int color) {
+      super(color);
+    }
+  }
+
+  private void markSelection(int c) {
+    SpannableStringBuilder s = texts.get(c);
+    if (s == null) return;
+    for (Sel o : s.getSpans(0, s.length(), Sel.class)) s.removeSpan(o);
+    if (c != selC) return;
+    for (int v : sel) {
+      int[] r = range(c, v);
+      if (r != null) s.setSpan(new Sel(Look.alpha(look.accent, 0.18f)), r[0], r[1],
+          android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    }
+  }
+
+  // The selection let go (core's clear_selection, or another chapter's).
+  void clearSelection() {
+    int c = selC;
+    sel.clear();
+    selC = -1;
+    if (c >= 0) {
+      markSelection(c);
+      changed();
+    }
+  }
+
+  // Chapter c asked for again (what is marked on it changed).
+  void reask(int c) {
+    if (c < 0 || c >= count) return;
+    asked.remove(c);
+    want(c);
   }
 
   private View childFor(int c) {

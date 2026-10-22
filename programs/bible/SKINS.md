@@ -243,7 +243,7 @@ Other lines from core:
 | `refill ID FADE` | screen ID made again as its field is typed in (FADE 1: a cross-fade) |
 | `retext ID`, `blur ID` | the field to show the screen's words; the keyboard put away |
 | `reader N` | the reader has N chapters |
-| `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA` and `verse V A B` lines, then `end` |
+| `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA`, `verse V A B` and `mark V HEX BOOKMARK NOTE` lines (a verse's highlight's color, `-` none; bookmarked; noted), then `end` |
 | `jump C V`, `goto C V`, `relayout` | the reader moved; the screens away, then moved; every chapter to be asked for again |
 | `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE` | all a skin needs of look.l8 |
 | `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation |
@@ -348,6 +348,7 @@ Practice: Add Passage, then a passage's levels, a word shown, Check). A
 row's field keeps the keys while its screen is made again, and the screen
 waits for typing to rest before it is. What is kept (highlights,
 bookmarks, notes, history, ribbons, Memory) is core's files, as the
-iPhone names them. Still to do there: selecting verses (the tray), the
-language data (and so the cards), and Reading Plans' files; then the
-views above.
+iPhone names them. A tap on a verse selects it (core's tray: highlights,
+Copy, Share, Bookmark, Note, Compare, Memorize), and highlights show as
+core marks them. Still to do there: the language data (and so Study and
+the cards), and Reading Plans' files; then the views above.
