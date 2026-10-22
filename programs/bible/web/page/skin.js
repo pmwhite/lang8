@@ -585,7 +585,7 @@ function line(w) {
       capsule.show(w.field(1));
       break;
     case "say":
-      voice.say(w.num(1), w.num(2), w.num(3) / 1000 || 1, w.field(1));
+      voice.say(w.num(1), w.num(2), w.num(3) / 1000 || 1, w.field(1), w.field(2));
       break;
     case "player":
       player.show(w.field(1), w.field(2), w.field(3) !== "0");
@@ -2018,10 +2018,12 @@ const voice = {
   resume() {
     window.speechSynthesis?.resume();
   },
-  say(c, v, rate, words) {
+  say(c, v, rate, words, name) {
     if (!window.speechSynthesis) return;
     const u = new SpeechSynthesisUtterance(words);
     u.lang = "en-US";
+    const chosen = name && speechSynthesis.getVoices().find((x) => x.name === name);
+    if (chosen) u.voice = chosen;
     u.rate = rate;
     u.onstart = () => send(`spoke ${c} ${v} ${clock()}`);
     u.onend = () => send(`spoken ${c} ${v}`);
@@ -2034,6 +2036,17 @@ const voice = {
     window.speechSynthesis?.cancel();
   },
 };
+
+// The device's voices told to core (voices Q:LANG:NAME ...: quality 2 for
+// the natural or premium ones, else 1), as they become known.
+function tellVoices() {
+  if (!window.speechSynthesis) return;
+  const vs = speechSynthesis.getVoices();
+  if (!vs.length) return;
+  const q = (v) => (/natural|neural|premium|enhanced/i.test(v.name) ? 2 : 1);
+  send("voices\t" + vs.map((v) => `${q(v)}:${v.lang}:${v.name.replace(/[\t\n]/g, " ")}`).join("\t"));
+}
+if (window.speechSynthesis) speechSynthesis.addEventListener("voiceschanged", tellVoices);
 
 // ---- Keep Screen On ----
 let lock = null;
@@ -2087,6 +2100,7 @@ document.addEventListener("visibilitychange", () => {
 function begin() {
   if (started) return;
   started = true;
+  tellVoices();
   const c = chapterOfAddress(location.pathname);
   const v = /^\/read\/(bsb|kjv|web|asv|ylt|esv)\//.exec(location.pathname);
   if (v) send(`version ${v[1].toUpperCase()}`);

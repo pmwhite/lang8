@@ -293,6 +293,7 @@ hs_num(what: int, _a: int): int {
     if (what == SK_NUM_VOICE_SEEN || what == SK_NUM_BETTER_VOICE) return 1;
     if (what == SK_NUM_ESV_SEARCH) return hs_esr_state;
     if (what == SK_NUM_PRACTICE_AUDIO) return 1;
+    if (what == SK_NUM_ESV_AUDIO) return if (hs_esv_audio_ok) 1 else 0;
     -1
 }
 
@@ -302,6 +303,161 @@ hs_source(t: int): int {
     if (len(name) == 0) return SRC_VOICE;
     k: int = pref_get(name) - 1;
     if (k < 0 || k >= SOURCES || k != SRC_VOICE && src_texts[k] != t) text_default_src(t) else k
+}
+
+// ---- the device's voices (the skin says them: voices Q:LANG:NAME ...) ----
+// Each one's name and core's place for it (voice_score: English only,
+// better first), the chosen one's name (voice.txt; none: the best), and
+// whether the ESV's recording is offered (its status).
+HV_MOST: int = 64;
+
+hv_n: int = 0;
+
+hv_at: []int = new int[64](0);
+
+hv_len: []int = new int[64](0);
+
+hv_q: []int = new int[64](0);
+
+hv_score: []int = new int[64](0);
+
+hv_pool: []i8 = new i8[8192](0i8);
+
+hv_pool_n: int = 0;
+
+hv_chosen: []i8 = new i8[256](0i8);
+
+hv_chosen_n: int = 0;
+
+hs_esv_audio_ok: bool = false;
+
+// The voices line read (each field Q:LANG:NAME), kept in core's order.
+sk_voices_said(line: []i8, b: int, e: int) {
+    hv_n = 0;
+    hv_pool_n = 0;
+    p: int = b;
+    while (p < e) {
+        q: int = p;
+        while (q < e && line[q] as int != 9) q = q + 1;
+        hs_voice_field(line, p, q);
+        p = q + 1
+    }
+    // (Better first: insertion, as few as they are.)
+    for i in 1..hv_n {
+        j: int = i;
+        while (j > 0 && hv_score[j - 1] < hv_score[j]) {
+            hs_voice_swap(j - 1, j);
+            j = j - 1
+        }
+    }
+}
+
+hs_voice_field(b: []i8, p: int, e: int) {
+    if (hv_n >= HV_MOST) return;
+    q: int = sk_num(b, p, e);
+    c1: int = sk_num_end;
+    if (c1 >= e || b[c1] as int != 58) return;
+    c2: int = c1 + 1;
+    while (c2 < e && b[c2] as int != 58) c2 = c2 + 1;
+    if (c2 >= e) return;
+    english: bool = c2 - c1 > 2 && b[c1 + 1] as int == 101 && b[c1 + 2] as int == 110;
+    us: bool = c2 - c1 == 6 && english && b[c1 + 4] as int == 85 && b[c1 + 5] as int == 83;
+    score: int = voice_score(english, false, q, us);
+    if (score < 0 || hv_pool_n + e - c2 > len(hv_pool)) return;
+    hv_at[hv_n] = hv_pool_n;
+    for i in c2 + 1..e {
+        hv_pool[hv_pool_n] = b[i];
+        hv_pool_n = hv_pool_n + 1
+    }
+    hv_len[hv_n] = e - c2 - 1;
+    hv_q[hv_n] = q;
+    hv_score[hv_n] = score;
+    hv_n = hv_n + 1
+}
+
+hs_voice_swap(i: int, j: int) {
+    a: int = hv_at[i];
+    hv_at[i] = hv_at[j];
+    hv_at[j] = a;
+    l: int = hv_len[i];
+    hv_len[i] = hv_len[j];
+    hv_len[j] = l;
+    q: int = hv_q[i];
+    hv_q[i] = hv_q[j];
+    hv_q[j] = q;
+    s: int = hv_score[i];
+    hv_score[i] = hv_score[j];
+    hv_score[j] = s
+}
+
+// Whether voice i is the chosen one.
+hv_is_chosen(i: int): bool {
+    if (hv_chosen_n != hv_len[i]) return false;
+    for k in 0..hv_len[i]
+        if (hv_pool[hv_at[i] + k] != hv_chosen[k]) return false;
+    true
+}
+
+// The voice heard: the chosen one, if the device has it, else the best.
+hv_heard(): int {
+    for i in 0..hv_n
+        if (hv_is_chosen(i)) return i;
+    if (hv_n > 0) 0 else -1
+}
+
+// Its name into fbuf (none: the device's own choice).
+fput_voice_heard() {
+    i: int = hv_heard();
+    if (i >= 0) fput_bytes(hv_pool, hv_at[i], hv_at[i] + hv_len[i])
+}
+
+// The Voices screen's list (SK_ITEMS_VOICES): each its name, quality, and
+// whether it is the one chosen.
+hs_fill(what: int) {
+    if (what != SK_ITEMS_VOICES) return;
+    for i in 0..hv_n {
+        fbuf_n = 0;
+        fput_bytes(hv_pool, hv_at[i], hv_at[i] + hv_len[i]);
+        sk_item_fbuf(hv_q[i], if (hv_is_chosen(i)) 1 else 0)
+    }
+}
+
+// Voice i chosen (-1: the best available), kept (voice.txt).
+hs_voice_chosen(i: int) {
+    hv_chosen_n = 0;
+    if (i >= 0 && i < hv_n) {
+        for k in 0..hv_len[i] {
+            if (hv_chosen_n < len(hv_chosen)) {
+                hv_chosen[hv_chosen_n] = hv_pool[hv_at[i] + k];
+                hv_chosen_n = hv_chosen_n + 1
+            }
+        }
+    }
+    fbuf_n = 0;
+    fput_bytes(hv_chosen, 0, hv_chosen_n);
+    kp_set("voice.txt");
+    kp_write();
+    sk_update_all()
+}
+
+hs_voice_load() {
+    kp_set("voice.txt");
+    kp_read();
+    hv_chosen_n = 0;
+    for i in 0..fbuf_n {
+        k: int = fbuf[i] as int;
+        if (k != 10 && hv_chosen_n < len(hv_chosen)) {
+            hv_chosen[hv_chosen_n] = fbuf[i];
+            hv_chosen_n = hv_chosen_n + 1
+        }
+    }
+}
+
+// The platform's words, as core's host has them: who reads aloud (the
+// voice heard), the app's version.
+hs_say_words(what: int) {
+    fbuf_n = 0;
+    if (what == SK_WORDS_VOICE) fput_voice_heard() else if (what == SK_WORDS_APP_VERSION) fput_str("Smooth Bible")
 }
 
 // ---- the network: the site's Worker (/api/v1/) ----
@@ -457,6 +613,8 @@ hs_answer(id: int, status: int, n: int) {
     if (n > 0) hs_file(id, body);
     m: int = if (n > 0) n else 0;
     if (id == HS_STATUS) {
+        hs_esv_audio_ok = status == 200 && json_true(body, json_get(body, 0, m, "esvAudio"),
+            m);
         sk_esv_status(status, status == 200 && json_true(body, json_get(body, 0, m,
             "esv"), m));
         return
@@ -587,16 +745,17 @@ hs_start() {
     sk_host = SkinHost {
         save_prefs: &kept_save_prefs,
         save_kept: &kept_save,
-        words: &sk_no_words,
+        words: &hs_say_words,
         switch_version: null,
         num: &hs_num,
-        fill: &sk_no_fill,
+        fill: &hs_fill,
         fetch: &hs_fetch
     };
     sk_has_ribbons = true;
     sk_has_listen = true;
     sk_has_keep_on = true;
     kept_load_prefs();
+    hs_voice_load();
     hs_start_t = launch_version(pref_get("version"), false);
     if (hs_start_t < 0 || hs_start_t >= len(hs_version_files) || len(hs_version_files[hs_start_t]) == 0) hs_start_t = 0;
     hs_ask_version(hs_start_t);
