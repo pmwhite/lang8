@@ -1083,6 +1083,13 @@ final class Panel extends FrameLayout {
           }
         }, b, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
       }
+      if (r.value > 0 || r.lo > 0) {
+        // (Its indent and hang, tenths of an em: a definition's sense.)
+        int em = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 16,
+            getResources().getDisplayMetrics());
+        s.setSpan(new android.text.style.LeadingMarginSpan.Standard(r.value * em / 10,
+            (r.value + r.lo) * em / 10), 0, s.length(), Spanned.SPAN_INCLUSIVE_INCLUSIVE);
+      }
       t.setText(s);
       if (r.links.length > 0) t.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
       t.setTextIsSelectable(true);
