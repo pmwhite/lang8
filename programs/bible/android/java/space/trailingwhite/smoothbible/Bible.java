@@ -65,6 +65,13 @@ public final class Bible extends Activity {
     title.setEllipsize(TextUtils.TruncateAt.END);
     title.setPadding(0, dp(12), dp(12), dp(12));
     title.setOnClickListener(v -> Native.send("tap goto"));
+    // (A long press: the title's menu, core's: New Ribbon Here, the
+    // ribbon carried's Leave Here, Move Here.)
+    title.setOnLongClickListener(v -> {
+      menuWanted = true;
+      Native.send("titlemenu");
+      return true;
+    });
     version = button("", "versions");
     settings = button("Aa", "settings");
     settings.setContentDescription("Settings");
@@ -236,6 +243,28 @@ public final class Bible extends Activity {
     else d.unregisterOnBackInvokedCallback(backCallback);
   }
 
+  // The title's menu asked for, and its model coming (core's screen 0).
+  boolean menuWanted, titleMenuNext;
+
+  void showTitleMenu(Screen s) {
+    android.widget.PopupMenu m = new android.widget.PopupMenu(this, title);
+    int n = 0;
+    final ArrayList<Screen.Row> rows = new ArrayList<>();
+    for (Screen.Section sec : s.sections)
+      for (Screen.Row r : sec.rows) {
+        if (r.action == 0) continue;
+        m.getMenu().add(0, n, n, r.detail.isEmpty() ? r.title : r.title + "  " + r.detail);
+        rows.add(r);
+        n++;
+      }
+    m.setOnMenuItemClickListener(item -> {
+      Screen.Row r = rows.get(item.getItemId());
+      Native.send("menuact " + r.action + " " + r.arg);
+      return true;
+    });
+    m.show();
+  }
+
   private final Runnable capsuleAway = () -> capsule.setVisibility(View.GONE);
 
   void restyle() {
@@ -340,6 +369,11 @@ public final class Bible extends Activity {
       }
       else if (word.equals("end")) {
         panel.screens.put(building.id, building);
+        if (titleMenuNext) {
+          titleMenuNext = false;
+          menuWanted = false;
+          showTitleMenu(building);
+        }
         building = null;
         section = null;
       }
@@ -355,6 +389,7 @@ public final class Bible extends Activity {
     }
     switch (word) {
       case "screen":
+        if (w.num(1) == 0 && menuWanted) titleMenuNext = true;
         building = new Screen();
         building.id = w.num(1);
         building.kind = w.num(2);
