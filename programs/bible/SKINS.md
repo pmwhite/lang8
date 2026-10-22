@@ -293,7 +293,7 @@ Other lines from core:
 | `reader N` | the reader has N chapters |
 | `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA`, `verse V A B`, `link A B KIND ARG` (a footnote's mark, KIND 0, ARG its place; a reference, 1, ARG the reference; a word of the original's, 2) and `mark V HEX BOOKMARK NOTE` lines (a verse's highlight's color, `-` none; bookmarked; noted), then `end` |
 | `jump C V`, `goto C V`, `relayout` | the reader moved; the screens away, then moved; every chapter to be asked for again |
-| `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE` | all a skin needs of look.l8 |
+| `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT` | all a skin needs of look.l8: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument) |
 | `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation |
 | `url` ADDRESS | a page outside the app to open |
 | `place C V*1000+FRAC`, `back` WORDS | the reader to a place (a ribbon's, the way back's); the capsule's words (none: away). A skin with jumps of its own (`SK_NUM_OWN_JUMPS`: the iPhone) does `core/jump.l8`'s steps itself and gets `goto`, `ribbon_open`, `ribbon_added` instead |

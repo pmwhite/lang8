@@ -182,6 +182,14 @@ const imports = {
 // ---- the look (core's look line) ----
 const look = { size: 1, spacing: 1.32, margin: 28, dark: false, red: false, accent: "#9C3A2C", rule: "#1E1C19", gloss: 0.32 };
 
+// The reader's faces (web/main.l8's sk_fonts, in its order).
+const FONTS = [
+  `"Source Serif 4", "Charis SIL", Georgia, serif`,
+  `"Charis SIL", "Source Serif 4", Georgia, serif`,
+  `Georgia, "Source Serif 4", serif`,
+  `system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`,
+];
+
 function readLook(w) {
   look.size = w.num(1) / 1000;
   look.spacing = w.num(2) / 1000;
@@ -200,6 +208,7 @@ function readLook(w) {
   s.setProperty("--size", look.size);
   s.setProperty("--lh", look.spacing);
   s.setProperty("--margin", look.margin + "px");
+  s.setProperty("--body", FONTS[w.num(13)] || FONTS[0]);
   s.background = c(6);
   look.accent = c(10);
   document.documentElement.classList.toggle("dark", look.dark);
@@ -333,6 +342,7 @@ let chapter = null;
 // CUSTOM_CARD (a card of verses to share).
 const CUSTOM_HIT = 5;
 const CUSTOM_SWATCHES = 6;
+const CUSTOM_FONT = 4;
 const CUSTOM_CARD = 11;
 
 function screenLine(w) {
@@ -1591,6 +1601,7 @@ const panel = {
     const words = el("div", "words");
     const t = el("div", "rt");
     rich(t, r.title, r.truns);
+    if (r.custom === CUSTOM_FONT) t.style.fontFamily = FONTS[+r.arg] || "";
     if (r.suffix) t.appendChild(el("span", "suffix", r.suffix));
     if (r.flag("x") || r.flag("t")) t.classList.add("accent");
     if (r.flag("f")) t.classList.add("faint");
