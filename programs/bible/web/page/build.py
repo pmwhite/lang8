@@ -29,7 +29,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(HERE))))
 WEB = os.path.join(ROOT, "web")
 VERSIONS = ["bsb", "kjv", "web", "asv", "ylt"]
 # The data files besides the versions, by their names under data/.
-FILES = ["xref_index.bin", "xrefs.bin", "mhcc.txt", "help.txt", "orig.txt", "plans/mcheyne.txt", "plans/chrono.txt"]
+FILES = ["xref_index.bin", "xrefs.bin", "mhcc.txt", "help.txt", "orig.txt", "plans/mcheyne.txt", "plans/chrono.txt",
+         "audio/souer.tim", "audio/hays.tim", "audio/gilbert.tim", "audio/henson.tim", "audio/henson.paths"]
 
 
 def digest(data):

@@ -519,6 +519,9 @@ function line(w) {
     case "follow":
       reader.follow(w.num(1), w.num(2));
       break;
+    case "hearing":
+      reader.hearing(w.num(1), w.num(2));
+      break;
     case "wake":
       reader.wake(w.num(1));
       break;
@@ -582,13 +585,31 @@ function line(w) {
       capsule.show(w.field(1));
       break;
     case "say":
-      voice.say(w.num(1), w.num(2), w.field(1));
+      voice.say(w.num(1), w.num(2), w.num(3) / 1000 || 1, w.field(1));
       break;
     case "player":
-      player.show(w.field(1), w.field(2));
+      player.show(w.field(1), w.field(2), w.field(3) !== "0");
+      break;
+    case "audio_play":
+      sound.play(w.num(1), w.num(3), w.num(4), w.num(5) / 1000 || 1, w.field(1));
+      break;
+    case "audio_stop":
+      sound.stop();
+      break;
+    case "speech_stop":
+      voice.stop();
+      break;
+    case "listen_pause":
+      sound.pause();
+      voice.pause();
+      break;
+    case "listen_resume":
+      sound.resume();
+      voice.resume();
       break;
     case "listen_stop":
       voice.stop();
+      sound.stop();
       player.hide();
       break;
     case "awake":
@@ -828,6 +849,7 @@ const reader = {
     else put();
     this.loaded.add(c);
     if (c === this.selC) this.paintSelection();
+    if (this.heard && this.heard.c === c) this.paintHeard();
     if (this.pending && this.pending.c === c) this.finishJump();
     else this.extend();
   },
@@ -943,6 +965,21 @@ const reader = {
       return;
     }
     this.jump(c, v, 0);
+  },
+
+  // The verse being heard, washed (v 0: none, the chapter's start).
+  heard: null,
+  hearing(c, v) {
+    for (const t of this.main.querySelectorAll(".heard")) t.classList.remove("heard");
+    this.heard = c >= 0 && v > 0 ? { c, v } : null;
+    this.paintHeard();
+  },
+
+  paintHeard() {
+    const h = this.heard;
+    if (!h) return;
+    const s = this.main.querySelector(`section[data-c="${h.c}"]`);
+    if (s) for (const t of s.querySelectorAll(`[data-v="${h.v}"]`)) t.classList.add("heard");
   },
 
   // Core's selection (its chapter, -1 none, then its verses), painted.
@@ -1851,25 +1888,32 @@ const capsule = {
 
 const player = {
   box: null,
+  playing: true,
   init() {
     this.box = el("div", "player");
     this.box.hidden = true;
     this.box.innerHTML = `<div class="pw"><div class="pt"></div><div class="ps"></div></div>`;
-    const stop = el("button", "stop");
-    stop.type = "button";
-    stop.setAttribute("aria-label", "Stop Listening");
-    stop.appendChild(icon("square"));
-    stop.addEventListener("click", () => {
-      voice.stop();
-      this.hide();
-      send("listenstop");
-    });
-    this.box.appendChild(stop);
+    const button = (cls, label, name, line) => {
+      const b = el("button", cls);
+      b.type = "button";
+      b.setAttribute("aria-label", label);
+      b.appendChild(icon(name));
+      b.addEventListener("click", () => send(typeof line === "function" ? line() : line));
+      this.box.appendChild(b);
+      return b;
+    };
+    button("prev", "Previous", "skip-back", "listenprev");
+    this.toggle = button("toggle", "Pause", "pause", () => (this.playing ? "listenpause" : "listenplay"));
+    button("next", "Next", "skip-forward", "listennext");
+    button("stop", "Stop Listening", "x", "listenstop");
     document.body.appendChild(this.box);
   },
-  show(title, state) {
+  show(title, state, playing) {
     $(".pt", this.box).textContent = title;
     $(".ps", this.box).textContent = state;
+    this.playing = playing;
+    this.toggle.replaceChildren(icon(playing ? "pause" : "play"));
+    this.toggle.setAttribute("aria-label", playing ? "Pause" : "Play");
     this.box.hidden = false;
   },
   hide() {
@@ -1892,12 +1936,73 @@ function toast(words) {
   toastTimer = setTimeout(() => t.classList.remove("on"), 1800);
 }
 
-// ---- Listen: the browser's voice, as core's session asks ----
+// ---- Listen: a recording, or the browser's voice, as core's session asks ----
+// (The recording: an address played from one time to another, where it
+// is told to core four times a second; its end and its failure too.)
+const sound = {
+  el: new Audio(),
+  tok: 0,
+  to: -1,
+  timer: 0,
+  play(tok, from, to, rate, url) {
+    voice.stop();
+    this.stop();
+    this.tok = tok;
+    this.to = to;
+    const a = this.el;
+    a.preload = "auto";
+    a.src = url;
+    a.playbackRate = rate;
+    a.addEventListener("loadedmetadata", () => {
+      if (from > 0) a.currentTime = from / 100;
+    }, { once: true });
+    a.play().catch(() => this.failed(tok));
+    this.timer = setInterval(() => this.tell(), 250);
+  },
+  tell() {
+    const a = this.el;
+    const t = Math.round(a.currentTime * 100);
+    if (this.to >= 0 && t >= this.to) {
+      this.stop();
+      send(`audioended ${this.tok}`);
+      return;
+    }
+    if (!a.paused) send(`audiotime ${this.tok} ${t} ${Math.round((a.duration || 0) * 100)}`);
+  },
+  failed(tok) {
+    if (tok !== this.tok) return;
+    this.stop();
+    send(`audiofailed ${tok}`);
+  },
+  pause() {
+    this.el.pause();
+  },
+  resume() {
+    if (this.el.src) this.el.play().catch(() => {});
+  },
+  stop() {
+    clearInterval(this.timer);
+    this.el.pause();
+  },
+};
+sound.el.addEventListener("ended", () => {
+  clearInterval(sound.timer);
+  send(`audioended ${sound.tok}`);
+});
+sound.el.addEventListener("error", () => sound.failed(sound.tok));
+
 const voice = {
-  say(c, v, words) {
+  pause() {
+    window.speechSynthesis?.pause();
+  },
+  resume() {
+    window.speechSynthesis?.resume();
+  },
+  say(c, v, rate, words) {
     if (!window.speechSynthesis) return;
     const u = new SpeechSynthesisUtterance(words);
     u.lang = "en-US";
+    u.rate = rate;
     u.onstart = () => send(`spoke ${c} ${v} ${clock()}`);
     u.onend = () => send(`spoken ${c} ${v}`);
     u.onerror = (e) => {

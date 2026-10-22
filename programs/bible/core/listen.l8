@@ -315,40 +315,264 @@ lw_say(c: int, v: int) {
     ui_int(c);
     ui_byte(32);
     ui_int(v);
+    ui_byte(32);
+    ui_int((lw_rate() * 1000.0f64) as int);
     ui_byte(9);
     ui_field_bytes(fbuf, 0, fbuf_n);
     ui_byte(10)
 }
 
-// The player's words: the verse (or chapter) and its state.
+// The player's words: the verse (or chapter) and its state; and whether
+// it plays (player TITLE STATE PLAYING: its button Pause or Play).
 lw_player() {
     lp_title(lw_c, lw_v);
     t: int = fbuf_n;
-    lp_state(true, false, false, SRC_VOICE);
+    lp_state(lw_playing, lw_standing_in, lw_loading, lw_src);
     ui_str("player");
     ui_byte(9);
     ui_field_bytes(fbuf, 0, t);
     ui_byte(9);
     ui_field_bytes(fbuf, t, fbuf_n);
+    ui_byte(9);
+    ui_int(if (lw_playing) 1 else 0);
+    ui_byte(10);
+    // (The verse being heard, washed: hearing C V; the chapter, V 0.)
+    ui_str("hearing ");
+    ui_int(lw_c);
+    ui_byte(32);
+    ui_int(lw_v);
     ui_byte(10)
+}
+
+// ---- what is heard: a recording, or the device's voice ----
+// (The skin plays an address from a time to a time, and says where it is:
+// audio_play TOKEN C FROM TO RATE URL; audiotime TOKEN CS DURATION,
+// audioended TOKEN, audiofailed TOKEN. Times are centiseconds; the token
+// tells the play now from those before.)
+lw_player_on: bool = false;
+
+lw_src: int = SRC_VOICE;
+
+lw_chosen: int = SRC_VOICE;
+
+lw_tok: int = 0;
+
+lw_playing: bool = true;
+
+lw_loading: bool = false;
+
+lw_standing_in: bool = false;
+
+lw_hold_v: int = 0;
+
+lw_ask_v: int = 0;
+
+lw_t: int = 0;
+
+lw_return_c: int = -1;
+
+lw_failed_at: []f64 = new f64[6](-1000.0f64);
+
+// The speeds Listen offers (listenRate: slower, normal, faster).
+lw_rates: []f64 = [0.85f64, 1.0f64, 1.25f64];
+
+lw_rate(): f64 {
+    lw_rates[clamp_index(pref_get("listenRate"), len(lw_rates))]
+}
+
+// The source chapter c is heard from now: the version's chosen reader,
+// unless it can't be had (then the voice).
+lw_effective(c: int): int {
+    audio_effective(lw_chosen, c, false, true, lw_failed_at[lw_chosen], ew_now())
 }
 
 // Listen begun at c:v (v 0: the chapter's start), or stopped.
 lw_start(c: int, v: int) {
     if (c < 0 || c >= chapters || !lp_can_listen(text_cur)) return;
     lw_on = true;
+    lw_playing = true;
+    lw_standing_in = false;
+    lw_return_c = -1;
+    ls_day = false;
+    lw_chosen = clamp_index(sk_num_of(SK_NUM_AUDIO_SOURCE, text_cur), SOURCES);
+    lw_go(c, v)
+}
+
+// Heard from c:v by whichever source it is heard from now.
+lw_go(c: int, v: int) {
+    e: int = lw_effective(c);
+    if (e == SRC_VOICE) lw_voice(c, v) else lw_play(e, c, v)
+}
+
+// The voice from c:v.
+lw_voice(c: int, v: int) {
+    if (lw_player_on) ui_effect("audio_stop", -1, -1);
+    lw_player_on = false;
+    lw_tok = lw_tok + 1;
+    lw_src = SRC_VOICE;
+    lw_loading = false;
     lw_c = c;
     lw_v = (if (v < 1) 0 else v);
-    ls_day = false;
+    ui_effect("speech_stop", -1, -1);
     lw_queue(c, if (v < 1) 1 else v, ch_verses[c]);
     lw_player()
+}
+
+// Source s's recording of chapter c, from verse v: its address (the
+// ESV's asked of the Worker, by the host), from where verse v begins.
+lw_play(s: int, c: int, v: int) {
+    ui_effect("speech_stop", -1, -1);
+    lw_queued_c = -1;
+    lw_player_on = true;
+    lw_src = s;
+    lw_c = c;
+    lw_ask_v = v;
+    lw_v = (if (s != SRC_ESV && v > 1) v else 0);
+    lw_hold_v = (if (v > 1) v else 0);
+    lw_tok = lw_tok + 1;
+    lw_t = 0;
+    lw_loading = true;
+    if (s == SRC_ESV) {
+        if (!hs_on) {
+            lw_fail();
+            return
+        }
+        hs_esv_audio(c);
+        lw_player();
+        return
+    }
+    audio_url(s, c);
+    if (au_n == 0) {
+        lw_fail();
+        return
+    }
+    lw_emit(c, if (follows_verses(s, c) && v > 1) audio_time_of(s, c, v) else 0, au,
+        au_n);
+    lw_player()
+}
+
+// The ESV's recording's address came (b's first n bytes; none: it can't
+// be had).
+lw_esv_url(b: []i8, n: int) {
+    if (!lw_on || !lw_player_on || lw_src != SRC_ESV) return;
+    if (n <= 0) {
+        lw_fail();
+        return
+    }
+    lw_emit(lw_c, 0, b, n)
+}
+
+lw_emit(
+    c: int,
+    from: int,
+    b: []i8,
+    n: int
+) {
+    if (!ui_wire) return;
+    ui_str("audio_play ");
+    ui_int(lw_tok);
+    ui_byte(32);
+    ui_int(c);
+    ui_byte(32);
+    ui_int(from);
+    ui_str(" -1 ");
+    ui_int((lw_rate() * 1000.0f64) as int);
+    ui_byte(9);
+    ui_field_bytes(b, 0, n);
+    ui_byte(10)
+}
+
+// Where the recording is (t into chapter, of duration): the verse it is
+// at followed, the one asked for held until it is reached.
+lw_time(tok: int, t: int, duration: int) {
+    if (!lw_on || !lw_player_on || tok != lw_tok) return;
+    if (lw_loading) {
+        lw_loading = false;
+        lw_player()
+    }
+    lw_t = t;
+    if (!follows_verses(lw_src, lw_c)) return;
+    v: int = audio_verse_shown(lw_src, lw_c, t, lw_hold_v);
+    if (v < 0) return;
+    if (lw_hold_v > 0 && audio_hold_ended(lw_src, lw_c, t, lw_hold_v)) lw_hold_v = 0;
+    if (v != lw_v) lw_at(lw_c, v)
+}
+
+lw_at(c: int, v: int) {
+    lw_c = c;
+    lw_v = v;
+    if (v > 0 && ew_now() >= lw_follow_after) ui_effect("follow", c, v);
+    lw_player()
+}
+
+// The recording's chapter heard to its end: read, and on to the next.
+lw_ended(tok: int) {
+    if (!lw_on || !lw_player_on || tok != lw_tok) return;
+    c: int = lw_c;
+    rd_read(c);
+    if (lp_item_ended(c) == LP_STOP || c + 1 >= chapters) {
+        lw_stop();
+        return
+    }
+    lw_go(c + 1, 0)
+}
+
+// The recording failed: the voice stands in from the verse being heard.
+lw_failed(tok: int) {
+    if (!lw_on || !lw_player_on || tok != lw_tok) return;
+    lw_fail()
+}
+
+lw_fail() {
+    lw_failed_at[lw_src] = ew_now();
+    lw_standing_in = true;
+    lw_voice(lw_c, lp_fail_verse(lw_v, lw_ask_v))
+}
+
+// Pause and Play, Next and Previous (the player's buttons).
+lw_pause() {
+    if (!lw_on || !lw_playing) return;
+    lw_playing = false;
+    ui_effect("listen_pause", -1, -1);
+    lw_player()
+}
+
+lw_resume() {
+    if (!lw_on || lw_playing) return;
+    lw_playing = true;
+    ui_effect("listen_resume", -1, -1);
+    lw_player()
+}
+
+lw_next() {
+    if (!lw_on) return;
+    n: int = lp_next(lw_c);
+    if (n >= 0) {
+        lw_playing = true;
+        lw_standing_in = false;
+        lw_go(n, 0)
+    }
+}
+
+lw_previous() {
+    if (!lw_on) return;
+    into: bool = if (lw_player_on) lw_t > LP_PREVIOUS_INTO else lw_v > 1;
+    p: int = lp_previous(lw_c, into);
+    if (p >= 0) {
+        lw_playing = true;
+        lw_standing_in = false;
+        lw_go(p, 0)
+    }
 }
 
 lw_stop() {
     if (!lw_on) return;
     lw_on = false;
     lw_queued_c = -1;
-    ui_effect("listen_stop", -1, -1)
+    lw_player_on = false;
+    lw_tok = lw_tok + 1;
+    ui_effect("listen_stop", -1, -1);
+    if (ui_wire) ui_str("hearing -1 0\n")
 }
 
 // The settings' Listen button.
@@ -370,8 +594,8 @@ lw_spoke(c: int, v: int, now: f64) {
         if (now < 0.0f64 || now >= lw_follow_after) ui_effect("follow", c, v);
         lw_player()
     }
-    k: int = lp_began(c, v, lw_queued_c, false, false);
-    if (k == LP_QUEUE) lw_queue(lp_c, lp_v, lp_to)
+    k: int = lp_began(c, v, lw_queued_c, lw_standing_in, c + 1 < chapters && lw_effective(c + 1) != SRC_VOICE);
+    if (k == LP_QUEUE) lw_queue(lp_c, lp_v, lp_to) else if (k == LP_RETURN) lw_return_c = lp_c
 }
 
 // Following waits while a finger moves the reader, and LP_FOLLOW_WAIT_S
@@ -387,8 +611,13 @@ lw_dragged(moving: bool, now: f64) {
 // Verse v of chapter c said: a chapter heard is read (the carried ribbon
 // moves on); Revelation 22's end, listening done.
 lw_spoken(c: int, v: int) {
-    if (!lw_on) return;
-    k: int = lp_finished(c, v, -1);
+    if (!lw_on || lw_player_on) return;
+    k: int = lp_finished(c, v, lw_return_c);
     if (lp_heard) rd_read(c);
-    if (k == LP_STOP) lw_stop()
+    if (k == LP_STOP) lw_stop() else if (k == LP_RESTART) {
+        // (The recording taken up again at the next chapter.)
+        lw_standing_in = false;
+        lw_return_c = -1;
+        lw_go(lp_c, 1)
+    }
 }

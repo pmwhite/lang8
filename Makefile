@@ -213,7 +213,8 @@ BIBLE_VERSIONS := bsb kjv web asv ylt
 BIBLE_DATA := $(BUILD)/bible-data
 BIBLE_VERSION_GZ := $(addprefix $(BIBLE_DATA)/,$(addsuffix .gz,$(BIBLE_VERSIONS)))
 BIBLE_FILES := $(wildcard programs/bible/data/lang/*.bin programs/bible/data/lang/*.txt) \
-	$(addprefix programs/bible/data/,xref_index.bin xrefs.bin mhcc.txt help.txt orig.txt plans/mcheyne.txt plans/chrono.txt)
+	$(addprefix programs/bible/data/,xref_index.bin xrefs.bin mhcc.txt help.txt orig.txt plans/mcheyne.txt plans/chrono.txt) \
+	$(wildcard programs/bible/data/audio/*)
 
 $(BIBLE_DATA):
 	@mkdir -p $@
