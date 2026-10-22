@@ -11,8 +11,23 @@ first new skin is Android.
 | Layer | Where | What it is |
 |---|---|---|
 | The Bible and what is kept | `core/*.l8` (text, layout, store, plans, memory, ...) | Data and rules. No platform, no screens. Unchanged by this. |
-| The app | `core/ui.l8`, `core/skin.l8` and the screens it imports (`learn_screens.l8`, `verse_study.l8`, `tray.l8`, `note.l8`, `practice.l8`), `core/prefs.l8` | Every screen as data, what each action does, the settings. No platform. |
+| The app | `core/ui.l8`, `core/skin.l8` and what it imports, `core/prefs.l8` | Every screen as data, what each action does, the settings, and the app's rules and words. No platform. |
 | A skin | `ios/`, `android/`, later `web/` | Draws screens and a few views of its own, gives core the platform (files, network, voice, sharing). |
+
+What `core/skin.l8` imports, besides the screens' own files
+(`learn_screens.l8`, `verse_study.l8`, `tray.l8`, `note.l8`):
+
+| File | What it holds |
+|---|---|
+| `practice.l8` | Practice: a session's queue, steps, levels, typing, grades, cards, Practise Reading, each word's look, the buttons, Listen and Echo's verses and clips; its screen (`SCR_PRACTICE`) |
+| `day.l8` | A plan's day: its rows, title, Mark Read, the day's end; following, stopping and marking plans; which days get reminders; its screen (`SCR_DAY`) |
+| `reading.l8` | The reader's rests: chapters read (20 s at rest, end seen), the carried ribbon moving, dwelling into the history |
+| `jump.l8`, `back.l8` | What a jump does (the way back, the history, the ribbon put down), the capsule and its return, opening a ribbon |
+| `listen.l8` | Listen's words, what comes next, listening through a day |
+| `preview.l8`, `footnote.l8` | A reference's preview and a footnote: what they show; their screens |
+| `share.l8`, `word.l8`, `keys.l8` | The share card's words; a Hebrew or Greek word's popover; the keyboard's commands |
+| `esv_client.l8` | Asking for the ESV's chapters (one at a time, the client's limit, resting, the reader's window) and taking them |
+| `words.l8` | Words no one screen owns: counts, labels, toasts, the controls' titles |
 
 A skin decides **how** things look and move (a sheet or a pushed screen, a
 switch or a checkbox, the platform's fonts and icons). Core decides **what**
@@ -110,14 +125,22 @@ Every list in the app is core's, and so are (2026-10-22) the chapter grid,
 a verse's Study (the interlinear, cross references, the commentary), a
 word's definition, the Manual's pages, the note editor, the selection
 tray and its menus (`select`, `trayact`), the title's menu (`titlemenu`,
-`menuact`) and Practice (below). These are still drawn by each skin, and
-need view models in core, written as they are reached:
+`menuact`), Practice (below), a plan's day, a reference's preview and a
+footnote. What each skin still draws itself is drawing only, from core's
+models, words and rules:
 
 1. **The reader**: chapters as laid-out runs (`ChapterLayout`,
-   `measure_chapter`), continuous; its place reported back as chapter, verse
-   and fraction. Its view model exists (`chapter` and `span` lines).
-2. The back capsule; the mini player; the day's reader (its words and Mark
-   Read are core's: `core/day.l8`); the share card; the edit menu; toasts.
+   `measure_chapter`; `chapter`, `span`, `verse`, `link` and `mark`
+   lines), continuous; its place, rests and jumps told back.
+2. The back capsule (`back` WORDS), the mini player (`core/listen.l8`'s
+   words), the share card (`core/share.l8`'s pieces), the text's own menu
+   (`core/tray.l8`'s commands), a word's popover (`core/word.l8`), toasts
+   (`toast`).
+
+The iPhone keeps richer versions of some of core's screens (its own
+Practice sheet, day's reader, preview, footnote popover, jumps), each
+drawn from core's state and saying so through `SK_NUM_OWN_VIEW` and
+`SK_NUM_OWN_JUMPS`.
 
 A reference's preview is core's (`core/preview.l8`: its verses, each
 chapter's first and last, at most 80, the words around them): a skin with
