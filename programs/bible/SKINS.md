@@ -346,7 +346,8 @@ APK's assets copied to the app's files. It draws the whole screen model
 Greek page, the Alphabet, the reading settings, the chapter grid, and
 Practice: Add Passage, then a passage's levels, a word shown, Check). A
 row's field keeps the keys while its screen is made again, and the screen
-waits for typing to rest before it is. Still to do there: selecting
-verses (the tray), the language data and what is kept (ribbons, history,
-marks, Memory, cards) as files, so that Study, Learn and the Library keep
-what is shown; then the views above.
+waits for typing to rest before it is. What is kept (highlights,
+bookmarks, notes, history, ribbons, Memory) is core's files, as the
+iPhone names them. Still to do there: selecting verses (the tray), the
+language data (and so the cards), and Reading Plans' files; then the
+views above.
