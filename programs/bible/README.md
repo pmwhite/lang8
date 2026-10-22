@@ -20,6 +20,10 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   and its host in WebAssembly, and `web/page/`, its page: the skin
   (`skin.js`), styles, boot script, fonts, site build (`build.py`) and
   local server.
+- `android/`: the Android app, a skin over core: `main.l8` (Android's
+  primitives under core's host), its Java skin, build script.
+- `tui/`: the app in a terminal, a skin over core in one native program
+  (`make bible-tui`, then `.build/smooth-bible [VERSION]` from here).
 - `data/`: the texts and the study, plan and audio data the apps read.
 - `tools/`: the scripts that made the data, `skin_text.l8` (core's wire on a
   terminal) and `spoken.l8` (the spoken text, for the aligner).
@@ -296,6 +300,13 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   the site into `.build/bible-site` (`web/page/`). The workflow's `web` job
   builds the site and uploads it as `bible-web-site`. Serve it locally with
   `node programs/bible/web/page/serve.mjs`.
+- The terminal (SKINS.md): `tui/main.l8` is the platform (data and kept
+  files, curl for the site's Worker, the loop), `tui/skin.l8` and what it
+  imports the skin, reading core's wire as any skin does. `make bible-tui`
+  builds `.build/smooth-bible`; run it from the checkout (or with
+  `SMOOTH_BIBLE_DATA` set). It keeps what is kept in
+  `~/.local/share/smooth-bible`, plays recordings with ffplay and speaks with
+  spd-say where they are installed; `SMOOTH_BIBLE_LOG=FILE` writes the wire.
 - `core/audio.l8` is recorded readings' portable part (sources, addresses,
   timings, which source a chapter is heard from, the cache's rules); `ios/audio.l8` the Voice screens, voices, the cache
   and downloads; `ios/listen.l8` both engines (AVQueuePlayer, no blocks;

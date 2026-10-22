@@ -525,6 +525,41 @@ phone's voice; a reminder at its time, opened; a card shared; Practice
 typed; a file saved. What L8 writes to standard error goes to the log
 (glue.c).
 
+## The terminal
+
+`tui/` is the app in a terminal, the third new skin, and the one in L8: one
+native program (`make bible-tui`, `.build/smooth-bible [VERSION]`) holding
+core, core's host and the skin. The platform (`tui/main.l8`) gives the host
+the data files, the kept files (`~/.local/share/smooth-bible`, the iPhone's
+names), a GET (curl, its answer a file) and the lines to the skin, which
+reads them exactly as the web's and Android's do: nothing of core's is
+called but through the wire. Its own parts:
+
+- The reader (`tui/reader.l8`): chapters laid out for the column (its width
+  core's margins; Relaxed spacing a line between paragraphs), poetry
+  indented, the book and number centered, verse numbers and footnote marks
+  raised, highlights, the selection, the verse heard and the keys' cursor
+  washed, in the theme's 24-bit colors; a chapter still waiting kept a
+  screen tall. The place and rests told as on the web.
+- Core's screens (`tui/panel.l8`): a panel beside the reader (110 columns
+  and wider) or over it, each screen's lines kept as they came and read
+  when shown; what can be done is a ring of focus items (rows, a grid's
+  squares, a page's links, tiles, swatches, segments, sort, filter,
+  scopes, the bar's buttons, those at the foot) the arrows move through;
+  Return acts, ←/→ change a setting or open a row's menu (its ⓘ, actions,
+  Delete), typing goes to the screen's field (or a field row: a note's
+  Return a new line), Esc is Back (`closed ID`), a click acts at once.
+- The tray, the title's menu (a popup), toasts, Listen's player and the
+  way back in the line below, a help (`?`).
+- Recordings through ffplay (its position read from its errors' file,
+  paused with SIGSTOP), the voice through spd-say (its English voices told
+  as `voices`), the clipboard through OSC 52 (and wl-copy or xclip), a
+  saved file in Downloads, reminders shown while it is open (a toast, the
+  terminal's own notification, its bell; R opens one).
+
+What it turns off in core: Share as Image (`sk_has_card`), Keep Screen On,
+the text size (`sk_has_text_size`: a terminal's text is its own).
+
 ## The web, the second new skin
 
 Core runs in WebAssembly (`web/main.l8`, built with `l8 wasm --async
