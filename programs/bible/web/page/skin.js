@@ -387,6 +387,9 @@ function screenLine(w) {
     case "plain":
       s.plain = true;
       break;
+    case "keys":
+      s.keys = w.num(1);
+      break;
     case "page":
       s.page = true;
       break;
@@ -1355,6 +1358,26 @@ const panel = {
     this.showFilter(s);
     this.showTools(s);
     list.replaceChildren(this.rows(s));
+    // (A screen that takes letters: a field of its own, so a phone's
+    // keyboard comes up; what is typed in it goes to core a letter at a
+    // time.)
+    let trap = $(".keytrap", p);
+    if (s.keys) {
+      if (!trap) {
+        trap = el("input", "keytrap");
+        trap.setAttribute("aria-label", "Type the first letters");
+        trap.autocapitalize = "off";
+        trap.autocomplete = "off";
+        trap.spellcheck = false;
+        trap.addEventListener("input", () => {
+          const top = this.top();
+          for (const ch of trap.value) if (top && top.keys && ch !== " ") send(`act ${top.id} ${top.keys} ${ch.codePointAt(0)} 0`);
+          trap.value = "";
+        });
+        p.appendChild(trap);
+      }
+      if (document.activeElement !== trap) trap.focus({ preventScroll: true });
+    } else if (trap) trap.remove();
     list.classList.toggle("page", !!s.page);
     p.hidden = false;
     document.body.classList.add("panel-open");
@@ -2071,7 +2094,14 @@ async function awake(ms) {
 // ---- the keyboard: core's commands ----
 addEventListener("keydown", (e) => {
   if (e.repeat || menuOpen) return;
-  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && !e.target.classList.contains("keytrap");
+  // (A screen that takes letters: each one typed, its code point, core's.)
+  const top = panel.box.hidden ? null : panel.top();
+  if (top && top.keys && !typing && !e.target.classList.contains("keytrap") && !e.ctrlKey && !e.metaKey && !e.altKey && [...e.key].length === 1 && e.key !== " ") {
+    e.preventDefault();
+    send(`act ${top.id} ${top.keys} ${e.key.codePointAt(0)} 0`);
+    return;
+  }
   const mods = (e.ctrlKey || e.metaKey ? 1 : 0) | (e.shiftKey ? 2 : 0) | (e.altKey ? 4 : 0);
   if (typing && !(mods & 1)) return;
   // (Escape over the reader: the selection let go.)
