@@ -199,7 +199,9 @@ uk_prefs_from_app() {
     set_pref("librarySort", clamp(def_int("librarySort"), 0, 1));
     set_pref_on("learnHideKnown", def_bool("learnHideKnown"));
     set_pref("learnPronGreek", def_int("learnPronGreek"));
-    set_pref("learnPronHebrew", def_int("learnPronHebrew"))
+    set_pref("learnPronHebrew", def_int("learnPronHebrew"));
+    set_pref("studySegment", clamp(def_int("studySegment"), 0, 2));
+    set_pref("interlinearOrder", clamp(def_int("interlinearOrder"), 0, 1))
 }
 
 // A setting core changed, done as the app does it (kept, and the reader
@@ -236,7 +238,7 @@ uk_app_from_prefs() {
     if (pref_on("keepScreenOn", keep_on) != keep_on) set_keep_on(!keep_on);
     if (pref_on("origAccents", lay_accents) != lay_accents) set_accents(!lay_accents);
     for name in ["librarySegment", "librarySort", "learnHideKnown", "learnPronGreek",
-        "learnPronHebrew"]
+        "learnPronHebrew", "studySegment", "interlinearOrder"]
         if (pref(name, 0) != def_int(name)) set_def_int(name, pref(name, 0));
     gl: int = clamp(pref("origGlosses", 0), 0, 3);
     if (gl > 0 && gl != clamp(def_int("origGlosses"), 0, 3)) set_gloss_mode(gl - 1);
@@ -268,7 +270,7 @@ uk_sync() {
 }
 
 // ---- the lists: a slot each for the screens shown ----
-UK_SLOTS: int = 8;
+UK_SLOTS: int = 12;
 
 uk_tables: []int = new int[UK_SLOTS](0);
 
@@ -365,6 +367,7 @@ uk_cell(t: int, path: int): int {
     if (row.custom == CUSTOM_PASSAGE) return uk_row_extras(uk_passage_cell(t, i),
         k, i);
     if (row.kind == UI_TEXT) return uk_text_cell(t, k, i);
+    if (row.kind == UI_TILES) return uk_tiles_cell(t, k, i);
     if (row.lead.n > 0) return uk_row_extras(uk_letter_cell(t, i), k, i);
     if (row.cells_n > 0) return uk_grid_cell(t, k, i);
     if (row.kind == UI_FIELD) return uk_field_cell(k, i);
@@ -681,10 +684,15 @@ uk_rich_text(
             if (st == RUN_GREEK || st == RUN_GREEK_FAINT) f = original_font(true,
                 size, size + 2.0f64) else if (st == RUN_HEBREW || st == RUN_HEBREW_FAINT) f = original_font(false,
                 size, size + 2.0f64) else if (st == RUN_TRANSLIT) f = italic_sans(size) else if (st == RUN_CODE) f = mono(size) else if (st == RUN_STRONG) f = sans(size,
-                0.4f64) else if (st == RUN_SMALL) f = sans(13.0f64, 0.0f64) else if (st == RUN_READING) f = body(scaled(16.0f64));
+                0.4f64) else if (st == RUN_SMALL) f = sans(13.0f64, 0.0f64) else if (st == RUN_READING) f = body(scaled(16.0f64)) else if (st == RUN_SCRIPTURE) f = body(em * 0.9f64);
             if (st == RUN_ITALIC) f = italic_sans(size);
+            if (st == RUN_SCRIPTURE) c = c_ink;
             if (st == RUN_ACCENT) c = c_accent else if (st == RUN_PLAIN || st == RUN_GREEK || st == RUN_HEBREW || st == RUN_STRONG || st == RUN_READING || st == RUN_ITALIC) c = c_ink else if (st == RUN_FAINT || st == RUN_TRANSLIT || st == RUN_SMALL || st == RUN_GREEK_FAINT || st == RUN_HEBREW_FAINT) c = c_faint;
-            append(s, msg2(text, sel("substringWithRange:"), from, e - from), f, c)
+            at: int = msg(s, sel("length"));
+            part: int = msg2(text, sel("substringWithRange:"), from, e - from);
+            append(s, part, f, c);
+            // (The Bible's words: the divine name in small capitals.)
+            if (st == RUN_SCRIPTURE) caps_into(s, at, part, true, em * 0.9f64)
         }
         from = e
     }
@@ -927,6 +935,255 @@ uk_tool(_self: int, _cmd: int, item: int): int {
     0
 }
 
+// ---- the interlinear's tiles (UI_TILES) ----
+// A row of tiles: each its lines (its English, the original, its
+// transliteration, its code; what it hides drawn clear, its space kept),
+// in lines as wide as the list (at most 680, centred), right to left for
+// the Hebrew's order.
+uk_tw: []f64 = new f64[300](0.0f64);
+
+uk_th: []f64 = new f64[300](0.0f64);
+
+uk_tv: []int = new int[300](0);
+
+uk_tlines: []int = new int[4](0);
+
+uk_tiles_cell(t: int, k: int, i: int): int {
+    row: UiRow = ui_rows[i];
+    cell: int = fresh_cell(t);
+    msg1(cell, sel("setBackgroundColor:"), msg(cls("UIColor"), sel("clearColor")));
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    msg_rect(cell, sel("setSeparatorInset:"), 0.0f64, 10000.0f64, 0.0f64, 0.0f64);
+    TW: f64 = view_width(t);
+    W: f64 = if (TW > 680.0f64) 680.0f64 else TW;
+    n: int = if (row.cells_n > len(uk_tw)) len(uk_tw) else row.cells_n;
+    for c in 0..n uk_tv[c] = uk_tile_view(k, i, c, W);
+    wrap_tiles(uk_tw, n, W - 28.0f64, 6.0f64);
+    rtl: bool = row.value == 1;
+    box: int = msg(make("UIView"), sel("autorelease"));
+    y: f64 = 6.0f64;
+    for l in 0..line_count {
+        a: int = line_first[l];
+        b: int = if (l + 1 < line_count) line_first[l + 1] else n;
+        lh: f64 = 0.0f64;
+        for x in a..b
+            if (uk_th[x] > lh) lh = uk_th[x];
+        x0: f64 = if (rtl) W - 14.0f64 else 14.0f64;
+        for x in a..b {
+            if (rtl) x0 = x0 - uk_tw[x];
+            msg_rect(uk_tv[x], sel("setFrame:"), x0, y, uk_tw[x], uk_th[x]);
+            msg1(box, sel("addSubview:"), uk_tv[x]);
+            if (rtl) x0 = x0 - 6.0f64 else x0 = x0 + uk_tw[x] + 6.0f64
+        }
+        y = y + lh + 14.0f64
+    }
+    content: int = msg(cell, sel("contentView"));
+    msg1(box, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    msg1(content, sel("addSubview:"), box);
+    pin_by(box, content, "topAnchor", 0.0f64);
+    pin_by(box, content, "bottomAnchor", 0.0f64);
+    pin_to(box, "leadingAnchor", content, "leadingAnchor", (TW - W) / 2.0f64);
+    pin_size(box, "widthAnchor", W);
+    pin_size(box, "heightAnchor", y);
+    uk_tiles_w[k] = TW;
+    msg1(cell, sel("setAccessibilityElements:"), msg(box, sel("subviews")));
+    cell
+}
+
+// The width each slot's tiles were laid out for: laid out again (the
+// list reloaded) when its list's width changes.
+uk_tiles_w: []f64 = new f64[UK_SLOTS](0.0f64);
+
+uk_layout(self: int, cmd: int): int {
+    super0(self, uk_class, cmd);
+    for k in 0..UK_SLOTS {
+        if (uk_vcs[k] == self && uk_vcs[k] != 0 && uk_tiles_w[k] > 0.0f64) {
+            w: f64 = view_width(uk_tables[k]);
+            if (w > 0.0f64 && w != uk_tiles_w[k]) {
+                uk_tiles_w[k] = w;
+                msg(uk_tables[k], sel("reloadData"))
+            }
+        }
+    }
+    0
+}
+
+// Cell c of row i: its tile, its size in uk_tw, uk_th.
+uk_tile_view(
+    k: int,
+    i: int,
+    c: int,
+    W: f64
+): int {
+    cl: UiCell = ui_cells[ui_rows[i].cells + c];
+    n: int = 0;
+    if ((cl.flags & UI_TILE_ADDED) != 0) {
+        uk_tlines[0] = label_of(attributed(uk_text(cl.sub), italic_sans(15.0f64),
+            c_faint));
+        n = 1
+    } else {
+        uk_tlines[0] = label_of(if ((cl.flags & UI_TILE_FAINT_SUB) != 0) attributed(uk_text(cl.sub),
+            italic_sans(12.0f64), c_faint) else attributed(uk_text(cl.sub), sans(15.0f64,
+            0.0f64), c_ink));
+        uk_tlines[1] = label_of(attributed(uk_text(cl.text), original_font(cl.script != RUN_HEBREW,
+            21.0f64, 25.0f64), c_ink));
+        uk_tlines[2] = label_of(attributed(uk_text(cl.tr), italic_sans(12.0f64), c_faint));
+        uk_tlines[3] = label_of(attributed(uk_text(cl.count), mono(11.0f64), c_faint));
+        if ((cl.flags & UI_TILE_HIDE_SUB) != 0) msg_set_f(uk_tlines[0], sel("setAlpha:"),
+            0.0f64);
+        if ((cl.flags & UI_TILE_HIDE_TR) != 0) msg_set_f(uk_tlines[2], sel("setAlpha:"),
+            0.0f64);
+        n = 4
+    }
+    // (As wide as its widest line, never wider than a row: its lines wrap.)
+    wide: f64 = 0.0f64;
+    for x in 0..n {
+        label_size(uk_tlines[x], 2000.0f64);
+        if (hfa[0] > wide) wide = hfa[0]
+    }
+    most: f64 = W - 28.0f64 - 16.0f64;
+    if (most > 40.0f64 && wide > most) wide = most;
+    wide = (wide + 0.99f64) as int as f64;
+    v: int = msg(make(if (cl.action != 0) "UIControl" else "UIView"), sel("autorelease"));
+    y: f64 = 6.0f64;
+    for x in 0..n {
+        msg1(uk_tlines[x], sel("setNumberOfLines:"), 0);
+        label_size(uk_tlines[x], wide);
+        lh: f64 = hfa[1];
+        msg_rect(uk_tlines[x], sel("setFrame:"), 8.0f64, y, wide, lh);
+        msg1(v, sel("addSubview:"), uk_tlines[x]);
+        y = y + lh + 2.0f64
+    }
+    msg_set_f(msg(v, sel("layer")), sel("setCornerRadius:"), 10.0f64);
+    if ((cl.flags & UI_TILE_HELPED) != 0) tile_underline(v, uk_tlines[0]);
+    uk_tw[c] = wide + 16.0f64;
+    uk_th[c] = y + 4.0f64;
+    if (cl.action != 0) {
+        msg1(v, sel("setTag:"), (k * 4096 + i) * 512 + c + 1);
+        msg3(v, sel("addTarget:action:forControlEvents:"), app_obj, sel("coreTile:"),
+            64);
+        hover(v);
+        msg1(v, sel("setIsAccessibilityElement:"), 1);
+        msg1(v, sel("setAccessibilityLabel:"), uk_text(cl.label));
+        msg1(v, sel("setAccessibilityTraits:"), objc_const("UIAccessibilityTraitButton"));
+        hidden: bool = (cl.flags & (UI_TILE_HIDE_SUB | UI_TILE_HIDE_TR)) != 0;
+        msg1(v, sel("setAccessibilityHint:"), nsstring(if (hidden) "Shows its meaning" else "Shows word study"));
+        m: int = 0;
+        for j in 0..cl.actions_n {
+            if (m < len(one)) {
+                a: UiAction = ui_actions[cl.actions + j];
+                one[m] = msg(msg3(msg(cls("UIAccessibilityCustomAction"), sel("alloc")),
+                    sel("initWithName:target:selector:"), uk_text(a.title), app_obj,
+                    sel("coreTileAction:")), sel("autorelease"));
+                objc_setAssociatedObject(one[m], ints_address(uk_act_key), nsnumber_int(((k * 4096 + i) * 512 + c) * 8 + j),
+                    1);
+                m = m + 1
+            }
+        }
+        msg1(v, sel("setAccessibilityCustomActions:"), if (m > 0) nsarray(one, m) else 0)
+    } else {
+        msg1(v, sel("setIsAccessibilityElement:"), 1);
+        msg1(v, sel("setAccessibilityLabel:"), uk_text(cl.sub))
+    }
+    v
+}
+
+uk_tile_tapped(_self: int, _cmd: int, v: int): int {
+    n: int = msg(v, sel("tag")) - 1;
+    if (n >= 0) uk_tile_act(n, -1);
+    0
+}
+
+uk_tile_action(_self: int, _cmd: int, a: int): int {
+    nn: int = objc_getAssociatedObject(a, ints_address(uk_act_key));
+    if (nn == 0) return 0;
+    n: int = msg(nn, sel("longValue"));
+    uk_tile_act(n / 8, n % 8);
+    1
+}
+
+// Tile c of row i of slot k ((k * 4096 + i) * 512 + c): its tap (j -1),
+// or its action j.
+uk_tile_act(n: int, j: int) {
+    k: int = n / 512 / 4096;
+    i: int = n / 512 % 4096;
+    c: int = n % 512;
+    if (k >= UK_SLOTS || !uk_ensure(k) || i >= ui_rows_n || c >= ui_rows[i].cells_n) return;
+    cl: UiCell = ui_cells[ui_rows[i].cells + c];
+    action: int = if (j >= 0 && j < cl.actions_n) ui_actions[cl.actions + j].action else cl.action;
+    uk_sync();
+    uk_nav = msg(uk_vcs[k], sel("navigationController"));
+    sk_act(uk_ids[k], action, cl.arg, 0);
+    uk_effects()
+}
+
+// Segments at a screen's foot chosen (the interlinear's order): the
+// tool's action, its item's argument the value.
+uk_tool_segment(_self: int, _cmd: int, seg: int): int {
+    n: int = msg(seg, sel("tag"));
+    k: int = n / 16;
+    j: int = n % 16;
+    if (k < 0 || k >= UK_SLOTS || !uk_ensure(k) || j >= ui_tools_n) return 0;
+    if (!uk_menu_item(ui_tools[j].menu, msg(seg, sel("selectedSegmentIndex")))) return 0;
+    action: int = ui_tools[j].action;
+    arg: int = ui_tools[j].arg;
+    v: int = uk_mi_arg;
+    uk_sync();
+    uk_nav = msg(uk_vcs[k], sel("navigationController"));
+    sk_act(uk_ids[k], action, arg, v);
+    uk_effects();
+    0
+}
+
+// Slot k's segments as the bar's title (the Study sheet's): made once, then
+// their choice kept as core says.
+uk_title_segments(k: int, item: int) {
+    seg: int = msg(item, sel("titleView"));
+    if (seg == 0 || !responds(seg, "setSelectedSegmentIndex:")) {
+        n: int = 0;
+        while (n < len(one) && uk_menu_title(ui_segments, n)) {
+            one[n] = nsstring_at(bytes_address(ui_pool) + uk_mi_b, uk_mi_e - uk_mi_b);
+            n = n + 1
+        }
+        seg = msg(msg1(msg(cls("UISegmentedControl"), sel("alloc")), sel("initWithItems:"),
+            nsarray(one, n)), sel("autorelease"));
+        msg3(seg, sel("addTarget:action:forControlEvents:"), app_obj, sel("coreSegment:"),
+            4096);
+        msg_rect(seg, sel("setFrame:"), 0.0f64, 0.0f64, 300.0f64, 32.0f64);
+        msg1(item, sel("setTitleView:"), seg)
+    }
+    msg1(seg, sel("setTag:"), k);
+    msg1(seg, sel("setSelectedSegmentIndex:"), ui_segment)
+}
+
+// Title idx of words split by | (its place in uk_mi_b, uk_mi_e), or false.
+uk_menu_title(t: UiText, idx: int): bool {
+    x: int = t.at;
+    end: int = t.at + t.n;
+    if (t.n == 0) return false;
+    for _j in 0..idx {
+        while (x < end && ui_pool[x] as int != 124) x = x + 1;
+        if (x >= end) return false;
+        x = x + 1
+    }
+    uk_mi_b = x;
+    while (x < end && ui_pool[x] as int != 124) x = x + 1;
+    uk_mi_e = x;
+    true
+}
+
+// The slots of the panel's screens (those in nav) let go, and core's.
+uk_panel_gone(nav: int) {
+    for k in 0..UK_SLOTS {
+        if (uk_vcs[k] != 0 && msg(uk_vcs[k], sel("navigationController")) == nav && nav != 0) uk_free(k)
+    }
+    sk_close_group(1);
+    uk_stale = true
+}
+
+// The panel's screen made (core's panel effect), its slot.
+uk_panel_slot: int = -1;
+
 // ---- a page's paragraphs (UI_TEXT) ----
 // A paragraph: its words selectable in a text view of its own (not
 // scrolling), set by its runs (a heading in the Headline face; a symbol
@@ -1002,7 +1259,9 @@ uk_text_cell(t: int, k: int, i: int): int {
 // link marked (its index plus one, k_page_link).
 uk_page_text(i: int): int {
     row: UiRow = ui_rows[i];
-    font: int = msg1(cls("UIFont"), sel("preferredFontForTextStyle:"), objc_const(if (row.heading) "UIFontTextStyleHeadline" else "UIFontTextStyleBody"));
+    // (The commentary's in the reader's face, a little smaller.)
+    font: int = if (row.scripture) body(em * 0.95f64) else msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
+        objc_const(if (row.heading) "UIFontTextStyleHeadline" else "UIFontTextStyleBody"));
     text: int = uk_text(row.title);
     s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
     if (text == 0) return s;
@@ -1018,7 +1277,7 @@ uk_page_text(i: int): int {
                 uk_symbol_text(part, font, if (st == RUN_SYMBOL_BOLD) 6 else 4)) else msg1(s,
                 sel("appendAttributedString:"), uk_rich_text(part, 0, 0, font, c_ink));
             if (st != RUN_SYMBOL && st != RUN_SYMBOL_BOLD) {
-                uk_run_look(st, font);
+                uk_run_look(st, font, row.scripture);
                 msg4(s, sel("addAttribute:value:range:"), k_font, uk_rl_font, at,
                     e - from);
                 msg4(s, sel("addAttribute:value:range:"), k_color, uk_rl_color, at,
@@ -1042,12 +1301,13 @@ uk_rl_font: int = 0;
 
 uk_rl_color: int = 0;
 
-uk_run_look(st: int, font: int) {
+uk_run_look(st: int, font: int, reading: bool) {
     size: f64 = msg_f(font, sel("pointSize"));
     uk_rl_font = font;
     uk_rl_color = c_ink;
-    if (st == RUN_STRONG) uk_rl_font = sans(size, 0.4f64) else if (st == RUN_ITALIC) uk_rl_font = italic_sans(size);
-    if (st == RUN_ACCENT) uk_rl_color = c_accent else if (st == RUN_FAINT) uk_rl_color = c_faint
+    if (st == RUN_STRONG) uk_rl_font = sans(size, 0.4f64) else if (st == RUN_ITALIC) uk_rl_font = (if (reading) italic(size) else italic_sans(size)) else if (st == RUN_SMALL) uk_rl_font = sans(13.0f64,
+        0.3f64);
+    if (st == RUN_ACCENT) uk_rl_color = c_accent else if (st == RUN_FAINT || st == RUN_SMALL) uk_rl_color = c_faint
 }
 
 // A symbol (its name an NSString) as an attachment: at the text's size and
@@ -1520,12 +1780,34 @@ uk_tool_menu_chosen(_self: int, _cmd: int, command: int): int {
 
 // Core's screen of kind acted on, as one of its buttons does (the demos').
 uk_act_kind(kind: int, action: int, arg: int) {
+    uk_act_value(kind, action, arg, 0)
+}
+
+uk_act_value(
+    kind: int,
+    action: int,
+    arg: int,
+    value: int
+) {
     k: int = uk_slot_of(uk_table_of(kind));
     if (k < 0) return;
     uk_sync();
     uk_nav = msg(uk_vcs[k], sel("navigationController"));
-    sk_act(uk_ids[k], action, arg, 0);
+    sk_act(uk_ids[k], action, arg, value);
     uk_effects()
+}
+
+// The argument of the first row (or link) of core's screen of kind doing
+// action, or 0 (the demos').
+uk_first_arg(kind: int, action: int): int {
+    k: int = uk_slot_of(uk_table_of(kind));
+    if (k < 0 || !uk_ensure(k)) return 0;
+    for i in 0..ui_rows_n {
+        if (ui_rows[i].action == action) return ui_rows[i].arg;
+        for l in 0..ui_rows[i].links_n
+            if (ui_links[ui_rows[i].links + l].action == action) return ui_links[ui_rows[i].links + l].arg
+    }
+    0
 }
 
 // Every list of core's shown laid out again (the text's size changed).
@@ -1561,8 +1843,26 @@ uk_toolbar(k: int, vc: int, fade: bool) {
             tool: UiTool = ui_tools[j];
             if (tool.place == place && n < len(uk_bar_items)) {
                 item: int = 0;
-                if (tool.title.n > 0) item = msg4(msg(cls("UIBarButtonItem"), sel("alloc")),
-                    sel("initWithTitle:style:target:action:"), uk_text(tool.title),
+                if (tool.style == UI_TOOL_SEGMENTS) {
+                    // (Segments: the interlinear's order.)
+                    m: int = 0;
+                    chosen: int = 0;
+                    while (m < 8 && uk_menu_item(tool.menu, m)) {
+                        if (uk_mi_arg == tool.arg) chosen = m;
+                        one[m] = nsstring_at(bytes_address(ui_pool) + uk_mi_b, uk_mi_e - uk_mi_b);
+                        m = m + 1
+                    }
+                    seg: int = msg(msg1(msg(cls("UISegmentedControl"), sel("alloc")),
+                        sel("initWithItems:"), nsarray(one, m)), sel("autorelease"));
+                    msg1(seg, sel("setSelectedSegmentIndex:"), chosen);
+                    msg1(seg, sel("setTag:"), k * 16 + j);
+                    msg3(seg, sel("addTarget:action:forControlEvents:"), app_obj,
+                        sel("coreToolSegment:"), 4096);
+                    msg_rect(seg, sel("setFrame:"), 0.0f64, 0.0f64, 240.0f64, 32.0f64);
+                    item = msg1(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithCustomView:"),
+                        seg)
+                } else if (tool.title.n > 0) item = msg4(msg(cls("UIBarButtonItem"),
+                    sel("alloc")), sel("initWithTitle:style:target:action:"), uk_text(tool.title),
                     if (tool.style == UI_TOOL_PROMINENT) 2 else 0, app_obj, sel("coreTool:")) else {
                     fbuf_n = 0;
                     fput_bytes(ui_pool, tool.icon.at, tool.icon.at + tool.icon.n);
@@ -2032,7 +2332,7 @@ uk_hit_cell(t: int, i: int): int {
     msg1(config, sel("setAttributedText:"), a);
     msg1(config, sel("setSecondaryAttributedText:"), uk_hit_text(i));
     // (A verse in its own script whole: Verses You Can Read's.)
-    msg1(detail_props(config), sel("setNumberOfLines:"), if (row.runs_n > 0) 0 else 4);
+    msg1(detail_props(config), sel("setNumberOfLines:"), if (row.runs_n > 0) 0 else if (row.lines > 0) row.lines else 4);
     msg1(detail_props(config), sel("setLineBreakMode:"), 4);
     msg_set_f(config, sel("setTextToSecondaryTextVerticalPadding:"), 3.0f64);
     msg_rect(config, sel("setDirectionalLayoutMargins:"), 12.0f64, 20.0f64, 12.0f64,
@@ -2507,7 +2807,7 @@ uk_dress(k: int, fade: bool) {
         }
         msg1(t, sel("setTableHeaderView:"), uk_hero_view(W))
     }
-    if (ui_intro.n > 0 && ui_segments.n == 0) {
+    if (ui_intro.n > 0 && (ui_segments.n == 0 || ui_segments_title)) {
         W: f64 = view_width(t);
         if (W < 1.0f64) {
             nav: int = if (uk_nav != 0) uk_nav else presented();
@@ -2523,7 +2823,8 @@ uk_dress(k: int, fade: bool) {
     if (ui_tools_n > 0) uk_toolbar(k, vc, fade);
     // (Its segments and filter as its list's header; its sort, at the
     // top left; its field's placeholder, the segment's.)
-    if (ui_segments.n > 0) uk_header_box(k, fade);
+    if (ui_segments.n > 0 && !ui_segments_title) uk_header_box(k, fade);
+    if (ui_segments.n > 0 && ui_segments_title) uk_title_segments(k, msg(vc, sel("navigationItem")));
     if (ui_sorts.n > 0) uk_sort_button(k);
     if (uk_searches[k] != 0) msg1(msg(uk_searches[k], sel("searchBar")), sel("setPlaceholder:"),
         uk_text(ui_search));
@@ -2940,6 +3241,7 @@ uk_kind_of(id: int): int {
 }
 
 uk_free(k: int) {
+    uk_tiles_w[k] = 0.0f64;
     uk_searches[k] = 0;
     release(uk_boxes[k]);
     uk_boxes[k] = 0;
@@ -3053,7 +3355,7 @@ uk_effects() {
             uk_sync();
             sk_update_all()
         } else if (e.word == "definition") open_definition() else if (e.word == "add_to_note") _n: int = add_to_note(0,
-            0, 0) else if (e.word == "interlinear") push_interlinear(e.a) else if (e.word == "learned") {
+            0, 0) else if (e.word == "learned") {
             cards_changed();
             toast_symbol(nsstring(if (e.a == 0) "Added to Greek Words" else "Added to Hebrew Words"),
                 "plus", 1.6f64);
@@ -3121,7 +3423,8 @@ uk_effects() {
             url: int = msg1(cls("NSURL"), sel("URLWithString:"), objc_const("UIApplicationOpenSettingsURLString"));
             msg3(app, sel("openURL:options:completionHandler:"), url, nsdictionary(keys,
                 values, 0), 0)
-        } else if (e.word == "plan_today") day_open_today_of(e.a) else if (e.word == "plan_details") plan_row_details(e.a) else if (e.word == "plan_stop") {
+        } else if (e.word == "preview") push_preview(e.a) else if (e.word == "study_moved") study_verse_moved(e.a,
+            e.b) else if (e.word == "panel") uk_panel_slot = uk_make(e.a) else if (e.word == "plan_today") day_open_today_of(e.a) else if (e.word == "plan_details") plan_row_details(e.a) else if (e.word == "plan_stop") {
             detail_plan = e.a;
             _s: int = plan_stop(0, 0, 0)
         } else if (e.word == "update" && uk_slot_of_id(e.a) == uk_del_k && uk_del_k >= 0 && uk_deleted(uk_del_k)) {
@@ -3338,16 +3641,23 @@ add_skin_methods(app: int) {
     add_method1(app, sel("coreToolMenu:"), &uk_tool_menu_chosen, "v@:@");
     add_method1(app, sel("coreGridCell:"), &uk_grid_tapped, "v@:@");
     add_method1(app, sel("corePageTapped:"), &uk_page_tapped, "v@:@");
+    add_method1(app, sel("coreTile:"), &uk_tile_tapped, "v@:@");
+    add_method1(app, sel("coreTileAction:"), &uk_tile_action, "B@:@");
+    add_method1(app, sel("coreToolSegment:"), &uk_tool_segment, "v@:@");
     add_method1(app, sel("corePageLinkAction:"), &uk_page_link_action, "B@:@")
 }
 
 // The sheets gone: their lists let go, and core's screens with them.
 uk_gone() {
-    for k in 0..UK_SLOTS uk_free(k);
+    // (Not the panel's: it stays as sheets come and go.)
+    for k in 0..UK_SLOTS {
+        i: int = sk_find(uk_ids[k]);
+        if (i < 0 || sk_groups[i] == 0) uk_free(k)
+    }
     uk_timer = stop_timer(uk_timer);
     uk_pending = -1;
     // (What Search searched for kept first among the recent searches.)
-    sk_closing(0);
+    sk_close_group(0);
     uk_stale = true
 }
 
@@ -3356,6 +3666,7 @@ uk_screens() {
         0);
     add_method1(uk_class, sel("viewWillAppear:"), &uk_will_appear, "v@:B");
     add_method1(uk_class, sel("viewWillDisappear:"), &uk_will_go, "v@:B");
+    add_method0(uk_class, sel("viewDidLayoutSubviews"), &uk_layout, "v@:");
     objc_registerClassPair(uk_class);
     uk_entry = table_screens_n;
     for k in 0..UK_SLOTS {

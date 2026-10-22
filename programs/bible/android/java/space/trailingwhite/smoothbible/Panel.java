@@ -408,6 +408,21 @@ final class Panel extends FrameLayout {
       if (place > 0) foot.addView(new View(getContext()), new LinearLayout.LayoutParams(0, 1, 1));
       for (Screen.Tool t : s.tools) {
         if (t.place != place) continue;
+        if (t.style == 4) {
+          // (Segments: the interlinear's order; the item's ARG the value.)
+          String[] items = t.menu.split("\\|");
+          for (String it : items) {
+            int colon = it.indexOf(':');
+            String v = colon < 0 ? "0" : it.substring(0, colon);
+            TextView w = choiceWord(colon < 0 ? it : it.substring(colon + 1), v.equals(
+                String.valueOf(t.arg)));
+            w.setPadding(dp(8), dp(12), dp(8), dp(12));
+            w.setOnClickListener(x -> Native.send("act " + s.id + " " + t.action + " " + t.arg + " "
+                + v));
+            foot.addView(w);
+          }
+          continue;
+        }
         TextView b = new TextView(getContext());
         b.setText(!t.title.isEmpty() ? t.title : glyph(t.icon, t.label));
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, t.title.isEmpty() ? 22 : 17);
@@ -734,6 +749,7 @@ final class Panel extends FrameLayout {
       Context c = getContext();
       if (r.kind.equals("field")) return fieldRow(r);
       if (r.kind.equals("text")) return textRow(r);
+      if (r.kind.equals("tiles")) return tilesRow(r);
       if (!r.cells.isEmpty()) return gridRow(r);
       if (r.custom == CUSTOM_SWATCHES) return swatches(r);
       LinearLayout line = new LinearLayout(c);
@@ -982,6 +998,66 @@ final class Panel extends FrameLayout {
       return line;
     }
 
+    // The interlinear's words: a tile each (its English, the original, its
+    // transliteration, its code; what it hides kept clear), wrapped in lines
+    // (right to left for the Hebrew's order); a tap does its action, a long
+    // press offers its actions.
+    private View tilesRow(Screen.Row r) {
+      Context c = getContext();
+      Flow flow = new Flow(c, dp(6), dp(14), r.value == 1);
+      flow.setPadding(dp(14), dp(6), dp(14), dp(6));
+      for (Screen.Cell cl : r.cells) {
+        LinearLayout t = new LinearLayout(c);
+        t.setOrientation(LinearLayout.VERTICAL);
+        t.setGravity(Gravity.CENTER_HORIZONTAL);
+        t.setPadding(dp(8), dp(6), dp(8), dp(6));
+        boolean added = (cl.flags & Screen.TILE_ADDED) != 0;
+        TextView sub = tileLine(cl.sub, added || (cl.flags & Screen.TILE_FAINT_SUB) != 0 ? 12 : 15,
+            added || (cl.flags & Screen.TILE_FAINT_SUB) != 0, look.ink);
+        if ((cl.flags & Screen.TILE_HIDE_SUB) != 0) sub.setAlpha(0);
+        if ((cl.flags & Screen.TILE_HELPED) != 0) sub.setPaintFlags(sub.getPaintFlags()
+            | android.graphics.Paint.UNDERLINE_TEXT_FLAG);
+        t.addView(sub);
+        if (!added) {
+          TextView o = tileLine(cl.text, 21, false, look.ink);
+          o.setTypeface(Typeface.SERIF);
+          t.addView(o);
+          TextView tr = tileLine(cl.tr, 12, true, look.faint);
+          if ((cl.flags & Screen.TILE_HIDE_TR) != 0) tr.setAlpha(0);
+          t.addView(tr);
+          TextView code = tileLine(cl.count, 11, false, look.faint);
+          code.setTypeface(Typeface.MONOSPACE);
+          t.addView(code);
+          Screen s = screen;
+          t.setContentDescription(cl.label);
+          t.setOnClickListener(v -> Native.send("act " + s.id + " " + cl.action + " " + cl.arg + " 0"));
+          if (!cl.actions.isEmpty()) t.setOnLongClickListener(v -> {
+            PopupMenu m = new PopupMenu(c, v);
+            for (int j = 0; j < cl.actions.size(); j++) m.getMenu().add(0, j, j, cl.actions.get(j).title);
+            m.setOnMenuItemClickListener(item -> {
+              Native.send("act " + s.id + " " + cl.actions.get(item.getItemId()).action + " "
+                  + cl.arg + " 0");
+              return true;
+            });
+            m.show();
+            return true;
+          });
+        }
+        flow.addView(t);
+      }
+      return flow;
+    }
+
+    private TextView tileLine(String words, int sp, boolean italic, int color) {
+      TextView l = new TextView(getContext());
+      l.setText(words);
+      l.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+      if (italic) l.setTypeface(Typeface.DEFAULT, Typeface.ITALIC);
+      l.setTextColor(italic ? look.faint : color);
+      l.setGravity(Gravity.CENTER);
+      return l;
+    }
+
     // A page's paragraph: its words by their runs, selectable, its links
     // doing their actions; a heading larger and bold, with room above it.
     private View textRow(Screen.Row r) {
@@ -991,9 +1067,10 @@ final class Panel extends FrameLayout {
       android.text.SpannableStringBuilder s = new android.text.SpannableStringBuilder(words);
       Screen sc = screen;
       for (int j = 0; j + 3 < r.links.length; j += 4) {
-        int b = Math.max(0, Math.min(r.links[j], s.length()));
-        int e = Math.max(b, Math.min(r.links[j + 1], s.length()));
-        int action = r.links[j + 2], arg = r.links[j + 3];
+        int b = (int) Math.max(0, Math.min(r.links[j], s.length()));
+        int e = (int) Math.max(b, Math.min(r.links[j + 1], s.length()));
+        int action = (int) r.links[j + 2];
+        long arg = r.links[j + 3];
         s.setSpan(new android.text.style.ClickableSpan() {
           @Override
           public void onClick(View v) {

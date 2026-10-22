@@ -37,6 +37,15 @@ final class Wire {
     }
   }
 
+  // A field's number as a long (a reference: chapters and verses packed).
+  long fieldLong(int i) {
+    try {
+      return Long.parseLong(field(i));
+    } catch (NumberFormatException e) {
+      return 0;
+    }
+  }
+
   static String unescape(String s) {
     if (s.indexOf('\\') < 0) return s;
     StringBuilder b = new StringBuilder(s.length());

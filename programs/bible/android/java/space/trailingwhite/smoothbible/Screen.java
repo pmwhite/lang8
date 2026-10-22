@@ -103,19 +103,29 @@ final class Screen {
   // A grid's cell: its words in a script, what it does, its count, what
   // TalkBack says, and its tap.
   static final class Cell {
-    int action, arg, script;
-    String text = "", sub = "", count = "", label = "";
+    int action, script, flags;
+    long arg;
+    String text = "", sub = "", count = "", label = "", tr = "";
+    final ArrayList<Action> actions = new ArrayList<>();
   }
+
+  // A tile's flags (core/ui.l8's UI_TILE_): its English hidden, its
+  // transliteration hidden, the helped mark, its English faint, no original.
+  static final int TILE_HIDE_SUB = 1, TILE_HIDE_TR = 2, TILE_HELPED = 4, TILE_FAINT_SUB = 8,
+      TILE_ADDED = 16;
 
   static Cell cell(Wire w) {
     Cell c = new Cell();
     c.action = w.fieldNum(1);
-    c.arg = w.fieldNum(2);
+    c.arg = w.fieldLong(2);
     c.script = w.fieldNum(3);
     c.text = w.field(4);
     c.sub = w.field(5);
     c.count = w.field(6);
     c.label = w.field(7);
+    c.tr = w.field(8);
+    c.flags = w.fieldNum(9);
+    actions(w.field(10), c.actions);
     return c;
   }
 
@@ -123,13 +133,14 @@ final class Screen {
     String kind = "", title = "", detail = "", icon = "", acc = "", flags = "", options = "",
         label = "", trailing = "", hint = "", suffix = "", iconColor = "", note = "", lead = "",
         side = "", sideNote = "";
-    int action, arg, value, lo, hi, deleteAction, custom, lines, circle, circleAction, infoAction,
+    long arg;
+    int action, value, lo, hi, deleteAction, custom, lines, circle, circleAction, infoAction,
         titleLines, fieldKind, leadStyle;
     // Places in the detail to stress: pairs of UTF-16 offsets; the runs of
     // its detail, title and side words (END, STYLE pairs).
     int[] marks = new int[0], runs = new int[0], truns = new int[0], sruns = new int[0];
     // A page's paragraph's links: B, E (UTF-16), ACTION, ARG each.
-    int[] links = new int[0];
+    long[] links = new long[0];
     final ArrayList<Action> actions = new ArrayList<>();
     final ArrayList<Cell> cells = new ArrayList<>();
 
@@ -146,7 +157,7 @@ final class Screen {
     Row r = new Row();
     r.kind = w.field(1);
     r.action = w.fieldNum(2);
-    r.arg = w.fieldNum(3);
+    r.arg = w.fieldLong(3);
     r.title = w.field(4);
     r.detail = w.field(5);
     r.icon = w.field(6);
@@ -169,21 +180,7 @@ final class Screen {
     r.iconColor = w.field(23);
     r.note = w.field(24);
     r.infoAction = w.fieldNum(25);
-    String acts = w.field(26);
-    if (!acts.isEmpty()) {
-      for (String a : acts.split("\\|", -1)) {
-        int colon = a.indexOf(':');
-        if (colon < 0) continue;
-        Action x = new Action();
-        try {
-          x.action = Integer.parseInt(a.substring(0, colon));
-        } catch (NumberFormatException e) {
-          continue;
-        }
-        x.title = a.substring(colon + 1);
-        r.actions.add(x);
-      }
-    }
+    actions(w.field(26), r.actions);
     r.runs = runs(w.field(27));
     r.truns = runs(w.field(28));
     r.titleLines = w.fieldNum(29);
@@ -198,20 +195,37 @@ final class Screen {
     String ls = w.field(37);
     if (!ls.isEmpty()) {
       String[] parts = ls.split("\\|");
-      r.links = new int[parts.length * 4];
+      r.links = new long[parts.length * 4];
       for (int i = 0; i < parts.length; i++) {
         String[] q = parts[i].split(":");
         for (int j = 0; j < 4 && j < q.length; j++) {
           try {
-            r.links[i * 4 + j] = Integer.parseInt(q[j]);
+            r.links[i * 4 + j] = Long.parseLong(q[j]);
           } catch (NumberFormatException e) {
-            r.links = new int[0];
+            r.links = new long[0];
             return r;
           }
         }
       }
     }
     return r;
+  }
+
+  // Actions: ACTION:TITLE split by |.
+  static void actions(String acts, ArrayList<Action> into) {
+    if (acts.isEmpty()) return;
+    for (String a : acts.split("\\|", -1)) {
+      int colon = a.indexOf(':');
+      if (colon < 0) continue;
+      Action x = new Action();
+      try {
+        x.action = Integer.parseInt(a.substring(0, colon));
+      } catch (NumberFormatException e) {
+        continue;
+      }
+      x.title = a.substring(colon + 1);
+      into.add(x);
+    }
   }
 
   // Words split by |; none from nothing.
