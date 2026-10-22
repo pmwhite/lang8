@@ -235,6 +235,14 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   reader and the day's reader each own one (`active_rendering()` is the
   visible one; table callbacks pick theirs by table). Compare, previews,
   Memory and the web's `html.l8` keep their own layouts.
+- **Skins** (SKINS.md, owner 2026-10-21): the app moving into core so each
+  platform only draws it. `core/ui.l8` is a screen as data and its wire;
+  `core/skin.l8` the app's state, screens and actions (Go To, Versions,
+  Settings and the reader so far); `core/prefs.l8` the settings;
+  `core/look.l8` the sizes and themes' colors. `android/` is the first skin
+  (Java framework widgets, L8 on a thread of its own:
+  `android/build.sh OUT.apk`); `tools/skin_text.l8` the same wire on a
+  terminal.
 - `ios/app.l8` is the app: the reader and its classes; `ios/look.l8` the themes,
   fonts and styles; `ios/store.l8` what is kept; `ios/select.l8` selection,
   the tray, the edit menu and jumps; `ios/sheets.l8` the sheets;

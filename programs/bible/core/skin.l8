@@ -1,0 +1,526 @@
+tag bible;
+
+use_tag std;
+
+// The app for a skin (SKINS.md): its state, its screens and what their
+// actions do, and the reader's chapters, as the wire's lines into ui_out.
+// A skin's host (in L8, on its platform) loads the texts and the settings,
+// passes each line the skin sends to sk_line, and sends ui_out's lines on.
+// What only the host can do (read a version's file, keep the settings) it
+// gives here as functions: sk_host.
+import "ui.l8";
+
+import "prefs.l8";
+
+import "look.l8";
+
+import "chapter_ranges.l8";
+
+// ---- what the host does for the app ----
+type SkinHost = {
+    // Version t loaded (text_load), if it can be: whether it is.
+    load_text: fn(t: int) noregion: bool;
+    // The settings kept (prefs_format into fbuf, then kept).
+    save_prefs: fn()
+}
+
+sk_no_load(_t: int) noregion: bool {
+    false
+}
+
+sk_no_save() { }
+
+sk_host: SkinHost = SkinHost { load_text: &sk_no_load, save_prefs: &sk_no_save };
+
+// ---- the screens, and their actions ----
+SCR_GOTO: int = 1;
+
+SCR_CHAPTERS: int = 2;
+
+SCR_VERSIONS: int = 3;
+
+SCR_SETTINGS: int = 4;
+
+ACT_BOOK: int = 1;
+
+ACT_CHAPTER: int = 2;
+
+ACT_VERSION: int = 3;
+
+ACT_SIZE: int = 4;
+
+ACT_THEME: int = 5;
+
+ACT_SPACING: int = 6;
+
+ACT_MARGINS: int = 7;
+
+ACT_SHOW: int = 8;
+
+// The versions offered: those a skin bundles (not the ESV, nor the
+// original's, yet).
+sk_versions: []int = [0, 1, 2, 3, 4];
+
+// The screens shown, bottom to top: their ids, kinds and arguments.
+SK_SCREENS_MOST: int = 16;
+
+sk_ids: []int = new int[SK_SCREENS_MOST](0);
+
+sk_kinds: []int = new int[SK_SCREENS_MOST](0);
+
+sk_args: []int = new int[SK_SCREENS_MOST](0);
+
+sk_n: int = 0;
+
+sk_next_id: int = 1;
+
+// The reader's place: its top (chapter, verse, and thousandths of an em
+// into the verse), as the skin says it is.
+sk_c: int = 0;
+
+sk_v: int = 0;
+
+sk_frac: int = 0;
+
+// The skin's window, for what depends on it.
+sk_width: int = 0;
+
+sk_height: int = 0;
+
+sk_density: int = 100;
+
+// ---- settings into the layout ----
+// The Show settings, in show_titles' order (the iPhone's).
+sk_show_names: []str = ["showVerseNumbers", "showHeadings", "showNotes", "redLetter",
+    "verseLines"];
+
+sk_show_titles: []str = ["Verse Numbers", "Section Headings", "Footnote Marks", "Words of Jesus in Red",
+    "One Verse per Line"];
+
+sk_show_default: []bool = [true, true, true, false, false];
+
+sk_show(i: int): bool {
+    pref_on(sk_show_names[i], sk_show_default[i])
+}
+
+// The layout's flags from the settings.
+sk_apply_prefs() {
+    lay_verse_numbers = sk_show(0);
+    lay_headings = sk_show(1);
+    lay_notes = sk_show(2);
+    lay_verse_lines = sk_show(4)
+}
+
+// The look, as a line, worked out so that a skin needs none of look.l8's
+// tables: the text's size and its line spacing (thousandths of the
+// default), the margins (points), whether the theme is dark, whether the
+// words of Jesus are red, then the theme's colors as hex: the page, the
+// ink, headings, faint text, the accent, rules.
+sk_write_look() {
+    size: int = clamp_index(pref("sizeStep", 2), len(size_steps));
+    spacing: int = clamp_index(pref("spacing", 1), len(spacings));
+    margin: int = clamp_index(pref("margins", 1), len(margins));
+    th: int = theme_now(clamp_index(pref("theme", 0), len(t_bg)), sk_dark);
+    ui_str("look ");
+    ui_int((size_steps[size] * 1000.0f64) as int);
+    ui_byte(32);
+    ui_int((spacings[spacing] * 1000.0f64) as int);
+    ui_byte(32);
+    ui_int(margins[margin] as int);
+    ui_byte(32);
+    ui_int(if (theme_dark(th, sk_dark)) 1 else 0);
+    ui_byte(32);
+    ui_int(if (sk_show(3)) 1 else 0);
+    for color in [t_bg[th], t_ink[th], t_heading[th], t_faint[th], t_accent[th], t_rule[th]] {
+        ui_byte(32);
+        ui_str(color)
+    }
+    ui_byte(10)
+}
+
+clamp_index(i: int, n: int): int {
+    if (i < 0) 0 else if (i >= n) n - 1 else i
+}
+
+// Whether the system is in its dark appearance (for Auto), as the skin
+// says.
+sk_dark: bool = false;
+
+// ---- the reader ----
+sk_layout: ChapterLayout = chapter_layout();
+
+sk_ranges: ChapterRanges = chapter_ranges();
+
+// Chapter c of the version read, as lines: its text, its runs (UTF-16
+// places, as Java and JavaScript count), its verses, end.
+sk_write_chapter(c: int) {
+    if (c < 0 || c >= chapters) return;
+    sk_apply_prefs();
+    ctx: *ChapterLayout = &sk_layout;
+    ctx.lay_verse_numbers = lay_verse_numbers;
+    ctx.lay_headings = lay_headings;
+    ctx.lay_notes = lay_notes;
+    ctx.lay_verse_lines = lay_verse_lines;
+    ctx.lay_accents = lay_accents;
+    ctx.source = text_source(text_cur);
+    layout_chapter_from(ctx.source, ctx, c);
+    measure_chapter(ctx, &sk_ranges, c);
+    u: []int = sk_ranges.u16_at;
+    ui_str("chapter ");
+    ui_int(c);
+    ui_byte(9);
+    ui_field_bytes(ctx.out, 0, ctx.out_n);
+    ui_byte(10);
+    p: int = 0;
+    for r in 0..ctx.runs {
+        e: int = ctx.run_end[r];
+        if (e > p) {
+            ui_str("span ");
+            ui_int(u[p]);
+            ui_byte(32);
+            ui_int(u[e]);
+            ui_byte(32);
+            ui_int(ctx.run_style[r]);
+            ui_byte(32);
+            ui_int(ctx.run_para[r]);
+            ui_byte(10)
+        }
+        p = e
+    }
+    for i in 0..ctx.verse_count {
+        if (ctx.verse_begin[i] >= 0) {
+            ui_str("verse ");
+            ui_int(ctx.verse_num[i]);
+            ui_byte(32);
+            ui_int(u[ctx.verse_begin[i]]);
+            ui_byte(32);
+            ui_int(u[ctx.verse_end[i]]);
+            ui_byte(10)
+        }
+    }
+    ui_str("end\n")
+}
+
+// The bar's title (the chapter at the top) and the version read.
+sk_write_title() {
+    fbuf_n = 0;
+    fput_title(sk_c);
+    ui_line_fbuf("title");
+    fbuf_n = 0;
+    fput_str(text_abbrs[text_cur]);
+    ui_line_fbuf("version")
+}
+
+// The reader to be made again (a setting or the version changed), at its
+// place.
+sk_relayout() {
+    sk_write_look();
+    ui_effect("relayout", -1, -1);
+    ui_effect("jump", sk_c, sk_v)
+}
+
+// ---- screens ----
+sk_top(): int {
+    sk_n - 1
+}
+
+sk_find(id: int): int {
+    for i in 0..sk_n
+        if (sk_ids[i] == id) return i;
+    -1
+}
+
+// Screen i (of those shown) built, and written.
+sk_build(i: int) {
+    k: int = sk_kinds[i];
+    a: int = sk_args[i];
+    if (k == SCR_GOTO) sk_build_goto(sk_ids[i]) else if (k == SCR_CHAPTERS) sk_build_chapters(sk_ids[i],
+        a) else if (k == SCR_VERSIONS) sk_build_versions(sk_ids[i]) else if (k == SCR_SETTINGS) sk_build_settings(sk_ids[i]);
+    ui_write()
+}
+
+// A screen of kind and arg shown: pushed over the one on top, or presented
+// (over the reader, the others closed).
+sk_open(kind: int, arg: int, push: bool) {
+    if (!push) sk_n = 0;
+    if (sk_n >= SK_SCREENS_MOST) return;
+    sk_ids[sk_n] = sk_next_id;
+    sk_kinds[sk_n] = kind;
+    sk_args[sk_n] = arg;
+    sk_next_id = sk_next_id + 1;
+    sk_n = sk_n + 1;
+    sk_build(sk_top());
+    ui_effect(if (push) "push" else "present", sk_ids[sk_top()], -1)
+}
+
+// Every screen shown made again (a setting changed what they say).
+sk_update_all() {
+    for i in 0..sk_n {
+        sk_build(i);
+        ui_effect("update", sk_ids[i], -1)
+    }
+}
+
+sk_dismiss() {
+    sk_n = 0;
+    ui_effect("dismiss", -1, -1)
+}
+
+// Go To: the books, by testament, the one read checked.
+sk_build_goto(id: int) {
+    ui_begin(id, SCR_GOTO, 0, "Go To");
+    source: TextSource = text_source(text_cur);
+    for b in 0..books {
+        if (b == 0) ui_section("Old Testament", "");
+        if (b == 39) ui_section("New Testament", "");
+        ui_row(UI_ITEM, ACT_BOOK, b);
+        sk_title_book(&source, b);
+        fbuf_n = 0;
+        fput_int(book_count[b]);
+        fput_str(if (book_count[b] == 1) " chapter" else " chapters");
+        ui_set_detail_fbuf();
+        ui_set_value_detail();
+        ui_set_acc(if (sk_c >= 0 && sk_c < chapters && ch_book[sk_c] == b) ACC_CHECK else ACC_MORE)
+    }
+}
+
+sk_title_book(source: *TextSource, b: int) {
+    fbuf_n = 0;
+    fput_bytes(source.data, source_book_name_start(source, b), source_book_name_end(source,
+        b));
+    ui_set_title_fbuf()
+}
+
+// A book's chapters: each its number and verses.
+sk_build_chapters(id: int, b: int) {
+    source: TextSource = text_source(text_cur);
+    ui_begin(id, SCR_CHAPTERS, b, "");
+    fbuf_n = 0;
+    fput_bytes(source.data, source_book_name_start(&source, b), source_book_name_end(&source,
+        b));
+    ui_set_screen_title_fbuf();
+    for n in 1..book_count[b] + 1 {
+        c: int = book_first[b] + n - 1;
+        ui_row(UI_ITEM, ACT_CHAPTER, c);
+        fbuf_n = 0;
+        fput_str(if (source_book_is(&source, b, "PSA")) "Psalm " else "Chapter ");
+        fput_int(n);
+        ui_set_title_fbuf();
+        fbuf_n = 0;
+        fput_int(ch_verses[c]);
+        fput_str(if (ch_verses[c] == 1) " verse" else " verses");
+        ui_set_detail_fbuf();
+        ui_set_value_detail();
+        if (c == sk_c) ui_set_acc(ACC_CHECK)
+    }
+}
+
+// The versions: each its name, the one read checked.
+sk_build_versions(id: int) {
+    ui_begin(id, SCR_VERSIONS, 0, "Versions");
+    ui_section("", "");
+    for i in 0..len(sk_versions) {
+        t: int = sk_versions[i];
+        ui_row(UI_ITEM, ACT_VERSION, t);
+        ui_set_title(text_names[t]);
+        ui_set_detail(text_abbrs[t]);
+        ui_set_value_detail();
+        if (t == text_cur) ui_set_acc(ACC_CHECK)
+    }
+}
+
+// The reading settings: the text's size, its theme, its layout, and what
+// is shown.
+sk_build_settings(id: int) {
+    ui_begin(id, SCR_SETTINGS, 0, "Settings");
+    ui_section("Text Size", "");
+    ui_row(UI_SLIDER, ACT_SIZE, 0);
+    ui_set_title("Text Size");
+    ui_set_range(0, len(size_steps) - 1, pref("sizeStep", 2));
+    ui_section("Theme", "");
+    ui_row(UI_CHOICE, ACT_THEME, 0);
+    ui_set_title("Theme");
+    ui_set_options("Auto|Paper|White|Sepia|Night|Black", pref("theme", 0));
+    ui_section("Layout", "");
+    ui_row(UI_CHOICE, ACT_SPACING, 0);
+    ui_set_title("Line Spacing");
+    ui_set_options("Compact|Normal|Relaxed", pref("spacing", 1));
+    ui_row(UI_CHOICE, ACT_MARGINS, 0);
+    ui_set_title("Margins");
+    ui_set_options("Narrow|Normal|Wide", pref("margins", 1));
+    ui_section("Show", "");
+    for i in 0..len(sk_show_names) {
+        ui_row(UI_TOGGLE, ACT_SHOW, i);
+        ui_set_title(sk_show_titles[i]);
+        ui_set_on(sk_show(i))
+    }
+}
+
+// ---- actions ----
+sk_save() {
+    f: fn() = sk_host.save_prefs;
+    f()
+}
+
+sk_act(
+    id: int,
+    action: int,
+    arg: int,
+    value: int
+) noregion {
+    if (sk_find(id) < 0) return;
+    if (action == ACT_BOOK) {
+        sk_open(SCR_CHAPTERS, arg, true);
+        return
+    }
+    if (action == ACT_CHAPTER) {
+        sk_dismiss();
+        sk_goto(arg, 0);
+        return
+    }
+    if (action == ACT_VERSION) {
+        sk_use_version(arg);
+        return
+    }
+    if (action == ACT_SIZE) set_pref("sizeStep", value) else if (action == ACT_THEME) set_pref("theme",
+        value) else if (action == ACT_SPACING) set_pref("spacing", value) else if (action == ACT_MARGINS) set_pref("margins",
+        value) else if (action == ACT_SHOW) set_pref_on(sk_show_names[arg], value != 0) else return;
+    sk_save();
+    sk_relayout();
+    sk_update_all()
+}
+
+// The reader at chapter c, verse v.
+sk_goto(c: int, v: int) {
+    if (c < 0 || c >= chapters) return;
+    sk_c = c;
+    sk_v = v;
+    sk_frac = 0;
+    ui_effect("jump", c, v);
+    sk_write_title();
+    sk_keep_place();
+    sk_save()
+}
+
+sk_keep_place() {
+    set_pref("chapter", sk_c);
+    set_pref("verse", sk_v);
+    set_pref("verseOffset", sk_frac)
+}
+
+// Version t read, if it is loaded or can be.
+sk_use_version(t: int) noregion {
+    if (t != text_cur && !tx_ready[t]) {
+        load: fn(t: int) noregion: bool = sk_host.load_text;
+        if (!load(t)) return
+    }
+    text_use(t);
+    set_pref("version", t);
+    sk_save();
+    ui_effect("reader", chapters, -1);
+    sk_relayout();
+    sk_write_title();
+    sk_update_all()
+}
+
+// ---- the skin's lines ----
+// The app begun: the settings (prefs_parse'd by the host) applied, the
+// version read and the place kept, the look, the reader and its place.
+sk_start() noregion {
+    t: int = pref("version", 0);
+    if (t != text_cur && t >= 0 && t < TEXT_PIN) {
+        load: fn(t: int) noregion: bool = sk_host.load_text;
+        if (tx_ready[t] || load(t)) text_use(t)
+    }
+    sk_apply_prefs();
+    sk_c = pref("chapter", book_first[42]);
+    if (sk_c < 0 || sk_c >= chapters) sk_c = 0;
+    sk_v = pref("verse", 0);
+    sk_frac = pref("verseOffset", 0);
+    sk_write_look();
+    ui_effect("reader", chapters, -1);
+    ui_effect("jump", sk_c, sk_v);
+    sk_write_title()
+}
+
+// A field's number at b in line (to e): where it ends, in sk_num_end.
+sk_num_end: int = 0;
+
+sk_num(line: []i8, b: int, e: int): int {
+    i: int = b;
+    while (i < e && line[i] as int == 32) i = i + 1;
+    neg: bool = i < e && line[i] as int == 45;
+    if (neg) i = i + 1;
+    n: int = 0;
+    while (i < e && line[i] as int >= 48 && line[i] as int <= 57) {
+        n = n * 10 + line[i] as int - 48;
+        i = i + 1
+    }
+    sk_num_end = i;
+    if (neg) -n else n
+}
+
+sk_word_is(
+    line: []i8,
+    b: int,
+    e: int,
+    word: str
+): bool {
+    if (e - b < len(word)) return false;
+    for i in 0..len(word)
+        if (line[b + i] != word[i]) return false;
+    e - b == len(word) || line[b + len(word)] as int == 32
+}
+
+// One line the skin sent (bytes b to e of line, without its newline).
+sk_line(line: []i8, b: int, e: int) noregion {
+    if (sk_word_is(line, b, e, "start")) {
+        sk_width = sk_num(line, b + 5, e);
+        sk_height = sk_num(line, sk_num_end, e);
+        sk_density = sk_num(line, sk_num_end, e);
+        sk_dark = sk_num(line, sk_num_end, e) != 0;
+        sk_start()
+    } else if (sk_word_is(line, b, e, "want")) sk_write_chapter(sk_num(line, b + 4,
+        e)) else if (sk_word_is(line, b, e, "place")) {
+        c: int = sk_num(line, b + 5, e);
+        v: int = sk_num(line, sk_num_end, e);
+        f: int = sk_num(line, sk_num_end, e);
+        if (c >= 0 && c < chapters) {
+            was: int = sk_c;
+            sk_c = c;
+            sk_v = v;
+            sk_frac = f;
+            sk_keep_place();
+            if (c != was) sk_write_title()
+        }
+    } else if (sk_word_is(line, b, e, "act")) {
+        id: int = sk_num(line, b + 3, e);
+        action: int = sk_num(line, sk_num_end, e);
+        arg: int = sk_num(line, sk_num_end, e);
+        value: int = sk_num(line, sk_num_end, e);
+        sk_act(id, action, arg, value)
+    } else if (sk_word_is(line, b, e, "tap")) {
+        if (sk_word_is(line, b + 4, e, "goto")) sk_open(SCR_GOTO, 0, false) else if (sk_word_is(line,
+            b + 4, e, "versions")) sk_open(SCR_VERSIONS, 0, false) else if (sk_word_is(line,
+            b + 4, e, "settings")) sk_open(SCR_SETTINGS, 0, false)
+    } else if (sk_word_is(line, b, e, "closed")) {
+        i: int = sk_find(sk_num(line, b + 6, e));
+        if (i >= 0) sk_n = i
+    } else if (sk_word_is(line, b, e, "dark")) {
+        sk_dark = sk_num(line, b + 4, e) != 0;
+        sk_write_look();
+        ui_effect("relayout", -1, -1);
+        ui_effect("jump", sk_c, sk_v)
+    } else if (sk_word_is(line, b, e, "away")) sk_save()
+}
+
+// Each line of bytes b to e (newline-ended), in turn.
+sk_lines(buf: []i8, b: int, e: int) noregion {
+    p: int = b;
+    for i in b..e {
+        if (buf[i] as int == 10) {
+            sk_line(buf, p, i);
+            p = i + 1
+        }
+    }
+}

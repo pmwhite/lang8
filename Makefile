@@ -59,7 +59,8 @@ all:
 
 check: $(OK)/stage1-tests l8 $(BUILD)/block-game $(BUILD)/skate $(BUILD)/race $(BUILD)/cad $(BUILD)/recipes \
 	$(BUILD)/profile-explorer \
-	$(BUILD)/better $(BUILD)/better-ios.s $(BUILD)/ios-check.s $(BUILD)/better-ios-sim $(BUILD)/better-android.s $(OK)/bible-web $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim
+	$(BUILD)/better $(BUILD)/better-ios.s $(BUILD)/ios-check.s $(BUILD)/better-ios-sim $(BUILD)/better-android.s $(OK)/bible-web $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim \
+	$(BUILD)/bible-android.s $(BUILD)/skin-text
 
 # ---- compiler stages ----
 
@@ -178,6 +179,15 @@ $(BUILD)/better-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 # tools/android/build.sh: see programs/better/README.md).
 $(BUILD)/better-android.s: l8c3 $(PROGRAMS) runtime-arm64-android.s stdlib/write.arm64-android.s | $(OK)
 	@$(STEP) 'better for Android' sh -c './l8c3 arm64 --target android programs/better/android.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+# Smooth Bible as an Android skin (programs/bible/SKINS.md): its L8, as
+# arm64 assembly (built into an APK by programs/bible/android/build.sh),
+# and the text skin, which speaks the same wire on a terminal.
+$(BUILD)/bible-android.s: l8c3 $(PROGRAMS) runtime-arm64-android.s stdlib/write.arm64-android.s | $(OK)
+	@$(STEP) 'bible for Android' sh -c './l8c3 arm64 --target android programs/bible/android/main.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+$(BUILD)/skin-text: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'bible text skin' ./l8c3 build programs/bible/tools/skin_text.l8 -o $@
 
 $(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 	@$(STEP) 'iOS check' sh -c './l8c3 arm64 --target ios programs/ios/check.l8 -o $@.tmp && mv -f $@.tmp $@'
