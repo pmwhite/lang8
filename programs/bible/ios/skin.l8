@@ -65,6 +65,11 @@ uk_words(what: int) {
     } else if (what == SK_WORDS_PASSAGE_STATE) {
         fbuf_n = 0;
         fput_mm_state(sk_words_arg)
+    } else if (what == SK_WORDS_FORM) {
+        fbuf_n = 0;
+        frm_put_form(sk_words_arg);
+        fput_str(" \Â\· ");
+        frm_put_parsing(sk_words_arg)
     } else if (what == SK_WORDS_APP_VERSION) {
         n: int = nsstring_into(app_version_line(), uk_query_buf);
         fput_bytes(uk_query_buf, 0, n)
@@ -87,6 +92,11 @@ uk_num(what: int, a: int): int {
         return if (tx_ready[a]) 1 else 0
     }
     if (what == SK_NUM_ESV_STATE) return if (esv_held(a)) 0 else if (uk_esv_state >= ESV_OFFLINE) 2 else 1;
+    if (what == SK_NUM_LANG) {
+        lang_load();
+        ensure_learn_lang();
+        return if (lang_ready) 1 else 0
+    }
     if (what == SK_NUM_QUOTABLE) {
         ensure_quotable();
         return 1
@@ -336,9 +346,13 @@ uk_footer(t: int, s: int): int {
 
 // The row at path (of the screen just ensured), or -1.
 uk_row_at(path: int): int {
-    s: int = msg(path, sel("section"));
-    r: int = msg(path, sel("row"));
-    if (s >= ui_sections_n || r >= ui_sections[s].n) -1 else ui_sections[s].first + r
+    uk_row_of(msg(path, sel("section")), msg(path, sel("row")))
+}
+
+// Row r of section s (made now, a lazy section's), or -1.
+uk_row_of(s: int, r: int): int {
+    if (s < 0 || s >= ui_sections_n || r < 0 || r >= ui_sections[s].n) return -1;
+    if (ui_sections[s].lazy) ui_lazy_row(s, r) else ui_sections[s].first + r
 }
 
 // A row as the app's lists draw it: its words (a subtitle under, or a value
@@ -412,6 +426,33 @@ uk_cell(t: int, path: int): int {
         msg1(msg(config, sel("imageProperties")), sel("setTintColor:"), color)
     }
     if (row.lines > 0) msg1(detail_props(config), sel("setNumberOfLines:"), row.lines);
+    // (Rich words: a title or detail set by its runs; a note under the
+    // detail, small and faint.)
+    title_font: int = msg1(cls("UIFont"), sel("preferredFontForTextStyle:"), objc_const("UIFontTextStyleBody"));
+    if (row.truns_n > 0) msg1(config, sel("setAttributedText:"), uk_rich_text(uk_text(row.title),
+        row.truns, row.truns_n, title_font, c_ink));
+    if (row.title_lines > 0) {
+        msg1(text_props(config), sel("setNumberOfLines:"), row.title_lines);
+        msg1(text_props(config), sel("setLineBreakMode:"), 4)
+    }
+    if (row.runs_n > 0 && !row.scripture) msg1(config, sel("setSecondaryAttributedText:"),
+        uk_rich_text(uk_text(row.detail), row.runs, row.runs_n, msg1(cls("UIFont"),
+        sel("preferredFontForTextStyle:"), objc_const(if (kind == 1) "UIFontTextStyleBody" else "UIFontTextStyleSubheadline")),
+        c_faint));
+    if (row.note.n > 0) {
+        a: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+        if (row.detail.n > 0) {
+            d: int = msg(config, sel("secondaryAttributedText"));
+            if (d != 0) msg1(a, sel("appendAttributedString:"), d) else append(a,
+                uk_text(row.detail), msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
+                objc_const("UIFontTextStyleBody")), c_ink);
+            append(a, nsstring("\n"), sans(6.0f64, 0.0f64), c_faint)
+        }
+        append(a, uk_text(row.note), msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
+            objc_const("UIFontTextStyleFootnote")), c_faint);
+        msg1(config, sel("setSecondaryAttributedText:"), a);
+        msg1(detail_props(config), sel("setNumberOfLines:"), 0)
+    }
     msg1(cell, sel("setContentConfiguration:"), config);
     msg1(cell, sel("setTintColor:"), c_accent);
     acc: int = if (row.acc == ACC_CHECK) 3 else if (row.acc == ACC_MORE) 1 else if (row.acc == ACC_INFO) 4 else 0;
@@ -432,8 +473,11 @@ uk_cell(t: int, path: int): int {
     }
     // (A book downloading: its ring, which can stop it, a ring a list.)
     if (downloading) msg1(cell, sel("setAccessoryView:"), dl_ring(row.arg, if (uk_kind_of(uk_ids[k]) == SCR_DOWNLOADS) 0 else 1));
-    // (Words at the row's end, as a time is: a label of their own.)
-    if (row.trailing.n > 0) {
+    // (Words at the row's end, as a time is: a label of their own; with a
+    // disclosure, a count beside it, a word known checked.)
+    if (row.trailing.n > 0 && row.acc == ACC_MORE) msg1(cell, sel("setAccessoryView:"),
+        if (row.on) value_check_disclosure(uk_text(row.trailing)) else value_disclosure(uk_text(row.trailing),
+        c_faint)) else if (row.trailing.n > 0) {
         l: int = msg(make("UILabel"), sel("autorelease"));
         msg1(l, sel("setText:"), uk_text(row.trailing));
         msg1(l, sel("setFont:"), msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
@@ -540,7 +584,7 @@ uk_icon_color(row: UiRow): int {
 // supplied words italic, a verse's number small and faint, a verse not in
 // the version faint and italic; or, waiting, its words faint by a
 // spinner.
-uk_verses_cell(t: int, i: int): int {
+uk_verses_cell(_t: int, i: int): int {
     row: UiRow = ui_rows[i];
     cell: int = msg(msg2(msg(cls("UITableViewCell"), sel("alloc")), sel("initWithStyle:reuseIdentifier:"),
         0, 0), sel("autorelease"));
@@ -611,6 +655,84 @@ uk_runs_text(i: int, size: f64): int {
         from = e
     }
     s
+}
+
+// Words set by runs (core/ui.l8's RUN_ and the reader's STYLE_), from a
+// face and color.
+uk_rich_text(
+    text: int,
+    at: int,
+    n: int,
+    font: int,
+    color: int
+): int {
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    if (text == 0) return s;
+    size: f64 = msg_f(font, sel("pointSize"));
+    from: int = 0;
+    for x in 0..n {
+        e: int = ui_runs[at + x * 2];
+        st: int = ui_runs[at + x * 2 + 1];
+        if (e > from) {
+            f: int = font;
+            c: int = color;
+            if (st == RUN_GREEK || st == RUN_GREEK_FAINT) f = original_font(true,
+                size, size + 2.0f64) else if (st == RUN_HEBREW || st == RUN_HEBREW_FAINT) f = original_font(false,
+                size, size + 2.0f64) else if (st == RUN_TRANSLIT) f = italic_sans(size) else if (st == RUN_CODE) f = mono(size) else if (st == RUN_STRONG) f = sans(size,
+                0.4f64) else if (st == RUN_SMALL) f = sans(13.0f64, 0.0f64) else if (st == RUN_READING) f = body(scaled(16.0f64));
+            if (st == RUN_PLAIN || st == RUN_GREEK || st == RUN_HEBREW || st == RUN_STRONG || st == RUN_READING) c = c_ink else if (st == RUN_FAINT || st == RUN_TRANSLIT || st == RUN_SMALL || st == RUN_GREEK_FAINT || st == RUN_HEBREW_FAINT) c = c_faint;
+            append(s, msg2(text, sel("substringWithRange:"), from, e - from), f, c)
+        }
+        from = e
+    }
+    // (Anything after the last run, in the face given.)
+    total: int = msg(text, sel("length"));
+    if (total > from) append(s, msg2(text, sel("substringWithRange:"), from, total - from),
+        font, color);
+    s
+}
+
+// A word as the screen's heading: the word large in its script (made
+// smaller to fit, rather than cut off), its transliteration, and its line.
+uk_hero_view(W: f64): int {
+    v: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, W, 100.0f64), sel("autorelease"));
+    hero: int = label_of(attributed(uk_text(ui_hero), original_font(ui_hero_script == RUN_GREEK,
+        34.0f64, 40.0f64), c_ink));
+    tr: int = label_of(attributed(uk_text(ui_hero_sub), italic_sans(17.0f64), c_faint));
+    line: int = label_of(uk_rich_text(uk_text(ui_hero_line), ui_hero_runs, ui_hero_runs_n,
+        sans(15.0f64, 0.0f64), msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.8f64)));
+    msg1(hero, sel("setAdjustsFontSizeToFitWidth:"), 1);
+    msg_set_f(hero, sel("setMinimumScaleFactor:"), 0.3f64);
+    msg1(tr, sel("setNumberOfLines:"), 0);
+    msg1(line, sel("setNumberOfLines:"), 0);
+    y: f64 = 24.0f64;
+    for x in [hero, tr, line] {
+        label_size(x, W - 40.0f64);
+        h: f64 = hfa[1];
+        msg_rect(x, sel("setFrame:"), 20.0f64, y, W - 40.0f64, h);
+        msg1(v, sel("addSubview:"), x);
+        y = y + h + (if (x == hero) 4.0f64 else 8.0f64)
+    }
+    msg_rect(v, sel("setFrame:"), 0.0f64, 0.0f64, W, y - 8.0f64 + 20.0f64);
+    v
+}
+
+// The short titles of the sections of core's list t, for its index (none,
+// unless it has them).
+uk_index_titles(t: int): int {
+    k: int = uk_slot_of(t);
+    if (k < 0 || !uk_ensure(k) || ui_index.n == 0) return 0;
+    a: int = msg(make("NSMutableArray"), sel("autorelease"));
+    p: int = ui_index.at;
+    e: int = ui_index.at + ui_index.n;
+    for x in ui_index.at..e + 1 {
+        if (x == e || ui_pool[x] as int == 124) {
+            msg1(a, sel("addObject:"), nsstring_at(bytes_address(ui_pool) + p, x - p));
+            p = x + 1
+        }
+    }
+    a
 }
 
 // A mark (the Library's): its reference (15 points, grown with the text
@@ -774,8 +896,8 @@ uk_circle_action(_self: int, _cmd: int, a: int): int {
 uk_intro_view(W: f64, text: int): int {
     v: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
         0.0f64, 0.0f64, W, 100.0f64), sel("autorelease"));
-    l: int = label_of(attributed(text, sans(scaled(15.0f64), 0.0f64), msg_set_f(c_ink,
-        sel("colorWithAlphaComponent:"), 0.8f64)));
+    l: int = label_of(uk_rich_text(text, ui_intro_runs, ui_intro_runs_n, sans(scaled(15.0f64),
+        0.0f64), msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.8f64)));
     msg1(l, sel("setNumberOfLines:"), 0);
     msg1(l, sel("setTextAlignment:"), 4);
     label_size(l, W - 40.0f64);
@@ -910,6 +1032,16 @@ uk_header_box(k: int, fade: bool) {
         if (fade) fade_layer(msg(f, sel("layer")), 0.15f64);
         uk_fboxes[k] = f;
         h = UK_SEG_ROW + 48.0f64
+    }
+    if (ui_intro.n > 0) {
+        f: int = uk_intro_view(if (W < 1.0f64) 375.0f64 else W, uk_text(ui_intro));
+        l8_msg_hfa(hfa, f, sel("frame"), 0, 0, 0);
+        fh: f64 = hfa[3] - 14.0f64;
+        msg_rect(f, sel("setFrame:"), 0.0f64, h - 14.0f64, W, fh);
+        msg1(f, sel("setAutoresizingMask:"), 2);
+        msg1(uk_boxes[k], sel("addSubview:"), f);
+        if (uk_fboxes[k] == 0) uk_fboxes[k] = f;
+        h = h - 14.0f64 + fh
     }
     msg_rect(uk_boxes[k], sel("setFrame:"), 0.0f64, 0.0f64, W, h);
     msg1(t, sel("setTableHeaderView:"), uk_boxes[k])
@@ -1255,10 +1387,11 @@ uk_hit_cell(t: int, i: int): int {
     values[0] = sans(13.0f64, 0.3f64);
     keys[1] = k_color;
     values[1] = c_accent;
-    a: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
-        uk_text(row.title), nsdictionary(keys, values, 2));
+    a: int = msg(msg2(msg(cls("NSMutableAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        uk_text(row.title), nsdictionary(keys, values, 2)), sel("autorelease"));
+    // (" Â· not translated", faint.)
+    if (row.suffix.n > 0) append(a, uk_text(row.suffix), sans(13.0f64, 0.0f64), c_faint);
     msg1(config, sel("setAttributedText:"), a);
-    release(a);
     msg1(config, sel("setSecondaryAttributedText:"), uk_hit_text(i));
     msg1(detail_props(config), sel("setNumberOfLines:"), 4);
     msg1(detail_props(config), sel("setLineBreakMode:"), 4);
@@ -1501,8 +1634,9 @@ uk_picked(t: int, s: int, r: int) {
         mm_remind_picked(r);
         return
     }
-    if (r >= ui_sections[s].n) return;
-    row: UiRow = ui_rows[ui_sections[s].first + r];
+    ri: int = uk_row_of(s, r);
+    if (ri < 0) return;
+    row: UiRow = ui_rows[ri];
     if (row.disabled || row.kind != UI_ITEM && row.kind != UI_BUTTON) return;
     uk_sync();
     uk_nav = msg(uk_vcs[k], sel("navigationController"));
@@ -1736,7 +1870,15 @@ uk_dress(k: int, fade: bool) {
     } else uk_empty(vc, t, 0, 0, 0);
     // (Its words above the first section, as wide as the list is, or will
     // be.)
-    if (ui_intro.n > 0) {
+    if (ui_hero.n > 0) {
+        W: f64 = view_width(t);
+        if (W < 1.0f64) {
+            nav: int = if (uk_nav != 0) uk_nav else presented();
+            W = (if (nav != 0) view_width(msg(nav, sel("view"))) else sheet_content_w(700.0f64))
+        }
+        msg1(t, sel("setTableHeaderView:"), uk_hero_view(W))
+    }
+    if (ui_intro.n > 0 && ui_segments.n == 0) {
         W: f64 = view_width(t);
         if (W < 1.0f64) {
             nav: int = if (uk_nav != 0) uk_nav else presented();
@@ -1925,6 +2067,12 @@ uk_tap(kind: int, action: int, arg: int) {
     }
 }
 
+// Whether t is one of core's plain lists (its cells on the page's color).
+uk_plain_table(t: int): bool {
+    k: int = uk_slot_of(t);
+    k >= 0 && table_screens[uk_entry + k].look == TableLook.Plain
+}
+
 // The registry's entry of slot 0 (the slots' are in order).
 uk_entry: int = 0;
 
@@ -1996,6 +2144,23 @@ uk_split(t: UiText, into: []int): int {
 uk_labels: []int = new int[8](0);
 
 uk_query_buf: []i8 = new i8[256](0i8);
+
+// The section of core's screen of kind with header title (the demos'),
+// or 0.
+uk_section_titled(kind: int, title: str): int {
+    k: int = uk_slot_of(uk_table_of(kind));
+    if (k < 0 || !uk_ensure(k)) return 0;
+    for s in 0..ui_sections_n {
+        h: UiText = ui_sections[s].header;
+        if (h.n == len(title)) {
+            same: bool = true;
+            for x in 0..h.n
+                if (ui_pool[h.at + x] != title[x]) same = false;
+            if (same) return s
+        }
+    }
+    0
+}
 
 // The controller of core's screen of kind (the demos'), or 0.
 uk_vc_of(kind: int): int {
@@ -2254,6 +2419,12 @@ uk_effects() {
             // (What the app has done shown: the screens made again.)
             uk_sync();
             sk_update_all()
+        } else if (e.word == "forms") open_forms(ws_greek, ws_num) else if (e.word == "definition") open_definition() else if (e.word == "add_to_note") _n: int = add_to_note(0,
+            0, 0) else if (e.word == "interlinear") push_interlinear(e.a) else if (e.word == "learned") {
+            cards_changed();
+            toast_symbol(nsstring(if (e.a == 0) "Added to Greek Words" else "Added to Hebrew Words"),
+                "plus", 1.6f64);
+            note(if (e.a == 0) "bible: toast Added to Greek Words" else "bible: toast Added to Hebrew Words")
         } else if (e.word == "url") open_web(e.text) else if (e.word == "esv_want") {
             // (The ESV's chapter asked for, for Compare; its answer, ios/
             // esv.l8's, makes Compare again.)
