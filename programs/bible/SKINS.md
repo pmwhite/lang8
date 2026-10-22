@@ -284,6 +284,7 @@ From the skin:
 | `away` | the app put away: the settings kept now |
 | `select C V...` | the verses selected (none: the tray away); the tray's model written as screen 0 |
 | `trayact ACTION V`, `titlemenu`, `menuact ACTION ARG` | a tray's button; the title's menu's model, as screen 0; one of its items |
+| `versestudy C V` | verse C:V's Study, as core's screen (a skin's answer to `study_verse`) |
 | `refresh` | what core's screens show has changed (the host's own state): each made again |
 
 A host in L8 (android/main.l8) reads files and keeps the settings for core
@@ -350,5 +351,8 @@ waits for typing to rest before it is. What is kept (highlights,
 bookmarks, notes, history, ribbons, Memory) is core's files, as the
 iPhone names them. A tap on a verse selects it (core's tray: highlights,
 Copy, Share, Bookmark, Note, Compare, Memorize), and highlights show as
-core marks them. Still to do there: the language data (and so Study and
-the cards), and Reading Plans' files; then the views above.
+core marks them. The language data, cross references, commentary and
+Manual are in the APK (about 37 MB) and read at the start, so Study (the
+tray's: `versestudy`), word studies, the Manual's pages and Learn work,
+and the cards are kept. Still to do there: Reading Plans' files; then the
+views above.

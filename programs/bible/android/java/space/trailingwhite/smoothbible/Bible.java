@@ -119,9 +119,22 @@ public final class Bible extends Activity {
         getResources().getDisplayMetrics());
   }
 
+  // (And the language data, the cross references, the commentary, the
+  // Manual.)
+  static final String[] DATA = {"xref_index.bin", "xrefs.bin", "mhcc.txt", "help.txt"};
+
   private void copyVersions(File dir) {
     long apk = new File(getApplicationInfo().sourceDir).lastModified();
-    for (String name : VERSIONS) {
+    ArrayList<String> names = new ArrayList<>(java.util.Arrays.asList(VERSIONS));
+    names.addAll(java.util.Arrays.asList(DATA));
+    try {
+      String[] lang = getAssets().list("lang");
+      if (lang != null) for (String n : lang) names.add("lang/" + n);
+    } catch (java.io.IOException e) {
+      android.util.Log.w("smoothbible", "listing lang: " + e);
+    }
+    new File(dir, "lang").mkdirs();
+    for (String name : names) {
       File f = new File(dir, name);
       if (f.exists() && f.lastModified() >= apk) continue;
       try (InputStream in = getAssets().open(name); OutputStream out = new FileOutputStream(f)) {
@@ -343,6 +356,12 @@ public final class Bible extends Activity {
       case "refresh":
         // (What is kept changed: every screen shown made again.)
         Native.send("refresh");
+        break;
+      case "study_verse":
+        // (The tray's Study: core's screen of the verse.)
+        tray.hide();
+        reader.clearSelection();
+        Native.send("versestudy " + w.num(1) + " " + w.num(2));
         break;
       case "tray":
         tray.show(panel.screens.get(0));

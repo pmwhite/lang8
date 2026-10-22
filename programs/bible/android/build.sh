@@ -35,6 +35,11 @@ mkdir -p "$work/apk/lib/arm64-v8a"
 # Its resources, manifest and the versions.
 mkdir -p "$work/assets"
 for v in bsb kjv web asv ylt; do cp "$top/programs/bible/data/$v.txt" "$work/assets/"; done
+# (And the language data, the cross references, the commentary and the
+# Manual: Study, Learn and the Manual's pages.)
+mkdir -p "$work/assets/lang"
+cp "$top"/programs/bible/data/lang/*.bin "$top"/programs/bible/data/lang/*.txt "$work/assets/lang/"
+for f in xref_index.bin xrefs.bin mhcc.txt help.txt; do cp "$top/programs/bible/data/$f" "$work/assets/"; done
 "$bt/aapt2" compile --dir "$here/res" -o "$work/res.zip"
 mkdir -p "$work/gen"
 "$bt/aapt2" link -o "$work/base.apk" -I "$jar" --manifest "$here/AndroidManifest.xml" \
