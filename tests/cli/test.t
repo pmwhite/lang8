@@ -233,7 +233,7 @@ output, so a broken edit is never recorded as the expected result:
   $ l8 test --accept broken.l8
   FAIL broken.l8
   the file does not compile:
-    | error: broken.l8:1:1: unknown function missing
+    | error: broken.l8:4:5: unknown function missing
   1 file, 0 tests, 1 failed
   [1]
   $ printf '\n/* expect compile {|\n|} */\n' >> broken.l8
@@ -241,7 +241,7 @@ output, so a broken edit is never recorded as the expected result:
   1 file, 0 tests
   1 file, 0 tests
   /* expect compile {|
-  error: broken.l8:1:1: unknown function missing
+  error: broken.l8:4:5: unknown function missing
   |} */
 
 `expect` belongs to tests, and each test needs its own name:
