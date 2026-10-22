@@ -121,7 +121,7 @@ final class Panel extends FrameLayout {
         if (pending != null) later.removeCallbacks(pending);
         pending = () -> {
           pending = null;
-          Native.send("query " + s.id + " " + text);
+          Native.send("query " + s.id + " " + Wire.escape(text));
         };
         if (s.wait > 0 && !text.isEmpty()) later.postDelayed(pending, s.wait);
         else pending.run();
@@ -612,7 +612,7 @@ final class Panel extends FrameLayout {
     if (f == null || s == null) return;
     Screen.Row r = fieldRow(s);
     if (r == null || r.flag('l')) return;
-    Native.send("text " + id + " " + r.action + " " + r.arg + " " + f.getText().toString());
+    Native.send("text " + id + " " + r.action + " " + r.arg + " " + Wire.escape(f.getText().toString()));
   }
 
   private static Screen.Row fieldRow(Screen s) {
@@ -1239,7 +1239,7 @@ final class Panel extends FrameLayout {
               typed = android.os.SystemClock.uptimeMillis();
               Screen.Row now = Panel.fieldRow(s);
               if (now != null) Native.send("text " + s.id + " " + now.action + " " + now.arg + " "
-                  + e.toString());
+                  + Wire.escape(e.toString()));
             }
           });
         }
@@ -1247,7 +1247,7 @@ final class Panel extends FrameLayout {
           Screen.Row now = Panel.fieldRow(s);
           if (now == null) return false;
           if (!now.flag('l')) Native.send("text " + s.id + " " + now.action + " " + now.arg + " "
-              + ff.getText().toString());
+              + Wire.escape(ff.getText().toString()));
           if (now.flag('r') && !s.confirm.isEmpty()) Native.send("act " + s.id + " "
               + s.confirmAction + " 0 0");
           else keyboardAway();

@@ -1,5 +1,12 @@
 # Smooth Bible on the web: design specification
 
+> 2026-10-22: superseded in how it is built. The owner asked for the web to
+> be a skin over core, web-native, as Android is (SKINS.md): the phase (a)
+> reader in L8 (`app.l8`, `reader.l8`, `table.l8`, `html.l8`,
+> `estimate.l8`, the sizes tables) was removed, and `web/main.l8` (core in
+> WebAssembly) with `web/page/skin.js` replace it. What this says the web
+> should be like still holds where core's screens don't decide it.
+
 > 2026-10-21: Bible test suites, browser checks and simulator screenshot
 > automation were removed at the owner's request. Test/screenshot instructions
 > below are historical; current build commands are in README.md.

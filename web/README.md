@@ -323,15 +323,15 @@ of HTML.
 
 ## Smooth Bible
 
-`programs/bible/web/page/` is the Bible reader on the web (`programs/bible/WEB.md`):
-`page.html` the shell every reader's address is answered with (the Worker
-fills its head for the address), `boot.js` its inline boot script (which
-fetches the place's book, the sizes table and the app at once), `read.css`,
+`programs/bible/web/page/` is the Bible app on the web, a skin over its core
+(`programs/bible/SKINS.md`): `page.html` the shell every reader's address is
+answered with (the Worker fills its head for the address), `boot.js` its
+inline boot script (the page's color, then the app), `read.css`,
 `icons.svg` (Lucide), `fonts/` (Source Serif 4 and Charis SIL, OFL),
-`about.html`, and `bible.js`, which starts `programs/bible/web/app.l8`. `make
-bible-web` builds the site in `.build/bible-site` (`bible/build.py`: the
-assets under hashed names; each version whole, book by book, and its sizes
-table, `programs/bible/tools/sizes.l8`); `node programs/bible/web/page/serve.mjs` from
+`about.html`, and `skin.js`, the skin, which runs core
+(`programs/bible/web/main.l8`) and draws what it says. `make bible-web`
+builds the site in `.build/bible-site` (`bible/build.py`: the assets under
+hashed names; each data file gzipped); `node programs/bible/web/page/serve.mjs` from
 the repository root serves it as smoothbible.com does, through the real
 Worker. CI's `web` job builds and uploads the site as `bible-web-site`.
 The browser checks and screenshot runs have been removed.

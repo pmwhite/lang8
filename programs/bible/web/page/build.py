@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Build the web reader's site (WEB.md §W1.9) into SITE (.build/bible-site):
+"""Build the web app's site (SKINS.md, the web) into SITE (.build/bible-site):
 
     make -j4 bible-web
 
 The marketing pages (programs/bible/site/, without DESIGN.md) at the root,
 and read/: the assets under hashed names (read.<hash>.css, bible.<hash>.js,
-dom.<hash>.js, l8.<hash>.js, app.<hash>.wasm, icons.<hash>.svg, the fonts);
-the data under data/<hash of it all>/: each version whole (<v>.gz), book
-by book (<v>/<BOOK>.gz) and its sizes table (<v>.sizes.gz, made by SIZES,
-tools/sizes.l8); the shell (shell.html), which the Worker answers every
-reader's address with; and About (about.html). Then robots.txt, and
-worker/boot_hash.js when the boot script changed. Make schedules version, refs,
-manifest and site stages independently. --check parses the pages
-made: elements balanced, ids unique.
+l8.<hash>.js, app.<hash>.wasm, icons.<hash>.svg, the fonts); the data under
+data/<hash of it all>/, each file gzipped (each version whole, <v>.gz; the
+plans, the language data, the cross references, the commentary, the Manual
+and the original, by their names under programs/bible/data); the shell
+(shell.html), which the Worker answers every reader's address with; and
+About (about.html). Then robots.txt, and worker/boot_hash.js when the boot
+script changed. Make schedules the versions, the other files, the manifest
+and the site independently. --check parses the pages made: elements
+balanced, ids unique.
 """
 import base64
 import gzip
@@ -21,16 +22,14 @@ import html.parser
 import json
 import os
 import shutil
-import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(HERE))))
 WEB = os.path.join(ROOT, "web")
-DATA = os.path.join(ROOT, "programs", "bible", "data")
 VERSIONS = ["bsb", "kjv", "web", "asv", "ylt"]
-SITE_URL = "https://smoothbible.com"
+# The data files besides the versions, by their names under data/.
+FILES = ["xref_index.bin", "xrefs.bin", "mhcc.txt", "help.txt", "orig.txt", "plans/mcheyne.txt", "plans/chrono.txt"]
 
 
 def digest(data):
@@ -63,42 +62,35 @@ def boot_hash():
 
 
 def write_gzip(path, data):
-    with open(path, "wb") as f:
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
         f.write(gzip.compress(data, 9, mtime=0))
+    os.replace(tmp, path)
 
 
-def version(sizes, source, output, name):
-    """One translation's independently cached gzip files."""
-    parent = os.path.dirname(output)
-    os.makedirs(parent, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=parent) as staging:
-        raw = open(source, "rb").read()
-        write_gzip(os.path.join(staging, name + ".gz"), raw)
-        measured = subprocess.run([sizes, source], capture_output=True, check=True)
-        write_gzip(os.path.join(staging, name + ".sizes.gz"), measured.stdout)
-        lines = raw.split(b"\n")
-        starts = [i for i, line in enumerate(lines) if line.startswith(b"B")]
-        os.makedirs(os.path.join(staging, name))
-        for k, at in enumerate(starts):
-            end = starts[k + 1] if k + 1 < len(starts) else len(lines)
-            book = lines[at][1:4].decode()
-            data = b"\n".join(lines[at:end]).rstrip(b"\n") + b"\n"
-            write_gzip(os.path.join(staging, name, book + ".gz"), data)
-        # Publish only a complete version, removing any books no longer present.
-        if os.path.isdir(output):
-            shutil.rmtree(output)
-        os.rename(staging, output)
+def files(data, out):
+    """The data files besides the versions, each gzipped under out (those
+    whose source is newer than their copy)."""
+    names = FILES + sorted("lang/" + n for n in os.listdir(os.path.join(data, "lang")) if n.endswith((".bin", ".txt")))
+    for name in names:
+        src = os.path.join(data, name)
+        dst = os.path.join(out, name + ".gz")
+        if os.path.exists(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        write_gzip(dst, open(src, "rb").read())
 
 
 def manifest(cache, output):
-    """Hash the same sorted gzip names/bytes as the original monolithic build."""
-    files = {"refs.gz": os.path.join(cache, "refs.gz")}
+    """Every data file by its name under data/, and a hash of them all."""
+    files = {}
     for name in VERSIONS:
-        root = os.path.join(cache, name)
-        for directory, _, names in os.walk(root):
-            for filename in names:
-                path = os.path.join(directory, filename)
-                files[os.path.relpath(path, root)] = path
+        files[name + ".gz"] = os.path.join(cache, name + ".gz")
+    root = os.path.join(cache, "files")
+    for directory, _, names in os.walk(root):
+        for filename in names:
+            path = os.path.join(directory, filename)
+            files[os.path.relpath(path, root)] = path
     h = hashlib.sha256()
     for name, path in sorted(files.items()):
         h.update(name.encode())
@@ -134,14 +126,11 @@ def build(wasm, data_manifest, site):
 
     names = {"data": dhash}
     names["runtime"] = put(read, "l8", "js", open(os.path.join(WEB, "l8-runtime.js"), "rb").read())
-    names["dom"] = put(read, "dom", "js", open(os.path.join(WEB, "dom.js"), "rb").read())
     names["wasm"] = put(read, "app", "wasm", open(wasm, "rb").read())
     names["icons"] = put(read, "icons", "svg", open(os.path.join(HERE, "icons.svg"), "rb").read())
     names["css"] = put(read, "read", "css", css.encode())
-    js = text(os.path.join(HERE, "bible.js"))
-    js = js.replace("../../../../web/l8-runtime.js", "./" + names["runtime"]).replace("../../../../web/dom.js", "./" + names["dom"])
-    for k, n in names.items():
-        js = js.replace("{{" + k + "}}", n)
+    js = text(os.path.join(HERE, "skin.js"))
+    js = js.replace("../../../../web/l8-runtime.js", "./" + names["runtime"])
     names["js"] = put(read, "bible", "js", js.encode())
 
     # The shell, which the Worker answers every reader's address with (its
@@ -149,7 +138,7 @@ def build(wasm, data_manifest, site):
     # (The boot script inlined byte for byte: the Worker's CSP names its hash.)
     boot = text(os.path.join(HERE, "boot.js"))
     page = text(os.path.join(HERE, "page.html")).replace("{{boot}}", boot)
-    for k in ("css", "js", "dom", "runtime", "icons", "wasm", "data"):
+    for k in ("css", "js", "runtime", "icons", "wasm", "data"):
         page = page.replace("{{" + k + "}}", names[k])
 
     def fill(fields):
@@ -159,12 +148,11 @@ def build(wasm, data_manifest, site):
         return out
 
     with open(os.path.join(read, "shell.html"), "w", encoding="utf-8") as f:
-        f.write(fill({"title": "Smooth Bible", "og_title": "Smooth Bible", "bar_title": "Smooth Bible", "h1": "Smooth Bible",
-                      "main": "<noscript><p class=\"note\">Smooth Bible needs JavaScript to show the Bible.</p></noscript>\n",
-                      "credit": "Smooth Bible"}))
+        f.write(fill({"title": "Smooth Bible", "og_title": "Smooth Bible", "bar_title": "Smooth Bible",
+                      "main": "<noscript><p class=\"note\">Smooth Bible needs JavaScript to show the Bible.</p></noscript>\n"}))
     with open(os.path.join(read, "about.html"), "w", encoding="utf-8") as f:
-        f.write(fill({"title": "About · Smooth Bible", "og_title": "About · Smooth Bible", "bar_title": "About", "h1": "About Smooth Bible",
-                      "main": text(os.path.join(HERE, "about.html")), "credit": "Smooth Bible"}))
+        f.write(fill({"title": "About · Smooth Bible", "og_title": "About · Smooth Bible", "bar_title": "About",
+                      "main": text(os.path.join(HERE, "about.html"))}))
 
     # (Nothing under /read/ is indexed: the Worker says noindex; /api/ is not
     # for crawlers. No sitemap.)
@@ -245,11 +233,10 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     command, *args = sys.argv[1:]
-    if command == "version" and len(args) == 4:
-        version(*args)
-    elif command == "refs" and len(args) == 2:
-        write_gzip(args[1] + ".tmp", open(args[0], "rb").read())
-        os.replace(args[1] + ".tmp", args[1])
+    if command == "gz" and len(args) == 2:
+        write_gzip(args[1], open(args[0], "rb").read())
+    elif command == "files" and len(args) == 2:
+        files(*args)
     elif command == "manifest" and len(args) == 2:
         manifest(*args)
     elif command == "site" and len(args) == 3:

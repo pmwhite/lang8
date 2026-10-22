@@ -12,7 +12,7 @@ first new skin is Android.
 |---|---|---|
 | The Bible and what is kept | `core/*.l8` (text, layout, store, plans, memory, ...) | Data and rules. No platform, no screens. Unchanged by this. |
 | The app | `core/ui.l8`, `core/skin.l8` and what it imports, `core/prefs.l8` | Every screen as data, what each action does, the settings, and the app's rules and words. No platform. |
-| A skin | `ios/`, `android/`, later `web/` | Draws screens and a few views of its own, gives core the platform (files, network, voice, sharing). |
+| A skin | `ios/`, `android/`, `web/` | Draws screens and a few views of its own, gives core the platform (files, network, voice, sharing). |
 
 What `core/skin.l8` imports, besides the screens' own files
 (`learn_screens.l8`, `verse_study.l8`, `tray.l8`, `note.l8`):
@@ -28,6 +28,7 @@ What `core/skin.l8` imports, besides the screens' own files
 | `share.l8`, `word.l8`, `keys.l8` | The share card's words; a Hebrew or Greek word's popover; the keyboard's commands |
 | `esv_client.l8` | Asking for the ESV's chapters (one at a time, the client's limit, resting, the reader's window) and taking them |
 | `words.l8` | Words no one screen owns: counts, labels, toasts, the controls' titles |
+| `kept.l8` | What is kept: the files (as the iPhone names them), what goes in each, saving and loading them; a host only reads, writes, adds to and deletes one by name (`kept_store`) |
 
 A skin decides **how** things look and move (a sheet or a pushed screen, a
 switch or a checkbox, the platform's fonts and icons). Core decides **what**
@@ -403,3 +404,25 @@ end), Day Done. A skin with a day's reader of its own (the iPhone's)
 says so (`SK_NUM_OWN_VIEW` of `SCR_DAY`, and of `SCR_PLAN`, `SCR_DAY1`,
 `SCR_MANUAL`, `SCR_VOICE` for its own sheets) and gets the effects
 instead. Still to do there: reminders; then the views above.
+
+## The web, the second new skin
+
+Core runs in WebAssembly (`web/main.l8`, built with `l8 wasm --async
+bw_wait`): its host's loop waits on the page (`bw_wait`) as Android's
+waits for its Java side, so what core keeps is made outside any callback.
+The host asks the page for the data files by id (`bw_ask`: the site's
+`data/HASH/NAME.gz`, each the page's fetch, given back as `got ID SIZE`),
+reads the reader's version and the plans first, then what is kept, and
+says `ready`; the language data comes after, and Study and Learn appear
+once it has. What is kept is `core/kept.l8`'s files, a key each in the
+browser's storage (`sb.NAME`).
+
+The skin is JavaScript (`web/page/skin.js`), drawing core's wire the web's
+way rather than the iPhone's: the reader is the page itself (its chapters
+added as either end is scrolled to, the place in the address,
+`/read/bsb/john/3`), core's screens in a panel beside the reader on a wide
+window and over it on a narrow one, each screen an entry of the browser's
+history (Back is the browser's), the selection's toolbar floating over the
+text, menus where a phone has sheets, the browser's voice for Listen and
+its wake lock for Keep Screen On. Core's words that named the phone are the
+host's (`sk_device`, `sk_follows_text_size`).

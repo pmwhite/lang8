@@ -1,0 +1,370 @@
+tag bible_web;
+
+use_tag std, bible;
+
+// Smooth Bible on the web (SKINS.md): the app (core/skin.l8) in
+// WebAssembly, under the page's skin (web/page/skin.js), which draws what
+// it says. Built with `l8 wasm --async bw_wait`: main waits for the page
+// (bw_wait) as Android's waits for its Java side, so what core keeps is
+// made outside any callback. This host does what only a host can: it asks
+// the page for the data files (each the page's fetch of the site's
+// data/HASH/NAME.gz, given back by its id: `got ID SIZE`), and keeps the
+// settings and what is kept in the browser's storage (core/kept.l8's
+// files, a key each). Every other line the page sends is the app's, and
+// what the app answers (ui_out) goes to the page as it is.
+//
+//   got ID SIZE    file ID came (SIZE -1: it could not)
+//   ...            the wire (SKINS.md): start, tap, act, want, place, ...
+//
+// To the page, besides the app's lines: `ready` once the reader's version
+// and what is kept are read (then it says start).
+import "../core/skin.l8";
+
+// The page waits for what to send (a pause: the module unwinds to it).
+extern bw_wait(): int;
+
+// What it has sent, into buf (at most cap bytes, whole lines).
+extern bw_take(buf: []i8, cap: int): int;
+
+// Lines to it: n bytes of b from start.
+extern bw_say(b: []i8, start: int, n: int): int;
+
+// Data file name (b, start to end) asked for, as ID.
+extern bw_ask(id: int, b: str): int;
+
+// File ID, as it came, into out (its whole length).
+extern bw_file(id: int, out: []i8): int;
+
+// The browser's storage, by name (b, start to end): read into out (its
+// whole length, -1 none), written, deleted.
+extern bw_store_get(
+    b: []i8,
+    start: int,
+    end: int,
+    out: []i8
+): int;
+
+extern bw_store_set(
+    b: []i8,
+    start: int,
+    end: int,
+    v: []i8,
+    n: int
+): int;
+
+extern bw_store_remove(b: []i8, start: int, end: int): int;
+
+// ---- what is kept (core/kept.l8's), a key each ----
+web_read() {
+    n: int = bw_store_get(kp_name, 0, kp_name_n, fbuf);
+    fbuf_n = (if (n < 0) 0 else if (n > len(fbuf)) len(fbuf) else n)
+}
+
+web_write() {
+    _n: int = bw_store_set(kp_name, 0, kp_name_n, fbuf, fbuf_n)
+}
+
+// (Added to: what is there read, fbuf's put after it, written. fbuf is
+// the store's only room, so what is added goes first, then is moved.)
+web_append() {
+    add: int = fbuf_n;
+    if (add <= 0) return;
+    k: []i8 = new i8[add](0i8);
+    for i in 0..add k[i] = fbuf[i];
+    web_read();
+    for i in 0..add {
+        if (fbuf_n < len(fbuf)) {
+            fbuf[fbuf_n] = k[i];
+            fbuf_n = fbuf_n + 1
+        }
+    }
+    web_write()
+}
+
+web_remove() {
+    _n: int = bw_store_remove(kp_name, 0, kp_name_n)
+}
+
+// ---- the data files ----
+// Their ids: a version's (core's TEXT_), the plans', the Manual's, the
+// language data's (from LANG_ID, as lang_files), the original's.
+PLAN_M_ID: int = 10;
+
+PLAN_C_ID: int = 11;
+
+HELP_ID: int = 12;
+
+LANG_ID: int = 20;
+
+ORIG_WORDS_ID: int = 50;
+
+ORIG_KETIV_ID: int = 51;
+
+ORIG_ACCENTS_ID: int = 52;
+
+version_files: []str = ["bsb", "kjv", "web", "asv", "ylt", "", "orig.txt"];
+
+lang_files: []str = ["lang/words.bin", "lang/verses.bin", "lang/supplied.bin", "lang/forms.txt",
+    "lang/morph.txt", "lang/conc.bin", "lang/lexicon.txt", "lang/grammar.txt", "lang/senses.bin",
+    "lang/related.bin", "xref_index.bin", "xrefs.bin", "mhcc.txt", "lang/meanings.bin",
+    "lang/meanings.txt", "lang/vocab.bin", "lang/letters.txt"];
+
+lang_got: int = 0;
+
+// The version the reader opens in, and whether it and the plans have come
+// (then what is kept is read, and the page told).
+start_t: int = 0;
+
+plans_got: int = 0;
+
+start_came: bool = false;
+
+begun: bool = false;
+
+// A version asked for (core's sk_want_text), until it comes.
+asked_t: int = -1;
+
+// The original: its words, Ketiv and accents first, then its text.
+og_parts: int = 0;
+
+og_text: []i8 = new i8[1](0i8);
+
+og_text_n: int = -1;
+
+ask_version(t: int) {
+    if (t < 0 || t >= len(version_files) || len(version_files[t]) == 0) return;
+    if (t == TEXT_ORIG) {
+        og_parts = 0;
+        og_text_n = -1;
+        _a: int = bw_ask(ORIG_WORDS_ID, "lang/orig-words.bin");
+        _b: int = bw_ask(ORIG_KETIV_ID, "lang/orig-ketiv.txt");
+        _c: int = bw_ask(ORIG_ACCENTS_ID, "lang/orig-accents.txt")
+    }
+    _v: int = bw_ask(t, version_files[t])
+}
+
+// File id came, size bytes (-1: it could not).
+got(id: int, size: int) noregion {
+    if (size < 0) {
+        if (id == start_t && !start_came && id != 0) {
+            // (The version kept couldn't come: the BSB.)
+            start_t = 0;
+            ask_version(0)
+        } else if (id == asked_t) asked_t = -1;
+        return
+    }
+    buf: []i8 = new i8[size + 1](0i8);
+    _n: int = bw_file(id, buf);
+    if (id == TEXT_ORIG) {
+        og_text = buf;
+        og_text_n = size;
+        orig_ready()
+    } else if (id >= 0 && id < TEXTS) version_came(id, buf, size) else if (id == PLAN_M_ID || id == PLAN_C_ID) {
+        plan_file_set(if (id == PLAN_M_ID) PLAN_MCHEYNE else PLAN_CHRONO, buf, size);
+        plans_got = plans_got + 1;
+        begin()
+    } else if (id == HELP_ID) {
+        hlp = buf;
+        hlp_n = size;
+        help_index()
+    } else if (id >= LANG_ID && id < LANG_ID + len(lang_files)) lang_came(id - LANG_ID,
+        buf, size) else if (id == ORIG_WORDS_ID) {
+        og = buf;
+        og_n = size / 12;
+        og_parts = og_parts + 1;
+        orig_ready()
+    } else if (id == ORIG_KETIV_ID) {
+        lket = buf;
+        lket_n = size;
+        ket_index();
+        og_parts = og_parts + 1;
+        orig_ready()
+    } else if (id == ORIG_ACCENTS_ID) {
+        og_acc = buf;
+        og_acc_n = size;
+        og_acc_index();
+        og_parts = og_parts + 1;
+        orig_ready()
+    }
+}
+
+version_came(t: int, buf: []i8@immortal, n: int) {
+    text_load(t, buf, n);
+    if (!start_came && t == start_t) {
+        start_came = true;
+        text_use(t);
+        begin()
+    } else if (t == asked_t) {
+        asked_t = -1;
+        sk_use_version(t)
+    }
+}
+
+// The original's text read once its words, Ketiv and accents are.
+orig_ready() {
+    if (og_parts < 3 || og_text_n < 0) return;
+    og_setting = clamp_index(pref_get("origGlosses"), 4) - 1;
+    lay_accents = pref_is("origAccents");
+    version_came(TEXT_ORIG, og_text, og_text_n)
+}
+
+// The reader's version and the plans here: what is kept read, the page
+// told, and the language data asked for (Study and Learn once it comes).
+begin() {
+    if (begun || !start_came || plans_got < 2) return;
+    begun = true;
+    kept_load();
+    for i in 0..len(lang_files) _a: int = bw_ask(LANG_ID + i, lang_files[i]);
+    _h: int = bw_ask(HELP_ID, "help.txt");
+    _r: int = bw_say("ready\n", 0, 6)
+}
+
+lang_came(k: int, buf: []i8@immortal, n: int) {
+    if (k == 0) {
+        lw = buf;
+        lw_n = n / 12
+    } else if (k == 1) {
+        lv = buf;
+        lv_n = n / 8 - 1
+    } else if (k == 2) {
+        lsup = buf;
+        lsup_n = n / 8
+    } else if (k == 3) {
+        lforms = buf;
+        lforms_len = n
+    } else if (k == 4) {
+        lmorph = buf;
+        lmorph_len = n
+    } else if (k == 5) {
+        lconc = buf;
+        lconc_len = n
+    } else if (k == 6) {
+        llex = buf;
+        llex_len = n
+    } else if (k == 7) {
+        lgram = buf;
+        lgram_len = n
+    } else if (k == 8) {
+        lsen = buf;
+        lsen_n = n
+    } else if (k == 9) {
+        lrel = buf;
+        lrel_n = n
+    } else if (k == 10) {
+        lxi = buf;
+        lxi_n = n / 4
+    } else if (k == 11) {
+        lxr = buf;
+        lxr_n = n
+    } else if (k == 12) {
+        lmh = buf;
+        lmh_n = n
+    } else if (k == 13) {
+        lmean = buf;
+        lmean_n = n
+    } else if (k == 14) {
+        lmeant = buf;
+        lmeant_n = n
+    } else if (k == 15) {
+        lvoc = buf;
+        lvoc_n = n
+    } else if (k == 16) {
+        llet = buf;
+        llet_n = n
+    }
+    lang_got = lang_got + 1;
+    if (lang_got < len(lang_files)) return;
+    // (All of it: indexed, the cards read, and core's screens made again.)
+    mean_index();
+    lang_index();
+    learn_index_files();
+    if (lang_ready) learn_index_lang();
+    kept_load_cards();
+    sk_update_all()
+}
+
+// (The host's numbers: whether the language data is here; the device's
+// own voice reads aloud.)
+web_num(what: int, _a: int): int {
+    if (what == SK_NUM_LANG || what == SK_NUM_LEARN) return if (lang_ready) 1 else 0;
+    if (what == SK_NUM_AUDIO_SOURCE) return SRC_VOICE;
+    if (what == SK_NUM_VOICE_SEEN || what == SK_NUM_BETTER_VOICE) return 1;
+    -1
+}
+
+// ---- the lines ----
+inbox: []i8 = new i8[1048576](0i8);
+
+// What the app said, sent on whole, at most a megabyte at a time (at a
+// line's end).
+flush() {
+    p: int = 0;
+    while (p < ui_out_n) {
+        e: int = if (ui_out_n - p > 1048576) p + 1048576 else ui_out_n;
+        while (e > p + 1 && ui_out[e - 1] as int != 10) e = e - 1;
+        _n: int = bw_say(ui_out, p, e - p);
+        p = e
+    }
+    ui_out_n = 0
+}
+
+lines(n: int) noregion {
+    p: int = 0;
+    for i in 0..n {
+        if (inbox[i] as int == 10) {
+            if (i - p > 4 && sk_word_is(inbox, p, i, "got")) {
+                id: int = sk_num(inbox, p + 4, i);
+                got(id, sk_num(inbox, sk_num_end, i))
+            } else sk_line(inbox, p, i);
+            p = i + 1
+        }
+    }
+}
+
+main() noregion: int {
+    kept_store = KeptStore {
+        read: &web_read,
+        write: &web_write,
+        append: &web_append,
+        remove: &web_remove
+    };
+    sk_host = SkinHost {
+        save_prefs: &kept_save_prefs,
+        save_kept: &kept_save,
+        words: &sk_no_words,
+        switch_version: null,
+        num: &web_num,
+        fill: &sk_no_fill,
+        fetch: null
+    };
+    sk_has_ribbons = true;
+    sk_has_listen = true;
+    sk_has_keep_on = true;
+    sk_device = "Device";
+    sk_follows_text_size = false;
+    kept_load_prefs();
+    // (The version read last, or the BSB.)
+    start_t = launch_version(pref_get("version"), false);
+    if (start_t < 0 || start_t >= len(version_files) || len(version_files[start_t]) == 0) start_t = 0;
+    ask_version(start_t);
+    _m: int = bw_ask(PLAN_M_ID, "plans/mcheyne.txt");
+    _c: int = bw_ask(PLAN_C_ID, "plans/chrono.txt");
+    while (true) {
+        _w: int = bw_wait();
+        n: int = bw_take(inbox, len(inbox));
+        if (n > 0) {
+            lines(n);
+            // (A version core wants: asked for, and used once it comes.)
+            t: int = sk_want_text;
+            if (t >= 0) {
+                sk_want_text = -1;
+                if (t != asked_t) {
+                    asked_t = t;
+                    ask_version(t)
+                }
+            }
+            flush()
+        }
+    }
+    0
+}

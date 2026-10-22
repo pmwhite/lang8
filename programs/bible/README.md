@@ -16,12 +16,13 @@ read aloud by VoiceOver as it would be in the phone's own apps.
 - `ios/`: the iPhone and iPad app (`app.l8` and its screens, in UIKit), and
   what goes into its bundle (Info.plist, icons, colors, frameworks,
   resources).
-- `web/`: the reader on the web (`app.l8`, `reader.l8`, `table.l8`, `web/html.l8`,
-  `web/estimate.l8`), and `web/page/`, its page,
-  styles, boot script, fonts, site build (`build.py`) and local server.
+- `web/`: the app on the web, a skin over core (SKINS.md): `main.l8`, core
+  and its host in WebAssembly, and `web/page/`, its page: the skin
+  (`skin.js`), styles, boot script, fonts, site build (`build.py`) and
+  local server.
 - `data/`: the texts and the study, plan and audio data the apps read.
-- `tools/`: the scripts that made the data, and `sizes.l8` (the web's
-  sizes tables) and `spoken.l8` (the spoken text, for the aligner).
+- `tools/`: the scripts that made the data, `skin_text.l8` (core's wire on a
+  terminal) and `spoken.l8` (the spoken text, for the aligner).
 - `worker/`: the Cloudflare Worker at smoothbible.com (the ESV proxy and
   the site).
 - `site/`: smoothbible.com's own pages.
@@ -285,15 +286,13 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   words' lines, a word's popover, the letter keyboard); `ios/demo.l8` (and
   `ios/demo3.l8` to `ios/demo17.l8`) the retained demo code (`ios/demo11.l8`
   Round 11's).
-- The web (`WEB.md`): `web/html.l8` writes a chapter as HTML; `web/estimate.l8` estimates a chapter's height from its
-  records (or counts its blocks for `tools/sizes.l8`'s sizes table, which
-  the first paint estimates from); `core/text.l8`'s `text_load_book` holds one
-  book with the whole Bible's chapter numbers.
-  The app is `web/app.l8` (start, settings, keys, history, Go To),
-  `web/reader.l8` (the scroller laid out by the height table, the window
-  of chapters, the bar, the place, footnotes) and `web/table.l8` (the
-  calibration, measuring, kept heights), running in the browser through
-  the page bridge (`../web/dom.l8`, `web/dom.js`). `make bible-web` builds
+- The web (SKINS.md): core in WebAssembly (`web/main.l8`, built with `l8
+  wasm --async bw_wait`: its loop waits on the page as Android's does on
+  its Java side) and the page's skin, `web/page/skin.js`, which draws core's
+  wire the web's way (the reader as the page, core's screens in a panel
+  beside it, the selection's toolbar, the browser's Back). The host asks the
+  page for the data files and keeps what is kept in the browser's storage
+  (`core/kept.l8`'s files, a key each). `make bible-web` builds
   the site into `.build/bible-site` (`web/page/`). The workflow's `web` job
   builds the site and uploads it as `bible-web-site`. Serve it locally with
   `node programs/bible/web/page/serve.mjs`.

@@ -46,6 +46,11 @@ final class Wire {
     }
   }
 
+  // Words for a line to core: a tab, newline and backslash escaped.
+  static String escape(String s) {
+    return s.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t");
+  }
+
   static String unescape(String s) {
     if (s.indexOf('\\') < 0) return s;
     StringBuilder b = new StringBuilder(s.length());
