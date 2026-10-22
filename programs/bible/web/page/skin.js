@@ -277,6 +277,12 @@ function rich(node, text, runs, links = [], onLink = null) {
       r++;
     }
     const st = r < runs.length ? runs[r][1] : -1;
+    // (A symbol: its words its name, drawn.)
+    if (st === 115 || st === 116) {
+      const g = symbol(text.slice(a, b), `sym${st === 116 ? " bold" : ""}`);
+      if (g) node.appendChild(g);
+      continue;
+    }
     const link = links.find((l) => l[0] <= a && a < l[1]);
     const s = el(link ? "a" : "span", st >= 0 ? runClass(st) : "", text.slice(a, b));
     if (link && onLink) {
@@ -1555,6 +1561,8 @@ const panel = {
     }
     if (none && s.emptyTitle) {
       const e = el("div", "empty");
+      const g = s.emptySymbol && symbol(s.emptySymbol, "esym");
+      if (g) e.appendChild(g);
       e.append(el("h3", "", s.emptyTitle), el("p", "", s.emptyLine));
       frag.appendChild(e);
     }
@@ -1591,9 +1599,10 @@ const panel = {
       });
       line.appendChild(ci);
     } else if (r.icon) {
-      const g = glyph(r.icon);
+      const g = symbol(r.icon);
       if (g) {
-        const ic = el("span", "ricon" + (r.flag("g") ? " faint" : ""), g);
+        const ic = el("span", "ricon" + (r.flag("g") ? " faint" : ""));
+        ic.appendChild(g);
         if (r.iconColor) ic.style.color = "#" + r.iconColor;
         ic.setAttribute("aria-hidden", "true");
         line.appendChild(ic);
@@ -2051,9 +2060,29 @@ function marked(node, r) {
 const SYMBOLS = {
   "play.fill": "play", repeat: "repeat", "speaker.wave.2": "volume", keyboard: "keyboard",
   "keyboard.chevron.compact.down": "keyboard-off", plus: "plus", "square.and.arrow.up": "share",
-  "square.and.pencil": "pencil", "chevron.up": "chevron-up", "chevron.down": "chevron-down",
-  "pause.fill": "pause", "stop.fill": "square",
+  "square.and.pencil": "square-pen", "chevron.up": "chevron-up", "chevron.down": "chevron-down",
+  "pause.fill": "pause", "stop.fill": "square", book: "book", "book.closed": "book",
+  bookmark: "bookmark", "bookmark.fill": "bookmark", "books.vertical": "library", brain: "brain",
+  calendar: "calendar", "character.book.closed": "book-a", "doc.on.doc": "copy",
+  "note.text": "sticky-note", "text.quote": "text-quote", "clock.arrow.circlepath": "history",
+  globe: "globe", "arrow.right.circle": "circle-arrow-right", "arrow.right.circle.fill": "circle-arrow-right",
+  "arrow.triangle.branch": "split", "arrow.up.arrow.down": "arrow-up-down", "checkmark.circle": "circle-check",
+  "circle.slash": "circle-slash", "hand.tap": "pointer", "info.circle": "info", "textformat.abc": "case-sensitive",
+  "textformat.size": "a-large-small", "text.book.closed": "book-text", trash: "trash-2",
+  magnifyingglass: "search", highlighter: "highlighter", xmark: "x", headphones: "headphones",
 };
+
+// An icon core names, drawn (else a character that reads as it; else
+// nothing).
+function symbol(name, cls = "") {
+  if (SYMBOLS[name]) {
+    const s = icon(SYMBOLS[name]);
+    if (cls) s.setAttribute("class", cls);
+    return s;
+  }
+  const g = glyph(name);
+  return g ? el("span", cls, g) : null;
+}
 
 // An icon core names (an SF Symbol's name) as a character, where one reads
 // as it ("" for those left out).
