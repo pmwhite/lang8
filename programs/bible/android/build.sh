@@ -40,6 +40,8 @@ for v in bsb kjv web asv ylt; do cp "$top/programs/bible/data/$v.txt" "$work/ass
 mkdir -p "$work/assets/lang"
 cp "$top"/programs/bible/data/lang/*.bin "$top"/programs/bible/data/lang/*.txt "$work/assets/lang/"
 for f in xref_index.bin xrefs.bin mhcc.txt help.txt; do cp "$top/programs/bible/data/$f" "$work/assets/"; done
+mkdir -p "$work/assets/plans"
+cp "$top/programs/bible/data/plans/mcheyne.txt" "$top/programs/bible/data/plans/chrono.txt" "$work/assets/plans/"
 "$bt/aapt2" compile --dir "$here/res" -o "$work/res.zip"
 mkdir -p "$work/gen"
 "$bt/aapt2" link -o "$work/base.apk" -I "$jar" --manifest "$here/AndroidManifest.xml" \

@@ -365,5 +365,10 @@ Copy, Share, Bookmark, Note, Compare, Memorize), and highlights show as
 core marks them. The language data, cross references, commentary and
 Manual are in the APK (about 37 MB) and read at the start, so Study (the
 tray's: `versestudy`), word studies, the Manual's pages and Learn work,
-and the cards are kept. Still to do there: Reading Plans' files; then the
-views above.
+and the cards are kept. Reading Plans work there from core: following a plan
+(its file plan-N.tsv, their numbers in plans.txt; `SK_KEPT_PLANS`), its
+days, core's day's reader (`SCR_DAY`: its passages, Mark Read, the day's
+end), Day Done. A skin with a day's reader of its own (the iPhone's)
+says so (`SK_NUM_OWN_VIEW` of `SCR_DAY`, and of `SCR_PLAN`, `SCR_DAY1`,
+`SCR_MANUAL`, `SCR_VOICE` for its own sheets) and gets the effects
+instead. Still to do there: reminders; then the views above.

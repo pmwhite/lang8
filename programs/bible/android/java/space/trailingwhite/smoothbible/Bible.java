@@ -121,7 +121,8 @@ public final class Bible extends Activity {
 
   // (And the language data, the cross references, the commentary, the
   // Manual.)
-  static final String[] DATA = {"xref_index.bin", "xrefs.bin", "mhcc.txt", "help.txt"};
+  static final String[] DATA = {"xref_index.bin", "xrefs.bin", "mhcc.txt", "help.txt",
+      "plans/mcheyne.txt", "plans/chrono.txt"};
 
   private void copyVersions(File dir) {
     long apk = new File(getApplicationInfo().sourceDir).lastModified();
@@ -134,6 +135,7 @@ public final class Bible extends Activity {
       android.util.Log.w("smoothbible", "listing lang: " + e);
     }
     new File(dir, "lang").mkdirs();
+    new File(dir, "plans").mkdirs();
     for (String name : names) {
       File f = new File(dir, name);
       if (f.exists() && f.lastModified() >= apk) continue;
