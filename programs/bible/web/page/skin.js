@@ -82,8 +82,11 @@ function send(line) {
 
 // (A version and the plans first; the language data and the Manual at low
 // priority, after the reader: host ids from 12.)
+const dataRead = new Set();
+
 async function fetchData(id, name) {
   try {
+    dataRead.add(`${DATA}/${name}.gz`);
     const r = await fetch(`${DATA}/${name}.gz`, { priority: id >= 12 ? "low" : "high" });
     if (!r.ok) throw new Error(r.status);
     const body = r.body.pipeThrough(new DecompressionStream("gzip"));
@@ -170,6 +173,7 @@ const imports = {
     const key = "sb." + dec.decode(this.bytes().slice(Number(b) + Number(start), Number(b) + Number(end)));
     try {
       localStorage.setItem(key, dec.decode(this.bytes().slice(Number(v), Number(v) + Number(n))));
+      keepStorage(key);
     } catch (e) {
       console.warn("smooth bible: not kept", key, e);
     }
@@ -2428,6 +2432,30 @@ function begin() {
   if (v) send(`version ${v[1].toUpperCase()}`);
   if (c >= 0) send(`place ${c} 0 0`);
   send(`start ${innerWidth} ${innerHeight} ${Math.round(devicePixelRatio * 100)} ${matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0} ${-new Date().getTimezoneOffset() * 60}`);
+  // (Offline once visited, after the first paint: WEB.md §W9.1.)
+  if ("serviceWorker" in navigator) setTimeout(offline, 3000);
+}
+
+// The Service Worker registered; the data read before it was there kept
+// where it keeps the data (sw.js's sb-data-), from the browser's cache.
+function offline() {
+  navigator.serviceWorker.register("/read/sw.js", { scope: "/read/" }).catch(() => {});
+  navigator.serviceWorker.ready.then(async () => {
+    const c = await caches.open("sb-data-" + meta("sb-data"));
+    for (const url of dataRead) if (!(await c.match(url))) await c.add(url).catch(() => {});
+  });
+}
+
+// The browser asked to keep what is kept, once something of the reader's
+// is (a highlight, a note, a ribbon...: not the settings or the ESV's
+// chapters), where it decides without asking (WEB.md §W9.4).
+let persistAsked = false;
+
+function keepStorage(key) {
+  if (persistAsked || /^sb\.(settings|voice|esv)/.test(key) || !navigator.storage?.persist) return;
+  persistAsked = true;
+  if (/firefox/i.test(navigator.userAgent)) return;
+  navigator.storage.persisted().then((p) => p || navigator.storage.persist()).catch(() => {});
 }
 
 panel.init();

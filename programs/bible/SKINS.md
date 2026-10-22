@@ -523,3 +523,12 @@ history (Back is the browser's), the selection's toolbar floating over the
 text, menus where a phone has sheets, the browser's voice for Listen and
 its wake lock for Keep Screen On. Core's words that named the phone are the
 host's (`sk_device`, `sk_follows_text_size`).
+
+It works offline once visited (WEB.md §W9): a Service Worker
+(`web/page/sw.js`, `/read/sw.js`, its build's files filled in by
+`build.py`) keeps the shell as it installs and each data file as the app
+first reads it (those read before it was there handed over by the page),
+and answers every reader's address with the shell kept; never the site's
+`/api/` or the recordings. The manifest (`/read/manifest.webmanifest`)
+makes it installable, and the browser is asked to keep its storage once
+something of the reader's is kept.

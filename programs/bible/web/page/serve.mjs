@@ -25,6 +25,7 @@ const types = {
   ".gz": "application/gzip",
   ".txt": "text/plain; charset=utf-8",
   ".xml": "application/xml",
+  ".webmanifest": "application/manifest+json",
 };
 
 export function serve(site, port) {

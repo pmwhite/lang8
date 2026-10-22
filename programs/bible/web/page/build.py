@@ -109,11 +109,13 @@ def build(wasm, data_manifest, site):
     read = os.path.join(site, "read")
     os.makedirs(os.path.join(read, "fonts"))
     css = text(os.path.join(HERE, "read.css"))
+    fonts = []
     for name in sorted(os.listdir(os.path.join(HERE, "fonts"))):
         src = os.path.join(HERE, "fonts", name)
         if name.endswith(".woff2"):
             hashed = put(os.path.join(read, "fonts"), name[:-6], "woff2", open(src, "rb").read())
             css = css.replace(f"fonts/{name}", f"fonts/{hashed}")
+            fonts.append("/read/fonts/" + hashed)
         else:
             shutil.copy(src, os.path.join(read, "fonts", name))
 
@@ -154,6 +156,26 @@ def build(wasm, data_manifest, site):
     with open(os.path.join(read, "about.html"), "w", encoding="utf-8") as f:
         f.write(fill({"title": "About · Smooth Bible", "og_title": "About · Smooth Bible", "bar_title": "About",
                       "main": text(os.path.join(HERE, "about.html"))}))
+
+    # The Service Worker (its build's files to keep, WEB.md §W9.1) and the
+    # manifest (§W9.2), at fixed names.
+    shell = ["/read/shell", "/read/about", "/read/manifest.webmanifest"] + ["/read/" + names[k] for k in ("css", "js", "runtime", "icons", "wasm")] + fonts + \
+        ["/img/favicon.png", "/img/apple-touch-icon.png", "/img/icon-192.png", "/img/icon-512.png"]
+    build_id = digest(json.dumps(shell).encode())
+    sw = text(os.path.join(HERE, "sw.js")).replace("{{build}}", build_id).replace("{{data}}", dhash)
+    sw = sw.replace("{{shell}}", json.dumps(shell))
+    with open(os.path.join(read, "sw.js"), "w", encoding="utf-8") as f:
+        f.write(sw)
+    with open(os.path.join(read, "manifest.webmanifest"), "w", encoding="utf-8") as f:
+        json.dump({
+            "name": "Smooth Bible", "short_name": "Smooth Bible", "start_url": "/read/", "scope": "/read/",
+            "display": "standalone", "background_color": "#FBF8F2", "theme_color": "#FBF8F2",
+            "icons": [
+                {"src": "/img/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+                {"src": "/img/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+                {"src": "/img/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+            ],
+        }, f, indent=1)
 
     # (Nothing under /read/ is indexed: the Worker says noindex; /api/ is not
     # for crawlers. No sitemap.)
