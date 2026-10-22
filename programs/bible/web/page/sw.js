@@ -15,8 +15,14 @@ const DATA = "{{data}}";
 const KEEP = "sb-shell-" + BUILD;
 const KEEP_DATA = "sb-data-" + DATA;
 
+// (The reader's own files all, or it doesn't install; the site's icons
+// if they come: an address that serves only /read/ has none.)
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(KEEP).then((c) => c.addAll(SHELL)));
+  e.waitUntil(
+    caches.open(KEEP).then((c) =>
+      Promise.all([c.addAll(SHELL.filter((u) => u.startsWith("/read/"))), ...SHELL.filter((u) => !u.startsWith("/read/")).map((u) => c.add(u).catch(() => {}))]),
+    ),
+  );
 });
 
 self.addEventListener("activate", (e) => {
