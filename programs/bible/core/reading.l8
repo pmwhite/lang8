@@ -1,0 +1,222 @@
+tag bible;
+
+use_tag std;
+
+// Reading in the reader (DESIGN.md §10.1.2, §11.1), apart from any
+// platform: how long the reader has rested in each chapter and whether its
+// end has been seen (a chapter read once it has rested 20 s in all and its
+// end has been seen, or Listen has said its last verse), and what that
+// does: the carried ribbon moves on; and a chapter dwelt in 20 s goes onto
+// the history (§6.4). A skin says when the reader comes to
+// rest (where, and whether that chapter's end is on the screen), when it
+// begins to move, and when a jump moves it; and calls rd_tick at the time
+// rd_wake says (a timer). Its clock is its own (seconds); the time kept
+// with a ribbon is time(0)'s. A plan's day's reader moves no ribbon
+// (§16.0 decision 2): its skin says it is in one.
+import "skin.l8";
+
+// Each chapter's rest so far (seconds), and whether its end has been seen;
+// the chapter resting in now (-1: moving), since when.
+rd_dwell: []f64 = new f64[1200](0.0f64);
+
+rd_end: []bool = new bool[1200](false);
+
+rd_c: int = -1;
+
+rd_since: f64 = 0.0f64;
+
+// Whether the reader has been scrolled (by a finger, or Listen's
+// following) since the last jump or pickup: only then is a rest a
+// scroll's rest, which the carried ribbon takes.
+rd_scrolled: bool = false;
+
+// Whether a plan's day is up (no ribbon moves), and whether the reader is
+// covered (a sheet over it: its time does not count).
+rd_in_day: bool = false;
+
+rd_covered: bool = false;
+
+RD_READ_AFTER: f64 = 20.0f64;
+
+// When the skin is to call rd_tick (its clock; 0: no need).
+rd_wake: f64 = 0.0f64;
+
+// Dwelling (§6.4): a chapter rested in for rd_dwell_after seconds goes onto
+// the history, unless it is the history's newest: the chapter, its place,
+// and when it is due (0: none).
+rd_dwell_after: f64 = 20.0f64;
+
+rd_dw_c: int = -1;
+
+rd_dw_v: int = 0;
+
+rd_dw_f: int = 0;
+
+rd_dw_due: f64 = 0.0f64;
+
+// The chapter at rest now, for dwelling (in a plan's day too; -1 moving).
+rd_rest_c: int = -1;
+
+// Dwelt in (at rest in the chapter, its time come): onto the history.
+rd_dwell_due(now: f64) {
+    if (rd_dw_c < 0 || rd_rest_c != rd_dw_c || rd_dw_due <= 0.0f64 || now < rd_dw_due) return;
+    if (!(hs_n > 0 && visits[hs_n - 1].chapter == rd_dw_c)) {
+        history_add(rd_dw_c, rd_dw_v, rd_dw_f, false, time(0));
+        sk_kept(SK_KEPT_HISTORY)
+    }
+    rd_dwell_off()
+}
+
+// The wake: the sooner of the rest's and the dwell's.
+rd_set_wake(rest_at: f64) {
+    w: f64 = rest_at;
+    if (rd_dw_due > 0.0f64 && (w <= 0.0f64 || rd_dw_due < w)) w = rd_dw_due;
+    rd_wake = w
+}
+
+// The reader came to rest at chapter c, verse v and frac into it, now; its
+// end on the screen or not (end_seen); chapters ends_lo to ends_hi (from
+// c) whose ends are on the screen. The carried ribbon takes the place (if
+// the rest is a scroll's), and a chapter whose end was seen may be read.
+rd_rest(
+    c: int,
+    v: int,
+    frac: int,
+    end_seen: bool,
+    ends_hi: int,
+    now: f64
+) {
+    if (c < 0 || c >= chapters) return;
+    rd_moving(now);
+    rd_rest_c = c;
+    // (Dwelling: due once it has stayed, if it isn't the history's newest;
+    // a rest again in the chapter already due keeps its time.)
+    if (hs_n > 0 && visits[hs_n - 1].chapter == c) rd_dwell_off() else if (rd_dw_c != c) {
+        rd_dw_c = c;
+        rd_dw_due = now + rd_dwell_after
+    }
+    rd_dw_v = v;
+    rd_dw_f = frac;
+    rd_dwell_due(now);
+    if (rd_in_day) {
+        rd_set_wake(0.0f64);
+        return
+    }
+    for x in c..ends_hi + 1 {
+        if (x >= 0 && x < chapters && !rd_end[x]) {
+            rd_end[x] = true;
+            rd_check(x)
+        }
+    }
+    rd_c = c;
+    rd_since = now;
+    left: f64 = RD_READ_AFTER - rd_dwell[c];
+    rd_set_wake(now + (if (left < 0.5f64) 0.5f64 else left));
+    if (rd_scrolled && ribbon_rest(c, v, frac, end_seen, time(0))) rd_ribbons_changed() else ui_effect("title_menus",
+        -1, -1)
+}
+
+// The ends of chapters lo to hi seen while the reader moves (a scroll
+// passing them): each perhaps read now. Whether any was new.
+rd_ends(lo: int, hi: int): bool {
+    if (rd_in_day) return false;
+    any: bool = false;
+    for x in lo..hi + 1 {
+        if (x >= 0 && x < chapters && !rd_end[x]) {
+            rd_end[x] = true;
+            any = true;
+            rd_check(x)
+        }
+    }
+    any
+}
+
+// The reader began to move (a finger, Listen's following), or the app went
+// away, or a sheet came over it: the rest's time added.
+rd_moving(now: f64) {
+    if (rd_c >= 0 && rd_since > 0.0f64 && !rd_covered) rd_dwell[rd_c] = rd_dwell[rd_c] + now - rd_since;
+    c: int = rd_c;
+    rd_c = -1;
+    rd_rest_c = -1;
+    rd_since = 0.0f64;
+    rd_wake = 0.0f64;
+    if (c >= 0) rd_check(c)
+}
+
+// The dwell let go (done, or the chapter the history's newest).
+rd_dwell_off() {
+    rd_dw_c = -1;
+    rd_dw_due = 0.0f64
+}
+
+// A finger's scroll (or Listen's following) began.
+rd_scroll(now: f64) {
+    rd_moving(now);
+    if (!rd_in_day) rd_scrolled = true
+}
+
+// The time rd_wake said: a rest long enough checked, and the rest begun
+// again in the same chapter.
+rd_tick(now: f64) {
+    rd_dwell_due(now);
+    c: int = rd_c;
+    if (c < 0) {
+        // (A plan's day at rest: only its dwell is timed.)
+        if (rd_rest_c >= 0) rd_set_wake(0.0f64) else rd_wake = 0.0f64;
+        return
+    }
+    at: int = rd_rest_c;
+    rd_moving(now);
+    rd_rest_c = at;
+    rd_c = c;
+    rd_since = now;
+    left: f64 = RD_READ_AFTER - rd_dwell[c];
+    rd_set_wake(if (left > 0.0f64) now + left else 0.0f64)
+}
+
+// A chapter read once its rest and its end are both there: counted, and
+// its rest and end begun again, so that only reading it again counts it
+// again.
+rd_check(c: int) {
+    if (c < 0 || c >= chapters) return;
+    if (rd_dwell[c] >= RD_READ_AFTER && rd_end[c]) {
+        rd_dwell[c] = 0.0f64;
+        rd_end[c] = false;
+        rd_read(c)
+    }
+}
+
+// Chapter c read (by rest, or Listen's last verse): the carried ribbon
+// moves on (M2). (A plan is read in its day's reader: §16.0 decision 7.)
+rd_read(c: int) {
+    if (c < 0 || c >= chapters || rd_in_day) return;
+    if (ribbon_read(c, time(0))) rd_ribbons_changed()
+}
+
+// A jump (kind as ribbon_jumped's: 0 with an origin, 1 the capsule's, 2
+// none): the carried ribbon put down, silently; nothing it leaves moves a
+// ribbon.
+rd_jump(kind: int) {
+    if (ribbon_jumped(kind)) rd_ribbons_changed();
+    rd_scrolled = false
+}
+
+// The capsule's arrival: the ribbon its jump had put down picked up again,
+// with its toast.
+rd_capsule_arrived() {
+    id: int = ribbon_capsule_back();
+    rd_scrolled = false;
+    if (id == 0) return;
+    rd_ribbons_changed();
+    i: int = rb_index(id);
+    if (i >= 0) {
+        fput_reading_with(i);
+        ui_toast(TOAST_RIBBON)
+    }
+}
+
+// The ribbons changed: kept, and the title's menu made again.
+rd_ribbons_changed() {
+    sk_kept(SK_KEPT_RIBBONS);
+    ui_effect("title_menus", -1, -1)
+}

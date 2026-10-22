@@ -196,96 +196,82 @@ plan_archive(i: int) {
     plan_end(i)
 }
 
-// ---- a chapter read ----
-// How long the reader has rested in each chapter (seconds), and whether
-// its end has been on the screen; the chapter resting in now, since when.
-pr_dwell: []f64 = new f64[1200](0.0f64);
-
-pr_end: []bool = new bool[1200](false);
-
-pr_c: int = -1;
-
-pr_since: f64 = 0.0f64;
-
+// ---- a chapter read: core's (core/reading.l8), told here ----
+// The timer for core's next tick (rd_wake), on the app's clock.
 pr_timer: int = 0;
 
+// Core told of the app's state (a plan's day up; the reader covered by a
+// sheet, or the demo's own pauses, whose time does not count: §11.3a note
+// 4), its effects done, and its tick set.
+rd_sync() {
+    rd_in_day = day_on;
+    rd_covered = presented() != 0 || demo_on
+}
+
+rd_after() {
+    uk_effects();
+    pr_timer = stop_timer(pr_timer);
+    if (rd_wake > 0.0f64) {
+        left: f64 = rd_wake - CACurrentMediaTime();
+        pr_timer = after(if (left < 0.1f64) 0.1f64 else left, "planRested:")
+    }
+}
+
 // The reader at rest (a scroll ended): resting in the chapter at the top,
-// checked again once it could have been 20 s. (With a plan or without:
-// the carried ribbon moves on as chapters are read, DESIGN.md §11.1.4.)
-plan_rest_began() {
-    // (A plan's day is marked only by Mark Read: §16.13.)
-    if (day_on) return;
-    if (cur < 0) return;
-    plan_rest_ended();
-    plan_seen();
-    pr_c = cur;
-    pr_since = CACurrentMediaTime();
-    left: f64 = 20.0f64 - pr_dwell[cur];
-    if (left < 0.5f64) left = 0.5f64;
-    pr_timer = stop_timer(pr_timer);
-    pr_timer = after(left, "planRested:")
+// the ends of the chapters on the screen seen, the carried ribbon taking
+// the place if the rest is a scroll's, the chapter perhaps dwelt in.
+reader_rest_core() {
+    if (!restored || cur < 0 || table == 0) return;
+    rd_sync();
+    rd_rest(cur, place_v, place_frac, chapter_end_seen(cur), ends_seen_hi(), CACurrentMediaTime());
+    rd_after()
 }
 
-// The rest over (a scroll began, the app went away): its time added.
-plan_rest_ended() {
-    // (A plan's day is marked only by Mark Read: §16.13.)
-    if (day_on) return;
-    if (pr_since <= 0.0f64 || pr_c < 0) return;
-    // (Not the time a sheet was over the reader; nor, in the demo, CI's own
-    // pauses: there only the demo's hook, demo_read, counts a chapter read,
-    // so no group's shots depend on how long a step took. §11.3a note 4.)
-    if (presented() == 0 && !demo_on) pr_dwell[pr_c] = pr_dwell[pr_c] + CACurrentMediaTime() - pr_since;
-    pr_since = 0.0f64;
-    pr_timer = stop_timer(pr_timer);
-    plan_check(pr_c)
-}
-
-plan_rested(_self: int, _cmd: int, _timer: int): int {
-    pr_timer = 0;
-    if (pr_since <= 0.0f64) return 0;
-    c: int = pr_c;
-    plan_rest_ended();
-    if (presented() == 0 && c == cur) plan_rest_began();
-    0
+// The last chapter from the one at the top whose end is on the screen
+// (cur - 1: none).
+ends_seen_hi(): int {
+    if (cur < 0 || table == 0) return -1;
+    bottom: f64 = offset_y(table) + view_height(table) - bottom_inset(table);
+    c: int = cur;
+    while (c < chapters) {
+        l8_msg_hfa(hfa, table, sel("rectForRowAtIndexPath:"), chapter_path(c), 0,
+            0);
+        if (hfa[1] + hfa[3] > bottom + 1.0f64) return c - 1;
+        c = c + 1
+    }
+    c - 1
 }
 
 // The ends of the chapters on the screen now, seen (from the scroll).
 plan_seen() {
-    // (A plan's day is marked only by Mark Read: §16.13.)
-    if (day_on) return;
-    if (cur < 0 || table == 0) return;
-    bottom: f64 = offset_y(table) + view_height(table) - bottom_inset(table);
-    c: int = cur;
-    more: bool = true;
-    while (more && c < chapters) {
-        l8_msg_hfa(hfa, table, sel("rectForRowAtIndexPath:"), chapter_path(c), 0,
-            0);
-        if (hfa[1] + hfa[3] <= bottom + 1.0f64) {
-            if (!pr_end[c]) {
-                pr_end[c] = true;
-                plan_check(c)
-            }
-            c = c + 1
-        } else more = false
-    }
+    if (day_on || cur < 0 || table == 0) return;
+    rd_sync();
+    if (rd_ends(cur, ends_seen_hi())) uk_effects()
 }
 
-// A chapter read once its rest and its end are both there: counted (for
-// the carried ribbon, and the plan if one is followed), and its rest and end
-// begun again, so that only reading it again counts it again.
-plan_check(c: int) {
-    if (c < 0 || c >= chapters) return;
-    if (pr_dwell[c] >= 20.0f64 && pr_end[c]) {
-        pr_dwell[c] = 0.0f64;
-        pr_end[c] = false;
-        chapter_read_now(c)
-    }
+// The rest over (a scroll began, the app went away).
+plan_rest_ended() {
+    rd_sync();
+    rd_moving(CACurrentMediaTime());
+    rd_after()
+}
+
+plan_rested(_self: int, _cmd: int, _timer: int): int {
+    pr_timer = 0;
+    rd_sync();
+    rd_tick(CACurrentMediaTime());
+    rd_after();
+    0
 }
 
 // Listen said a chapter's last verse (for the carried ribbon: a plan is
 // read only in its day's reader, DESIGN.md §16.0 decision 7).
 plan_heard(c: int) {
-    if (c >= 0 && c < chapters && (!demo_on || demo_heard)) chapter_read_now(c)
+    if (c < 0 || c >= chapters || demo_on && !demo_heard) return;
+    note_num("bible: chapter read ", c);
+    rd_sync();
+    rd_read(c);
+    rd_after()
 }
 
 // (The ribbons group's: Listen's chapter's end counts, as on a phone.)
