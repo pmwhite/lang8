@@ -50,9 +50,50 @@ uk_words(what: int) {
         fput_str(if (text_cur == TEXT_ORIG) "None yet" else src_readers[audio_source(text_cur)])
     } else if (what == SK_WORDS_LISTEN_FOOTER) {
         if (!def_bool("voiceScreenSeen") && audio_source(text_cur) == SRC_VOICE && !better_voice_installed()) fput_str("This version is read by the iPhone\â\€\™s voice. A more natural voice can be downloaded in Voice.")
-    } else if (what == SK_WORDS_ESV_SEARCH) {
+    } else if (what == SK_WORDS_APP_VERSION) {
+        n: int = nsstring_into(app_version_line(), uk_query_buf);
+        fput_bytes(uk_query_buf, 0, n)
+    } else if (what == SK_WORDS_VOICE_TIP) fput_str(" For a more natural voice, download an Enhanced or Premium English voice in the Settings app: Accessibility \â\€\º Read & Speak \â\€\º Voices \â\€\º English.") else if (what == SK_WORDS_ESV_SEARCH) {
         st: int = esv_sr_state;
         if (st >= ESV_OFFLINE || st == 1) fput_str(if (st == 1) "Searching\â\€\¦" else if (st == ESV_OFFLINE) "No connection" else if (st == ESV_BUSY) "Busy, try again in a minute" else if (st == ESV_DAILY) "Resting for today" else "Not available right now")
+    }
+}
+
+// Numbers only the app knows (core/skin.l8's SK_NUM_).
+uk_num(what: int, a: int): int {
+    if (what == SK_NUM_AUDIO_SOURCE) return audio_source(a);
+    if (what == SK_NUM_ESV_AUDIO) return if (esv_audio_listed()) 1 else 0;
+    if (what == SK_NUM_CELLULAR) return if (def_bool("downloadAheadCellular")) 1 else 0;
+    if (what == SK_NUM_DOWNLOADED) return downloaded_total();
+    if (what == SK_NUM_BETTER_VOICE) return if (better_voice_installed()) 1 else 0;
+    if (what == SK_NUM_DOWNLOAD) {
+        // (Book a's chapters here for the version's reader, and the one
+        // coming: thousandths; 1000 whole.)
+        downloads_open();
+        s: int = dl_reader();
+        if (a < 0 || a >= books || dl_index(s, a) < 0) return -1;
+        if (dl_complete(s, a)) return 1000;
+        part: f64 = 0.0f64;
+        if (dl_c >= 0 && !dl_ahead && dl_s == s && ch_book[dl_c] == a && dl_want > 0) part = dl_got as f64 / dl_want as f64;
+        if (part > 1.0f64) part = 1.0f64;
+        n: int = ((dl_have(s, a) as f64 + part) * 1000.0f64 / book_count[a] as f64) as int;
+        return if (n > 999) 999 else n
+    }
+    -1
+}
+
+// Lists only the app has (SK_ITEMS_): the English voices installed, best
+// first, the one chosen (if it still is) flagged.
+uk_fill(what: int) {
+    if (what != SK_ITEMS_VOICES) return;
+    if (!vo_read) voices_read();
+    vid: int = msg1(defaults(), sel("stringForKey:"), nsstring("listenVoiceID"));
+    for i in 0..vo_n {
+        fbuf_n = 0;
+        fput_voice(vo_obj[i]);
+        chosen: bool = vid != 0 && (msg1(msg(vo_obj[i], sel("identifier")), sel("isEqualToString:"),
+            vid) & 255) != 0;
+        sk_item_fbuf(vo_q[i] / 10, if (chosen) 1 else 0)
     }
 }
 
@@ -65,7 +106,9 @@ uk_begin() {
         save_prefs: &uk_save_prefs,
         save_kept: &uk_save_kept,
         words: &uk_words,
-        switch_version: &uk_switch_version
+        switch_version: &uk_switch_version,
+        num: &uk_num,
+        fill: &uk_fill
     };
     sk_has_listen = true;
     sk_has_manual = true;
@@ -99,7 +142,8 @@ uk_prefs_from_app() {
     set_pref_on("redLetter", red_letter);
     set_pref_on("keepScreenOn", keep_on);
     set_pref_on("origAccents", lay_accents);
-    set_pref("listenRate", clamp(def_int("listenRate"), 0, 2))
+    set_pref("listenRate", clamp(def_int("listenRate"), 0, 2));
+    set_pref("origGlosses", clamp(def_int("origGlosses"), 0, 3))
 }
 
 // A setting core changed, done as the app does it (kept, and the reader
@@ -135,6 +179,8 @@ uk_app_from_prefs() {
     if (pref_on("redLetter", red_letter) != red_letter) set_red_letter(!red_letter);
     if (pref_on("keepScreenOn", keep_on) != keep_on) set_keep_on(!keep_on);
     if (pref_on("origAccents", lay_accents) != lay_accents) set_accents(!lay_accents);
+    gl: int = clamp(pref("origGlosses", 0), 0, 3);
+    if (gl > 0 && gl != clamp(def_int("origGlosses"), 0, 3)) set_gloss_mode(gl - 1);
     rate: int = clamp(pref("listenRate", 1), 0, 2);
     if (rate != clamp(def_int("listenRate"), 0, 2)) listen_set_speed(rate)
 }
@@ -277,6 +323,7 @@ uk_cell(t: int, path: int): int {
     if (row.kind == UI_FIELD) return uk_field_cell(k, i);
     if (row.custom == CUSTOM_SWATCHES) return uk_swatch_cell(k, i);
     if (row.circle > 0) return uk_circle_cell(t, k, i);
+    downloading: bool = row.custom == CUSTOM_DOWNLOAD;
     if (row.kind == UI_TOGGLE || row.kind == UI_CHOICE) return uk_control_cell(t,
         k, i);
     kind: int = if (row.detail.n == 0) 0 else if (row.value_detail) 1 else 2;
@@ -335,6 +382,8 @@ uk_cell(t: int, path: int): int {
         msg1(img, sel("setAccessibilityLabel:"), nsstring("Today\â\€\™s read"));
         msg1(cell, sel("setAccessoryView:"), img)
     }
+    // (A book downloading: its ring, which can stop it, a ring a list.)
+    if (downloading) msg1(cell, sel("setAccessoryView:"), dl_ring(row.arg, if (uk_kind_of(uk_ids[k]) == SCR_DOWNLOADS) 0 else 1));
     // (Words at the row's end, as a time is: a label of their own.)
     if (row.trailing.n > 0) {
         l: int = msg(make("UILabel"), sel("autorelease"));
@@ -1081,6 +1130,8 @@ uk_will_appear(self: int, cmd: int, animated: int): int {
     for k in 0..UK_SLOTS {
         if (uk_vcs[k] == self && uk_vcs[k] != 0) {
             if (uk_seen[k]) {
+                // (The voices again: one just downloaded in Settings shows.)
+                if (uk_kind_of(uk_ids[k]) == SCR_VOICES) voices_read();
                 uk_stale = true;
                 msg(uk_tables[k], sel("reloadData"));
                 uk_dress(k, false)
@@ -1106,8 +1157,13 @@ uk_will_appear(self: int, cmd: int, animated: int): int {
 // (Going: its toolbar hidden, if it had one.)
 uk_will_go(self: int, cmd: int, animated: int): int {
     _r: int = super1(self, uk_class, cmd, animated);
-    // (Leaving ends the editing, and so keeps a name typed.)
+    // (Leaving ends the editing, and so keeps a name typed; a preview of a
+    // voice stops.)
     msg1(msg(self, sel("view")), sel("endEditing:"), 1);
+    for k in 0..UK_SLOTS {
+        kind: int = if (uk_vcs[k] == self) uk_kind_of(uk_ids[k]) else 0;
+        if (kind == SCR_VOICE || kind == SCR_VOICES) preview_stop()
+    }
     for k in 0..UK_SLOTS {
         if (uk_vcs[k] == self && uk_vcs[k] != 0 && uk_tooled[k]) {
             nav: int = msg(self, sel("navigationController"));
@@ -1205,6 +1261,18 @@ uk_split(t: UiText, into: []int): int {
 uk_labels: []int = new int[8](0);
 
 uk_query_buf: []i8 = new i8[256](0i8);
+
+// The controller of core's screen of kind (the demos'), or 0.
+uk_vc_of(kind: int): int {
+    k: int = uk_slot_of(uk_table_of(kind));
+    if (k < 0) 0 else uk_vcs[k]
+}
+
+// The search controller of core's screen of kind (the demos'), or 0.
+uk_search_of_kind(kind: int): int {
+    k: int = uk_slot_of(uk_table_of(kind));
+    if (k < 0) 0 else uk_searches[k]
+}
 
 // The slot whose field is sc's (a search controller's), or -1.
 uk_slot_of_search(sc: int): int {
@@ -1372,7 +1440,8 @@ uk_effects() {
             uk_making_push = false;
             sheet: int = if (uk_nav != 0) uk_nav else presented();
             if (k >= 0 && sheet != 0) msg2(sheet, sel("pushViewController:animated:"),
-                uk_vcs[k], 1)
+                uk_vcs[k], 1);
+            if (uk_kind_of(e.a) == SCR_DOWNLOADS) dl_pump()
         } else if (e.word == "present") {
             k: int = uk_make(e.a);
             if (k >= 0) {
@@ -1415,6 +1484,17 @@ uk_effects() {
                 sel("resignFirstResponder"))
         } else if (e.word == "searched") esv_sr_reset() else if (e.word == "esv_search") {
             if (esv_sr_state != 1) esv_search_ask(e.a)
+        } else if (e.word == "audio_source") uk_audio_source(e.a, e.b) else if (e.word == "voice") uk_voice_chosen(e.a) else if (e.word == "cellular") set_def_bool("downloadAheadCellular",
+            e.a != 0) else if (e.word == "download") {
+            s: int = dl_reader();
+            if (src_cacheable(s) && dl_index(s, e.a) < 0) {
+                haptic_select();
+                dl_start(s, e.a)
+            }
+        } else if (e.word == "download_delete") dl_stop(dl_reader(), e.a) else if (e.word == "refresh") {
+            // (What the app has done shown: the screens made again.)
+            uk_sync();
+            sk_update_all()
         } else if (e.word == "marked") {
             // (A plan's day marked: its file kept, today's done told, the
             // reminders scheduled again.)
@@ -1451,7 +1531,8 @@ uk_effects() {
                 if (text_cur != TEXT_ORIG) open_voice()
             } else if (e.a == OPEN_MANUAL) help_open_manual() else if (e.a == OPEN_ACKNOWLEDGEMENTS) open_acknowledgements() else if (e.a == OPEN_PLAN) open_plan(e.b,
                 0) else if (e.a == OPEN_DAY1) open_day1() else if (e.a == OPEN_DAY) day_open(e.b / 1000,
-                e.b % 1000, -1)
+                e.b % 1000, -1) else if (e.a == OPEN_HELP_PAGE) help_open_page(e.b / 1000,
+                e.b % 1000 - 1, e.b % 1000 > 0)
         } else if (e.word == "listen") _l: int = listen_button_tapped(0, 0, 0) else if (e.word == "goto") {
             // (The app's own jump: the sheet away, the way back shown.)
             jump(e.a, e.b)
@@ -1478,6 +1559,45 @@ uk_ribbon_added(id: int) {
     reading_jumped();
     ribbons_changed();
     toast_reading_with(id)
+}
+
+// A version's reader chosen (its tx and source s): kept; listening, heard
+// in place; else a preview of it.
+uk_audio_source(tx: int, s: int) {
+    was: int = audio_source(tx);
+    if (s != was) {
+        haptic_select();
+        set_audio_source(tx, s);
+        fbuf_n = 0;
+        fput_str("bible: voice ");
+        fput_str(text_abbrs[tx]);
+        fput_str(" ");
+        fput_str(src_ids[s]);
+        note_ns(fstring())
+    }
+    if (ls_active) {
+        if (s != was && tx == text_cur) listen_reader_changed()
+    } else preview_toggle(s)
+}
+
+// The iPhone's voice chosen (i, in the voices' order; -1 Best Available).
+uk_voice_chosen(i: int) {
+    v: int = if (i < 0 || i >= vo_n) 0 else vo_obj[i];
+    haptic_select();
+    if (v == 0) msg1(defaults(), sel("removeObjectForKey:"), nsstring("listenVoiceID")) else msg2(defaults(),
+        sel("setObject:forKey:"), msg(v, sel("identifier")), nsstring("listenVoiceID"));
+    ls_voice = 0;
+    if (!ls_active) preview_voice()
+}
+
+// The list showing core's screen of kind made again at once (a download's
+// progress).
+uk_reload_kind(kind: int) {
+    k: int = uk_slot_of(uk_table_of(kind));
+    if (k < 0) return;
+    uk_stale = true;
+    msg(uk_tables[k], sel("reloadData"));
+    uk_dress(k, false)
 }
 
 // Plan p's days (core's), at day d (selected, select), pushed in nav or
