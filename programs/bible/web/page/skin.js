@@ -95,7 +95,9 @@ async function fetchData(id, name) {
 }
 
 // ---- the ESV, through the site's Worker (/api/v1/: it holds the key) ----
-const API = "/api/v1/";
+// (On smoothbible.com the Worker answers /api/; a development server, and
+// a tailnet that forwards only /read, answer /read/api/ too: serve.mjs.)
+const API = location.hostname === "smoothbible.com" ? "/api/v1/" : "/read/api/v1/";
 const WHO = { "X-Smooth-Bible": "web (1)" };
 let esvFile = 1000000;
 

@@ -58,6 +58,8 @@ export function serve(site, port) {
   const env = { ASSETS, UPSTREAM: "http://127.0.0.1:9/", PER_IP: { limit: async () => ({ success: true }) } };
 
   const server = http.createServer(async (req, res) => {
+    // (/read/api/ is /api/: a tailnet may forward only /read.)
+    if (req.url.startsWith("/read/api/")) req.url = req.url.slice(5);
     const request = new Request(`http://smoothbible.com${req.url}`, { method: req.method, headers: req.headers });
     // (The ESV's requests to a Worker that has its key, where SB_API names
     // one: SB_API=https://smoothbible.com. Else this one's, without.)
