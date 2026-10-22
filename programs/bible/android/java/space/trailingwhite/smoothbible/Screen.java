@@ -128,6 +128,8 @@ final class Screen {
     // Places in the detail to stress: pairs of UTF-16 offsets; the runs of
     // its detail, title and side words (END, STYLE pairs).
     int[] marks = new int[0], runs = new int[0], truns = new int[0], sruns = new int[0];
+    // A page's paragraph's links: B, E (UTF-16), ACTION, ARG each.
+    int[] links = new int[0];
     final ArrayList<Action> actions = new ArrayList<>();
     final ArrayList<Cell> cells = new ArrayList<>();
 
@@ -136,7 +138,7 @@ final class Screen {
     }
   }
 
-  // A row line: row KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS VALUE OPTIONS
+  // A row line (and, after ACTION_ICONS, LINKS): row KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS VALUE OPTIONS
   // LO HI LABEL TRAILING DELETE CUSTOM HINT MARKS LINES CIRCLE CIRCLE_ACTION
   // SUFFIX ICON_COLOR NOTE INFO ACTIONS RUNS TRUNS TITLE_LINES FIELD_KIND LEAD
   // LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS.
@@ -193,6 +195,22 @@ final class Screen {
     r.sideNote = w.field(35);
     String[] icons = w.field(36).split("\\|", -1);
     for (int i = 0; i < r.actions.size() && i < icons.length; i++) r.actions.get(i).icon = icons[i];
+    String ls = w.field(37);
+    if (!ls.isEmpty()) {
+      String[] parts = ls.split("\\|");
+      r.links = new int[parts.length * 4];
+      for (int i = 0; i < parts.length; i++) {
+        String[] q = parts[i].split(":");
+        for (int j = 0; j < 4 && j < q.length; j++) {
+          try {
+            r.links[i * 4 + j] = Integer.parseInt(q[j]);
+          } catch (NumberFormatException e) {
+            r.links = new int[0];
+            return r;
+          }
+        }
+      }
+    }
     return r;
   }
 

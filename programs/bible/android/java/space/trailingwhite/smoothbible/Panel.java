@@ -733,6 +733,7 @@ final class Panel extends FrameLayout {
     private View row(Screen.Row r) {
       Context c = getContext();
       if (r.kind.equals("field")) return fieldRow(r);
+      if (r.kind.equals("text")) return textRow(r);
       if (!r.cells.isEmpty()) return gridRow(r);
       if (r.custom == CUSTOM_SWATCHES) return swatches(r);
       LinearLayout line = new LinearLayout(c);
@@ -979,6 +980,45 @@ final class Panel extends FrameLayout {
         line.addView(sp);
       }
       return line;
+    }
+
+    // A page's paragraph: its words by their runs, selectable, its links
+    // doing their actions; a heading larger and bold, with room above it.
+    private View textRow(Screen.Row r) {
+      Context c = getContext();
+      TextView t = new TextView(c);
+      CharSequence words = look.rich(r.title, r.truns);
+      android.text.SpannableStringBuilder s = new android.text.SpannableStringBuilder(words);
+      Screen sc = screen;
+      for (int j = 0; j + 3 < r.links.length; j += 4) {
+        int b = Math.max(0, Math.min(r.links[j], s.length()));
+        int e = Math.max(b, Math.min(r.links[j + 1], s.length()));
+        int action = r.links[j + 2], arg = r.links[j + 3];
+        s.setSpan(new android.text.style.ClickableSpan() {
+          @Override
+          public void onClick(View v) {
+            Native.send("act " + sc.id + " " + action + " " + arg + " 0");
+          }
+
+          @Override
+          public void updateDrawState(android.text.TextPaint p) {
+            p.setColor(look.accent);
+          }
+        }, b, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+      }
+      t.setText(s);
+      if (r.links.length > 0) t.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
+      t.setTextIsSelectable(true);
+      t.setTextColor(look.ink);
+      t.setTextSize(TypedValue.COMPLEX_UNIT_SP, r.flag('h') ? 18 : 16);
+      if (r.flag('h')) {
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setAccessibilityHeading(true);
+      }
+      t.setLineSpacing(0, 1.2f);
+      t.setPadding(dp(20), dp(r.flag('h') ? 20 : 0), dp(20), dp(r.flag('h') ? 6 : 10));
+      if (!r.label.isEmpty()) t.setContentDescription(r.label);
+      return t;
     }
 
     // A field (New Ribbon's name, Add Passage's reference): its title the

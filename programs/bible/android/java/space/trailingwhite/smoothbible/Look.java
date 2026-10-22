@@ -149,7 +149,7 @@ final class Look {
   static final int RUN_NUMBER = 100, RUN_MISSING = 101, RUN_GREEK = 102, RUN_HEBREW = 103,
       RUN_TRANSLIT = 104, RUN_CODE = 105, RUN_FAINT = 106, RUN_STRONG = 107, RUN_PLAIN = 108,
       RUN_SMALL = 109, RUN_GREEK_FAINT = 110, RUN_HEBREW_FAINT = 111, RUN_READING = 112,
-      RUN_ITALIC = 113, RUN_ACCENT = 114;
+      RUN_ITALIC = 113, RUN_ACCENT = 114, RUN_SYMBOL = 115, RUN_SYMBOL_BOLD = 116;
 
   // Words set by their runs (END, STYLE pairs; END in UTF-16 units, as
   // Java counts): the reader's styles, or core's RUN_.
@@ -215,6 +215,11 @@ final class Look {
       case RUN_ACCENT:
         span(s, new ForegroundColorSpan(accent), a, b);
         break;
+      case RUN_SYMBOL:
+      case RUN_SYMBOL_BOLD:
+        // (An iPhone symbol, by name: here a small mark in its place.)
+        span(s, new Mark(ink), a, b);
+        break;
       default:
         break;
     }
@@ -242,6 +247,29 @@ final class Look {
         break;
       default:
         break;
+    }
+  }
+
+  // A symbol core names, drawn as a small ring.
+  static final class Mark extends ReplacementSpan {
+    final int color;
+
+    Mark(int color) {
+      this.color = color;
+    }
+
+    @Override
+    public int getSize(Paint p, CharSequence t, int a, int b, Paint.FontMetricsInt fm) {
+      return (int) p.measureText(" \u25CB ");
+    }
+
+    @Override
+    public void draw(Canvas c, CharSequence t, int a, int b, float x, int top, int y, int bottom,
+        Paint p) {
+      int was = p.getColor();
+      p.setColor(color);
+      c.drawText(" \u25CB ", x, y, p);
+      p.setColor(was);
     }
   }
 
