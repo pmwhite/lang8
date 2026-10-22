@@ -256,6 +256,9 @@ public final class Bible extends Activity {
     return String.valueOf((char) Character.toLowerCase(ch));
   }
 
+  private final Runnable letScreenGo = () ->
+      getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
   @Override
   protected void onPause() {
     super.onPause();
@@ -581,6 +584,17 @@ public final class Bible extends Activity {
       case "jump":
         reader.jump(w.num(1), w.num(2));
         break;
+      case "awake": {
+        // (Keep Screen On: the screen kept on so long, or let go now.)
+        View d = getWindow().getDecorView();
+        d.removeCallbacks(letScreenGo);
+        long ms = w.num(1);
+        if (ms > 0) {
+          getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+          d.postDelayed(letScreenGo, ms);
+        } else letScreenGo.run();
+        break;
+      }
       case "page":
         reader.page(w.num(1) == 1 ? 1 : -1);
         break;
