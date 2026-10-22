@@ -51,6 +51,10 @@ SK_WORDS_VOICE: int = 1;
 
 SK_WORDS_LISTEN_FOOTER: int = 2;
 
+// Under "Search the ESV for ...": why it isn't shown yet (Searching...,
+// No connection), or nothing.
+SK_WORDS_ESV_SEARCH: int = 3;
+
 sk_words(what: int) {
     fbuf_n = 0;
     f: fn(what: int) = sk_host.words;
@@ -71,6 +75,8 @@ sk_has_keep_on: bool = false;
 sk_fonts: []str = new str[0]("");
 
 SK_KEPT_HISTORY: int = 1;
+
+SK_KEPT_SEARCHES: int = 2;
 
 // The local time's offset from UTC (seconds), as the host says.
 sk_tz: int = 0;
@@ -104,6 +110,12 @@ HOST_RIBBONS: int = 1;
 
 HOST_PLAN: int = 2;
 
+// The ESV's own search results (the host's, from its server), shown in
+// place of Search's once asked for (sk_esv_results, as the host says).
+HOST_ESV_RESULTS: int = 3;
+
+sk_esv_results: bool = false;
+
 sk_listed_c: []int = new int[16](0);
 
 sk_listed_n: int = 0;
@@ -118,6 +130,8 @@ SCR_VERSIONS: int = 3;
 SCR_SETTINGS: int = 4;
 
 SCR_HISTORY: int = 5;
+
+SCR_SEARCH: int = 6;
 
 ACT_BOOK: int = 1;
 
@@ -157,6 +171,16 @@ ACT_PLACE: int = 18;
 
 ACT_GOTO_REF: int = 19;
 
+ACT_HIT: int = 20;
+
+ACT_SEARCH_REF: int = 21;
+
+ACT_RECENT_SEARCH: int = 22;
+
+ACT_SEARCHES_CLEAR: int = 23;
+
+ACT_ESV_SEARCH: int = 24;
+
 // Screens a platform still makes itself, opened from core's (the open
 // effect's argument).
 OPEN_VERSIONS: int = 1;
@@ -179,6 +203,10 @@ CUSTOM_SIZE: int = 2;
 CUSTOM_THEMES: int = 3;
 
 CUSTOM_FONT: int = 4;
+
+// A verse a search found: its reference small, its words as the reader's
+// with the matches stressed (the row's marks), up to four lines.
+CUSTOM_HIT: int = 5;
 
 // The versions offered: those a skin bundles (not the ESV, nor the
 // original's, yet).
@@ -358,7 +386,7 @@ sk_build(i: int) {
     k: int = sk_kinds[i];
     a: int = sk_args[i];
     if (k == SCR_GOTO) sk_build_goto(sk_ids[i]) else if (k == SCR_CHAPTERS) sk_build_chapters(sk_ids[i],
-        a) else if (k == SCR_VERSIONS) sk_build_versions(sk_ids[i]) else if (k == SCR_SETTINGS) sk_build_settings(sk_ids[i]) else if (k == SCR_HISTORY) sk_build_history(sk_ids[i]);
+        a) else if (k == SCR_VERSIONS) sk_build_versions(sk_ids[i]) else if (k == SCR_SETTINGS) sk_build_settings(sk_ids[i]) else if (k == SCR_HISTORY) sk_build_history(sk_ids[i]) else if (k == SCR_SEARCH) sk_build_search(sk_ids[i]);
     ui_write()
 }
 
@@ -370,6 +398,11 @@ sk_open(kind: int, arg: int, push: bool) {
     if (kind == SCR_GOTO) {
         sk_q_n = 0;
         sk_goto_recent()
+    }
+    if (kind == SCR_SEARCH) {
+        sk_search_book = (if (sk_c >= 0 && sk_c < chapters) ch_book[sk_c] else 0);
+        sk_run_search();
+        sk_search_shown = (if (sk_sq_n == 0) 2 else 1)
     }
     sk_ids[sk_n] = sk_next_id;
     sk_kinds[sk_n] = kind;
@@ -386,6 +419,14 @@ sk_update_all() {
         sk_build(i);
         ui_effect("update", sk_ids[i], -1)
     }
+}
+
+// The screens from i up let go (closed by the skin, or the sheet gone):
+// what Search searched for kept first among the recent searches.
+sk_closing(i: int) {
+    for j in i..sk_n
+        if (sk_kinds[j] == SCR_SEARCH) sk_remember_search();
+    sk_n = i
 }
 
 sk_dismiss() {
@@ -593,6 +634,10 @@ sk_query(
 ) {
     i: int = sk_find(id);
     if (i < 0) return;
+    if (sk_kinds[i] == SCR_SEARCH) {
+        sk_search_typed(id, buf, b, e);
+        return
+    }
     sk_q_n = 0;
     for x in b..e {
         if (sk_q_n < len(sk_q)) {
@@ -607,7 +652,14 @@ sk_query(
 // Return in screen id's field: its first suggestion (the reference, else
 // the first book).
 sk_submit(id: int) {
-    if (sk_find(id) < 0 || sk_q_n == 0) return;
+    i: int = sk_find(id);
+    if (i >= 0 && sk_kinds[i] == SCR_SEARCH) {
+        // (Kept as a recent search; the keyboard put away.)
+        sk_remember_search();
+        ui_effect("blur", id, -1);
+        return
+    }
+    if (i < 0 || sk_q_n == 0) return;
     sk_query_books();
     if (sk_ref) sk_go_ref() else if (sk_found_n > 0) sk_pick_book(sk_found[0])
 }
@@ -617,6 +669,294 @@ sk_go_ref() {
     if (!sk_ref) return;
     if (ref_chapter < 0) sk_pick_book(ref_book) else sk_goto(chapter_of(ref_book,
         ref_chapter), if (ref_verse > 0) ref_verse else 0)
+}
+
+// ---- Search (DESIGN.md Â§5) ----
+// What is searched for (kept for the next time), in which scope (0 all, 1
+// the Old Testament, 2 the New, 3 the book read as Search opened), whether
+// it is a reference too (a row to go there), whether it was searched, and
+// what was shown (1 results, 2 recent searches: a change cross-fades).
+sk_sq: []i8 = new i8[256](0i8);
+
+sk_sq_n: int = 0;
+
+sk_scope: int = 0;
+
+sk_search_book: int = 0;
+
+sk_search_ref: bool = false;
+
+sk_search_done: bool = false;
+
+sk_search_shown: int = 0;
+
+// The recent searches, newest first (8 kept; the host keeps them:
+// SK_KEPT_SEARCHES).
+SK_SEARCHES_MOST: int = 8;
+
+sk_searches: []i8 = new i8[2048](0i8);
+
+sk_search_len: []int = new int[8](0);
+
+sk_searches_n: int = 0;
+
+// (Search i's words into fbuf, for the host to keep.)
+sk_search_words(i: int) {
+    fbuf_n = 0;
+    if (i >= 0 && i < sk_searches_n) fput_bytes(sk_searches, i * 256, i * 256 + sk_search_len[i])
+}
+
+// A search kept, last (the host's, as it begins).
+sk_searches_add(b: []i8, n: int) {
+    if (sk_searches_n >= SK_SEARCHES_MOST) return;
+    sk_search_set(sk_searches_n, b, 0, n);
+    sk_searches_n = sk_searches_n + 1
+}
+
+sk_search_set(
+    i: int,
+    b: []i8,
+    from: int,
+    n: int
+) {
+    m: int = if (n > 256) 256 else n;
+    for x in 0..m sk_searches[i * 256 + x] = b[from + x];
+    sk_search_len[i] = m
+}
+
+sk_search_is(i: int): bool {
+    if (sk_search_len[i] != sk_sq_n) return false;
+    for x in 0..sk_sq_n
+        if (sk_searches[i * 256 + x] != sk_sq[x]) return false;
+    true
+}
+
+// What was searched for, first among the recent searches.
+sk_remember_search() {
+    if (sk_sq_n == 0 || !sk_search_done) return;
+    at: int = -1;
+    for i in 0..sk_searches_n
+        if (at < 0 && sk_search_is(i)) at = i;
+    if (at < 0) at = (if (sk_searches_n < SK_SEARCHES_MOST) sk_searches_n else SK_SEARCHES_MOST - 1);
+    if (at >= sk_searches_n) sk_searches_n = at + 1;
+    i: int = at;
+    while (i > 0) {
+        sk_search_set(i, sk_searches, (i - 1) * 256, sk_search_len[i - 1]);
+        i = i - 1
+    }
+    sk_search_set(0, sk_sq, 0, sk_sq_n);
+    kept: fn(what: int) = sk_host.save_kept;
+    kept(SK_KEPT_SEARCHES)
+}
+
+// The search, in its scope: the verses found (text.l8's hit_chapter and
+// the rest), and whether it is a reference. (The version read; the BSB's
+// under the ESV, at once, the ESV itself a tap away; the Hebrew and Greek
+// by its letters, or Latin letters against each word's transliteration.)
+sk_run_search() {
+    sk_search_ref = false;
+    sk_search_done = false;
+    sk_esv_results = false;
+    hit_count = 0;
+    hit_more = false;
+    if (sk_sq_n > 0) {
+        sk_search_ref = parse_ref(sk_sq, sk_sq_n) && ref_chapter > 0;
+        from: int = if (sk_scope == 2) 39 else if (sk_scope == 3) sk_search_book else 0;
+        last: int = if (sk_scope == 1) 38 else if (sk_scope == 3) sk_search_book else 65;
+        source: TextSource = ready_source(quote_base());
+        if (text_cur == TEXT_ORIG) og_search(sk_sq, sk_sq_n, from, last) else source_search(&source,
+            sk_sq, sk_sq_n, from, last);
+        sk_search_done = true
+    }
+    // (A platform's results for what was searched before are gone.)
+    ui_effect("searched", -1, -1)
+}
+
+// Whether the results end with "Search the ESV for ..." (or, under No
+// Results, are it): under the ESV, once it is listed.
+sk_esv_search_row(): bool {
+    text_cur == TEXT_ESV && sk_esv_listed && sk_sq_n > 0 && sk_search_done
+}
+
+sk_build_search(id: int) {
+    ui_begin(id, SCR_SEARCH, 0, "Search");
+    ui_set_search("Search the Bible");
+    ui_set_search_text(sk_sq, sk_sq_n);
+    ui_search_wait = 200;
+    ui_search_focus = true;
+    ui_plain = true;
+    // (Short titles, so none is cut off; the full names for VoiceOver.)
+    b: int = sk_search_book;
+    fbuf_n = 0;
+    fput_str("All|OT|NT|");
+    if (book_name_end(b) - book_name_start(b) > 10) {
+        book_short(b);
+        fput_bytes(short_name, 0, short_n)
+    } else fput_bytes(bsb, book_name_start(b), book_name_end(b));
+    at: int = fbuf_n;
+    fput_str("All|Old Testament|New Testament|");
+    fput_bytes(bsb, book_name_start(b), book_name_end(b));
+    ui_set_scopes_fbuf(at, sk_scope);
+    if (sk_sq_n == 0) {
+        if (sk_searches_n == 0) {
+            ui_set_empty("magnifyingglass", "Search the Bible", "Find words and phrases across all 66 books.");
+            return
+        }
+        ui_section("Recent Searches", "");
+        ui_set_section_button("Clear", ACT_SEARCHES_CLEAR);
+        for i in 0..sk_searches_n {
+            ui_row(UI_ITEM, ACT_RECENT_SEARCH, i);
+            sk_search_words(i);
+            ui_set_title_fbuf();
+            ui_set_icon("clock.arrow.circlepath");
+            ui_set_icon_faint()
+        }
+        return
+    }
+    if (sk_search_ref && parse_ref(sk_sq, sk_sq_n)) {
+        ui_section("", "");
+        ui_row(UI_ITEM, ACT_SEARCH_REF, 0);
+        ui_set_icon("arrow.right.circle.fill");
+        ui_set_strong();
+        c: int = chapter_of(ref_book, ref_chapter);
+        fbuf_n = 0;
+        fput_str("Go to ");
+        fput_ref(c, if (ref_verse > 0) ref_verse else 0, if (ref_verse_end > 0) ref_verse_end else ref_verse);
+        ui_set_title_fbuf();
+        fbuf_n = 0;
+        fput_opening_words(c, ref_verse, 60);
+        ui_set_detail_fbuf();
+        ui_set_scripture()
+    }
+    if (sk_esv_results) {
+        ui_host_section(HOST_ESV_RESULTS);
+        return
+    }
+    esv_row: bool = sk_esv_search_row();
+    if (hit_count > 0 || esv_row) {
+        ui_section("", "");
+        fbuf_n = 0;
+        if (hit_count == 0) fput_str("No Results") else {
+            fput_int(hit_count);
+            if (hit_more) fput(43);
+            fput_str(if (hit_count == 1) " verse in the " else " verses in the ");
+            fput_str(text_abbrs[quote_base()])
+        }
+        ui_set_header_fbuf();
+        source: TextSource = ready_source(quote_base());
+        for i in 0..hit_count sk_hit_row(&source, i);
+        if (esv_row) {
+            ui_row(UI_ITEM, ACT_ESV_SEARCH, 0);
+            fbuf_n = 0;
+            fput_str("Search the ESV for \â\€\œ");
+            fput_bytes(sk_sq, 0, sk_sq_n);
+            fput_str("\â\€\");
+            ui_set_title_fbuf();
+            ui_set_tinted();
+            ui_set_icon("globe");
+            sk_words(SK_WORDS_ESV_SEARCH);
+            if (fbuf_n > 0) ui_set_detail_fbuf()
+        }
+    }
+    if (hit_count == 0 && !sk_search_ref && !esv_row) {
+        fbuf_n = 0;
+        fput_str("No Results for \â\€\œ");
+        fput_bytes(sk_sq, 0, sk_sq_n);
+        fput_str("\â\€\");
+        ui_set_empty("magnifyingglass", "", "Check the spelling or try fewer words.");
+        ui_set_empty_title_fbuf()
+    }
+}
+
+// A verse found: its reference, and its words with what was searched for
+// marked (begun nearer the first match, eight words before it, if it is
+// far in).
+sk_hit_row(source: *TextSource, i: int) {
+    c: int = hit_chapter[i];
+    v: int = hit_verse[i];
+    ui_row(UI_ITEM, ACT_HIT, c * 1000 + v);
+    ui_set_custom(CUSTOM_HIT);
+    fbuf_n = 0;
+    fput_ref(c, v, v);
+    ui_set_title_fbuf();
+    if (text_cur == TEXT_ORIG) og_match_ranges(c, v) else source_match_ranges(source,
+        c, v);
+    start: int = 0;
+    if (mr_count > 0 && mr_begin[0] > 170) {
+        words: int = 0;
+        start = mr_begin[0];
+        while (start > 0 && words < 9) {
+            start = start - 1;
+            if (vt[start] as int == 32) words = words + 1
+        }
+        if (vt[start] as int == 32) start = start + 1
+    }
+    fbuf_n = 0;
+    lead: int = 0;
+    if (start > 0) {
+        fput_str("\â\€\¦ ");
+        lead = 2
+    }
+    fput_bytes(vt, start, vt_n);
+    ui_set_detail_fbuf();
+    ui_set_scripture();
+    for m in 0..mr_count {
+        if (mr_begin[m] >= start) {
+            b: int = lead + sk_utf16(vt, start, mr_begin[m]);
+            ui_add_mark(b, b + sk_utf16(vt, mr_begin[m], mr_end[m]))
+        }
+    }
+}
+
+// How many UTF-16 units bytes p to e of s are.
+sk_utf16(s: []i8, p: int, e: int): int {
+    n: int = 0;
+    for i in p..e {
+        k: int = s[i] as int & 255;
+        if (k < 128 || k >= 192) n = n + 1;
+        if (k >= 240) n = n + 1
+    }
+    n
+}
+
+// Search's field typed in (as it rests): searched again; cleared, what was
+// searched for kept first among the recent searches.
+sk_search_typed(
+    id: int,
+    buf: []i8,
+    b: int,
+    e: int
+) {
+    i: int = sk_find(id);
+    if (i < 0) return;
+    if (e == b && sk_sq_n > 0) sk_remember_search();
+    sk_sq_n = 0;
+    for x in b..e {
+        if (sk_sq_n < len(sk_sq)) {
+            sk_sq[sk_sq_n] = buf[x];
+            sk_sq_n = sk_sq_n + 1
+        }
+    }
+    sk_search_again(i, false)
+}
+
+// Search made again for its query and scope (retext: its field to show
+// the query, a recent search chosen).
+sk_search_again(i: int, retext: bool) {
+    sk_run_search();
+    sk_build(i);
+    if (retext) ui_effect("retext", sk_ids[i], -1);
+    shown: int = if (sk_sq_n == 0) 2 else 1;
+    ui_effect("refill", sk_ids[i], if (shown != sk_search_shown) 1 else 0);
+    sk_search_shown = shown
+}
+
+// A scope chosen in screen id's field.
+sk_scope_chosen(id: int, scope: int) {
+    i: int = sk_find(id);
+    if (i < 0 || sk_kinds[i] != SCR_SEARCH) return;
+    sk_scope = (if (scope < 0 || scope > 3) 0 else scope);
+    sk_search_again(i, false)
 }
 
 // A book chosen: its chapters (one: the reader there).
@@ -888,6 +1228,35 @@ sk_act(
         sk_go_ref();
         return
     }
+    if (action == ACT_HIT) {
+        sk_remember_search();
+        sk_goto(arg / 1000, arg % 1000);
+        return
+    }
+    if (action == ACT_SEARCH_REF) {
+        sk_remember_search();
+        if (parse_ref(sk_sq, sk_sq_n) && ref_chapter > 0) sk_goto(chapter_of(ref_book,
+            ref_chapter), if (ref_verse > 0) ref_verse else 0);
+        return
+    }
+    if (action == ACT_RECENT_SEARCH) {
+        if (arg < 0 || arg >= sk_searches_n) return;
+        sk_sq_n = sk_search_len[arg];
+        for x in 0..sk_sq_n sk_sq[x] = sk_searches[arg * 256 + x];
+        sk_search_again(at, true);
+        return
+    }
+    if (action == ACT_SEARCHES_CLEAR) {
+        sk_searches_n = 0;
+        kept: fn(what: int) = sk_host.save_kept;
+        kept(SK_KEPT_SEARCHES);
+        sk_search_again(at, false);
+        return
+    }
+    if (action == ACT_ESV_SEARCH) {
+        ui_effect("esv_search", 1, -1);
+        return
+    }
     if (action == ACT_CHAPTER) {
         sk_goto(arg, 0);
         return
@@ -1059,14 +1428,18 @@ sk_line(line: []i8, b: int, e: int) {
         at: int = if (sk_num_end < e) sk_num_end + 1 else e;
         sk_query(id, line, at, e)
     } else if (sk_word_is(line, b, e, "submit")) sk_submit(sk_num(line, b + 6, e)) else if (sk_word_is(line,
-        b, e, "tap")) {
+        b, e, "scope")) {
+        id: int = sk_num(line, b + 5, e);
+        sk_scope_chosen(id, sk_num(line, sk_num_end, e))
+    } else if (sk_word_is(line, b, e, "tap")) {
         if (sk_word_is(line, b + 4, e, "goto")) sk_open(SCR_GOTO, 0, false) else if (sk_word_is(line,
             b + 4, e, "versions")) sk_open(SCR_VERSIONS, 0, false) else if (sk_word_is(line,
             b + 4, e, "settings")) sk_open(SCR_SETTINGS, 0, false) else if (sk_word_is(line,
-            b + 4, e, "history")) sk_open(SCR_HISTORY, 0, false)
+            b + 4, e, "history")) sk_open(SCR_HISTORY, 0, false) else if (sk_word_is(line,
+            b + 4, e, "search")) sk_open(SCR_SEARCH, 0, false)
     } else if (sk_word_is(line, b, e, "closed")) {
         i: int = sk_find(sk_num(line, b + 6, e));
-        if (i >= 0) sk_n = i
+        if (i >= 0) sk_closing(i)
     } else if (sk_word_is(line, b, e, "dark")) {
         sk_dark = sk_num(line, b + 4, e) != 0;
         sk_write_look();

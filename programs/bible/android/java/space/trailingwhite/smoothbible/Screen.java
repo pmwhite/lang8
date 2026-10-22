@@ -8,6 +8,14 @@ final class Screen {
   String title = "", search = "";
   // The row shown first as it opens (of all its rows, in order; -1: none).
   int focus = -1;
+  // Its field: the words in it, how long typing rests before they are
+  // sent (ms), whether Return goes (Go To) and whether it takes the keys as
+  // the screen opens; its scopes (titles, what TalkBack says) and the one
+  // chosen; and whether its list is plain.
+  String searchText = "";
+  int wait, scope;
+  boolean go, focusField, plain;
+  String[] scopes = new String[0], scopeLabels = new String[0];
   // What it shows with no rows, and its button's title and commands.
   String emptySymbol = "", emptyTitle = "", emptyLine = "", button = "";
   final ArrayList<Command> commands = new ArrayList<>();
@@ -20,14 +28,17 @@ final class Screen {
   final ArrayList<Section> sections = new ArrayList<>();
 
   static final class Section {
-    String header = "", footer = "";
+    String header = "", footer = "", button = "";
+    int host, buttonAction;
     final ArrayList<Row> rows = new ArrayList<>();
   }
 
   static final class Row {
     String kind = "", title = "", detail = "", icon = "", acc = "", flags = "", options = "",
-        label = "", trailing = "";
-    int action, arg, value, lo, hi, deleteAction;
+        label = "", trailing = "", hint = "";
+    int action, arg, value, lo, hi, deleteAction, custom;
+    // Places in the detail to stress: pairs of UTF-16 offsets.
+    int[] marks = new int[0];
 
     boolean flag(char c) {
       return flags.indexOf(c) >= 0;
@@ -52,6 +63,21 @@ final class Screen {
     r.label = w.field(13);
     r.trailing = w.field(14);
     r.deleteAction = w.fieldNum(15);
+    r.custom = w.fieldNum(16);
+    r.hint = w.field(17);
+    String m = w.field(18).trim();
+    if (!m.isEmpty()) {
+      String[] parts = m.split(" ");
+      r.marks = new int[parts.length];
+      for (int i = 0; i < parts.length; i++) {
+        try {
+          r.marks[i] = Integer.parseInt(parts[i]);
+        } catch (NumberFormatException e) {
+          r.marks = new int[0];
+          break;
+        }
+      }
+    }
     return r;
   }
 }

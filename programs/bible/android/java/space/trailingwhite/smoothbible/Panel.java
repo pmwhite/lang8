@@ -44,6 +44,11 @@ final class Panel extends FrameLayout {
   private final EditText field;
   private int fieldFor = -1;
   private boolean filling;
+  // The field's scopes (Search's All, OT, NT and the book).
+  private final LinearLayout scopes;
+  // What is typed, waiting for typing to rest (the screen's wait).
+  private final android.os.Handler later = new android.os.Handler(android.os.Looper.getMainLooper());
+  private Runnable pending;
 
   Panel(Context c, Look look) {
     super(c);
@@ -84,17 +89,30 @@ final class Panel extends FrameLayout {
 
       @Override
       public void afterTextChanged(Editable e) {
-        if (!filling && rows.screen != null) Native.send("query " + rows.screen.id + " " + e);
+        if (filling || rows.screen == null) return;
+        Screen s = rows.screen;
+        String text = e.toString();
+        if (pending != null) later.removeCallbacks(pending);
+        pending = () -> {
+          pending = null;
+          Native.send("query " + s.id + " " + text);
+        };
+        if (s.wait > 0 && !text.isEmpty()) later.postDelayed(pending, s.wait);
+        else pending.run();
       }
     });
     field.setOnEditorActionListener((v, action, ev) -> {
       if (rows.screen == null) return false;
+      flush();
       Native.send("submit " + rows.screen.id);
       return true;
     });
     LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(-1, -2);
     fp.setMargins(dp(16), 0, dp(16), dp(4));
     page.addView(field, fp);
+    scopes = new LinearLayout(c);
+    scopes.setPadding(dp(16), 0, dp(16), dp(6));
+    page.addView(scopes, new LinearLayout.LayoutParams(-1, -2));
     list = new ListView(c);
     list.setAdapter(rows);
     list.setDivider(null);
@@ -146,6 +164,27 @@ final class Panel extends FrameLayout {
     setVisibility(GONE);
   }
 
+  // (What waits sent now: Return, or a scope chosen.)
+  private void flush() {
+    if (pending == null) return;
+    later.removeCallbacks(pending);
+    pending.run();
+  }
+
+  // The field given the screen's words (a recent search chosen).
+  void retext(int id) {
+    Screen s = screens.get(id);
+    if (s == null || rows.screen == null || rows.screen.id != id) return;
+    filling = true;
+    field.setText(s.searchText);
+    field.setSelection(field.getText().length());
+    filling = false;
+  }
+
+  void blur() {
+    keyboardAway();
+  }
+
   private void keyboardAway() {
     android.view.inputmethod.InputMethodManager m = (android.view.inputmethod.InputMethodManager)
         getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
@@ -183,13 +222,27 @@ final class Panel extends FrameLayout {
     field.setVisibility(s.search.isEmpty() ? GONE : VISIBLE);
     if (s.search.isEmpty()) keyboardAway();
     field.setHint(s.search);
+    field.setImeOptions(s.go ? EditorInfo.IME_ACTION_GO : EditorInfo.IME_ACTION_SEARCH);
     if (s.id != fieldFor) {
-      // (Another screen's field: empty again, without telling core.)
+      // (Another screen's field: its words as core has them, without
+      // telling core.)
+      if (pending != null) later.removeCallbacks(pending);
+      pending = null;
       filling = true;
-      field.setText("");
+      field.setText(s.searchText);
+      field.setSelection(field.getText().length());
       filling = false;
       fieldFor = s.id;
+      if (s.focusField) {
+        field.requestFocus();
+        field.post(() -> {
+          android.view.inputmethod.InputMethodManager m = (android.view.inputmethod.InputMethodManager)
+              getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+          if (m != null) m.showSoftInput(field, 0);
+        });
+      }
     }
+    showScopes(s);
     title.setText(s.title);
     button.setText(s.button);
     button.setVisibility(s.button.isEmpty() ? GONE : VISIBLE);
@@ -208,6 +261,30 @@ final class Panel extends FrameLayout {
     if (fresh && rows.focusItem >= 0) list.setSelectionFromTop(rows.focusItem, dp(160));
     else if (fresh) list.setSelection(0);
     setVisibility(VISIBLE);
+  }
+
+  // The screen's scopes, as a row of words, the one chosen in the accent.
+  private void showScopes(Screen s) {
+    scopes.removeAllViews();
+    scopes.setVisibility(s.scopes.length == 0 ? GONE : VISIBLE);
+    for (int i = 0; i < s.scopes.length; i++) {
+      final int n = i;
+      TextView t = new TextView(getContext());
+      t.setText(s.scopes[i]);
+      t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+      t.setGravity(Gravity.CENTER);
+      t.setPadding(dp(4), dp(8), dp(4), dp(8));
+      boolean on = i == s.scope;
+      t.setTextColor(on ? look.accent : look.faint);
+      t.setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+      if (i < s.scopeLabels.length) t.setContentDescription(s.scopeLabels[i]);
+      t.setSelected(on);
+      t.setOnClickListener(v -> {
+        flush();
+        Native.send("scope " + s.id + " " + n);
+      });
+      scopes.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+    }
   }
 
   private void tapped(int i) {
@@ -265,7 +342,7 @@ final class Panel extends FrameLayout {
       focusItem = -1;
       int n = 0;
       for (Screen.Section sec : s.sections) {
-        items.add(new Header(sec.header));
+        items.add(new Header(sec.header, sec.button, sec.buttonAction));
         for (Screen.Row r : sec.rows) {
           if (n++ == s.focus) focusItem = items.size();
           items.add(r);
@@ -301,13 +378,27 @@ final class Panel extends FrameLayout {
       Object o = items.get(i);
       Context c = getContext();
       if (o instanceof Header) {
+        Header hd = (Header) o;
         TextView t = new TextView(c);
-        String h = ((Header) o).text;
+        String h = hd.text;
         t.setText(h.toUpperCase());
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         t.setTextColor(look.faint);
         t.setPadding(dp(20), dp(h.isEmpty() ? 8 : 20), dp(20), dp(6));
-        return t;
+        if (hd.button.isEmpty()) return t;
+        // (With its button: Recent Searches' Clear.)
+        LinearLayout line = new LinearLayout(c);
+        line.setGravity(Gravity.BOTTOM);
+        line.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView b = new TextView(c);
+        b.setText(hd.button);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        b.setTextColor(look.accent);
+        b.setPadding(dp(12), dp(12), dp(20), dp(6));
+        Screen s = screen;
+        b.setOnClickListener(v -> Native.send("act " + s.id + " " + hd.action + " 0 0"));
+        line.addView(b);
+        return line;
       }
       if (o instanceof Footer) {
         TextView t = new TextView(c);
@@ -337,14 +428,28 @@ final class Panel extends FrameLayout {
       t.setTextColor(r.flag('x') || r.flag('t') ? look.accent : r.flag('f') ? look.faint : look.ink);
       // (Strong: the row to go to, or the book being read.)
       if (r.flag('b')) t.setTypeface(Typeface.DEFAULT_BOLD);
+      // (A verse found: its reference small, in the accent.)
+      boolean hit = r.custom == CUSTOM_HIT;
+      if (hit) {
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        t.setTextColor(look.accent);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+      }
       words.addView(t);
       boolean valueDetail = r.flag('v');
       if (!r.detail.isEmpty() && !valueDetail) {
         TextView d = new TextView(c);
-        d.setText(r.detail);
-        d.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        d.setTextColor(look.faint);
-        if (r.flag('s')) {
+        d.setText(marked(r));
+        d.setTextSize(TypedValue.COMPLEX_UNIT_SP, hit ? 16 : 14);
+        d.setTextColor(hit ? (look.ink & 0x00ffffff) | 0xcc000000 : look.faint);
+        if (hit) {
+          // (Its words as the reader's, up to four lines.)
+          d.setTypeface(Typeface.SERIF);
+          d.setLineSpacing(0, 1.15f);
+          d.setMaxLines(4);
+          d.setEllipsize(TextUtils.TruncateAt.END);
+          d.setPadding(0, dp(3), 0, 0);
+        } else if (r.flag('s')) {
           // (The Bible's words: a line, or two for the row to go to.)
           d.setMaxLines(r.flag('b') ? 2 : 1);
           d.setEllipsize(TextUtils.TruncateAt.END);
@@ -438,11 +543,32 @@ final class Panel extends FrameLayout {
     }
   }
 
-  private static final class Header {
-    final String text;
+  // A row's detail, its marks stressed (in full ink, bold, washed).
+  private CharSequence marked(Screen.Row r) {
+    if (r.marks.length < 2) return r.detail;
+    android.text.SpannableString s = new android.text.SpannableString(r.detail);
+    for (int i = 0; i + 1 < r.marks.length; i += 2) {
+      int b = Math.max(0, Math.min(r.marks[i], s.length()));
+      int e = Math.max(b, Math.min(r.marks[i + 1], s.length()));
+      int f = android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE;
+      s.setSpan(new android.text.style.StyleSpan(Typeface.BOLD), b, e, f);
+      s.setSpan(new android.text.style.ForegroundColorSpan(look.ink), b, e, f);
+      s.setSpan(new android.text.style.BackgroundColorSpan((look.accent & 0x00ffffff) | 0x26000000), b, e, f);
+    }
+    return s;
+  }
 
-    Header(String t) {
+  // core/skin.l8's CUSTOM_HIT: a verse a search found.
+  static final int CUSTOM_HIT = 5;
+
+  private static final class Header {
+    final String text, button;
+    final int action;
+
+    Header(String t, String b, int a) {
       text = t;
+      button = b;
+      action = a;
     }
   }
 

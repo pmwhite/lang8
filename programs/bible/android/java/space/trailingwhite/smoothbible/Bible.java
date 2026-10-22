@@ -29,6 +29,7 @@ public final class Bible extends Activity {
   FrameLayout root;
   LinearLayout bar;
   TextView title, version, settings;
+  android.widget.ImageView search;
   // A screen or a chapter being said (between its first line and end).
   Screen building;
   Screen.Section section;
@@ -60,7 +61,13 @@ public final class Bible extends Activity {
     version = button("", "versions");
     settings = button("Aa", "settings");
     settings.setContentDescription("Settings");
+    search = new android.widget.ImageView(this);
+    search.setImageResource(android.R.drawable.ic_menu_search);
+    search.setPadding(dp(10), dp(10), dp(10), dp(10));
+    search.setContentDescription("Search");
+    search.setOnClickListener(v -> Native.send("tap search"));
     bar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+    bar.addView(search, new LinearLayout.LayoutParams(dp(44), dp(44)));
     bar.addView(version);
     bar.addView(settings);
     root.addView(bar, new FrameLayout.LayoutParams(-1, dp(52), Gravity.TOP));
@@ -165,6 +172,7 @@ public final class Bible extends Activity {
     title.setTextColor(look.ink);
     version.setTextColor(look.accent);
     settings.setTextColor(look.accent);
+    search.setColorFilter(look.accent);
     Window w = getWindow();
     w.setStatusBarColor(look.bg);
     w.setNavigationBarColor(look.bg);
@@ -193,6 +201,9 @@ public final class Bible extends Activity {
         section = new Screen.Section();
         section.header = w.field(1);
         section.footer = w.field(2);
+        section.host = w.fieldNum(3);
+        section.button = w.field(4);
+        section.buttonAction = w.fieldNum(5);
         building.sections.add(section);
       } else if (word.equals("row") && section != null) section.rows.add(Screen.row(w));
       else if (word.equals("empty")) {
@@ -200,6 +211,16 @@ public final class Bible extends Activity {
         building.emptyTitle = w.field(2);
         building.emptyLine = w.field(3);
       } else if (word.equals("focus")) building.focus = w.num(1);
+      else if (word.equals("field")) {
+        building.searchText = w.field(1);
+        building.wait = w.fieldNum(2);
+        building.go = w.field(3).contains("g");
+        building.focusField = w.field(3).contains("f");
+      } else if (word.equals("scopes")) {
+        building.scope = w.fieldNum(1);
+        building.scopes = w.field(2).split("\\|");
+        building.scopeLabels = w.field(3).split("\\|");
+      } else if (word.equals("plain")) building.plain = true;
       else if (word.equals("button")) building.button = w.field(1);
       else if (word.equals("command")) {
         Screen.Command c = new Screen.Command();
@@ -249,6 +270,12 @@ public final class Bible extends Activity {
         break;
       case "pop":
         panel.back();
+        break;
+      case "retext":
+        panel.retext(w.num(1));
+        break;
+      case "blur":
+        panel.blur();
         break;
       case "dismiss":
         panel.dismiss();

@@ -73,6 +73,11 @@ type UiRow = {
     strong: bool;
     tinted: bool;
     icon_faint: bool;
+    // Places in its detail to stress (the words a search found): pairs of
+    // UTF-16 offsets (as Java, JavaScript and NSString count), ui_marks
+    // from marks, marks_n pairs.
+    marks: int;
+    marks_n: int;
     acc: int;
     // A value shown on the right (not under the title).
     value_detail: bool;
@@ -92,7 +97,10 @@ type UiSection = {
     n: int;
     // A section the platform makes itself, rows and all (core/skin.l8's
     // HOST_; 0: core's), where a host has one.
-    host: int
+    host: int;
+    // A button in its header (Recent Searches' Clear), and its action.
+    button: UiText;
+    button_action: int
 }
 
 no_text: UiText = UiText { at: 0, n: 0 };
@@ -119,6 +127,8 @@ ui_rows: []UiRow = new UiRow[UI_ROWS_MOST](UiRow {
     strong: false,
     tinted: false,
     icon_faint: false,
+    marks: 0,
+    marks_n: 0,
     acc: 0,
     value_detail: false,
     disabled: false,
@@ -136,12 +146,14 @@ ui_sections: []UiSection = new UiSection[UI_SECTIONS_MOST](UiSection {
     footer: no_text,
     first: 0,
     n: 0,
-    host: 0
+    host: 0,
+    button: no_text,
+    button_action: 0
 });
 
 ui_sections_n: int = 0;
 
-ui_pool: []i8 = new i8[262144](0i8);
+ui_pool: []i8 = new i8[1048576](0i8);
 
 ui_pool_n: int = 0;
 
@@ -158,6 +170,35 @@ ui_search: UiText = UiText { at: 0, n: 0 };
 
 // The row shown first, as the screen opens (-1: its top).
 ui_focus: int = -1;
+
+// The search field's words as the screen is built (put in the field when
+// it is made, or when a retext effect says), and how long typing rests
+// before it is sent (ms; 0: at once, as Go To's is).
+ui_search_text: UiText = UiText { at: 0, n: 0 };
+
+ui_search_wait: int = 0;
+
+// Its Return goes (Go To's: a reference, not words to search for); and it
+// takes the keys as the screen appears.
+ui_search_go: bool = false;
+
+ui_search_focus: bool = false;
+
+// The field's scopes (titles split by |, and what a screen reader says
+// for each), and the one chosen.
+ui_scopes: UiText = UiText { at: 0, n: 0 };
+
+ui_scope_labels: UiText = UiText { at: 0, n: 0 };
+
+ui_scope: int = 0;
+
+// A plain list (search's results), not grouped.
+ui_plain: bool = false;
+
+// The marks' offsets, for the rows' marks.
+ui_marks: []int = new int[16384](0);
+
+ui_marks_n: int = 0;
 
 // What the screen shows with no rows: a symbol, a title, a line.
 ui_empty_symbol: UiText = UiText { at: 0, n: 0 };
@@ -228,6 +269,15 @@ ui_begin(
     ui_title = ui_put(title);
     ui_search = no_text;
     ui_focus = -1;
+    ui_search_text = no_text;
+    ui_search_wait = 0;
+    ui_search_go = false;
+    ui_search_focus = false;
+    ui_scopes = no_text;
+    ui_scope_labels = no_text;
+    ui_scope = 0;
+    ui_plain = false;
+    ui_marks_n = 0;
     ui_empty_symbol = no_text;
     ui_empty_title = no_text;
     ui_empty_line = no_text;
@@ -239,6 +289,10 @@ ui_set_empty(symbol: str, title: str, line: str) {
     ui_empty_symbol = ui_put(symbol);
     ui_empty_title = ui_put(title);
     ui_empty_line = ui_put(line)
+}
+
+ui_set_empty_title_fbuf() {
+    ui_empty_title = ui_put_fbuf()
 }
 
 ui_set_button(title: str) {
@@ -269,6 +323,28 @@ ui_set_search(placeholder: str) {
     ui_search = ui_put(placeholder)
 }
 
+ui_set_search_text(b: []i8, n: int) {
+    ui_search_text = ui_put_bytes(b, 0, n)
+}
+
+// (A scope's title and label made in fbuf: the book's, say.)
+ui_set_scopes_fbuf(titles_end: int, chosen: int) {
+    ui_scopes = ui_put_bytes(fbuf, 0, titles_end);
+    ui_scope_labels = ui_put_bytes(fbuf, titles_end, fbuf_n);
+    ui_scope = chosen
+}
+
+// A place in the last row's detail to stress: UTF-16 offsets b to e.
+ui_add_mark(b: int, e: int) {
+    if (ui_rows_n == 0 || ui_marks_n + 2 > len(ui_marks)) return;
+    i: int = ui_last();
+    if (ui_rows[i].marks_n == 0) ui_rows[i].marks = ui_marks_n;
+    ui_marks[ui_marks_n] = b;
+    ui_marks[ui_marks_n + 1] = e;
+    ui_marks_n = ui_marks_n + 2;
+    ui_rows[i].marks_n = ui_rows[i].marks_n + 1
+}
+
 ui_section(header: str, footer: str) {
     if (ui_sections_n >= UI_SECTIONS_MOST) return;
     ui_sections[ui_sections_n] = UiSection {
@@ -276,9 +352,18 @@ ui_section(header: str, footer: str) {
         footer: ui_put(footer),
         first: ui_rows_n,
         n: 0,
-        host: 0
+        host: 0,
+        button: no_text,
+        button_action: 0
     };
     ui_sections_n = ui_sections_n + 1
+}
+
+// A button in the last section's header, doing action.
+ui_set_section_button(title: str, action: int) {
+    if (ui_sections_n == 0) return;
+    ui_sections[ui_sections_n - 1].button = ui_put(title);
+    ui_sections[ui_sections_n - 1].button_action = action
 }
 
 // A section of the platform's own (its rows, header and footer its own).
@@ -318,6 +403,8 @@ ui_row(kind: int, action: int, arg: int) {
         strong: false,
         tinted: false,
         icon_faint: false,
+        marks: 0,
+        marks_n: 0,
         acc: ACC_NONE,
         value_detail: false,
         disabled: false,
@@ -511,6 +598,23 @@ ui_write() {
         ui_int(ui_focus);
         ui_byte(10)
     }
+    if (ui_search.n > 0) {
+        ui_str("field");
+        ui_field(ui_search_text);
+        ui_field_int(ui_search_wait);
+        ui_byte(9);
+        if (ui_search_go) ui_byte(103);
+        if (ui_search_focus) ui_byte(102);
+        ui_byte(10)
+    }
+    if (ui_scopes.n > 0) {
+        ui_str("scopes");
+        ui_field_int(ui_scope);
+        ui_field(ui_scopes);
+        ui_field(ui_scope_labels);
+        ui_byte(10)
+    }
+    if (ui_plain) ui_str("plain\n");
     if (ui_empty_title.n > 0) {
         ui_str("empty");
         ui_field(ui_empty_symbol);
@@ -537,6 +641,8 @@ ui_write() {
         ui_field(ui_sections[s].header);
         ui_field(ui_sections[s].footer);
         ui_field_int(ui_sections[s].host);
+        ui_field(ui_sections[s].button);
+        ui_field_int(ui_sections[s].button_action);
         ui_byte(10);
         first: int = ui_sections[s].first;
         for r in first..first + ui_sections[s].n {
@@ -568,6 +674,13 @@ ui_write() {
             ui_field_int(row.delete_action);
             ui_field_int(row.custom);
             ui_field(row.hint);
+            ui_byte(9);
+            for m in 0..row.marks_n {
+                if (m > 0) ui_byte(32);
+                ui_int(ui_marks[row.marks + m * 2]);
+                ui_byte(32);
+                ui_int(ui_marks[row.marks + m * 2 + 1])
+            }
             ui_byte(10)
         }
     }

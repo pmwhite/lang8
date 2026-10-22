@@ -108,11 +108,17 @@ From core:
 | Line | Meaning |
 |---|---|
 | `screen ID KIND ARG` TITLE SEARCH | a screen built; then its `section` and `row` lines, then `end` |
-| `section` HEADER FOOTER HOST | a section of the screen; HOST, if not 0, a section the platform makes itself (core/skin.l8's `HOST_`: Go To's ribbons and plan, only where the host has them) |
+| `section` HEADER FOOTER HOST BUTTON ACTION | a section of the screen; HOST, if not 0, a section the platform makes itself (core/skin.l8's `HOST_`: Go To's ribbons and plan, Search's ESV results, only where the host has them); BUTTON, a button in its header doing ACTION (Recent Searches' Clear) |
+| `field` TEXT WAIT FLAGS | after `screen`, if it has a field: its words now, how long typing rests before it is sent (ms; 0 at once), `g` Return goes (Go To), `f` it takes the keys as the screen opens |
+| `scopes` VALUE TITLES LABELS | the field's scopes (titles and spoken labels split by `\|`), the one chosen |
+| `plain` | a plain list, not grouped (Search's results) |
 | `focus N` | after `screen`: the screen opens at its Nth row (of all, from 0): Go To at the book read |
 | `row` KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS VALUE OPTIONS LO HI LABEL | a row (below); LABEL what a screen reader says, if not its words |
 | `present ID`, `push ID`, `update ID`, `pop`, `dismiss` | what to do with screens |
-| `refill ID` | screen ID made again as its field is typed in: its rows at once, the field as it is |
+| `refill ID FADE` | screen ID made again as its field is typed in: its rows at once, the field as it is (FADE 1: what it shows changed kind, recent searches giving way to results: a cross-fade) |
+| `retext ID` | screen ID's field to show the screen's words (a recent search chosen) |
+| `blur ID` | the keyboard put away (Return in Search) |
+| `searched`, `esv_search PAGE` | Search searched again (a platform's own results for what it searched before are gone); the ESV's search asked for (the iPhone's, from its server) |
 | `reader N` | the reader has N chapters (the version changed, or at the start) |
 | `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA` (UTF-16 places; core/text.l8's `STYLE_` and `PARA_`) and `verse V A B` lines, then `end` |
 | `jump C V`, `relayout` | the reader moved; every chapter to be asked for again |
@@ -137,7 +143,9 @@ disabled, `x` destructive, `o` on, `v` the detail is a value on the right, `s`
 the detail is the Bible's words (the divine name in small capitals), `f` its
 words faint (nothing to do), `b` strong (the row to go to, or where the
 reader is: its title heavier, its icon larger, its words up to two lines),
-`t` its title in the accent (a link: Show All), `g` its icon faint; a
+`t` its title in the accent (a link: Show All), `g` its icon faint; after
+HINT, MARKS: places in the detail to stress, pairs of UTF-16 offsets split by
+spaces (the words a search found); a
 choice's OPTIONS are its labels split by `|`, VALUE the one chosen; a slider
 goes from LO to HI.
 
@@ -146,9 +154,10 @@ From the skin:
 | Line | Meaning |
 |---|---|
 | `start W H DENSITY DARK` | the app begun: the window (points), its scale (hundredths), the system's appearance |
-| `tap goto`, `tap versions`, `tap settings`, `tap history` | the bar's buttons (History, for now) |
+| `tap goto`, `tap versions`, `tap settings`, `tap history`, `tap search` | the bar's buttons (History, for now) |
 | `act ID ACTION ARG VALUE` | a row's action (VALUE: a toggle's 1 or 0, a choice's index, a slider's value). An action on a screen means those over it have gone |
-| `query ID TEXT` | screen ID's field typed in (TEXT to the line's end) |
+| `query ID TEXT` | screen ID's field typed in (TEXT to the line's end), once typing has rested the screen's WAIT |
+| `scope ID N` | scope N chosen in screen ID's field |
 | `submit ID` | Return (Go) in screen ID's field: its first suggestion |
 | `closed ID` | the skin closed screen ID (and those over it) |
 | `want C` | chapter C's text, to show |
@@ -171,7 +180,12 @@ action goes to core (`sk_act`); its effects are done the iPhone's way
 (`push` into the navigation the action came from, `present` as a sheet,
 `update` a cross-fade and reload, `dismiss`). The platform's work stays the
 app's: core's version switch is the iPhone's `switch_version`. Moved so far:
-Versions, History, the reading settings and Go To (2026-10-21).
+Versions, History, the reading settings, Go To and Search (2026-10-21).
+Search's recent searches stay in the iPhone's defaults (`recentSearches`):
+core keeps them while it runs and asks the host to keep them
+(`SK_KEPT_SEARCHES`). Its ESV results, from the iPhone's server, are a host
+section in place of core's results once asked for; the row that asks is
+core's, its state line the host's words.
 
 Go To shows how a screen moves while parts of it are still the iPhone's
 own. Its ribbons and reading plan are host sections: core places them

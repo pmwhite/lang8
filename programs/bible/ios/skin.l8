@@ -22,12 +22,26 @@ uk_switch_version(t: int): bool {
 uk_save_prefs() { }
 
 uk_save_kept(what: int) {
-    if (what == SK_KEPT_HISTORY) save_history()
+    if (what == SK_KEPT_HISTORY) save_history();
+    if (what == SK_KEPT_SEARCHES) {
+        if (sk_searches_n == 0) {
+            msg1(defaults(), sel("removeObjectForKey:"), nsstring("recentSearches"));
+            return
+        }
+        a: int = make("NSMutableArray");
+        for i in 0..sk_searches_n {
+            sk_search_words(i);
+            msg1(a, sel("addObject:"), fstring())
+        }
+        msg2(defaults(), sel("setObject:forKey:"), a, nsstring("recentSearches"));
+        release(a)
+    }
 }
 
 // Words only the app knows: who reads the version aloud; the Listen
 // section's footer, while it applies (the version read by the iPhone's
-// voice, no better voice installed, and Voice never opened).
+// voice, no better voice installed, and Voice never opened); why the
+// ESV's search isn't shown yet.
 uk_words(what: int) {
     fbuf_n = 0;
     if (what == SK_WORDS_VOICE) {
@@ -35,6 +49,9 @@ uk_words(what: int) {
         fput_str(if (text_cur == TEXT_ORIG) "None yet" else src_readers[audio_source(text_cur)])
     } else if (what == SK_WORDS_LISTEN_FOOTER) {
         if (!def_bool("voiceScreenSeen") && audio_source(text_cur) == SRC_VOICE && !better_voice_installed()) fput_str("This version is read by the iPhone\â\€\™s voice. A more natural voice can be downloaded in Voice.")
+    } else if (what == SK_WORDS_ESV_SEARCH) {
+        st: int = esv_sr_state;
+        if (st >= ESV_OFFLINE || st == 1) fput_str(if (st == 1) "Searching\â\€\¦" else if (st == ESV_OFFLINE) "No connection" else if (st == ESV_BUSY) "Busy, try again in a minute" else if (st == ESV_DAILY) "Resting for today" else "Not available right now")
     }
 }
 
@@ -54,7 +71,15 @@ uk_begin() {
     sk_has_acknowledgements = true;
     sk_has_keep_on = true;
     sk_has_ribbons = true;
-    sk_fonts = font_names
+    sk_fonts = font_names;
+    // (The recent searches, kept in the defaults as they were.)
+    a: int = msg1(defaults(), sel("arrayForKey:"), nsstring("recentSearches"));
+    if (a != 0) {
+        for i in 0..msg(a, sel("count")) {
+            n: int = nsstring_into(msg1(a, sel("objectAtIndex:"), i), uk_query_buf);
+            sk_searches_add(uk_query_buf, n)
+        }
+    }
 }
 
 // The app's settings, as core keeps them (by the defaults' names), so its
@@ -118,6 +143,7 @@ uk_sync() {
     sk_esv_listed = esv_listed();
     sk_c = cur;
     sk_tz = local_offset();
+    sk_esv_results = esv_sr_on;
     // (The chapters the ribbons' rows show.)
     sk_listed_n = 0;
     for i in 0..rb_n {
@@ -136,17 +162,18 @@ uk_host(s: int): int {
 }
 
 uk_host_rows(h: int): int {
-    if (h == HOST_RIBBONS) ribbons_rows() else plan_rows()
+    if (h == HOST_RIBBONS) ribbons_rows() else if (h == HOST_PLAN) plan_rows() else esv_results_rows()
 }
 
 uk_host_cell(h: int, t: int, r: int): int {
-    if (h == HOST_RIBBONS) ribbons_cell(t, r) else plan_cell(t, r)
+    if (h == HOST_RIBBONS) ribbons_cell(t, r) else if (h == HOST_PLAN) plan_cell(t,
+        r) else esv_result_cell(t, r)
 }
 
 // (A ribbon's row, Delete; the plan's, Remove; New Ribbon and Reading
 // Plans, neither.)
 uk_host_can_edit(h: int, r: int): bool {
-    if (h == HOST_RIBBONS) r < gt_rb else r < gt_np
+    if (h == HOST_RIBBONS) r < gt_rb else if (h == HOST_PLAN) r < gt_np else false
 }
 
 // ---- the lists: a slot each for the screens shown ----
@@ -208,14 +235,14 @@ uk_header(t: int, s: int): int {
     k: int = uk_slot_of(t);
     if (k < 0 || !uk_ensure(k) || s >= ui_sections_n) return 0;
     h: int = uk_host(s);
-    if (h == HOST_RIBBONS) ribbons_header() else if (h == HOST_PLAN) plan_header() else uk_text(ui_sections[s].header)
+    if (h == HOST_RIBBONS) ribbons_header() else if (h == HOST_PLAN) plan_header() else if (h == HOST_ESV_RESULTS) esv_results_header() else uk_text(ui_sections[s].header)
 }
 
 uk_footer(t: int, s: int): int {
     k: int = uk_slot_of(t);
     if (k < 0 || !uk_ensure(k) || s >= ui_sections_n) return 0;
     h: int = uk_host(s);
-    if (h == HOST_RIBBONS) ribbons_footer() else if (h == HOST_PLAN) 0 else uk_text(ui_sections[s].footer)
+    if (h == HOST_RIBBONS) ribbons_footer() else if (h != 0) 0 else uk_text(ui_sections[s].footer)
 }
 
 // The row at path (of the screen just ensured), or -1.
@@ -240,6 +267,7 @@ uk_cell(t: int, path: int): int {
     if (row.custom == CUSTOM_SIZE) return size_cell(t);
     if (row.custom == CUSTOM_THEMES) return theme_cell(t);
     if (row.custom == CUSTOM_LISTEN) return listen_cell(t);
+    if (row.custom == CUSTOM_HIT) return uk_hit_cell(t, i);
     if (row.kind == UI_TOGGLE || row.kind == UI_CHOICE) return uk_control_cell(t,
         k, i);
     kind: int = if (row.detail.n == 0) 0 else if (row.value_detail) 1 else 2;
@@ -303,6 +331,116 @@ uk_cell(t: int, path: int): int {
     msg1(cell, sel("setAccessibilityTraits:"), if (row.acc == ACC_CHECK) objc_const("UIAccessibilityTraitSelected") else 0);
     msg1(cell, sel("setAccessibilityHint:"), if (row.hint.n > 0) uk_text(row.hint) else 0);
     cell
+}
+
+// A verse found: its reference small, in the accent; its words as the
+// reader's, the matches in full ink, bold and washed, the rest softer, up
+// to four lines.
+uk_hit_cell(t: int, i: int): int {
+    row: UiRow = ui_rows[i];
+    cell: int = list_cell(t, "hit", 2);
+    config: int = list_config(2);
+    keys[0] = k_font;
+    values[0] = sans(13.0f64, 0.3f64);
+    keys[1] = k_color;
+    values[1] = c_accent;
+    a: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        uk_text(row.title), nsdictionary(keys, values, 2));
+    msg1(config, sel("setAttributedText:"), a);
+    release(a);
+    msg1(config, sel("setSecondaryAttributedText:"), uk_hit_text(i));
+    msg1(detail_props(config), sel("setNumberOfLines:"), 4);
+    msg1(detail_props(config), sel("setLineBreakMode:"), 4);
+    msg_set_f(config, sel("setTextToSecondaryTextVerticalPadding:"), 3.0f64);
+    msg_rect(config, sel("setDirectionalLayoutMargins:"), 12.0f64, 20.0f64, 12.0f64,
+        20.0f64);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    cell
+}
+
+// Row i's words with its marks stressed (the original's in its fonts, the
+// Hebrew right to left).
+uk_hit_text(i: int): int {
+    row: UiRow = ui_rows[i];
+    metrics: int = msg1(cls("UIFontMetrics"), sel("metricsForTextStyle:"), objc_const("UIFontTextStyleBody"));
+    size: f64 = msg_f_f(metrics, sel("scaledValueForValue:"), 16.0f64);
+    c: int = row.arg / 1000;
+    orig: bool = text_cur == TEXT_ORIG;
+    hebrew: bool = orig && c >= 0 && c < chapters && ch_book[c] < 39;
+    keys[0] = k_font;
+    values[0] = (if (hebrew) sans(size * 1.15f64, 0.0f64) else if (orig) new_york(size) else body(size));
+    keys[1] = k_color;
+    values[1] = msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.8f64);
+    keys[2] = k_para;
+    values[2] = msg(para_style(0, 0.0f64, 0.0f64, 0.0f64, 0.0f64, if (hebrew) 1.4f64 else 1.25f64),
+        sel("autorelease"));
+    msg1(values[2], sel("setLineBreakMode:"), 4);
+    if (hebrew) {
+        msg1(values[2], sel("setBaseWritingDirection:"), 1);
+        msg1(values[2], sel("setAlignment:"), 4)
+    }
+    text: int = uk_text(row.detail);
+    if (text == 0) text = nsstring("");
+    s: int = msg(msg2(msg(cls("NSMutableAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        text, nsdictionary(keys, values, 3)), sel("autorelease"));
+    if (!orig) caps_into(s, 0, text, true, size);
+    bold_font: int = if (hebrew) sans(size * 1.15f64, 0.4f64) else if (orig) new_york_bold(size) else bold(size);
+    for m in 0..row.marks_n {
+        b: int = ui_marks[row.marks + m * 2];
+        n: int = ui_marks[row.marks + m * 2 + 1] - b;
+        msg4(s, sel("addAttribute:value:range:"), k_font, bold_font, b, n);
+        msg4(s, sel("addAttribute:value:range:"), k_color, c_ink, b, n);
+        // (Hebrew semibold only: a background is drawn in pieces round its
+        // points, run 39573776932's 289.)
+        if (!hebrew) msg4(s, sel("addAttribute:value:range:"), k_background, c_sel,
+            b, n)
+    }
+    s
+}
+
+// A section's header with a button (Recent Searches' Clear): its title,
+// and the button, doing its action. The button's tag says its slot and
+// section: k * 64 + s.
+uk_header_view(t: int, s: int): int {
+    k: int = uk_slot_of(t);
+    if (k < 0 || !uk_ensure(k) || s >= ui_sections_n || ui_sections[s].button.n == 0) return 0;
+    v: int = msg(make("UIView"), sel("autorelease"));
+    label: int = make("UILabel");
+    msg1(label, sel("setText:"), uk_text(ui_sections[s].header));
+    msg1(label, sel("setFont:"), sans(15.0f64, 0.4f64));
+    msg1(label, sel("setTextColor:"), c_ink);
+    msg1(label, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    msg1(v, sel("addSubview:"), label);
+    release(label);
+    config: int = msg(cls("UIButtonConfiguration"), sel("plainButtonConfiguration"));
+    msg1(config, sel("setTitle:"), uk_text(ui_sections[s].button));
+    msg1(config, sel("setBaseForegroundColor:"), c_accent);
+    b: int = msg2(cls("UIButton"), sel("buttonWithConfiguration:primaryAction:"),
+        config, 0);
+    msg1(b, sel("setTag:"), k * 64 + s);
+    msg3(b, sel("addTarget:action:forControlEvents:"), app_obj, sel("coreSectionButton:"),
+        64);
+    msg1(b, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    msg1(v, sel("addSubview:"), b);
+    pin_by(label, v, "leadingAnchor", 20.0f64);
+    pin_by(label, v, "topAnchor", 14.0f64);
+    pin_by(label, v, "bottomAnchor", -6.0f64);
+    pin_by(b, v, "trailingAnchor", -8.0f64);
+    pin_to(b, "centerYAnchor", label, "centerYAnchor", 0.0f64);
+    msg1(v, sel("setBackgroundColor:"), c_bg);
+    v
+}
+
+uk_section_button(_self: int, _cmd: int, b: int): int {
+    n: int = msg(b, sel("tag"));
+    k: int = n / 64;
+    s: int = n % 64;
+    if (k < 0 || k >= UK_SLOTS || !uk_ensure(k) || s >= ui_sections_n) return 0;
+    action: int = ui_sections[s].button_action;
+    uk_sync();
+    sk_act(uk_ids[k], action, 0, 0);
+    uk_effects();
+    0
 }
 
 // A toggle's switch, or a choice's segmented control, beside its title (a
@@ -402,6 +540,10 @@ uk_picked(t: int, s: int, r: int) {
     }
     if (h == HOST_PLAN) {
         plan_picked(r);
+        return
+    }
+    if (h == HOST_ESV_RESULTS) {
+        esv_results_picked(r);
         return
     }
     if (r >= ui_sections[s].n) return;
@@ -581,26 +723,46 @@ uk_make(id: int): int {
     }
     if (k < 0) return -1;
     uk_free(k);
-    // (Go To's controller is the app's own kind: it opens at its focus, and
-    // its ribbons are made again as it comes back: ios/sheets.l8.)
-    goto: bool = uk_kind_of(id) == SCR_GOTO;
-    vc: int = msg(msg1(msg(if (goto) books_class else cls("UITableViewController"),
-        sel("alloc")), sel("initWithStyle:"), 2), sel("autorelease"));
     uk_ids[k] = id;
-    uk_vcs[k] = keep(vc);
-    uk_tables[k] = keep(msg(vc, sel("tableView")));
     uk_stale = true;
     _b: bool = uk_ensure(k);
+    // (Go To's and Search's controllers are the app's own kinds: Go To opens
+    // at its focus and makes its ribbons again as it comes back, Search
+    // takes the keys as it appears: ios/sheets.l8.)
+    kind: int = uk_kind_of(id);
+    c: int = if (kind == SCR_GOTO) books_class else if (kind == SCR_SEARCH) search_class else cls("UITableViewController");
+    vc: int = msg(msg1(msg(c, sel("alloc")), sel("initWithStyle:"), if (ui_plain) 0 else 2),
+        sel("autorelease"));
+    goto: bool = kind == SCR_GOTO;
+    uk_vcs[k] = keep(vc);
+    uk_tables[k] = keep(msg(vc, sel("tableView")));
+    uk_waits[k] = ui_search_wait;
     msg1(vc, sel("setTitle:"), uk_text(ui_title));
     item: int = msg(vc, sel("navigationItem"));
     msg1(item, sel("setLargeTitleDisplayMode:"), if (goto) 0 else 2);
     if (ui_search.n > 0) uk_make_search(k, item);
     msg1(uk_tables[k], sel("setDataSource:"), app_obj);
     msg1(uk_tables[k], sel("setDelegate:"), app_obj);
-    style_table(uk_tables[k], true);
+    style_table(uk_tables[k], !ui_plain);
+    table_screens[uk_entry + k].look = (if (ui_plain) TableLook.Plain else TableLook.Grouped);
+    if (ui_plain) {
+        // (Search's results: full-width rows, headers as tall as they need,
+        // and the keyboard dragged down with the rows.)
+        t: int = uk_tables[k];
+        msg_rect(t, sel("setSeparatorInset:"), 0.0f64, 20.0f64, 0.0f64, 0.0f64);
+        msg_set_f(t, sel("setSectionHeaderHeight:"), objc_const_f("UITableViewAutomaticDimension"));
+        msg_set_f(t, sel("setEstimatedSectionHeaderHeight:"), 36.0f64);
+        msg1(t, sel("setKeyboardDismissMode:"), 1)
+    }
     uk_dress(k, false);
     k
 }
+
+// The registry's entry of slot 0 (the slots' are in order).
+uk_entry: int = 0;
+
+// Slot k's field's rest before what is typed is sent (ms).
+uk_waits: []int = new int[UK_SLOTS](0);
 
 // Slot k's search field (as the screen's ui_search says), under its title.
 uk_searches: []int = new int[UK_SLOTS](0);
@@ -614,9 +776,34 @@ uk_make_search(k: int, item: int) {
     bar: int = msg(sc, sel("searchBar"));
     msg1(bar, sel("setPlaceholder:"), uk_text(ui_search));
     msg1(bar, sel("setAutocorrectionType:"), 1);
-    msg1(bar, sel("setAutocapitalizationType:"), 0);
-    msg1(bar, sel("setReturnKeyType:"), 1);
+    if (ui_search_go) {
+        msg1(bar, sel("setAutocapitalizationType:"), 0);
+        msg1(bar, sel("setReturnKeyType:"), 1)
+    } else {
+        // (The sheet has Done: no Cancel button popping in beside the
+        // field.)
+        msg1(sc, sel("setAutomaticallyShowsCancelButton:"), 0)
+    }
     msg1(bar, sel("setDelegate:"), app_obj);
+    if (ui_scopes.n > 0) {
+        if ((msg1(sc, sel("respondsToSelector:"), sel("setScopeBarActivation:")) & 255) != 0) msg1(sc,
+            sel("setScopeBarActivation:"), 1);
+        msg1(sc, sel("setAutomaticallyShowsScopeBar:"), 0);
+        // (Short titles, so none is cut off; the full names for VoiceOver.)
+        n: int = uk_split(ui_scopes, one);
+        _l: int = uk_split(ui_scope_labels, uk_labels);
+        for i in 0..n {
+            title: int = msg(msg1(msg(cls("NSString"), sel("alloc")), sel("initWithString:"),
+                one[i]), sel("autorelease"));
+            if ((msg1(one[i], sel("isEqualToString:"), uk_labels[i]) & 255) == 0) msg1(title,
+                sel("setAccessibilityLabel:"), uk_labels[i]);
+            one[i] = title
+        }
+        msg1(bar, sel("setScopeButtonTitles:"), nsarray(one, n));
+        msg1(bar, sel("setSelectedScopeButtonIndex:"), ui_scope);
+        msg1(bar, sel("setShowsScopeBar:"), 1)
+    }
+    if (ui_search_text.n > 0) msg1(bar, sel("setText:"), uk_text(ui_search_text));
     msg1(item, sel("setSearchController:"), sc);
     search_stacked(item);
     msg1(item, sel("setHidesSearchBarWhenScrolling:"), 0);
@@ -624,35 +811,126 @@ uk_make_search(k: int, item: int) {
     release(sc)
 }
 
-uk_query_buf: []i8 = new i8[256](0i8);
-
-// A screen's field typed in (sc, its search controller): core's query;
-// whether it was one of core's.
-uk_search_updated(sc: int): bool {
-    for k in 0..UK_SLOTS {
-        if (sc != 0 && uk_searches[k] == sc && uk_ids[k] != 0) {
-            n: int = nsstring_into(msg(msg(sc, sel("searchBar")), sel("text")), uk_query_buf);
-            uk_sync();
-            sk_query(uk_ids[k], uk_query_buf, 0, n);
-            uk_effects();
-            return true
+// Words split at | into into (NSStrings): how many (as many as fit).
+uk_split(t: UiText, into: []int): int {
+    n: int = 0;
+    p: int = t.at;
+    e: int = t.at + t.n;
+    for x in t.at..e + 1 {
+        if ((x == e || ui_pool[x] as int == 124) && n < len(into)) {
+            into[n] = nsstring_at(bytes_address(ui_pool) + p, x - p);
+            n = n + 1;
+            p = x + 1
         }
     }
-    false
+    n
+}
+
+uk_labels: []int = new int[8](0);
+
+uk_query_buf: []i8 = new i8[256](0i8);
+
+// The slot whose field is sc's (a search controller's), or -1.
+uk_slot_of_search(sc: int): int {
+    for k in 0..UK_SLOTS
+        if (sc != 0 && uk_searches[k] == sc && uk_ids[k] != 0) return k;
+    -1
+}
+
+uk_slot_of_bar(bar: int): int {
+    for k in 0..UK_SLOTS
+        if (uk_searches[k] != 0 && uk_ids[k] != 0 && msg(uk_searches[k], sel("searchBar")) == bar) return k;
+    -1
+}
+
+// What is typed waiting to be sent (its slot, -1: none), and its timer.
+uk_pending: int = -1;
+
+uk_timer: int = 0;
+
+// A screen's field typed in (sc, its search controller): core's query, at
+// once or as typing rests (the screen's wait; cleared, at once); whether
+// it was one of core's.
+uk_search_updated(sc: int): bool {
+    k: int = uk_slot_of_search(sc);
+    if (k < 0) return false;
+    uk_timer = stop_timer(uk_timer);
+    uk_pending = -1;
+    empty: bool = msg(msg(msg(sc, sel("searchBar")), sel("text")), sel("length")) == 0;
+    if (uk_waits[k] > 0 && !empty) {
+        uk_pending = k;
+        uk_timer = after(uk_waits[k] as f64 / 1000.0f64, "coreSearchFire:");
+        return true
+    }
+    uk_search_send(k);
+    true
+}
+
+uk_search_send(k: int) {
+    sc: int = uk_searches[k];
+    if (sc == 0 || uk_ids[k] == 0) return;
+    n: int = nsstring_into(msg(msg(sc, sel("searchBar")), sel("text")), uk_query_buf);
+    uk_sync();
+    sk_query(uk_ids[k], uk_query_buf, 0, n);
+    uk_effects()
+}
+
+uk_search_fire(_self: int, _cmd: int, _timer: int): int {
+    uk_timer = 0;
+    k: int = uk_pending;
+    uk_pending = -1;
+    if (k >= 0) uk_search_send(k);
+    0
+}
+
+// (What waits sent now: Return, or a scope chosen.)
+uk_search_flush() {
+    if (uk_pending < 0) return;
+    uk_timer = stop_timer(uk_timer);
+    k: int = uk_pending;
+    uk_pending = -1;
+    uk_search_send(k)
 }
 
 // Return in a screen's field (bar): its first suggestion, core's.
 uk_search_return(bar: int): bool {
-    for k in 0..UK_SLOTS {
-        if (uk_searches[k] != 0 && uk_ids[k] != 0 && msg(uk_searches[k], sel("searchBar")) == bar) {
-            uk_sync();
-            uk_nav = msg(uk_vcs[k], sel("navigationController"));
-            sk_submit(uk_ids[k]);
-            uk_effects();
-            return true
-        }
-    }
-    false
+    k: int = uk_slot_of_bar(bar);
+    if (k < 0) return false;
+    uk_search_flush();
+    uk_sync();
+    uk_nav = msg(uk_vcs[k], sel("navigationController"));
+    sk_submit(uk_ids[k]);
+    uk_effects();
+    true
+}
+
+// A scope chosen in a screen's field (bar).
+uk_scope_changed(bar: int, scope: int): bool {
+    k: int = uk_slot_of_bar(bar);
+    if (k < 0) return false;
+    uk_search_flush();
+    uk_sync();
+    sk_scope_chosen(uk_ids[k], scope);
+    uk_effects();
+    true
+}
+
+// (For the demos: Search's field given q, searched at once; its scope.)
+uk_search_for(q: int) {
+    k: int = uk_slot_of(uk_table_of(SCR_SEARCH));
+    if (k < 0) return;
+    msg1(msg(uk_searches[k], sel("searchBar")), sel("setText:"), q);
+    uk_timer = stop_timer(uk_timer);
+    uk_pending = -1;
+    uk_search_send(k)
+}
+
+uk_search_scope(scope: int) {
+    k: int = uk_slot_of(uk_table_of(SCR_SEARCH));
+    if (k < 0) return;
+    msg1(msg(uk_searches[k], sel("searchBar")), sel("setSelectedScopeButtonIndex:"),
+        scope);
+    _s: bool = uk_scope_changed(msg(uk_searches[k], sel("searchBar")), scope)
 }
 
 // A list scrolled to its screen's focus (as it is first laid out).
@@ -702,6 +980,12 @@ uk_effects() {
             k: int = uk_make(e.a);
             if (k >= 0) {
                 uk_sheet = sheet_of(uk_vcs[k], uk_detents);
+                if (uk_kind_of(e.a) == SCR_SEARCH) {
+                    // (For ios/esv.l8's answers, and the cells' colors.)
+                    search_table = uk_tables[k];
+                    search_vc = uk_vcs[k];
+                    search_bar = msg(uk_searches[k], sel("searchBar"))
+                }
                 if (uk_kind_of(e.a) == SCR_GOTO) {
                     // (Known before it appears: ios/daily.l8's
                     // books_will_appear, ios/ipad.l8's books_did_appear.)
@@ -714,13 +998,26 @@ uk_effects() {
             }
             uk_detents = 0
         } else if (e.word == "refill") {
-            // (Typed: the rows as they are now, at once.)
+            // (Typed: the rows as they are now, at once; what they are
+            // changed (recent searches giving way to results), a
+            // cross-fade, not a jump.)
             k: int = uk_slot_of_id(e.a);
             if (k >= 0) {
+                if (e.b == 1) fade_layer(msg(uk_tables[k], sel("layer")), 0.2f64);
                 uk_stale = true;
                 msg(uk_tables[k], sel("reloadData"));
                 uk_dress(k, false)
             }
+        } else if (e.word == "retext") {
+            k: int = uk_slot_of_id(e.a);
+            if (k >= 0 && uk_searches[k] != 0 && uk_ensure(k)) msg1(msg(uk_searches[k],
+                sel("searchBar")), sel("setText:"), if (ui_search_text.n > 0) uk_text(ui_search_text) else nsstring(""))
+        } else if (e.word == "blur") {
+            k: int = uk_slot_of_id(e.a);
+            if (k >= 0 && uk_searches[k] != 0) msg(msg(uk_searches[k], sel("searchBar")),
+                sel("resignFirstResponder"))
+        } else if (e.word == "searched") esv_sr_reset() else if (e.word == "esv_search") {
+            if (esv_sr_state != 1) esv_search_ask(e.a)
         } else if (e.word == "update") {
             k: int = uk_slot_of_id(e.a);
             if (k >= 0) {
@@ -790,22 +1087,29 @@ uk_button_of(kind: int): int {
 add_skin_methods(app: int) {
     add_method1(app, sel("coreCommand:"), &uk_command, "v@:@");
     add_method1(app, sel("coreToggle:"), &uk_toggled, "v@:@");
-    add_method1(app, sel("coreChoice:"), &uk_chose, "v@:@")
+    add_method1(app, sel("coreChoice:"), &uk_chose, "v@:@");
+    add_method1(app, sel("coreSectionButton:"), &uk_section_button, "v@:@");
+    add_method1(app, sel("coreSearchFire:"), &uk_search_fire, "v@:@")
 }
 
 // The sheets gone: their lists let go, and core's screens with them.
 uk_gone() {
     for k in 0..UK_SLOTS uk_free(k);
-    sk_n = 0;
+    uk_timer = stop_timer(uk_timer);
+    uk_pending = -1;
+    // (What Search searched for kept first among the recent searches.)
+    sk_closing(0);
     uk_stale = true
 }
 
 uk_screens() {
+    uk_entry = table_screens_n;
     for k in 0..UK_SLOTS {
         s: TableScreen = table_screen(&uk_tables[k], &uk_sections, &uk_rows, &uk_cell);
         s.picked = &uk_picked;
         s.header = &uk_header;
         s.footer = &uk_footer;
+        s.header_view = &uk_header_view;
         s.can_edit = &uk_can_edit;
         s.commit = &uk_commit;
         s.delete_title = &uk_delete_title;
