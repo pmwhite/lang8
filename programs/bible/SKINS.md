@@ -269,7 +269,8 @@ Memory's, else a plan's slot plus 1), `remind_time MINUTES`, `open_settings`,
 other version's is added by core, which says `memorized ID`),
 `mm_version`, `mm_delete`, `passage`, `practice_session N HOW` (a host
 with its own Practice), `practice_audio ACTION ARG` (Listen, Echo, Speak
-on core's Practice), `learned LANG`, `words_added N`, `read_in CV RIBBON`
+on core's Practice), `toast SYMBOL` WORDS (a toast's words, and its
+symbol: 0 plus, 1 a check, 2 the brain), `read_in CV RIBBON`
 (the reader in the Hebrew and Greek), `study_verse`, `copy`, `share`,
 `highlighted`, `bookmarked`, `clear_selection`, `tray`, `tray_away`.
 

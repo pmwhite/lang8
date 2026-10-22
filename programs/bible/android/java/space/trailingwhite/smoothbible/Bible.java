@@ -395,6 +395,9 @@ public final class Bible extends Activity {
         startActivity(android.content.Intent.createChooser(i, null));
         break;
       }
+      case "toast":
+        android.widget.Toast.makeText(this, w.field(1), android.widget.Toast.LENGTH_SHORT).show();
+        break;
       case "memorized":
         android.widget.Toast.makeText(this, "Added to Memory", android.widget.Toast.LENGTH_SHORT).show();
         break;
