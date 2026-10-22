@@ -47,7 +47,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test game skate race cad recipes better bible-web bible-spoken \
+.PHONY: all check fmt selfhost compiler-test game skate race cad recipes better bible-web bible-tui bible-spoken \
 	terminal callback-test http websocket wasm-test web \
 	profile-explorer \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
@@ -60,7 +60,7 @@ all:
 check: $(OK)/stage1-tests l8 $(BUILD)/block-game $(BUILD)/skate $(BUILD)/race $(BUILD)/cad $(BUILD)/recipes \
 	$(BUILD)/profile-explorer \
 	$(BUILD)/better $(BUILD)/better-ios.s $(BUILD)/ios-check.s $(BUILD)/better-ios-sim $(BUILD)/better-android.s $(OK)/bible-web $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim \
-	$(BUILD)/bible-android.s $(BUILD)/skin-text
+	$(BUILD)/bible-android.s $(BUILD)/skin-text $(BUILD)/smooth-bible
 
 # ---- compiler stages ----
 
@@ -188,6 +188,13 @@ $(BUILD)/bible-android.s: l8c3 $(PROGRAMS) runtime-arm64-android.s stdlib/write.
 
 $(BUILD)/skin-text: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'bible text skin' ./l8c3 build programs/bible/tools/skin_text.l8 -o $@
+
+# Smooth Bible in a terminal (programs/bible/tui): run it from here,
+# .build/smooth-bible [VERSION], or with SMOOTH_BIBLE_DATA set.
+$(BUILD)/smooth-bible: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'bible for the terminal' ./l8c3 build programs/bible/tui/main.l8 -o $@
+
+bible-tui: $(BUILD)/smooth-bible
 
 $(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 	@$(STEP) 'iOS check' sh -c './l8c3 arm64 --target ios programs/ios/check.l8 -o $@.tmp && mv -f $@.tmp $@'
@@ -386,7 +393,7 @@ help:
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
 	@echo '  game, skate, race, cad, recipes'
-	@echo '  better, bible-web'
+	@echo '  better, bible-web, bible-tui'
 	@echo '  terminal, callback-test'
 	@echo '  http, websocket, profile-explorer'
 	@echo '  wasm-test       run the tests as WebAssembly under Node; check the wasm compiler fixpoint'

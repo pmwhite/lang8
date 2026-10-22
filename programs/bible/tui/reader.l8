@@ -1,0 +1,1006 @@
+tag bible_tui;
+
+use_tag std, bible;
+
+// The reader (SKINS.md: a view a skin makes itself): every chapter one
+// after another, scrolled a line at a time. Each chapter's text and runs
+// come from core (chapter C TEXT, then span, verse, link and mark lines,
+// to end) when it is first wanted (want C); this lays it out for the
+// terminal's width (paragraphs wrapped, poetry indented, headings and the
+// chapter's number centered, verse numbers and footnote marks raised),
+// draws it in the theme's colors (highlights, the selection, the verse
+// being heard washed over their verses), and tells core where the top is
+// (place, rest).
+import "term.l8";
+
+import "wire.l8";
+
+// ---- the look (core's look line) ----
+lk_bg: int = 1776152;
+
+lk_ink: int = 15131095;
+
+lk_heading: int = 12432042;
+
+lk_faint: int = 9209210;
+
+lk_accent: int = 14452851;
+
+lk_rule: int = 16777215;
+
+lk_dark: bool = true;
+
+lk_red: bool = false;
+
+lk_font: int = 0;
+
+// The margins (core's points: 20, 28, 40) as the column's width, the line
+// spacing (thousandths: relaxed, 1480) as a line between paragraphs.
+lk_margin: int = 28;
+
+lk_spacing: int = 1320;
+
+// The chapters held: a slot each (RS_SLOTS, the least used let go), its
+// text (unescaped) and its other lines (as they came).
+RS_SLOTS: int = 16;
+
+rs_c: []int = new int[16](-1);
+
+rs_used: []int = new int[16](0);
+
+rs_clock: int = 0;
+
+rs_text: [][]i8 = new []i8[16](new i8[0](0i8));
+
+rs_text_n: []int = new int[16](0);
+
+rs_meta: [][]i8 = new []i8[16](new i8[0](0i8));
+
+rs_meta_n: []int = new int[16](0);
+
+// Laid out: for which width (-1: not yet), its cells (a code point each,
+// and its attributes: RA_), its lines (their cells, indent, the verse at
+// their start, whether centered), each verse's first line, its links and
+// its marks.
+rs_w: []int = new int[16](-1);
+
+rs_cp: [][]int = new []int[16](new int[0](0));
+
+rs_at: [][]int = new []int[16](new int[0](0));
+
+rs_cells: []int = new int[16](0);
+
+RS_LINES: int = 8192;
+
+rs_l0: [][]int = new []int[16](new int[0](0));
+
+rs_l1: [][]int = new []int[16](new int[0](0));
+
+rs_lx: [][]int = new []int[16](new int[0](0));
+
+rs_lv: [][]int = new []int[16](new int[0](0));
+
+rs_lines: []int = new int[16](0);
+
+rs_vline: [][]int = new []int[16](new int[0](0));
+
+rs_lk_kind: [][]int = new []int[16](new int[0](0));
+
+rs_lk_arg: [][]int = new []int[16](new int[0](0));
+
+rs_links: []int = new int[16](0);
+
+rs_mark: [][]int = new []int[16](new int[0](0));
+
+// (Whether its verses are none: the ESV's line while it waits, kept a
+// screen tall.)
+rs_wait: []bool = new bool[16](false);
+
+rd_alloc() noregion {
+    for s in 0..RS_SLOTS {
+        rs_text[s] = new i8[262144](0i8);
+        rs_meta[s] = new i8[262144](0i8);
+        rs_cp[s] = new int[65536](0);
+        rs_at[s] = new int[65536](0);
+        rs_l0[s] = new int[8192](0);
+        rs_l1[s] = new int[8192](0);
+        rs_lx[s] = new int[8192](0);
+        rs_lv[s] = new int[8192](0);
+        rs_vline[s] = new int[256](-1);
+        rs_lk_kind[s] = new int[2048](0);
+        rs_lk_arg[s] = new int[2048](0);
+        rs_mark[s] = new int[256](-1)
+    }
+}
+
+// A cell's attributes: its style (core's STYLE_, 0 to 127), its verse, its
+// link (plus 1; 0 none).
+ra_style(a: int): int {
+    a % 128
+}
+
+ra_verse(a: int): int {
+    a / 128 % 512
+}
+
+ra_link(a: int): int {
+    a / 65536 - 1
+}
+
+ra(style: int, verse: int, link: int): int {
+    style + verse * 128 + (link + 1) * 65536
+}
+
+rd_slot(c: int): int {
+    for s in 0..RS_SLOTS
+        if (rs_c[s] == c) return s;
+    -1
+}
+
+// ---- what core says ----
+rd_chapters: int = 1189;
+
+// The chapter being gathered (its slot; -1 none).
+rd_taking: int = -1;
+
+// chapter C TEXT: its slot (the least used, not one on the screen).
+rd_chapter(buf: []i8, b: int, e: int) {
+    c: int = wl_num(buf, b, e, 1);
+    s: int = rd_slot(c);
+    if (s < 0) {
+        best: int = 0;
+        for k in 0..RS_SLOTS {
+            if (rs_c[k] < 0) {
+                if (rs_c[best] >= 0) best = k
+            } else if (rs_c[best] >= 0 && rs_used[k] < rs_used[best] && !rd_on_screen(rs_c[k])) best = k
+        }
+        s = best
+    }
+    rs_c[s] = c;
+    rs_clock = rs_clock + 1;
+    rs_used[s] = rs_clock;
+    rs_w[s] = -1;
+    rs_meta_n[s] = 0;
+    rs_text_n[s] = 0;
+    if (wl_field(buf, b, e, 1)) rs_text_n[s] = wl_unescape(buf, wl_b, wl_e, rs_text[s],
+        0);
+    rd_taking = s
+}
+
+// A line of the chapter being gathered (end: it is whole).
+rd_take(buf: []i8, b: int, e: int): bool {
+    s: int = rd_taking;
+    if (wl_is(buf, b, e, "end")) {
+        rd_taking = -1;
+        if (s >= 0) rd_came(s);
+        return true
+    }
+    if (s < 0) return false;
+    m: []i8 = rs_meta[s];
+    n: int = rs_meta_n[s];
+    if (n + e - b + 1 < len(m)) {
+        for i in b..e m[n + i - b] = buf[i];
+        m[n + e - b] = 10i8;
+        rs_meta_n[s] = n + e - b + 1
+    }
+    false
+}
+
+// A chapter whole: laid out when drawn; the place kept if it was waiting
+// at the top, and a jump to it made.
+rd_came(s: int) {
+    c: int = rs_c[s];
+    rd_asked_clear(c);
+    was: int = rd_lines_of(c);
+    old_l: int = rd_l;
+    rs_w[s] = -1;
+    if (c == rd_topc && rd_was_placeholder) {
+        // (Its place as it was from its end, now its own lines.)
+        now: int = rd_lines_of(c);
+        rd_l = now - (was - old_l);
+        if (rd_l < 0) rd_l = 0
+    }
+    if (c == rd_jump_c) rd_finish_jump();
+    rd_dirty = true
+}
+
+// ---- laying a chapter out ----
+// The column's width it is laid out for.
+rd_width: int = 72;
+
+// Scratch: the spans, verses and links of the chapter being laid out (UTF-16
+// places, as core counts).
+sp_a: []int = new int[16384](0);
+
+sp_end: []int = new int[16384](0);
+
+sp_st: []int = new int[16384](0);
+
+sp_pa: []int = new int[16384](0);
+
+sp_n: int = 0;
+
+vr_v: []int = new int[512](0);
+
+vr_a: []int = new int[512](0);
+
+vr_b: []int = new int[512](0);
+
+vr_n: int = 0;
+
+ln_a: []int = new int[2048](0);
+
+ln_b: []int = new int[2048](0);
+
+// The paragraph being wrapped: its cells (code points, attributes), kind.
+pc_cp: []int = new int[65536](0);
+
+pc_at: []int = new int[65536](0);
+
+pc_n: int = 0;
+
+rd_lay(s: int) {
+    w: int = rd_width;
+    rs_w[s] = w;
+    rs_cells[s] = 0;
+    rs_lines[s] = 0;
+    rs_links[s] = 0;
+    for v in 0..256 {
+        rs_vline[s][v] = -1;
+        rs_mark[s][v] = -1
+    }
+    // Its lines (span A B STYLE PARA, verse V A B, link A B KIND ARG,
+    // mark V HEX BOOKMARK NOTE).
+    sp_n = 0;
+    vr_n = 0;
+    m: []i8 = rs_meta[s];
+    mn: int = rs_meta_n[s];
+    p: int = 0;
+    while (p < mn) {
+        e: int = p;
+        while (e < mn && m[e] as int != 10) e = e + 1;
+        if (wl_is(m, p, e, "span") && sp_n < len(sp_a)) {
+            sp_a[sp_n] = wl_num(m, p, e, 1);
+            sp_end[sp_n] = wl_num(m, p, e, 2);
+            sp_st[sp_n] = wl_num(m, p, e, 3);
+            sp_pa[sp_n] = wl_num(m, p, e, 4);
+            sp_n = sp_n + 1
+        } else if (wl_is(m, p, e, "verse") && vr_n < len(vr_v)) {
+            vr_v[vr_n] = wl_num(m, p, e, 1);
+            vr_a[vr_n] = wl_num(m, p, e, 2);
+            vr_b[vr_n] = wl_num(m, p, e, 3);
+            vr_n = vr_n + 1
+        } else if (wl_is(m, p, e, "link") && rs_links[s] < len(ln_a)) {
+            k: int = rs_links[s];
+            ln_a[k] = wl_num(m, p, e, 1);
+            ln_b[k] = wl_num(m, p, e, 2);
+            rs_lk_kind[s][k] = wl_num(m, p, e, 3);
+            rs_lk_arg[s][k] = wl_num(m, p, e, 4);
+            rs_links[s] = k + 1
+        } else if (wl_is(m, p, e, "mark")) {
+            v: int = wl_num(m, p, e, 1);
+            if (wl_word(m, p, e, 2) && v >= 0 && v < 256) rs_mark[s][v] = tm_hex(m,
+                wl_b, wl_e)
+        }
+        p = e + 1
+    }
+    rs_wait[s] = vr_n == 0;
+    // The text, a code point at a time: each paragraph's cells, wrapped.
+    t: []i8 = rs_text[s];
+    tn: int = rs_text_n[s];
+    u: int = 0;
+    si: int = 0;
+    vi: int = 0;
+    li: int = 0;
+    pc_n = 0;
+    para: int = 0;
+    first: int = -1;
+    q: int = 0;
+    while (q <= tn) {
+        if (q == tn || t[q] as int == 10) {
+            rd_wrap(s, para, first);
+            pc_n = 0;
+            first = -1;
+            para = 0;
+            u = u + 1;
+            q = q + 1
+        } else {
+            cp: int = tm_cp_at(t, q, tn);
+            q = q + tm_cp_len;
+            while (si < sp_n && sp_end[si] <= u) si = si + 1;
+            while (vi < vr_n && vr_b[vi] <= u) vi = vi + 1;
+            while (li < rs_links[s] && ln_b[li] <= u) li = li + 1;
+            st: int = if (si < sp_n && sp_a[si] <= u) sp_st[si] else 0;
+            if (first < 0) {
+                first = st;
+                para = (if (si < sp_n && sp_a[si] <= u) sp_pa[si] else 0)
+            }
+            v: int = if (vi < vr_n && vr_a[vi] <= u) vr_v[vi] else 0;
+            l: int = if (li < rs_links[s] && ln_a[li] <= u) li else -1;
+            rd_cell(rd_show(cp, st), ra(st, v, l));
+            u = u + (if (cp >= 65536) 2 else 1)
+        }
+    }
+    // (A chapter still to come, its line alone: kept a screen tall.)
+    if (rs_wait[s]) {
+        while (rs_lines[s] < tm_rows) rd_line(s, rs_cells[s], rs_cells[s], 0, 0)
+    }
+    rd_line(s, rs_cells[s], rs_cells[s], 0, 0)
+}
+
+rd_cell(cp: int, at: int) {
+    if (pc_n < len(pc_cp)) {
+        pc_cp[pc_n] = cp;
+        pc_at[pc_n] = at;
+        pc_n = pc_n + 1
+    }
+}
+
+// What a code point shows as: a verse's number raised, a footnote's letter
+// raised, the rule's mark a line.
+sup_digits: []int = [8304, 185, 178, 179, 8308, 8309, 8310, 8311, 8312, 8313];
+
+sup_letters: []int = [7491, 7495, 7580, 7496, 7497, 7584, 7501, 688, 8305, 690, 7503,
+    737, 7504, 8319, 7506, 7510, 113, 691, 738, 7511, 7512, 7515, 695, 739, 696, 7611];
+
+rd_show(cp: int, st: int): int {
+    if (st == 1 && cp >= 48 && cp <= 57) return sup_digits[cp - 48];
+    if (st == 1 && cp == 8239) return 32;
+    if (st == 11 && cp >= 97 && cp <= 122) return sup_letters[cp - 97];
+    if (cp == 8239 || cp == 160) return 160;
+    if (cp == 9) return 32;
+    cp
+}
+
+// A line of slot s: cells a to b, at column x.
+rd_line(
+    s: int,
+    a: int,
+    b: int,
+    x: int,
+    v: int
+) {
+    k: int = rs_lines[s];
+    if (k >= RS_LINES) return;
+    rs_l0[s][k] = a;
+    rs_l1[s][k] = b;
+    rs_lx[s][k] = x;
+    rs_lv[s][k] = v;
+    rs_lines[s] = k + 1
+}
+
+// The paragraph's cells wrapped into lines of slot s: its kind's indent
+// (poetry's 2 and 4, a verse a line's hanging), centered (the book, the
+// number, the rule, PARA_CENTER) or at the right; a heading with a line
+// before it; an empty paragraph a line of its own.
+rd_wrap(s: int, para: int, first: int) {
+    w: int = rd_width;
+    kind: int = para % 16;
+    base: int = if (kind == 1 || kind == 3) 2 else if (kind == 2 || kind == 4) 4 else 0;
+    hang: int = if (kind == 7) 2 else if (kind >= 1 && kind <= 4) 2 else 0;
+    centered: bool = kind == 5 || first == 2 || first == 3 || first == 15 || first == 12 || first == 14;
+    right: bool = kind == 6;
+    heading: bool = first == 4 || first == 10 || first == 21 || first == 8 || first == 5;
+    lastv: int = if (rs_lines[s] > 0) rs_lv[s][rs_lines[s] - 1] else 0;
+    if (heading && rs_lines[s] > 0) rd_line(s, rs_cells[s], rs_cells[s], 0, lastv);
+    if (pc_n == 0) {
+        rd_line(s, rs_cells[s], rs_cells[s], 0, lastv);
+        return
+    }
+    // (The rule's mark: a short line.)
+    if (first == 14 && pc_n == 1) {
+        pc_n = 0;
+        for _k in 0..9 rd_cell(9472, ra(14, 0, -1))
+    }
+    // Into the slot's cells, then broken at spaces.
+    c0: int = rs_cells[s];
+    cp: []int = rs_cp[s];
+    at: []int = rs_at[s];
+    for i in 0..pc_n {
+        if (c0 + i < len(cp)) {
+            cp[c0 + i] = pc_cp[i];
+            at[c0 + i] = pc_at[i]
+        }
+    }
+    n: int = if (c0 + pc_n <= len(cp)) pc_n else len(cp) - c0;
+    rs_cells[s] = c0 + n;
+    start: int = c0;
+    end: int = c0 + n;
+    indent: int = base;
+    while (start < end) {
+        room: int = w - indent;
+        if (room < 8) room = 8;
+        // The most that fits, broken after a space.
+        x: int = 0;
+        i: int = start;
+        brk: int = -1;
+        fits: bool = true;
+        while (i < end && fits) {
+            cw: int = tm_width(cp[i]);
+            if (x + cw > room) fits = false else {
+                x = x + cw;
+                if (cp[i] == 32 || cp[i] == 8212 || cp[i] == 8211) brk = i + 1;
+                i = i + 1
+            }
+        }
+        stop: int = if (fits || brk <= start) i else brk;
+        if (stop <= start) stop = start + 1;
+        // (Its trailing space left off; its verse, the first on it.)
+        e2: int = stop;
+        while (e2 > start && cp[e2 - 1] == 32) e2 = e2 - 1;
+        v: int = lastv;
+        found: bool = false;
+        for j in start..e2 {
+            if (!found && ra_verse(at[j]) > 0) {
+                v = ra_verse(at[j]);
+                found = true
+            }
+        }
+        lw: int = 0;
+        for j in start..e2 lw = lw + tm_width(cp[j]);
+        lx: int = if (centered) (w - lw) / 2 else if (right) w - lw else indent;
+        k: int = rs_lines[s];
+        rd_line(s, start, e2, if (lx < 0) 0 else lx, v);
+        // (Each verse's first line.)
+        for j in start..e2 {
+            vv: int = ra_verse(at[j]);
+            if (vv > 0 && vv < 256 && rs_vline[s][vv] < 0) rs_vline[s][vv] = k
+        }
+        lastv = v;
+        start = stop;
+        while (start < end && cp[start] == 32) start = start + 1;
+        indent = base + hang
+    }
+    // (Relaxed: a line after each paragraph of prose.)
+    if (lk_spacing >= 1400 && kind == 0 && !heading && !centered) rd_line(s, rs_cells[s],
+        rs_cells[s], 0, lastv)
+}
+
+// ---- the place ----
+// The top of the reader: chapter rd_topc, its line rd_l.
+rd_topc: int = 0;
+
+rd_l: int = 0;
+
+rd_dirty: bool = true;
+
+// Whether the top chapter was not here yet when the place was set.
+rd_was_placeholder: bool = false;
+
+// A jump waiting for its chapter (-1: none), to verse rd_jump_v.
+rd_jump_c: int = -1;
+
+rd_jump_v: int = 0;
+
+// The lines chapter c takes (laid out if held; else a placeholder's 3).
+// After each, a line between it and the next.
+rd_lines_of(c: int): int {
+    s: int = rd_slot(c);
+    if (s < 0) return 3;
+    if (rs_w[s] != rd_width) rd_lay(s);
+    rs_lines[s]
+}
+
+rd_jump_to(c: int, v: int) {
+    if (c < 0 || c >= rd_chapters) return;
+    rd_topc = c;
+    rd_l = 0;
+    rd_jump_c = c;
+    rd_jump_v = v;
+    rd_want(c);
+    if (rd_slot(c) >= 0) rd_finish_jump();
+    rd_moved()
+}
+
+rd_finish_jump() {
+    c: int = rd_jump_c;
+    s: int = rd_slot(c);
+    if (s < 0) return;
+    rd_jump_c = -1;
+    if (rs_w[s] != rd_width) rd_lay(s);
+    l: int = 0;
+    if (rd_jump_v > 0 && rd_jump_v < 256 && rs_vline[s][rd_jump_v] >= 0) l = rs_vline[s][rd_jump_v];
+    rd_topc = c;
+    rd_l = l;
+    rd_moved()
+}
+
+// Down by n lines (n < 0: up), as far as chapters go.
+rd_scroll_by(n: int) {
+    k: int = n;
+    while (k > 0) {
+        if (rd_l + 1 < rd_lines_of(rd_topc)) rd_l = rd_l + 1 else if (rd_topc + 1 < rd_chapters) {
+            rd_topc = rd_topc + 1;
+            rd_l = 0
+        }
+        k = k - 1
+    }
+    while (k < 0) {
+        if (rd_l > 0) rd_l = rd_l - 1 else if (rd_topc > 0) {
+            rd_topc = rd_topc - 1;
+            rd_l = rd_lines_of(rd_topc) - 1
+        }
+        k = k + 1
+    }
+    rd_moved()
+}
+
+rd_moved() {
+    rd_was_placeholder = rd_slot(rd_topc) < 0;
+    rd_dirty = true;
+    rd_moved_at = tm_now();
+    rd_resting = false
+}
+
+// When the reader last moved, and whether it has told core it rests.
+rd_moved_at: int = 0;
+
+rd_resting: bool = true;
+
+// The place told (place C V FRAC: the verse at the top, how far into it, in
+// thousandths of a line), once it changes.
+rd_said_c: int = -1;
+
+rd_said_v: int = -1;
+
+rd_said_f: int = -1;
+
+rd_top_v: int = 0;
+
+rd_top_f: int = 0;
+
+rd_place() {
+    s: int = rd_slot(rd_topc);
+    v: int = 0;
+    f: int = 0;
+    if (s >= 0 && rd_l < rs_lines[s]) {
+        v = rs_lv[s][rd_l];
+        if (v > 0 && v < 256 && rs_vline[s][v] >= 0) f = (rd_l - rs_vline[s][v]) * 1000
+    }
+    rd_top_v = v;
+    rd_top_f = f;
+    if (rd_topc != rd_said_c || v != rd_said_v || f != rd_said_f) {
+        rd_said_c = rd_topc;
+        rd_said_v = v;
+        rd_said_f = f;
+        tc_str("place ");
+        tc_int(rd_topc);
+        tc_byte(32);
+        tc_int(v);
+        tc_byte(32);
+        tc_int(f);
+        tc_end()
+    }
+}
+
+// At rest (a third of a second after the last move): rest C V FRAC END
+// ENDS_HI MS, its end on the screen or not, the last chapter whose end is.
+rd_rest_check(rows: int) {
+    if (rd_resting || tm_now() - rd_moved_at < 350) return;
+    rd_resting = true;
+    rd_place();
+    // (Which chapters' ends show.)
+    c: int = rd_topc;
+    l: int = rd_l;
+    shown: int = 0;
+    ends_hi: int = rd_topc - 1;
+    while (shown < rows && c < rd_chapters) {
+        left: int = rd_lines_of(c) - l + 1;
+        if (shown + left - 1 <= rows && rd_slot(c) >= 0) ends_hi = c;
+        shown = shown + left;
+        c = c + 1;
+        l = 0
+    }
+    tc_str("rest ");
+    tc_int(rd_topc);
+    tc_byte(32);
+    tc_int(rd_top_v);
+    tc_byte(32);
+    tc_int(rd_top_f);
+    tc_byte(32);
+    tc_int(if (ends_hi >= rd_topc) 1 else 0);
+    tc_byte(32);
+    tc_int(ends_hi);
+    tc_byte(32);
+    tc_int(tm_now());
+    tc_end()
+}
+
+// ---- chapters asked for ----
+rd_asked: []int = new int[1200](0);
+
+rd_want(c: int) {
+    if (c < 0 || c >= rd_chapters || c >= len(rd_asked)) return;
+    if (rd_slot(c) >= 0) return;
+    now: int = tm_now();
+    if (rd_asked[c] > 0 && now - rd_asked[c] < 5000) return;
+    rd_asked[c] = now;
+    tc_str("want ");
+    tc_int(c);
+    tc_end()
+}
+
+rd_asked_clear(c: int) {
+    if (c >= 0 && c < len(rd_asked)) rd_asked[c] = 0
+}
+
+// Every chapter let go (the look, the version, what is marked changed:
+// core's relayout), asked for again as drawn.
+rd_forget() {
+    for s in 0..RS_SLOTS rs_c[s] = -1;
+    for c in 0..len(rd_asked) rd_asked[c] = 0;
+    rd_dirty = true
+}
+
+// Chapter c asked for again (what is marked on it changed).
+rd_reask(c: int) {
+    s: int = rd_slot(c);
+    if (s >= 0) rs_c[s] = -1;
+    rd_asked_clear(c);
+    rd_want(c)
+}
+
+rd_on_screen(c: int): bool {
+    c >= rd_topc && c <= rd_last_c
+}
+
+rd_last_c: int = 0;
+
+// ---- what is washed ----
+// The selection (its chapter, -1 none; its verses), the verse heard, the
+// verse the keys are on (the cursor), the link the keys are on.
+sel_c: int = -1;
+
+sel_v: []bool = new bool[256](false);
+
+heard_c: int = -1;
+
+heard_v: int = 0;
+
+cur_c: int = -1;
+
+cur_v: int = 0;
+
+cur_link_c: int = -1;
+
+cur_link: int = -1;
+
+// ---- drawing ----
+// Where each row drawn is: its chapter (-1 a gap), its line.
+row_c: []int = new int[512](-1);
+
+row_l: []int = new int[512](0);
+
+// The reader's column: rows r0 to r1, columns x0 to x0 + w; the text's
+// width in it, centered.
+rd_x0: int = 0;
+
+rd_tx: int = 0;
+
+rd_r0: int = 1;
+
+rd_draw(
+    r0: int,
+    r1: int,
+    x0: int,
+    w: int
+) {
+    tw: int = w - 4;
+    most: int = if (lk_margin <= 20) 84 else if (lk_margin <= 28) 72 else 60;
+    if (tw > most) tw = most;
+    if (tw < 20) tw = w;
+    if (tw != rd_width) {
+        rd_width = tw;
+        // (Laid out again for it, the place kept by its verse.)
+        s: int = rd_slot(rd_topc);
+        v: int = if (s >= 0 && rd_l < rs_lines[s]) rs_lv[s][rd_l] else 0;
+        if (v > 0) {
+            rd_jump_c = rd_topc;
+            rd_jump_v = v;
+            rd_finish_jump()
+        }
+    }
+    tx: int = x0 + (w - tw) / 2;
+    rd_x0 = x0;
+    rd_tx = tx;
+    rd_r0 = r0;
+    c: int = rd_topc;
+    l: int = rd_l;
+    rd_want(c);
+    rd_want(c - 1);
+    for r in r0..r1 {
+        i: int = r - r0;
+        if (c < rd_chapters) {
+            n: int = rd_lines_of(c);
+            if (l >= n) {
+                // (The line between chapters.)
+                if (i < len(row_c)) row_c[i] = -1;
+                c = c + 1;
+                l = 0;
+                rd_want(c)
+            } else {
+                if (i < len(row_c)) {
+                    row_c[i] = c;
+                    row_l[i] = l
+                }
+                rd_draw_line(r, tx, c, l);
+                l = l + 1
+            }
+        } else if (i < len(row_c)) row_c[i] = -1
+    }
+    rd_last_c = c;
+    rd_want(c + 1);
+    rd_want(c + 2);
+    rd_dirty = false
+}
+
+rd_draw_line(
+    r: int,
+    tx: int,
+    c: int,
+    l: int
+) {
+    s: int = rd_slot(c);
+    if (s < 0) {
+        if (l == 1) _w: int = tm_text(r, tx + rd_width / 2 - 1, "\Â\·\Â\·\Â\·", lk_faint,
+            lk_bg, 0);
+        return
+    }
+    cp: []int = rs_cp[s];
+    at: []int = rs_at[s];
+    x: int = tx + rs_lx[s][l];
+    for j in rs_l0[s][l]..rs_l1[s][l] {
+        a: int = at[j];
+        st: int = ra_style(a);
+        v: int = ra_verse(a);
+        fg: int = rd_fg(st);
+        bg: int = rd_wash(s, c, v);
+        attr: int = rd_attr(st);
+        lk: int = ra_link(a);
+        if (lk >= 0 && c == cur_link_c && lk == cur_link) attr = attr | TA_REVERSE;
+        x = x + tm_put(r, x, cp[j], fg, bg, attr)
+    }
+}
+
+// A verse's background: the selection, the verse heard, its highlight.
+rd_wash(s: int, c: int, v: int): int {
+    if (v <= 0 || v >= 256) return lk_bg;
+    if (c == sel_c && sel_v[v]) return tm_mix(lk_accent, lk_bg, if (lk_dark) 300 else 200);
+    if (c == cur_c && v == cur_v) return tm_mix(lk_ink, lk_bg, 90);
+    if (c == heard_c && v == heard_v) return tm_mix(lk_accent, lk_bg, 140);
+    m: int = rs_mark[s][v];
+    if (m >= 0) return tm_mix(m, lk_bg, if (lk_dark) 320 else 400);
+    lk_bg
+}
+
+// A style's color (core's STYLE_, then core's own RUN_).
+rd_fg(st: int): int {
+    if (st == 1 || st == 6 || st == 9 || st == 12 || st == 14 || st >= 26 && st <= 28) return lk_faint;
+    if (st == 2 || st == 3 || st == 15 || st == 4 || st == 10 || st == 21 || st == 5 || st == 7 || st == 8 || st == 24 || st == 25) return lk_heading;
+    if (st == 11 || st == 18) return lk_accent;
+    if ((st == 16 || st == 17 || st == 20) && lk_red) return lk_accent;
+    lk_ink
+}
+
+rd_attr(st: int): int {
+    if (st == 2 || st == 3 || st == 15 || st == 4 || st == 10 || st == 21 || st == 8) return TA_BOLD;
+    if (st == 5 || st == 7 || st == 6 || st == 9 || st == 19 || st == 20) return TA_ITALIC;
+    if (st == 23 || st == 25) return TA_UNDER;
+    0
+}
+
+// ---- where a click falls ----
+// The chapter and cell at screen row r, column x (rd_hit_c, rd_hit_cell;
+// -1 none).
+rd_hit_c: int = -1;
+
+rd_hit_s: int = -1;
+
+rd_hit_cell: int = -1;
+
+rd_hit(r: int, x: int): bool {
+    rd_hit_c = -1;
+    rd_hit_cell = -1;
+    i: int = r - rd_r0;
+    if (i < 0 || i >= len(row_c) || row_c[i] < 0) return false;
+    c: int = row_c[i];
+    l: int = row_l[i];
+    s: int = rd_slot(c);
+    if (s < 0 || l >= rs_lines[s]) return false;
+    rd_hit_c = c;
+    rd_hit_s = s;
+    cx: int = rd_tx + rs_lx[s][l];
+    best: int = -1;
+    for j in rs_l0[s][l]..rs_l1[s][l] {
+        cw: int = tm_width(rs_cp[s][j]);
+        if (x >= cx && x < cx + cw) best = j;
+        cx = cx + cw
+    }
+    rd_hit_cell = best;
+    best >= 0
+}
+
+// A click at r, x: a link's (a footnote, a reference, a word of the
+// original, the ESV's line), else a verse's (selected, or let go), else
+// elsewhere.
+rd_click(r: int, x: int) {
+    if (!rd_hit(r, x)) {
+        tc_str("tapnone");
+        tc_end();
+        return
+    }
+    s: int = rd_hit_s;
+    a: int = rs_at[s][rd_hit_cell];
+    lk: int = ra_link(a);
+    // (A footnote's mark is small: the cell before it counts too.)
+    if (lk < 0 && rd_hit_cell + 1 < rs_cells[s]) {
+        b2: int = rs_at[s][rd_hit_cell + 1];
+        if (ra_link(b2) >= 0 && rs_lk_kind[s][ra_link(b2)] == 0) lk = ra_link(b2)
+    }
+    if (lk >= 0) {
+        rd_open_link(rd_hit_c, s, lk);
+        return
+    }
+    v: int = ra_verse(a);
+    if (v > 0) {
+        tc_str("tapverse ");
+        tc_int(rd_hit_c);
+        tc_byte(32);
+        tc_int(v);
+        tc_end()
+    } else {
+        tc_str("tapnone");
+        tc_end()
+    }
+}
+
+rd_open_link(c: int, s: int, lk: int) {
+    k: int = rs_lk_kind[s][lk];
+    arg: int = rs_lk_arg[s][lk];
+    if (k == 0) {
+        tc_str("footnote ");
+        tc_int(c);
+        tc_byte(32);
+        tc_int(arg)
+    } else if (k == 2) {
+        tc_str("word ");
+        tc_int(arg)
+    } else if (k == 3) {
+        tc_str("esvact ");
+        tc_int(arg);
+        tc_byte(32);
+        tc_int(c)
+    } else {
+        tc_str("preview ");
+        tc_int(arg)
+    }
+    tc_end()
+}
+
+// ---- the keys' cursor: a verse, and the links on the screen ----
+// The cursor to the next (d 1) or previous (-1) verse, from the top's if
+// it is not on the screen.
+rd_cursor(d: int) {
+    if (cur_c < 0 || !rd_on_screen(cur_c)) {
+        cur_c = rd_topc;
+        cur_v = (if (rd_top_v > 0) rd_top_v else 1);
+        if (d < 0) d = 0
+    }
+    s: int = rd_slot(cur_c);
+    if (s < 0) return;
+    nv: int = cur_v + d;
+    if (nv >= 1 && nv < 256 && rs_vline[s][nv] >= 0) cur_v = nv else if (d > 0 && cur_c + 1 < rd_chapters && rd_slot(cur_c + 1) >= 0) {
+        cur_c = cur_c + 1;
+        cur_v = 1
+    } else if (d < 0 && cur_v <= 1 && cur_c > 0 && rd_slot(cur_c - 1) >= 0) {
+        cur_c = cur_c - 1;
+        s2: int = rd_slot(cur_c);
+        last: int = 1;
+        for v in 1..256
+            if (rs_vline[s2][v] >= 0) last = v;
+        cur_v = last
+    }
+    rd_show_cursor();
+    rd_dirty = true
+}
+
+// The cursor's verse brought onto the screen.
+rd_show_cursor() {
+    s: int = rd_slot(cur_c);
+    if (s < 0 || cur_v <= 0 || cur_v >= 256) return;
+    if (rs_w[s] != rd_width) rd_lay(s);
+    vl: int = rs_vline[s][cur_v];
+    if (vl < 0) return;
+    // (Above the top: up to it; below the bottom: down till it shows.)
+    if (cur_c < rd_topc || cur_c == rd_topc && vl < rd_l) {
+        rd_topc = cur_c;
+        rd_l = vl;
+        rd_moved();
+        return
+    }
+    rows: int = rd_rows_shown;
+    guard: int = 0;
+    while (!rd_line_visible(cur_c, vl + 1, rows) && guard < 2000) {
+        rd_scroll_by(1);
+        guard = guard + 1
+    }
+}
+
+rd_rows_shown: int = 20;
+
+// Whether line l of chapter c is within rows of the top.
+rd_line_visible(c: int, l: int, rows: int): bool {
+    cc: int = rd_topc;
+    ll: int = rd_l;
+    k: int = 0;
+    while (k < rows) {
+        if (cc == c && ll >= l) return true;
+        if (cc > c) return true;
+        n: int = rd_lines_of(cc);
+        if (ll + 1 >= n + 1) {
+            cc = cc + 1;
+            ll = 0
+        } else ll = ll + 1;
+        k = k + 1
+    }
+    false
+}
+
+// The next link on the screen (d 1) or the previous (-1), for the keys.
+rd_next_link(d: int) {
+    // The links shown, in order: (chapter, slot, link).
+    cs: int = -1;
+    found_c: int = -1;
+    found_l: int = -1;
+    take_next: bool = cur_link_c < 0;
+    prev_c: int = -1;
+    prev_l: int = -1;
+    for i in 0..rd_rows_shown {
+        if (i < len(row_c) && row_c[i] >= 0) {
+            c: int = row_c[i];
+            s: int = rd_slot(c);
+            l: int = row_l[i];
+            if (s >= 0 && l < rs_lines[s]) {
+                last: int = -1;
+                for j in rs_l0[s][l]..rs_l1[s][l] {
+                    lk: int = ra_link(rs_at[s][j]);
+                    if (lk >= 0 && lk != last) {
+                        last = lk;
+                        if (found_c < 0) {
+                            if (d > 0) {
+                                if (take_next) {
+                                    found_c = c;
+                                    found_l = lk
+                                } else if (c == cur_link_c && lk == cur_link) take_next = true
+                            } else {
+                                if (c == cur_link_c && lk == cur_link && prev_c >= 0) {
+                                    found_c = prev_c;
+                                    found_l = prev_l
+                                }
+                                prev_c = c;
+                                prev_l = lk
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    _cs: int = cs;
+    if (d < 0 && found_c < 0 && cur_link_c < 0) {
+        found_c = prev_c;
+        found_l = prev_l
+    }
+    cur_link_c = found_c;
+    cur_link = found_l;
+    rd_dirty = true
+}
+
+// The link the keys are on, opened.
+rd_open_cur_link(): bool {
+    if (cur_link_c < 0) return false;
+    s: int = rd_slot(cur_link_c);
+    if (s < 0 || cur_link >= rs_links[s]) return false;
+    rd_open_link(cur_link_c, s, cur_link);
+    true
+}

@@ -1,0 +1,455 @@
+tag bible_tui;
+
+use_tag std, bible;
+
+need "libc.so.6";
+
+// Smooth Bible in a terminal (SKINS.md: a skin by the contract): core and
+// its host (core/host.l8) in this process with the skin (tui/skin.l8),
+// which reads core's lines as any skin does. This is the platform: the
+// data files (SMOOTH_BIBLE_DATA, else programs/bible/data under where it
+// is run), what is kept (~/.local/share/smooth-bible), a GET (curl), the
+// terminal, and the loop: keys and what the programs it runs say, to
+// core; core's lines, to the skin; the screen drawn.
+//
+//   smooth-bible [VERSION]     (bsb, kjv, web, asv, ylt, esv)
+import "../../../stdlib/write.l8";
+
+import "../core/host.l8";
+
+import "skin.l8";
+
+extern lseek(fd: int, offset: int, whence: int): int;
+
+extern mkdir(path: str, mode: int): int;
+
+extern unlink(path: str): int;
+
+// ---- where things are ----
+data_dir: []i8 = new i8[4096](0i8);
+
+data_dir_n: int = 0;
+
+// The data's folder: SMOOTH_BIBLE_DATA, else programs/bible/data here.
+find_data(): bool {
+    n: int = pr_getenv("SMOOTH_BIBLE_DATA");
+    if (n > 0) {
+        for i in 0..n data_dir[i] = pr_var[i];
+        data_dir_n = n
+    } else {
+        data_dir_n = 0;
+        for c in "programs/bible/data" {
+            data_dir[data_dir_n] = c;
+            data_dir_n = data_dir_n + 1
+        }
+    }
+    pr_exists(pr_join(data_dir, data_dir_n, "bsb.txt"))
+}
+
+// What is kept: XDG_DATA_HOME/smooth-bible, else ~/.local/share/...
+find_kept() {
+    tk_cat_n = 0;
+    x: int = pr_getenv("XDG_DATA_HOME");
+    if (x > 0) tk_cat_buf(pr_var, x) else {
+        h: int = pr_getenv("HOME");
+        if (h > 0) tk_cat_buf(pr_var, h);
+        tk_cat_str("/.local");
+        _a: int = mkdir(cstr(tk_cat_bytes()), 493);
+        tk_cat_str("/share");
+        _b: int = mkdir(cstr(tk_cat_bytes()), 493)
+    }
+    tk_cat_str("/smooth-bible");
+    _c: int = mkdir(cstr(tk_cat_bytes()), 448);
+    for i in 0..tk_cat_n tk_kept_dir[i] = tk_cat[i];
+    tk_kept_dir_n = tk_cat_n;
+    _d: int = mkdir(pr_join(tk_kept_dir, tk_kept_dir_n, "http"), 448)
+}
+
+// ---- what is kept (core/kept.l8's), as files ----
+kp_path(): str@new {
+    tk_cat_n = 0;
+    tk_cat_buf(tk_kept_dir, tk_kept_dir_n);
+    tk_cat_str("/");
+    tk_cat_buf(kp_name, kp_name_n);
+    cstr(tk_cat_bytes())
+}
+
+tui_read() {
+    fbuf_n = 0;
+    fd: int = open(kp_path(), 0, 0);
+    if (fd < 0) return;
+    more: bool = true;
+    while (more) {
+        k: int = read(fd, fbuf, fbuf_n, len(fbuf) - fbuf_n);
+        if (k <= 0) more = false else fbuf_n = fbuf_n + k
+    }
+    close(fd)
+}
+
+tui_write() {
+    // (O_WRONLY | O_CREAT | O_TRUNC)
+    tui_out(577)
+}
+
+tui_append() {
+    // (O_WRONLY | O_CREAT | O_APPEND)
+    tui_out(1089)
+}
+
+tui_out(flags: int) {
+    fd: int = open(kp_path(), flags, 384);
+    if (fd < 0) return;
+    try {
+        write_bytes_n(fd, fbuf, fbuf_n)
+    } with IoError _e -> { }
+    close(fd)
+}
+
+tui_remove() {
+    _u: int = unlink(kp_path())
+}
+
+// ---- the data files core's host asks for ----
+// Each id's name as asked (a version's, "bsb", is bsb.txt), and the asks
+// not yet answered: answered in the loop (got ID SIZE).
+asked_name: []i8 = new i8[128 * 64](0i8);
+
+asked_len: []int = new int[128](0);
+
+waiting: []int = new int[128](0);
+
+waiting_n: int = 0;
+
+tui_ask(id: int, name: str) {
+    if (id < 0 || id >= 128) return;
+    n: int = 0;
+    for c in name {
+        if (n < 64) {
+            asked_name[id * 64 + n] = c;
+            n = n + 1
+        }
+    }
+    asked_len[id] = n;
+    if (waiting_n < len(waiting)) {
+        waiting[waiting_n] = id;
+        waiting_n = waiting_n + 1
+    }
+}
+
+// Data file id's path (with .txt, for a version).
+asked_path(id: int, txt: bool): str@new {
+    tk_cat_n = 0;
+    tk_cat_buf(data_dir, data_dir_n);
+    tk_cat_str("/");
+    for i in 0..asked_len[id] tk_cat[tk_cat_n + i] = asked_name[id * 64 + i];
+    tk_cat_n = tk_cat_n + asked_len[id];
+    if (txt) tk_cat_str(".txt");
+    cstr(tk_cat_bytes())
+}
+
+file_size(path: str): int {
+    fd: int = open(path, 0, 0);
+    if (fd < 0) return -1;
+    n: int = lseek(fd, 0, 2);
+    close(fd);
+    n
+}
+
+file_into(path: str, out: []i8): int {
+    fd: int = open(path, 0, 0);
+    if (fd < 0) return 0;
+    got: int = 0;
+    more: bool = true;
+    while (more && got < len(out)) {
+        k: int = read(fd, out, got, len(out) - got);
+        if (k <= 0) more = false else got = got + k
+    }
+    close(fd);
+    got
+}
+
+http_body(id: int): str@new {
+    tk_cat_n = 0;
+    tk_cat_buf(tk_kept_dir, tk_kept_dir_n);
+    tk_cat_str("/http/");
+    tk_cat_int(id);
+    cstr(tk_cat_bytes())
+}
+
+http_status_path(id: int): str@new {
+    tk_cat_n = 0;
+    tk_cat_buf(tk_kept_dir, tk_kept_dir_n);
+    tk_cat_str("/http/");
+    tk_cat_int(id);
+    tk_cat_str(".status");
+    cstr(tk_cat_bytes())
+}
+
+tui_file(id: int, out: []i8): int {
+    if (id >= 128) return file_into(http_body(id), out);
+    p: str = asked_path(id, false);
+    if (file_size(p) < 0) p = asked_path(id, true);
+    file_into(p, out)
+}
+
+answer_asks() noregion: bool {
+    if (waiting_n == 0) return false;
+    n: int = 0;
+    for w in 0..waiting_n {
+        id: int = waiting[w];
+        size: int = file_size(asked_path(id, false));
+        if (size < 0) size = file_size(asked_path(id, true));
+        fbuf_n = 0;
+        fput_str("got ");
+        fput_int(id);
+        fput(32);
+        fput_int(size);
+        fput(10);
+        for i in 0..fbuf_n {
+            hs_inbox[n] = fbuf[i];
+            n = n + 1
+        }
+    }
+    waiting_n = 0;
+    hs_lines(n);
+    true
+}
+
+// ---- the network: a GET by curl, its answer a file ----
+http_id: []int = new int[16](0);
+
+http_pid: []int = new int[16](0);
+
+http_n: int = 0;
+
+curl: str = "";
+
+tui_http(id: int, b: []i8, n: int) {
+    tk_cat_n = 0;
+    tk_cat_buf(b, n);
+    url: str = cstr(tk_cat_bytes());
+    body: str = http_body(id);
+    status: str = http_status_path(id);
+    pid: int = -1;
+    if (len(curl) > 0) {
+        pr_begin(curl);
+        pr_arg("-s");
+        pr_arg("-m");
+        pr_arg("20");
+        pr_arg("-H");
+        pr_arg("X-Smooth-Bible: terminal (1)");
+        pr_arg("-o");
+        pr_arg(body);
+        pr_arg("-w");
+        pr_arg("%{http_code}");
+        pr_arg(url);
+        pid = pr_spawn(curl, status, "")
+    }
+    if (pid < 0 || http_n >= len(http_id)) {
+        tc_str("http ");
+        tc_int(id);
+        tc_str(" 0 0");
+        tc_end();
+        return
+    }
+    http_id[http_n] = id;
+    http_pid[http_n] = pid;
+    http_n = http_n + 1
+}
+
+// Each GET ended: its status (curl's) and its body's size, to core.
+http_check() {
+    k: int = 0;
+    while (k < http_n) {
+        if (pr_done(http_pid[k])) {
+            id: int = http_id[k];
+            n: int = pr_read(http_status_path(id));
+            st: int = wl_int(pr_buf, 0, n);
+            size: int = file_size(http_body(id));
+            tc_str("http ");
+            tc_int(id);
+            tc_byte(32);
+            tc_int(if (pr_code == 0) st else 0);
+            tc_byte(32);
+            tc_int(if (size < 0) 0 else size);
+            tc_end();
+            http_n = http_n - 1;
+            http_id[k] = http_id[http_n];
+            http_pid[k] = http_pid[http_n]
+        } else k = k + 1
+    }
+}
+
+tui_say(b: []i8, start: int, n: int) {
+    tk_heard(b, start, n)
+}
+
+// ---- programs run once: the time zone, the voices ----
+tz_pid: int = -1;
+
+voices_pid: int = -1;
+
+tz_seconds: int = 0;
+
+side_path(name: str): str@new {
+    pr_join(tk_kept_dir, tk_kept_dir_n, name)
+}
+
+// The terminal's background answered: dark or not (else dark).
+tk_dark: bool = true;
+
+// The app begun, once core's host is ready: start W H DENSITY DARK TZ.
+send_start() {
+    tk_started = true;
+    tc_str("start ");
+    tc_int(tm_cols * 8);
+    tc_byte(32);
+    tc_int(tm_rows * 16);
+    tc_str(" 100 ");
+    tc_int(if (tk_dark) 1 else 0);
+    tc_byte(32);
+    tc_int(tz_seconds);
+    tc_end()
+}
+
+// ---- the loop ----
+// Lines to core (to_core's), to core's host: its lines read, the files it
+// asks for answered, what it says after.
+feed() noregion {
+    while (to_core_n > 0) {
+        n: int = to_core_n;
+        for i in 0..n hs_inbox[i] = to_core[i];
+        to_core_n = 0;
+        hs_lines(n);
+        while (answer_asks()) { }
+        hs_after();
+        while (answer_asks()) hs_after()
+    }
+    if (answer_asks()) hs_after()
+}
+
+main(argc: int, args: []str) noregion: int {
+    pr_env_load();
+    rd_alloc();
+    sc_alloc();
+    if (!find_data()) {
+        try {
+            write_bytes_n(2, bytes("smooth-bible: no Bible here; set SMOOTH_BIBLE_DATA to programs/bible/data\n"),
+                75)
+        } with IoError _e -> { }
+        return 1
+    }
+    find_kept();
+    curl = pr_find("curl");
+    au_ffplay = pr_find("ffplay");
+    au_log = side_path("ffplay.log");
+    vo_spd = pr_find("spd-say");
+    kept_store = KeptStore {
+        read: &tui_read,
+        write: &tui_write,
+        append: &tui_append,
+        remove: &tui_remove
+    };
+    host_io = HostIO {
+        ask: &tui_ask,
+        http: &tui_http,
+        file: &tui_file,
+        say: &tui_say
+    };
+    hs_start();
+    // (A computer's: no card to draw, no screen to keep on, no fonts but
+    // the terminal's own; reminders while it is open.)
+    sk_device = "Computer";
+    sk_device_prose = "computer";
+    sk_follows_text_size = false;
+    sk_has_card = false;
+    sk_has_keep_on = false;
+    sk_has_text_size = false;
+    tc_str("api https://smoothbible.com/api/v1/");
+    tc_end();
+    if (len(args) > 1) {
+        tc_str("version ");
+        for c in args[1] tc_byte(if (c as int >= 97 && c as int <= 122) c as int - 32 else c as int);
+        tc_end()
+    }
+    // The time zone (date +%z), the voices (spd-say -L).
+    date: str = pr_find("date");
+    if (len(date) > 0) {
+        pr_begin(date);
+        pr_arg("+%z");
+        tz_pid = pr_spawn(date, side_path("tz.txt"), "")
+    }
+    if (len(vo_spd) > 0) {
+        pr_begin(vo_spd);
+        pr_arg("-L");
+        voices_pid = pr_spawn(vo_spd, side_path("voices.txt"), "")
+    }
+    tm_enter();
+    _s: bool = tm_size();
+    asked_at: int = tm_now();
+    wait: int = 0;
+    while (!tk_quit) {
+        feed();
+        tk_lines();
+        // (Begun once core is ready, the time zone known, and the
+        // terminal's background answered, or a moment gone.)
+        if (tk_ready && !tk_started && (tz_pid < 0 && tm_now() - asked_at > 150 || tm_now() - asked_at > 1500)) {
+            send_start();
+            feed();
+            tk_lines()
+        }
+        if (tz_pid > 0 && pr_done(tz_pid)) {
+            tz_pid = -1;
+            n: int = pr_read(side_path("tz.txt"));
+            if (n >= 5) {
+                sign: int = if (pr_buf[0] as int == 45) -1 else 1;
+                hh: int = wl_int(pr_buf, 1, 3);
+                mm: int = wl_int(pr_buf, 3, 5);
+                tz_seconds = sign * (hh * 3600 + mm * 60)
+            }
+        }
+        if (voices_pid > 0 && pr_done(voices_pid)) {
+            voices_pid = -1;
+            vo_tell(pr_read(side_path("voices.txt")))
+        }
+        if (tk_started) {
+            rd_place();
+            rd_rest_check(rd_rows_shown)
+        }
+        resized: bool = tm_size();
+        if (resized) {
+            tm_forget();
+            tk_dirty = true
+        }
+        if (tk_dirty || rd_dirty || pn_dirty || mn_on) tk_draw();
+        wait = tk_timers();
+        if (au_pid > 0 || vo_pid > 0 || http_n > 0 || tz_pid > 0 || voices_pid > 0) {
+            if (wait > 100) wait = 100
+        }
+        if (pn_send_at > 0 && pn_send_at - tm_now() < wait) wait = pn_send_at - tm_now();
+        if (tm_wait(if (wait < 0) 0 else wait)) {
+            tm_read();
+            for k in 0..tk_count {
+                if (tk_code[k] == TK_BACKGROUND) {
+                    rgb: int = tk_row[k];
+                    lum: int = (rgb >> 16 & 255) * 3 + (rgb >> 8 & 255) * 6 + (rgb & 255);
+                    tk_dark = lum < 1280
+                } else tk_key(tk_code[k], tk_mods[k], tk_row[k], tk_col[k])
+            }
+        }
+        if (pn_send_at > 0 && tm_now() >= pn_send_at) pn_send_query();
+        http_check();
+        au_check();
+        vo_check();
+        rm_check();
+        pr_reap()
+    }
+    au_stop();
+    vo_stop();
+    tm_leave();
+    // (What is kept, kept now: core's away.)
+    tc_str("away");
+    tc_end();
+    feed();
+    0
+}

@@ -1,0 +1,2495 @@
+tag bible_tui;
+
+use_tag std, bible;
+
+// Core's screens (SKINS.md: screens as data), drawn in a panel: beside
+// the reader on a wide terminal, over it on a narrow one. Each screen's
+// lines are kept as they came (screen ... end); the one on top is read
+// into its parts, laid out as lines of cells, and drawn. What can be done
+// on it is a ring of focus items (its rows, a grid's cells, a page's
+// links, its segments, sort, filter and scopes, its buttons): the keys
+// move through them and act, a click acts at once; every action goes back
+// to core as it is (act ID ACTION ARG VALUE, query, text, submit, closed).
+import "reader.l8";
+
+// ---- the screens kept, a slot each ----
+SC_SLOTS: int = 24;
+
+sc_id: []int = new int[24](-1);
+
+sc_raw: [][]i8 = new []i8[24](new i8[0](0i8));
+
+sc_raw_n: []int = new int[24](0);
+
+sc_alloc() noregion {
+    for s in 0..SC_SLOTS sc_raw[s] = new i8[1048576](0i8)
+}
+
+sc_slot(id: int): int {
+    for s in 0..SC_SLOTS
+        if (sc_id[s] == id) return s;
+    -1
+}
+
+// The screen being gathered (its slot; -1 none).
+sc_taking: int = -1;
+
+sc_begin(buf: []i8, b: int, e: int) {
+    id: int = wl_num(buf, b, e, 1);
+    s: int = sc_slot(id);
+    if (s < 0) {
+        // (A slot not on the stack, the oldest kept.)
+        s = 0;
+        found: bool = false;
+        for k in 0..SC_SLOTS {
+            if (!found && !pn_on_stack(sc_id[k]) && sc_id[k] != 0) {
+                s = k;
+                found = true
+            }
+        }
+    }
+    sc_id[s] = id;
+    sc_raw_n[s] = 0;
+    sc_taking = s;
+    sc_add(buf, b, e)
+}
+
+sc_add(buf: []i8, b: int, e: int) {
+    s: int = sc_taking;
+    if (s < 0) return;
+    r: []i8 = sc_raw[s];
+    n: int = sc_raw_n[s];
+    if (n + e - b + 1 < len(r)) {
+        for i in b..e r[n + i - b] = buf[i];
+        r[n + e - b] = 10i8;
+        sc_raw_n[s] = n + e - b + 1
+    }
+}
+
+// A line of the screen being gathered: whether it was its end (the id).
+sc_end_id: int = -1;
+
+sc_take(buf: []i8, b: int, e: int): bool {
+    sc_add(buf, b, e);
+    if (wl_is(buf, b, e, "end")) {
+        sc_end_id = sc_id[sc_taking];
+        sc_taking = -1;
+        return true
+    }
+    false
+}
+
+// ---- the stack shown ----
+pn_stack: []int = new int[32](0);
+
+pn_depth: int = 0;
+
+pn_on_stack(id: int): bool {
+    for i in 0..pn_depth
+        if (pn_stack[i] == id) return true;
+    false
+}
+
+pn_top(): int {
+    if (pn_depth > 0) pn_stack[pn_depth - 1] else -1
+}
+
+pn_present(id: int) {
+    pn_depth = 0;
+    pn_push(id)
+}
+
+pn_push(id: int) {
+    if (pn_depth < len(pn_stack)) {
+        pn_stack[pn_depth] = id;
+        pn_depth = pn_depth + 1
+    }
+    pn_open(true)
+}
+
+pn_pop() {
+    if (pn_depth > 0) pn_depth = pn_depth - 1;
+    pn_open(false)
+}
+
+pn_pop_to(id: int) {
+    while (pn_depth > 0 && pn_stack[pn_depth - 1] != id) pn_depth = pn_depth - 1;
+    pn_open(false)
+}
+
+pn_close(id: int) {
+    k: int = -1;
+    for i in 0..pn_depth
+        if (k < 0 && pn_stack[i] == id) k = i;
+    if (k >= 0) pn_depth = k;
+    pn_open(false)
+}
+
+pn_dismiss() {
+    pn_depth = 0;
+    pn_open(false)
+}
+
+// The skin's Back: the top screen let go, and core told.
+pn_back() {
+    if (pn_depth == 0) return;
+    pn_commit_field();
+    id: int = pn_stack[pn_depth - 1];
+    pn_depth = pn_depth - 1;
+    tc_str("closed ");
+    tc_int(id);
+    tc_end();
+    pn_open(false)
+}
+
+// ---- the top screen read ----
+// Its slot, id and kind; each of its lines' place (the screen's own lines
+// by what they are), its sections and rows, each row's cells.
+pm_slot: int = -1;
+
+pm_id: int = -1;
+
+pm_kind: int = 0;
+
+PM_ROWS: int = 8192;
+
+pm_row_b: []int = new int[8192](0);
+
+pm_row_e: []int = new int[8192](0);
+
+pm_row_sec: []int = new int[8192](0);
+
+pm_row_c0: []int = new int[8192](0);
+
+pm_row_cn: []int = new int[8192](0);
+
+pm_rows: int = 0;
+
+pm_cell_b: []int = new int[16384](0);
+
+pm_cell_e: []int = new int[16384](0);
+
+pm_cells: int = 0;
+
+pm_sec_b: []int = new int[1024](0);
+
+pm_sec_e: []int = new int[1024](0);
+
+pm_sec_r0: []int = new int[1024](0);
+
+pm_secs: int = 0;
+
+pm_tool_b: []int = new int[16](0);
+
+pm_tool_e: []int = new int[16](0);
+
+pm_tools: int = 0;
+
+pm_cmd_b: []int = new int[32](0);
+
+pm_cmd_e: []int = new int[32](0);
+
+pm_cmds: int = 0;
+
+// (The screen's own lines: their places, -1 none.)
+pm_screen_b: int = 0;
+
+pm_screen_e: int = 0;
+
+pm_intro_b: int = -1;
+
+pm_intro_e: int = 0;
+
+pm_hero_b: int = -1;
+
+pm_hero_e: int = 0;
+
+pm_left_b: int = -1;
+
+pm_left_e: int = 0;
+
+pm_confirm_b: int = -1;
+
+pm_confirm_e: int = 0;
+
+pm_seg_b: int = -1;
+
+pm_seg_e: int = 0;
+
+pm_sort_b: int = -1;
+
+pm_sort_e: int = 0;
+
+pm_filter_b: int = -1;
+
+pm_filter_e: int = 0;
+
+pm_field_b: int = -1;
+
+pm_field_e: int = 0;
+
+pm_scopes_b: int = -1;
+
+pm_scopes_e: int = 0;
+
+pm_button_b: int = -1;
+
+pm_button_e: int = 0;
+
+pm_empty_b: int = -1;
+
+pm_empty_e: int = 0;
+
+pm_page: bool = false;
+
+pm_grid: bool = false;
+
+pm_keys: int = 0;
+
+pm_focus_row: int = -1;
+
+pm_read(id: int): bool {
+    s: int = sc_slot(id);
+    pm_slot = s;
+    pm_id = id;
+    pm_rows = 0;
+    pm_cells = 0;
+    pm_secs = 0;
+    pm_tools = 0;
+    pm_cmds = 0;
+    pm_intro_b = -1;
+    pm_hero_b = -1;
+    pm_left_b = -1;
+    pm_confirm_b = -1;
+    pm_seg_b = -1;
+    pm_sort_b = -1;
+    pm_filter_b = -1;
+    pm_field_b = -1;
+    pm_scopes_b = -1;
+    pm_button_b = -1;
+    pm_empty_b = -1;
+    pm_page = false;
+    pm_grid = false;
+    pm_keys = 0;
+    pm_focus_row = -1;
+    if (s < 0) return false;
+    r: []i8 = sc_raw[s];
+    n: int = sc_raw_n[s];
+    p: int = 0;
+    while (p < n) {
+        e: int = p;
+        while (e < n && r[e] as int != 10) e = e + 1;
+        if (wl_is(r, p, e, "screen")) {
+            pm_screen_b = p;
+            pm_screen_e = e;
+            pm_kind = wl_num(r, p, e, 2)
+        } else if (wl_is(r, p, e, "section")) {
+            if (pm_secs < len(pm_sec_b)) {
+                pm_sec_b[pm_secs] = p;
+                pm_sec_e[pm_secs] = e;
+                pm_sec_r0[pm_secs] = pm_rows;
+                pm_secs = pm_secs + 1
+            }
+        } else if (wl_is(r, p, e, "row")) {
+            if (pm_rows < PM_ROWS && pm_secs > 0) {
+                pm_row_b[pm_rows] = p;
+                pm_row_e[pm_rows] = e;
+                pm_row_sec[pm_rows] = pm_secs - 1;
+                pm_row_c0[pm_rows] = pm_cells;
+                pm_row_cn[pm_rows] = 0;
+                pm_rows = pm_rows + 1
+            }
+        } else if (wl_is(r, p, e, "cell")) {
+            if (pm_rows > 0 && pm_cells < len(pm_cell_b)) {
+                pm_cell_b[pm_cells] = p;
+                pm_cell_e[pm_cells] = e;
+                pm_cells = pm_cells + 1;
+                pm_row_cn[pm_rows - 1] = pm_row_cn[pm_rows - 1] + 1
+            }
+        } else if (wl_is(r, p, e, "tool")) {
+            if (pm_tools < len(pm_tool_b)) {
+                pm_tool_b[pm_tools] = p;
+                pm_tool_e[pm_tools] = e;
+                pm_tools = pm_tools + 1
+            }
+        } else if (wl_is(r, p, e, "command")) {
+            if (pm_cmds < len(pm_cmd_b)) {
+                pm_cmd_b[pm_cmds] = p;
+                pm_cmd_e[pm_cmds] = e;
+                pm_cmds = pm_cmds + 1
+            }
+        } else if (wl_is(r, p, e, "intro")) {
+            pm_intro_b = p;
+            pm_intro_e = e
+        } else if (wl_is(r, p, e, "hero")) {
+            pm_hero_b = p;
+            pm_hero_e = e
+        } else if (wl_is(r, p, e, "left")) {
+            pm_left_b = p;
+            pm_left_e = e
+        } else if (wl_is(r, p, e, "confirm")) {
+            pm_confirm_b = p;
+            pm_confirm_e = e
+        } else if (wl_is(r, p, e, "segments")) {
+            pm_seg_b = p;
+            pm_seg_e = e
+        } else if (wl_is(r, p, e, "sort")) {
+            pm_sort_b = p;
+            pm_sort_e = e
+        } else if (wl_is(r, p, e, "filter")) {
+            pm_filter_b = p;
+            pm_filter_e = e
+        } else if (wl_is(r, p, e, "field")) {
+            pm_field_b = p;
+            pm_field_e = e
+        } else if (wl_is(r, p, e, "scopes")) {
+            pm_scopes_b = p;
+            pm_scopes_e = e
+        } else if (wl_is(r, p, e, "button")) {
+            pm_button_b = p;
+            pm_button_e = e
+        } else if (wl_is(r, p, e, "empty")) {
+            pm_empty_b = p;
+            pm_empty_e = e
+        } else if (wl_is(r, p, e, "page")) pm_page = true else if (wl_is(r, p, e,
+            "grid")) pm_grid = true else if (wl_is(r, p, e, "keys")) pm_keys = wl_num(r,
+            p, e, 1) else if (wl_is(r, p, e, "focus")) pm_focus_row = wl_num(r, p,
+            e, 1);
+        p = e + 1
+    }
+    true
+}
+
+pm_raw(): []i8 {
+    if (pm_slot >= 0) sc_raw[pm_slot] else wl_text
+}
+
+// A row's field, unescaped into wl_text (its length).
+rf(i: int, f: int): int {
+    wl_get(pm_raw(), pm_row_b[i], pm_row_e[i], f)
+}
+
+rf_num(i: int, f: int): int {
+    wl_field_num(pm_raw(), pm_row_b[i], pm_row_e[i], f)
+}
+
+// Whether row i's flags have letter k.
+rf_flag(i: int, k: int): bool {
+    if (!wl_field(pm_raw(), pm_row_b[i], pm_row_e[i], 8)) return false;
+    r: []i8 = pm_raw();
+    for p in wl_b..wl_e
+        if (r[p] as int == k) return true;
+    false
+}
+
+// Its kind: its first letters (item, toggle, choice, slider, field, time,
+// button, text, tiles, custom).
+rf_kind(i: int): int {
+    if (!wl_field(pm_raw(), pm_row_b[i], pm_row_e[i], 1) || wl_e <= wl_b) return 105;
+    r: []i8 = pm_raw();
+    k: int = r[wl_b] as int;
+    // (time and text and tiles and toggle: told by their second letter.)
+    if (k == 116 && wl_e - wl_b > 1) {
+        k2: int = r[wl_b + 1] as int;
+        if (k2 == 105 && wl_e - wl_b > 2 && r[wl_b + 2] as int == 109) return 1;
+        if (k2 == 105) return 2;
+        if (k2 == 101) return 3;
+        return 4
+    }
+    k
+}
+
+RK_TIME: int = 1;
+
+RK_TILES: int = 2;
+
+RK_TEXT: int = 3;
+
+RK_TOGGLE: int = 4;
+
+RK_ITEM: int = 105;
+
+RK_CHOICE: int = 99;
+
+RK_SLIDER: int = 115;
+
+RK_FIELD: int = 102;
+
+RK_BUTTON: int = 98;
+
+// ---- the panel laid out: lines of cells ----
+// Each line: its cells (pv_*), the focus item it belongs to (-1 none).
+PV_CELLS: int = 262144;
+
+pv_cp: []int = new int[262144](32);
+
+pv_fg: []int = new int[262144](0);
+
+pv_bg: []int = new int[262144](-1);
+
+pv_at: []int = new int[262144](0);
+
+pv_used: int = 0;
+
+PV_LINES: int = 16384;
+
+pv_l0: []int = new int[16384](0);
+
+pv_l1: []int = new int[16384](0);
+
+pv_item: []int = new int[16384](-1);
+
+pv_lines: int = 0;
+
+// The focus items: kind (FI_), and its row, cell or link, tool, option.
+FI_ROW: int = 1;
+
+FI_CELL: int = 2;
+
+FI_LINK: int = 3;
+
+FI_TOOL: int = 4;
+
+FI_SEGMENTS: int = 5;
+
+FI_SORT: int = 6;
+
+FI_FILTER: int = 7;
+
+FI_SCOPES: int = 8;
+
+FI_CONFIRM: int = 9;
+
+FI_LEFT: int = 10;
+
+FI_BUTTON: int = 11;
+
+FI_FIELD: int = 12;
+
+fi_kind: []int = new int[16384](0);
+
+fi_a: []int = new int[16384](0);
+
+fi_b: []int = new int[16384](0);
+
+fi_line: []int = new int[16384](0);
+
+fi_n: int = 0;
+
+// The item the keys are on; the first line shown.
+pn_focus: int = 0;
+
+pn_scroll: int = 0;
+
+// The panel's place on the terminal.
+pn_x: int = 0;
+
+pn_w: int = 40;
+
+pn_r0: int = 1;
+
+pn_r1: int = 20;
+
+pn_built_w: int = -1;
+
+pn_dirty: bool = true;
+
+// The item being laid out.
+pv_cur_item: int = -1;
+
+pv_line_begin() {
+    if (pv_lines >= PV_LINES) return;
+    pv_l0[pv_lines] = pv_used;
+    pv_l1[pv_lines] = pv_used;
+    pv_item[pv_lines] = pv_cur_item;
+    pv_lines = pv_lines + 1
+}
+
+pv_put(
+    cp: int,
+    fg: int,
+    bg: int,
+    at: int
+) {
+    if (pv_used >= PV_CELLS || pv_lines == 0) return;
+    pv_cp[pv_used] = cp;
+    pv_fg[pv_used] = fg;
+    pv_bg[pv_used] = bg;
+    pv_at[pv_used] = at;
+    pv_used = pv_used + 1;
+    pv_l1[pv_lines - 1] = pv_used
+}
+
+// Columns used on the line being laid out.
+pv_col(): int {
+    if (pv_lines == 0) return 0;
+    w: int = 0;
+    for i in pv_l0[pv_lines - 1]..pv_l1[pv_lines - 1] w = w + tm_width(pv_cp[i]);
+    w
+}
+
+pv_spaces(n: int) {
+    for _i in 0..n pv_put(32, lk_ink, -1, 0)
+}
+
+pv_str(s: str, fg: int, at: int) {
+    p: int = 0;
+    while (p < len(s)) {
+        u: int = tm_cp_at_s(s, p, len(s));
+        p = p + tm_cp_len;
+        pv_put(u, fg, -1, at)
+    }
+}
+
+pv_bytes(
+    b: []i8,
+    from: int,
+    to: int,
+    fg: int,
+    at: int
+) {
+    p: int = from;
+    while (p < to) {
+        u: int = tm_cp_at(b, p, to);
+        p = p + tm_cp_len;
+        pv_put(u, fg, -1, at)
+    }
+}
+
+pv_int(n: int, fg: int) {
+    if (n >= 10) pv_int(n / 10, fg);
+    pv_put(48 + n % 10, fg, -1, 0)
+}
+
+fi_add(kind: int, a: int, b: int): int {
+    if (fi_n >= len(fi_kind)) return -1;
+    fi_kind[fi_n] = kind;
+    fi_a[fi_n] = a;
+    fi_b[fi_n] = b;
+    fi_line[fi_n] = pv_lines;
+    fi_n = fi_n + 1;
+    fi_n - 1
+}
+
+// Words (UTF-8, with runs: END:STYLE pairs in UTF-16 places, and links
+// B:E:ACTION:ARG) wrapped into lines at indent, room wide. Each link a
+// focus item of its own (on a page).
+pw_cp: []int = new int[65536](0);
+
+pw_fg: []int = new int[65536](0);
+
+pw_at: []int = new int[65536](0);
+
+pw_lk: []int = new int[65536](-1);
+
+pw_n: int = 0;
+
+pr_end: []int = new int[4096](0);
+
+pr_st: []int = new int[4096](0);
+
+pr_count: int = 0;
+
+pl_b: []int = new int[1024](0);
+
+pl_e: []int = new int[1024](0);
+
+pl_count: int = 0;
+
+// Runs from a field's bytes ("END:STYLE ...").
+runs_read(b: []i8, from: int, to: int) {
+    pr_count = 0;
+    p: int = from;
+    while (p < to && pr_count < len(pr_end)) {
+        q: int = p;
+        while (q < to && b[q] as int != 32) q = q + 1;
+        c: int = p;
+        while (c < q && b[c] as int != 58) c = c + 1;
+        if (c < q) {
+            pr_end[pr_count] = wl_int(b, p, c);
+            pr_st[pr_count] = wl_int(b, c + 1, q);
+            pr_count = pr_count + 1
+        }
+        p = q + 1
+    }
+}
+
+// Links from a field's bytes ("B:E:ACTION:ARG|..."): their places.
+pl_parse(b: []i8, from: int, to: int) {
+    pl_count = 0;
+    p: int = from;
+    while (p < to && pl_count < len(pl_b)) {
+        q: int = p;
+        while (q < to && b[q] as int != 124) q = q + 1;
+        c1: int = p;
+        while (c1 < q && b[c1] as int != 58) c1 = c1 + 1;
+        c2: int = c1 + 1;
+        while (c2 < q && b[c2] as int != 58) c2 = c2 + 1;
+        if (c2 < q) {
+            pl_b[pl_count] = wl_int(b, p, c1);
+            pl_e[pl_count] = wl_int(b, c1 + 1, c2);
+            pl_count = pl_count + 1
+        }
+        p = q + 1
+    }
+}
+
+// A run's style as a color and attributes (core's STYLE_ and RUN_).
+pw_style_fg(st: int, base: int): int {
+    if (st < 0) return base;
+    if (st >= 200) {
+        l: int = st - 200;
+        c: int = l & 3;
+        return if (c == 0) tm_mix(lk_faint, lk_bg, 300) else if (c == 2) lk_accent else if (c == 3) lk_faint else lk_ink
+    }
+    if (st == 100 || st == 101 || st == 104 || st == 106 || st == 109 || st == 110 || st == 111) return lk_faint;
+    if (st == 114) return lk_accent;
+    if (st == 102 || st == 103 || st == 107 || st == 108 || st == 112 || st == 113 || st == 117) return lk_ink;
+    if (st < 100) return rd_fg(st);
+    base
+}
+
+pw_style_at(st: int): int {
+    if (st >= 200) {
+        u: int = (st - 200) / 4 % 8;
+        return if (u > 0) TA_UNDER else 0
+    }
+    if (st == 107) return TA_BOLD;
+    if (st == 101 || st == 104 || st == 113) return TA_ITALIC;
+    if (st < 100) return rd_attr(st);
+    0
+}
+
+// The words (wl_text's) with runs and links into pw_*, then wrapped.
+pw_load(fg: int, at: int) {
+    pw_n = 0;
+    p: int = 0;
+    u: int = 0;
+    ri: int = 0;
+    li: int = 0;
+    while (p < wl_text_n && pw_n < len(pw_cp)) {
+        cp: int = tm_cp_at(wl_text, p, wl_text_n);
+        p = p + tm_cp_len;
+        while (ri < pr_count && pr_end[ri] <= u) ri = ri + 1;
+        while (li < pl_count && pl_e[li] <= u) li = li + 1;
+        st: int = if (ri < pr_count) pr_st[ri] else -1;
+        pw_cp[pw_n] = (if (st == 115 || st == 116) 9679 else cp);
+        pw_fg[pw_n] = pw_style_fg(st, fg);
+        pw_at[pw_n] = at | pw_style_at(st);
+        pw_lk[pw_n] = (if (li < pl_count && pl_b[li] <= u) li else -1);
+        // (A symbol by name: one mark for it.)
+        if (!((st == 115 || st == 116) && pw_n > 0 && pw_lk[pw_n - 1] == pw_lk[pw_n] && pw_cp[pw_n - 1] == 9679)) pw_n = pw_n + 1;
+        u = u + (if (cp >= 65536) 2 else 1)
+    }
+}
+
+// pw_* wrapped at indent, room wide; each link an item (link_row: the row
+// they are of, -1 none), lines at most `most` (0: any).
+pw_wrap(
+    indent: int,
+    room: int,
+    link_row: int,
+    most: int
+) {
+    start: int = 0;
+    lines: int = 0;
+    items: []int = pw_items;
+    for k in 0..pl_count items[k] = -1;
+    while (start < pw_n && (most == 0 || lines < most)) {
+        x: int = 0;
+        i: int = start;
+        brk: int = -1;
+        fits: bool = true;
+        nl: bool = false;
+        while (i < pw_n && fits && !nl) {
+            if (pw_cp[i] == 10) nl = true else {
+                cw: int = tm_width(pw_cp[i]);
+                if (x + cw > room) fits = false else {
+                    x = x + cw;
+                    if (pw_cp[i] == 32) brk = i + 1;
+                    i = i + 1
+                }
+            }
+        }
+        stop: int = if (fits || nl || brk <= start) i else brk;
+        if (stop <= start && !nl) stop = start + 1;
+        last: bool = most > 0 && lines + 1 == most && stop < pw_n;
+        pv_line_begin();
+        pv_spaces(indent);
+        for j in start..stop {
+            lk: int = pw_lk[j];
+            if (lk >= 0 && link_row >= 0 && items[lk] < 0) {
+                items[lk] = fi_add(FI_LINK, link_row, lk);
+                if (items[lk] >= 0) fi_line[items[lk]] = pv_lines - 1
+                // (The line is its item's, and the link's.)
+            }
+            if (!(last && j + 1 == stop && x + 1 > room)) pv_put(pw_cp[j], pw_fg[j],
+                if (lk >= 0 && link_row >= 0) -2 - items[lk] else -1, pw_at[j] | (if (lk >= 0 && link_row >= 0) TA_UNDER else 0))
+        }
+        if (last) pv_put(8230, lk_faint, -1, 0);
+        lines = lines + 1;
+        start = stop;
+        if (start < pw_n && pw_cp[start] == 10) start = start + 1;
+        while (start < pw_n && pw_cp[start] == 32) start = start + 1
+    }
+}
+
+pw_items: []int = new int[1024](-1);
+
+// ---- laying out the top screen ----
+pn_build() {
+    pv_used = 0;
+    pv_lines = 0;
+    fi_n = 0;
+    pv_cur_item = -1;
+    pn_built_w = pn_w;
+    if (!pm_read(pn_top())) return;
+    r: []i8 = pm_raw();
+    w: int = pn_w - 4;
+    // The bar's own: the left button (or Back), the title, the button or
+    // confirm at the right: drawn in pn_draw; its items here.
+    if (pm_left_b >= 0) _l: int = fi_add(FI_LEFT, 0, 0);
+    if (pm_confirm_b >= 0) _c: int = fi_add(FI_CONFIRM, 0, 0) else if (pm_button_b >= 0 && pm_cmds > 0) _b: int = fi_add(FI_BUTTON,
+        0, 0);
+    // Its field (a search's), then its scopes.
+    if (pm_field_b >= 0 || pn_has_search()) {
+        pv_cur_item = fi_add(FI_FIELD, 0, 0);
+        pv_line_begin();
+        pv_line_begin();
+        pv_cur_item = -1
+    }
+    if (pm_scopes_b >= 0) {
+        pv_cur_item = fi_add(FI_SCOPES, 0, 0);
+        pn_choices_line(r, pm_scopes_b, pm_scopes_e, 2, wl_field_num(r, pm_scopes_b,
+            pm_scopes_e, 1));
+        pv_cur_item = -1
+    }
+    if (pm_seg_b >= 0) {
+        pv_cur_item = fi_add(FI_SEGMENTS, 0, 0);
+        pn_choices_line(r, pm_seg_b, pm_seg_e, 3, wl_field_num(r, pm_seg_b, pm_seg_e,
+            2));
+        pv_cur_item = -1
+    }
+    if (pm_filter_b >= 0) {
+        pv_cur_item = fi_add(FI_FILTER, 0, 0);
+        pn_filter_line(r);
+        pv_cur_item = -1
+    }
+    if (pm_sort_b >= 0) {
+        pv_cur_item = fi_add(FI_SORT, 0, 0);
+        pv_line_begin();
+        pv_str("Sorted: ", lk_faint, 0);
+        pn_option(r, pm_sort_b, pm_sort_e, 3, wl_field_num(r, pm_sort_b, pm_sort_e,
+            2));
+        pv_bytes(wl_text, 0, wl_text_n, lk_accent, 0);
+        pv_str(" \‚\ñ\æ", lk_accent, 0);
+        pv_cur_item = -1
+    }
+    // A word as the heading.
+    if (pm_hero_b >= 0) {
+        pv_line_begin();
+        _h: int = wl_get(r, pm_hero_b, pm_hero_e, 1);
+        pv_line_begin();
+        pv_spaces(2);
+        pv_bytes(wl_text, 0, wl_text_n, lk_ink, TA_BOLD);
+        if (wl_get(r, pm_hero_b, pm_hero_e, 3) > 0) {
+            pv_str("  ", lk_ink, 0);
+            pv_bytes(wl_text, 0, wl_text_n, lk_faint, TA_ITALIC)
+        }
+        if (wl_get(r, pm_hero_b, pm_hero_e, 4) > 0) {
+            if (wl_field(r, pm_hero_b, pm_hero_e, 5)) runs_read(r, wl_b, wl_e) else pr_count = 0;
+            _t: int = wl_get(r, pm_hero_b, pm_hero_e, 4);
+            pl_count = 0;
+            pw_load(lk_ink, 0);
+            pw_wrap(2, w, -1, 0)
+        }
+        pv_line_begin()
+    }
+    // Words above the first section.
+    if (pm_intro_b >= 0 && wl_get(r, pm_intro_b, pm_intro_e, 1) > 0) {
+        if (wl_field(r, pm_intro_b, pm_intro_e, 2)) runs_read(r, wl_b, wl_e) else pr_count = 0;
+        _t: int = wl_get(r, pm_intro_b, pm_intro_e, 1);
+        pl_count = 0;
+        pw_load(lk_ink, 0);
+        quote: bool = wl_field_num(r, pm_intro_b, pm_intro_e, 3) == 1;
+        pv_line_begin();
+        pw_wrap(if (quote) 4 else 2, w - 2, -1, 0)
+    }
+    // The sections and their rows.
+    any: bool = false;
+    for si in 0..pm_secs {
+        if (pn_section(r, si, w)) any = true
+    }
+    if (!any && pm_empty_b >= 0) {
+        pv_line_begin();
+        pv_line_begin();
+        _t: int = wl_get(r, pm_empty_b, pm_empty_e, 2);
+        pn_center(lk_ink, TA_BOLD);
+        _l: int = wl_get(r, pm_empty_b, pm_empty_e, 3);
+        pr_count = 0;
+        pl_count = 0;
+        pw_load(lk_faint, 0);
+        pw_wrap(4, w - 4, -1, 0)
+    }
+    // The buttons at its foot: items, drawn in the foot.
+    for t in 0..pm_tools _t: int = fi_add(FI_TOOL, t, 0);
+    pv_line_begin();
+    if (pn_focus >= fi_n) pn_focus = (if (fi_n > 0) fi_n - 1 else 0);
+    pn_dirty = false
+}
+
+pn_has_search(): bool {
+    wl_field(pm_raw(), pm_screen_b, pm_screen_e, 2) && wl_e > wl_b
+}
+
+// wl_text, centered in the panel.
+pn_center(fg: int, at: int) {
+    pv_line_begin();
+    cw: int = tm_cols_of(wl_text, 0, wl_text_n);
+    pv_spaces((pn_w - cw) / 2);
+    pv_bytes(wl_text, 0, wl_text_n, fg, at)
+}
+
+// Option k of a |-split field into wl_text.
+pn_option(
+    buf: []i8,
+    b: int,
+    e: int,
+    f: int,
+    k: int
+) {
+    wl_text_n = 0;
+    if (!wl_field(buf, b, e, f)) return;
+    p: int = wl_b;
+    i: int = 0;
+    q: int = wl_b;
+    end: int = wl_e;
+    while (q <= end) {
+        if (q == end || buf[q] as int == 124) {
+            if (i == k) wl_text_n = wl_unescape(buf, p, q, wl_text, 0);
+            i = i + 1;
+            p = q + 1
+        }
+        q = q + 1
+    }
+}
+
+pn_option_count(
+    buf: []i8,
+    b: int,
+    e: int,
+    f: int
+): int {
+    if (!wl_field(buf, b, e, f) || wl_e <= wl_b) return 0;
+    n: int = 1;
+    for q in wl_b..wl_e
+        if (buf[q] as int == 124) n = n + 1;
+    n
+}
+
+// The options of a |-split field on a line, the one chosen stressed.
+pn_choices_line(
+    buf: []i8,
+    b: int,
+    e: int,
+    f: int,
+    chosen: int
+) {
+    pv_line_begin();
+    pv_spaces(2);
+    n: int = pn_option_count(buf, b, e, f);
+    for k in 0..n {
+        pn_option(buf, b, e, f, k);
+        if (k == chosen) {
+            pv_put(32, lk_bg, lk_accent, 0);
+            pv_bytes(wl_text, 0, wl_text_n, lk_bg, TA_BOLD);
+            for i in pv_l0[pv_lines - 1]..pv_l1[pv_lines - 1]
+                if (pv_fg[i] == lk_bg) pv_bg[i] = lk_accent;
+            pv_put(32, lk_bg, lk_accent, 0)
+        } else {
+            pv_put(32, lk_ink, -1, 0);
+            pv_bytes(wl_text, 0, wl_text_n, lk_faint, 0);
+            pv_put(32, lk_ink, -1, 0)
+        }
+        pv_put(32, lk_ink, -1, 0)
+    }
+}
+
+// The filter by color: All, then a dot each.
+pn_filter_line(buf: []i8) {
+    chosen: int = wl_field_num(buf, pm_filter_b, pm_filter_e, 2);
+    pv_line_begin();
+    pv_spaces(2);
+    pv_str("All", if (chosen < 0) lk_accent else lk_faint, if (chosen < 0) TA_BOLD | TA_UNDER else 0);
+    pv_spaces(2);
+    n: int = pn_option_count(buf, pm_filter_b, pm_filter_e, 3);
+    for k in 0..n {
+        pn_option(buf, pm_filter_b, pm_filter_e, 3, k);
+        hex: int = tm_hex(wl_text, 0, wl_text_n);
+        pv_put(if (k == chosen) 9673 else 9679, if (hex >= 0) hex else lk_faint, -1,
+            0);
+        pv_spaces(1)
+    }
+}
+
+// Section si: its header, its rows, its footer. Whether it had rows.
+pn_section(r: []i8, si: int, w: int): bool {
+    r0: int = pm_sec_r0[si];
+    r1: int = if (si + 1 < pm_secs) pm_sec_r0[si + 1] else pm_rows;
+    b: int = pm_sec_b[si];
+    e: int = pm_sec_e[si];
+    if (wl_get(r, b, e, 1) > 0) {
+        pv_line_begin();
+        pv_line_begin();
+        pv_spaces(2);
+        // (Headers in small capitals: here, letters spaced, faint.)
+        pv_bytes(wl_text, 0, wl_text_n, lk_faint, TA_BOLD);
+        if (wl_get(r, b, e, 5) > 0) pv_bytes(wl_text, 0, wl_text_n, lk_faint, 0)
+    } else if (si > 0 || pv_lines > 0) pv_line_begin();
+    // (A grid: its rows as squares, their values their words.)
+    if (pm_grid) pn_grid_rows(r, r0, r1, w) else {
+        for i in r0..r1 pn_row(r, i, w)
+    }
+    if (wl_get(r, b, e, 2) > 0) {
+        pr_count = 0;
+        pl_count = 0;
+        pw_load(lk_faint, 0);
+        pw_wrap(2, w, -1, 0)
+    }
+    if (wl_field_num(r, b, e, 6) == 1) {
+        pv_line_begin();
+        pv_spaces(2);
+        pv_str("ESV \¬\∑ Crossway", lk_faint, TA_ITALIC)
+    }
+    r1 > r0
+}
+
+// Row i laid out.
+pn_row(r: []i8, i: int, w: int) {
+    k: int = rf_kind(i);
+    action: int = rf_num(i, 2);
+    custom: int = rf_num(i, 16);
+    cells: int = pm_row_cn[i];
+    // A grid's cells, or tiles.
+    if (cells > 0) {
+        pn_cells(r, i, w, k == RK_TILES);
+        return
+    }
+    if (k == RK_TEXT) {
+        pn_text_row(r, i, w);
+        return
+    }
+    if (custom == 6) {
+        pn_swatches_row(r, i);
+        return
+    }
+    actionable: bool = action != 0 || k == RK_TOGGLE || k == RK_CHOICE || k == RK_SLIDER || k == RK_FIELD || k == RK_TIME || rf_num(i,
+        25) != 0 || rf_num(i, 21) != 0;
+    disabled: bool = rf_flag(i, 100);
+    pv_cur_item = (if (actionable && !disabled) fi_add(FI_ROW, i, 0) else -1);
+    if (k == RK_FIELD) {
+        pn_field_row(r, i, w);
+        pv_cur_item = -1;
+        return
+    }
+    pv_line_begin();
+    pv_spaces(2);
+    // Its circle (a plan's day), its icon, its glyph.
+    circle: int = rf_num(i, 20);
+    if (circle > 0) {
+        pv_put(if (circle == 3) 9679 else if (circle == 2) 9680 else 9675, if (circle == 1) lk_faint else lk_accent,
+            -1, 0);
+        pv_spaces(1)
+    } else if (rf(i, 6) > 0) {
+        g: int = pn_icon();
+        if (g > 0) {
+            ic: int = if (rf(i, 23) == 6) tm_hex(wl_text, 0, 6) else -1;
+            pv_put(g, if (ic >= 0) ic else if (rf_flag(i, 103)) lk_faint else lk_accent,
+                -1, 0);
+            pv_spaces(1)
+        }
+    }
+    if (rf(i, 31) > 0) {
+        pv_bytes(wl_text, 0, wl_text_n, lk_ink, TA_BOLD);
+        pv_spaces(2)
+    }
+    lead: int = pv_col();
+    // Its title (by its runs), its suffix faint.
+    tfg: int = if (rf_flag(i, 120) || rf_flag(i, 116)) lk_accent else if (rf_flag(i,
+        102) || disabled) lk_faint else lk_ink;
+    tat: int = if (rf_flag(i, 98)) TA_BOLD else 0;
+    if (custom == 5) tfg = lk_accent;
+    _t: int = rf(i, 4);
+    if (wl_field(r, pm_row_b[i], pm_row_e[i], 28)) runs_read(r, wl_b, wl_e) else pr_count = 0;
+    _t2: int = rf(i, 4);
+    pl_count = 0;
+    pw_load(tfg, tat);
+    // (The value at the right: a toggle's, a choice's, a detail shown as
+    // a value, the trailing words, its accessory.)
+    vlen: int = pn_value(i, k);
+    room: int = w - lead - vlen - 1;
+    if (room < 6) room = 6;
+    title_lines: int = rf_num(i, 29);
+    first_line: int = pv_lines - 1;
+    // (Its title on the line begun; more lines under it, at its lead.)
+    pn_wrap_here(lead, room, if (title_lines > 0) title_lines else 3);
+    if (rf_flag(i, 118) == false || rf_num(i, 10) > 0) { }
+    _s: int = rf(i, 22);
+    if (wl_text_n > 0) pv_bytes(wl_text, 0, wl_text_n, lk_faint, 0);
+    pn_value_at(first_line, i, k, w);
+    // Its detail (by its runs, or its marks), under the title.
+    if (!rf_flag(i, 118) && rf(i, 5) > 0) {
+        if (wl_field(r, pm_row_b[i], pm_row_e[i], 27)) runs_read(r, wl_b, wl_e) else pr_count = 0;
+        _d: int = rf(i, 5);
+        pl_count = 0;
+        small: bool = rf_flag(i, 109) || custom == 5;
+        pw_load(if (custom == 10 || custom == 8 || custom == 9 || pr_count > 0) lk_ink else lk_faint,
+            0);
+        if (pr_count == 0 && custom != 10) {
+            for j in 0..pw_n pw_fg[j] = lk_faint
+        }
+        lines: int = rf_num(i, 19);
+        if (lines == 0 && custom == 5) lines = 4;
+        if (lines == 0 && rf_flag(i, 115)) lines = (if (rf_flag(i, 98)) 2 else 1);
+        // (A verse found: the Bible's words, in ink.)
+        if (custom == 5) {
+            for j in 0..pw_n
+                if (pw_fg[j] == lk_faint) pw_fg[j] = tm_mix(lk_ink, lk_bg, 800)
+        }
+        pn_marks(r, i);
+        _sm: bool = small;
+        pw_wrap(lead, w - lead, -1, lines)
+    }
+    if (rf(i, 24) > 0) {
+        pr_count = 0;
+        pl_count = 0;
+        pw_load(lk_faint, TA_ITALIC);
+        pw_wrap(lead, w - lead, -1, 2)
+    }
+    pv_cur_item = -1
+}
+
+// The title (pw_*) on the line begun, from its column, at most lines.
+pn_wrap_here(lead: int, room: int, most: int) {
+    start: int = 0;
+    lines: int = 0;
+    while (start < pw_n && lines < most) {
+        if (lines > 0) {
+            pv_line_begin();
+            pv_spaces(lead)
+        }
+        x: int = 0;
+        i: int = start;
+        brk: int = -1;
+        fits: bool = true;
+        while (i < pw_n && fits) {
+            cw: int = tm_width(pw_cp[i]);
+            if (x + cw > room) fits = false else {
+                x = x + cw;
+                if (pw_cp[i] == 32) brk = i + 1;
+                i = i + 1
+            }
+        }
+        stop: int = if (fits || brk <= start) i else brk;
+        if (stop <= start) stop = start + 1;
+        for j in start..stop pv_put(pw_cp[j], pw_fg[j], -1, pw_at[j]);
+        lines = lines + 1;
+        start = stop;
+        while (start < pw_n && pw_cp[start] == 32) start = start + 1
+    }
+}
+
+// A row's marks (the words a search found): stressed in pw_*.
+pn_marks(r: []i8, i: int) {
+    if (!wl_field(r, pm_row_b[i], pm_row_e[i], 18)) return;
+    p: int = wl_b;
+    e: int = wl_e;
+    nums: []int = pn_nums;
+    n: int = 0;
+    while (p < e && n < len(nums)) {
+        q: int = p;
+        while (q < e && r[q] as int != 32) q = q + 1;
+        if (q > p) {
+            nums[n] = wl_int(r, p, q);
+            n = n + 1
+        }
+        p = q + 1
+    }
+    // (UTF-16 places to cells: the detail's code points counted.)
+    _d: int = rf(i, 5);
+    u: int = 0;
+    c: int = 0;
+    q2: int = 0;
+    while (q2 < wl_text_n && c < pw_n) {
+        cp: int = tm_cp_at(wl_text, q2, wl_text_n);
+        q2 = q2 + tm_cp_len;
+        k: int = 0;
+        while (k + 1 < n) {
+            if (u >= nums[k] && u < nums[k + 1]) {
+                pw_fg[c] = lk_ink;
+                pw_at[c] = pw_at[c] | TA_BOLD | TA_UNDER
+            }
+            k = k + 2
+        }
+        u = u + (if (cp >= 65536) 2 else 1);
+        c = c + 1
+    }
+}
+
+pn_nums: []int = new int[256](0);
+
+// What shows at a row's right, its width: a toggle's switch, a choice's
+// option, a slider's value, a time, a detail as a value, the trailing
+// words, the accessory.
+pn_value(i: int, k: int): int {
+    pn_value_n = 0;
+    if (k == RK_TOGGLE) pn_vstr(if (rf_flag(i, 111)) "\‚\ó\è On " else "\‚\ó\ã Off") else if (k == RK_CHOICE) {
+        pn_option(pm_raw(), pm_row_b[i], pm_row_e[i], 10, rf_num(i, 9));
+        pn_vstr("\‚\Ä\π ");
+        pn_vbytes();
+        pn_vstr(" \‚\Ä\∫")
+    } else if (k == RK_SLIDER) {
+        lo: int = rf_num(i, 11);
+        hi: int = rf_num(i, 12);
+        v: int = rf_num(i, 9);
+        pn_vstr("\‚\Ä\π ");
+        for x in lo..hi + 1 pn_vcp(if (x == v) 9679 else 183);
+        pn_vstr(" \‚\Ä\∫")
+    } else if (k == RK_TIME) {
+        m: int = rf_num(i, 9);
+        pn_vstr("\‚\Ä\π ");
+        h: int = m / 60 % 24;
+        pn_vint(if (h % 12 == 0) 12 else h % 12);
+        pn_vcp(58);
+        if (m % 60 < 10) pn_vcp(48);
+        pn_vint(m % 60);
+        pn_vstr(if (h < 12) " AM" else " PM");
+        pn_vstr(" \‚\Ä\∫")
+    } else if (rf_flag(i, 118) && rf(i, 5) > 0) pn_vbytes();
+    if (rf(i, 14) > 0) {
+        if (pn_value_n > 0) pn_vcp(32);
+        pn_vbytes()
+    }
+    acc: int = if (rf(i, 7) > 0) wl_text[0] as int else 0;
+    if (acc == 99 && wl_text_n > 1 && wl_text[1] as int == 104) {
+        if (pn_value_n > 0) pn_vcp(32);
+        pn_vcp(10003)
+    } else if (acc == 100) {
+        if (pn_value_n > 0) pn_vcp(32);
+        pn_vcp(10003)
+    } else if (acc == 109) {
+        if (pn_value_n > 0) pn_vcp(32);
+        pn_vcp(8250)
+    } else if (acc == 108) {
+        if (pn_value_n > 0) pn_vcp(32);
+        pn_vcp(8599)
+    }
+    if (rf_num(i, 25) != 0) {
+        pn_vcp(32);
+        pn_vcp(9432)
+    }
+    if (rf_num(i, 26) != 0 || rf_num(i, 15) != 0) {
+        if (wl_get(pm_raw(), pm_row_b[i], pm_row_e[i], 26) > 0 || rf_num(i, 15) != 0) {
+            pn_vcp(32);
+            pn_vcp(8943)
+        }
+    }
+    w: int = 0;
+    for j in 0..pn_value_n w = w + tm_width(pn_vbuf[j]);
+    w
+}
+
+pn_vbuf: []int = new int[256](0);
+
+pn_vfg: []int = new int[256](0);
+
+pn_value_n: int = 0;
+
+pn_vcp(cp: int) {
+    if (pn_value_n < len(pn_vbuf)) {
+        pn_vbuf[pn_value_n] = cp;
+        pn_value_n = pn_value_n + 1
+    }
+}
+
+pn_vstr(s: str) {
+    p: int = 0;
+    while (p < len(s)) {
+        u: int = tm_cp_at_s(s, p, len(s));
+        p = p + tm_cp_len;
+        pn_vcp(u)
+    }
+}
+
+pn_vbytes() {
+    p: int = 0;
+    while (p < wl_text_n) {
+        u: int = tm_cp_at(wl_text, p, wl_text_n);
+        p = p + tm_cp_len;
+        pn_vcp(u)
+    }
+}
+
+pn_vint(n: int) {
+    if (n >= 10) pn_vint(n / 10);
+    pn_vcp(48 + n % 10)
+}
+
+// The value (pn_value's) at the right of line l.
+pn_value_at(
+    l: int,
+    i: int,
+    k: int,
+    w: int
+) {
+    _v: int = pn_value(i, k);
+    if (pn_value_n == 0 || l < 0 || l >= pv_lines) return;
+    // (Padded to the right: the line's cells moved to make room.)
+    vw: int = 0;
+    for j in 0..pn_value_n vw = vw + tm_width(pn_vbuf[j]);
+    if (l != pv_lines - 1) {
+        // (A title of many lines: the value on the last.)
+        l2: int = pv_lines - 1;
+        _l2: int = l2
+    }
+    used: int = 0;
+    for j in pv_l0[pv_lines - 1]..pv_l1[pv_lines - 1] used = used + tm_width(pv_cp[j]);
+    pad: int = w + 2 - used - vw;
+    if (pad < 1) pad = 1;
+    pv_spaces(pad);
+    on: bool = k == RK_TOGGLE && rf_flag(i, 111);
+    for j in 0..pn_value_n pv_put(pn_vbuf[j], if (on || pn_vbuf[j] == 10003 || pn_vbuf[j] == 8250 || pn_vbuf[j] == 9432 || pn_vbuf[j] == 8943) lk_accent else lk_faint,
+        -1, 0)
+}
+
+// A glyph for row i's icon (wl_text: its SF Symbols name).
+pn_icon(): int {
+    if (pn_is("ribbon")) return 9646;
+    if (pn_is("plus")) return 43;
+    if (pn_is("book.closed") || pn_is("book")) return 10070;
+    if (pn_is("bookmark") || pn_is("bookmark.fill")) return 9873;
+    if (pn_is("brain")) return 10022;
+    if (pn_is("calendar")) return 9638;
+    if (pn_is("clock.arrow.circlepath")) return 8634;
+    if (pn_is("globe")) return 9711;
+    if (pn_is("square.and.arrow.up")) return 8679;
+    if (pn_is("square.and.pencil") || pn_is("note.text")) return 9998;
+    if (pn_is("doc.on.doc")) return 10697;
+    if (pn_is("text.quote")) return 8220;
+    if (pn_is("character.book.closed")) return 945;
+    if (pn_is("books.vertical")) return 9776;
+    if (pn_is("arrow.right.circle.fill") || pn_is("arrow.right.circle")) return 8594;
+    if (pn_is("magnifyingglass")) return 8981;
+    if (pn_is("trash")) return 10005;
+    if (pn_is("highlighter")) return 9998;
+    if (pn_is("play.fill")) return 9654;
+    if (pn_is("speaker.wave.2") || pn_is("headphones")) return 9835;
+    if (pn_is("checkmark.circle.fill") || pn_is("checkmark.circle")) return 10003;
+    if (pn_is("info.circle")) return 9432;
+    if (pn_is("circle.fill")) return 9679;
+    if (pn_is("circle")) return 9675;
+    9702
+}
+
+pn_is(s: str): bool {
+    if (wl_text_n != len(s)) return false;
+    for i in 0..len(s)
+        if (wl_text[i] != s[i]) return false;
+    true
+}
+
+// A page's paragraph (text): its words by its runs, its links items.
+pn_text_row(r: []i8, i: int, w: int) {
+    heading: bool = rf_flag(i, 104);
+    if (wl_field(r, pm_row_b[i], pm_row_e[i], 28)) runs_read(r, wl_b, wl_e) else pr_count = 0;
+    if (wl_field(r, pm_row_b[i], pm_row_e[i], 37)) pl_parse(r, wl_b, wl_e) else pl_count = 0;
+    _t: int = rf(i, 4);
+    pw_load(if (heading) lk_ink else lk_ink, if (heading) TA_BOLD else 0);
+    pv_cur_item = -1;
+    pv_line_begin();
+    pw_wrap(2, w, i, 0)
+}
+
+// A row's links: their actions (B:E:ACTION:ARG), link k's into pn_la/pn_lg.
+pn_la: int = 0;
+
+pn_lg: int = 0;
+
+pn_link(i: int, k: int): bool {
+    r: []i8 = pm_raw();
+    if (!wl_field(r, pm_row_b[i], pm_row_e[i], 37)) return false;
+    p: int = wl_b;
+    e: int = wl_e;
+    n: int = 0;
+    found: bool = false;
+    while (p < e && !found) {
+        q: int = p;
+        while (q < e && r[q] as int != 124) q = q + 1;
+        if (n == k) {
+            // (Its third and fourth parts.)
+            c: int = p;
+            parts: int = 0;
+            start: int = p;
+            for x in p..q + 1 {
+                if (x == q || r[x] as int == 58) {
+                    if (parts == 2) pn_la = wl_int(r, start, x);
+                    if (parts == 3) pn_lg = wl_int(r, start, x);
+                    parts = parts + 1;
+                    start = x + 1
+                }
+            }
+            _c: int = c;
+            found = true
+        }
+        n = n + 1;
+        p = q + 1
+    }
+    found
+}
+
+// A row of swatches: a dot each, the chosen ringed; each an item.
+pn_swatches_row(r: []i8, i: int) {
+    pv_line_begin();
+    pv_spaces(2);
+    n: int = pn_option_count(r, pm_row_b[i], pm_row_e[i], 10);
+    v: int = rf_num(i, 9);
+    for k in 0..n {
+        pv_cur_item = fi_add(FI_CELL, i, -1 - k);
+        if (pv_cur_item >= 0) fi_line[pv_cur_item] = pv_lines - 1;
+        pn_option(r, pm_row_b[i], pm_row_e[i], 10, k);
+        hex: int = tm_hex(wl_text, 0, wl_text_n);
+        pv_put(if (k == v) 9673 else 9679, if (hex >= 0) hex else lk_faint, -2 - pv_cur_item,
+            0);
+        pv_put(32, lk_ink, -1, 0);
+        pv_put(32, lk_ink, -1, 0)
+    }
+    pv_cur_item = -1
+}
+
+// A grid's cells (squares) or tiles (a word, its English, its
+// transliteration), flowed across lines; each cell an item.
+pn_cells(
+    r: []i8,
+    i: int,
+    w: int,
+    tiles: bool
+) {
+    n: int = pm_row_cn[i];
+    c0: int = pm_row_c0[i];
+    // (Each cell's width: the widest of its words, at least 3.)
+    x: int = 0;
+    pv_line_begin();
+    pv_spaces(2);
+    l0: int = pv_lines - 1;
+    second: int = -1;
+    third: int = -1;
+    if (tiles) {
+        pv_line_begin();
+        pv_spaces(2);
+        second = pv_lines - 1;
+        pv_line_begin();
+        pv_spaces(2);
+        third = pv_lines - 1
+    }
+    for k in 0..n {
+        cb: int = pm_cell_b[c0 + k];
+        ce: int = pm_cell_e[c0 + k];
+        tw: int = 0;
+        _t: int = wl_get(r, cb, ce, 4);
+        tw = tm_cols_of(wl_text, 0, wl_text_n);
+        if (tw == 0) tw = 1;
+        sw: int = 0;
+        if (tiles) {
+            _s: int = wl_get(r, cb, ce, 5);
+            sw = tm_cols_of(wl_text, 0, wl_text_n);
+            _r: int = wl_get(r, cb, ce, 8);
+            if (tm_cols_of(wl_text, 0, wl_text_n) > sw) sw = tm_cols_of(wl_text, 0,
+                wl_text_n)
+        }
+        cw: int = (if (sw > tw) sw else tw) + 2;
+        if (!tiles && cw < 5) cw = 5;
+        if (x + cw > w && x > 0) {
+            // (A new line of cells.)
+            pv_cur_item = -1;
+            if (tiles) pv_line_begin();
+            pv_line_begin();
+            pv_spaces(2);
+            l0 = pv_lines - 1;
+            if (tiles) {
+                pv_line_begin();
+                pv_spaces(2);
+                second = pv_lines - 1;
+                pv_line_begin();
+                pv_spaces(2);
+                third = pv_lines - 1
+            }
+            x = 0
+        }
+        action: int = wl_field_num(r, cb, ce, 1);
+        item: int = if (action != 0) fi_add(FI_CELL, i, k) else -1;
+        // (The item's line: the cell's first.)
+        if (item >= 0) fi_line[item] = l0;
+        _t2: int = wl_get(r, cb, ce, 4);
+        pn_put_at(l0, wl_text, wl_text_n, cw, if (action != 0) lk_ink else lk_faint,
+            item, if (tiles) TA_BOLD else 0);
+        if (tiles) {
+            _s2: int = wl_get(r, cb, ce, 5);
+            pn_put_at(second, wl_text, wl_text_n, cw, lk_faint, item, 0);
+            _r2: int = wl_get(r, cb, ce, 8);
+            pn_put_at(third, wl_text, wl_text_n, cw, lk_faint, item, TA_ITALIC)
+        }
+        x = x + cw
+    }
+    pv_cur_item = -1
+}
+
+// Words padded to cw columns appended to line l (which is the last, or
+// one of the last three: the tiles' lines are laid out together).
+pn_put_at(
+    l: int,
+    b: []i8,
+    n: int,
+    cw: int,
+    fg: int,
+    item: int,
+    at: int
+) {
+    if (l < 0 || l >= pv_lines) return;
+    // (Cells of a line not the last: moved along by those after it.)
+    tw: int = tm_cols_of(b, 0, n);
+    pad: int = cw - tw;
+    bg: int = if (item >= 0) -2 - item else -1;
+    insert: int = pv_l1[l];
+    count: int = 0;
+    p: int = 0;
+    while (p < n) {
+        u: int = tm_cp_at(b, p, n);
+        p = p + tm_cp_len;
+        count = count + 1
+    }
+    count = count + pad;
+    // Room made at insert (the lines after l moved).
+    if (pv_used + count > PV_CELLS) return;
+    k: int = pv_used - 1;
+    while (k >= insert) {
+        pv_cp[k + count] = pv_cp[k];
+        pv_fg[k + count] = pv_fg[k];
+        pv_bg[k + count] = pv_bg[k];
+        pv_at[k + count] = pv_at[k];
+        k = k - 1
+    }
+    for j in l + 1..pv_lines {
+        pv_l0[j] = pv_l0[j] + count;
+        pv_l1[j] = pv_l1[j] + count
+    }
+    pv_used = pv_used + count;
+    pv_l1[l] = pv_l1[l] + count;
+    q: int = insert;
+    p = 0;
+    while (p < n) {
+        u: int = tm_cp_at(b, p, n);
+        p = p + tm_cp_len;
+        pv_cp[q] = u;
+        pv_fg[q] = fg;
+        pv_bg[q] = bg;
+        pv_at[q] = at;
+        q = q + 1
+    }
+    for _j in 0..pad {
+        pv_cp[q] = 32;
+        pv_fg[q] = fg;
+        pv_bg[q] = bg;
+        pv_at[q] = 0;
+        q = q + 1
+    }
+}
+
+// A grid's rows: a square each (its value), in lines; the one checked (the
+// chapter being read) in the accent.
+pn_grid_rows(
+    r: []i8,
+    r0: int,
+    r1: int,
+    w: int
+) {
+    per: int = (w - 2) / 5;
+    if (per < 1) per = 1;
+    k: int = 0;
+    for i in r0..r1 {
+        if (k % per == 0) {
+            pv_cur_item = -1;
+            pv_line_begin();
+            pv_spaces(2)
+        }
+        f: int = fi_add(FI_ROW, i, 0);
+        if (f >= 0) fi_line[f] = pv_lines - 1;
+        v: int = rf_num(i, 9);
+        checked: bool = rf(i, 7) > 0 && wl_text[0] as int == 99;
+        fg: int = if (checked) lk_accent else lk_ink;
+        bg: int = -2 - f;
+        digits: int = if (v >= 100) 3 else if (v >= 10) 2 else 1;
+        for _p in 0..4 - digits pv_put(32, fg, bg, 0);
+        pv_int(v, fg);
+        // (pv_int's cells: given the item's mark.)
+        for j in pv_used - digits..pv_used {
+            pv_bg[j] = bg;
+            pv_at[j] = (if (checked) TA_BOLD else 0)
+        }
+        pv_put(32, fg, -1, 0);
+        k = k + 1
+    }
+    pv_cur_item = -1
+}
+
+// A field row (New Ribbon's name, a note): its words, typed into.
+pn_field_row(r: []i8, i: int, w: int) {
+    pv_line_begin();
+    pv_spaces(2);
+    editing: bool = pn_typing_row == i && pn_typing_id == pm_id;
+    if (editing) {
+        pv_bytes(pn_ftext, 0, pn_ftext_n, lk_ink, 0);
+        pv_put(9612, lk_accent, -1, 0)
+    } else {
+        _t: int = rf(i, 4);
+        if (wl_text_n > 0) pv_bytes(wl_text, 0, wl_text_n, lk_ink, 0) else {
+            _d: int = rf(i, 5);
+            pv_bytes(wl_text, 0, wl_text_n, lk_faint, TA_ITALIC)
+        }
+    }
+    // (A rule under it.)
+    pv_line_begin();
+    pv_spaces(2);
+    for _k in 0..w - 2 pv_put(9472, tm_mix(lk_faint, lk_bg, 500), -1, 0)
+}
+
+// ---- typing ----
+// What is typed into the screen's field (or a field row's), and whose.
+pn_ftext: []i8 = new i8[16384](0i8);
+
+pn_ftext_n: int = 0;
+
+pn_typing_id: int = -1;
+
+// (-1: the screen's search field; else the field row typed into.)
+pn_typing_row: int = -1;
+
+// When it is to be sent (query ID TEXT, after the screen's wait); whether
+// the keys have moved to an item since it was typed (else Return submits).
+pn_send_at: int = 0;
+
+pn_moved: bool = false;
+
+// The screen's field's words as core has them, taken up as it shows.
+pn_take_field() {
+    if (pm_id == pn_typing_id && pn_typing_row < 0) return;
+    pn_typing_id = pm_id;
+    pn_typing_row = -1;
+    pn_ftext_n = 0;
+    if (pm_field_b >= 0) pn_ftext_n = wl_unescape(sc_raw[pm_slot], pm_field_b, pm_field_e,
+        pn_ftext, 0);
+    // (The field line's first field is its words.)
+    if (pm_field_b >= 0) pn_ftext_n = wl_get(sc_raw[pm_slot], pm_field_b, pm_field_e,
+        1);
+    for k in 0..pn_ftext_n pn_ftext[k] = wl_text[k]
+}
+
+// A field row's words sent (its editing ended).
+pn_commit_field() {
+    if (pn_typing_row < 0 || pn_typing_id != pm_id || pn_typing_row >= pm_rows) return;
+    i: int = pn_typing_row;
+    tc_str("text ");
+    tc_int(pm_id);
+    tc_byte(32);
+    tc_int(rf_num(i, 2));
+    tc_byte(32);
+    _a: int = rf(i, 3);
+    for k in 0..wl_text_n tc_byte(wl_text[k] as int);
+    tc_byte(32);
+    tc_bytes(pn_ftext, 0, pn_ftext_n);
+    tc_end();
+    pn_typing_row = -1
+}
+
+// The search field's words sent now (query ID TEXT).
+pn_send_query() {
+    pn_send_at = 0;
+    tc_str("query ");
+    tc_int(pn_typing_id);
+    tc_byte(32);
+    tc_bytes(pn_ftext, 0, pn_ftext_n);
+    tc_end()
+}
+
+pn_wait(): int {
+    if (pm_field_b < 0) return 0;
+    wl_field_num(sc_raw[pm_slot], pm_field_b, pm_field_e, 2)
+}
+
+// A character typed into the field being typed in.
+pn_type(u: int) {
+    if (u == 8) {
+        // (Backspace: the last character let go.)
+        k: int = pn_ftext_n;
+        while (k > 0 && (pn_ftext[k - 1] as int & 192) == 128) k = k - 1;
+        if (k > 0) k = k - 1;
+        pn_ftext_n = k
+    } else {
+        n: int = pn_ftext_n;
+        if (u < 128) {
+            pn_ftext[n] = u trunc i8;
+            n = n + 1
+        } else if (u < 2048) {
+            pn_ftext[n] = (192 + u / 64) trunc i8;
+            pn_ftext[n + 1] = (128 + u % 64) trunc i8;
+            n = n + 2
+        } else {
+            pn_ftext[n] = (224 + u / 4096) trunc i8;
+            pn_ftext[n + 1] = (128 + u / 64 % 64) trunc i8;
+            pn_ftext[n + 2] = (128 + u % 64) trunc i8;
+            n = n + 3
+        }
+        pn_ftext_n = n
+    }
+    pn_moved = false;
+    if (pn_typing_row < 0) {
+        w: int = pn_wait();
+        pn_send_at = tm_now() + (if (w > 0 && pn_ftext_n > 0) w else 1)
+    }
+    pn_dirty = true
+}
+
+// ---- acting ----
+pn_act(action: int, arg: int, value: int) {
+    tc_str("act ");
+    tc_int(pm_id);
+    tc_byte(32);
+    tc_int(action);
+    tc_byte(32);
+    tc_int(arg);
+    tc_byte(32);
+    tc_int(value);
+    tc_end()
+}
+
+// (A row's argument may be long: sent as its words.)
+pn_act_row(i: int, action: int, value: int) {
+    tc_str("act ");
+    tc_int(pm_id);
+    tc_byte(32);
+    tc_int(action);
+    tc_byte(32);
+    _a: int = rf(i, 3);
+    if (wl_text_n == 0) tc_byte(48);
+    for k in 0..wl_text_n tc_byte(wl_text[k] as int);
+    tc_byte(32);
+    tc_int(value);
+    tc_end()
+}
+
+// Item f done (Enter, a click): d the way a choice moves (0: Enter).
+pn_do(f: int, d: int) {
+    if (f < 0 || f >= fi_n) return;
+    k: int = fi_kind[f];
+    r: []i8 = pm_raw();
+    if (k == FI_ROW) pn_do_row(fi_a[f], d) else if (k == FI_CELL) {
+        i: int = fi_a[f];
+        c: int = fi_b[f];
+        if (c < 0) pn_act_row(i, rf_num(i, 2), -1 - c) else {
+            cb: int = pm_cell_b[pm_row_c0[i] + c];
+            ce: int = pm_cell_e[pm_row_c0[i] + c];
+            tc_str("act ");
+            tc_int(pm_id);
+            tc_byte(32);
+            tc_int(wl_field_num(r, cb, ce, 1));
+            tc_byte(32);
+            _a: int = wl_get(r, cb, ce, 2);
+            if (wl_text_n == 0) tc_byte(48);
+            for x in 0..wl_text_n tc_byte(wl_text[x] as int);
+            tc_str(" 0");
+            tc_end()
+        }
+    } else if (k == FI_LINK) {
+        if (pn_link(fi_a[f], fi_b[f])) pn_act(pn_la, pn_lg, 0)
+    } else if (k == FI_TOOL) pn_do_tool(fi_a[f]) else if (k == FI_SEGMENTS) {
+        n: int = pn_option_count(r, pm_seg_b, pm_seg_e, 3);
+        v: int = wl_field_num(r, pm_seg_b, pm_seg_e, 2) + (if (d == 0) 1 else d);
+        if (n > 0) pn_act(wl_field_num(r, pm_seg_b, pm_seg_e, 1), 0, (v + n) % n)
+    } else if (k == FI_SORT) {
+        n: int = pn_option_count(r, pm_sort_b, pm_sort_e, 3);
+        v: int = wl_field_num(r, pm_sort_b, pm_sort_e, 2) + (if (d == 0) 1 else d);
+        if (n > 0) pn_act(wl_field_num(r, pm_sort_b, pm_sort_e, 1), 0, (v + n) % n)
+    } else if (k == FI_FILTER) {
+        n: int = pn_option_count(r, pm_filter_b, pm_filter_e, 3);
+        v: int = wl_field_num(r, pm_filter_b, pm_filter_e, 2) + (if (d == 0) 1 else d);
+        if (v >= n) v = -1;
+        if (v < -1) v = n - 1;
+        pn_act(wl_field_num(r, pm_filter_b, pm_filter_e, 1), 0, v)
+    } else if (k == FI_SCOPES) {
+        n: int = pn_option_count(r, pm_scopes_b, pm_scopes_e, 2);
+        v: int = wl_field_num(r, pm_scopes_b, pm_scopes_e, 1) + (if (d == 0) 1 else d);
+        if (n > 0) {
+            tc_str("scope ");
+            tc_int(pm_id);
+            tc_byte(32);
+            tc_int((v + n) % n);
+            tc_end()
+        }
+    } else if (k == FI_CONFIRM) {
+        if (wl_field_num(r, pm_confirm_b, pm_confirm_e, 3) != 1) {
+            pn_commit_field();
+            pn_act(wl_field_num(r, pm_confirm_b, pm_confirm_e, 1), 0, 0)
+        }
+    } else if (k == FI_LEFT) pn_act(wl_field_num(r, pm_left_b, pm_left_e, 1), 0, 0) else if (k == FI_BUTTON) pn_commands_menu() else if (k == FI_FIELD) {
+        if (pm_id == pn_typing_id) {
+            pn_send_query();
+            tc_str("submit ");
+            tc_int(pm_id);
+            tc_end()
+        }
+    }
+}
+
+pn_do_row(i: int, d: int) {
+    k: int = rf_kind(i);
+    action: int = rf_num(i, 2);
+    if (k == RK_TOGGLE) {
+        on: bool = rf_flag(i, 111);
+        if (d == 0 || d > 0 && !on || d < 0 && on) pn_act_row(i, action, if (on) 0 else 1)
+    } else if (k == RK_CHOICE) {
+        n: int = pn_option_count(pm_raw(), pm_row_b[i], pm_row_e[i], 10);
+        v: int = rf_num(i, 9) + (if (d == 0) 1 else d);
+        if (n > 0) pn_act_row(i, action, (v + n) % n)
+    } else if (k == RK_SLIDER) {
+        lo: int = rf_num(i, 11);
+        hi: int = rf_num(i, 12);
+        v: int = rf_num(i, 9) + (if (d == 0) 1 else d);
+        if (v > hi) v = (if (d == 0) lo else hi);
+        if (v < lo) v = lo;
+        pn_act_row(i, action, v)
+    } else if (k == RK_TIME) {
+        m: int = rf_num(i, 9) + (if (d < 0) -15 else 15);
+        pn_act_row(i, action, (m + 1440) % 1440)
+    } else if (k == RK_FIELD) {
+        if (pn_typing_row == i && pn_typing_id == pm_id) {
+            // (Return: the row's words sent; the screen's confirm too, if
+            // the field says so.)
+            pn_commit_field();
+            if (rf_flag(i, 114) && pm_confirm_b >= 0) pn_act(wl_field_num(pm_raw(),
+                pm_confirm_b, pm_confirm_e, 1), 0, 0)
+        } else {
+            pn_typing_id = pm_id;
+            pn_typing_row = i;
+            _t: int = rf(i, 4);
+            pn_ftext_n = wl_text_n;
+            for x in 0..wl_text_n pn_ftext[x] = wl_text[x];
+            pn_dirty = true
+        }
+    } else if (d > 0 && pn_row_has_menu(i)) pn_row_menu(i) else if (d == 0) {
+        if (action != 0) pn_act_row(i, action, 0) else if (rf_num(i, 21) != 0) pn_act_row(i,
+            rf_num(i, 21), 0) else if (rf_num(i, 25) != 0) pn_act_row(i, rf_num(i,
+            25), 0)
+    }
+}
+
+pn_row_has_menu(i: int): bool {
+    rf_num(i, 25) != 0 || rf_num(i, 15) != 0 || wl_get(pm_raw(), pm_row_b[i], pm_row_e[i],
+        26) > 0 || rf_num(i, 21) != 0
+}
+
+// ---- menus (a popup over everything) ----
+// Its items: words, and the line to send for each.
+mn_on: bool = false;
+
+mn_words: []i8 = new i8[65536](0i8);
+
+mn_line: []i8 = new i8[65536](0i8);
+
+mn_w_at: []int = new int[64](0);
+
+mn_w_n: []int = new int[64](0);
+
+mn_l_at: []int = new int[64](0);
+
+mn_l_n: []int = new int[64](0);
+
+mn_n: int = 0;
+
+mn_words_n: int = 0;
+
+mn_line_n: int = 0;
+
+mn_focus: int = 0;
+
+mn_title: []i8 = new i8[256](0i8);
+
+mn_title_n: int = 0;
+
+mn_begin(title: str) {
+    mn_n = 0;
+    mn_words_n = 0;
+    mn_line_n = 0;
+    mn_focus = 0;
+    mn_title_n = 0;
+    for c in title {
+        mn_title[mn_title_n] = c;
+        mn_title_n = mn_title_n + 1
+    }
+}
+
+// An item: its words (wl_text), and the line to_core's bytes from at.
+mn_item_text() {
+    if (mn_n >= len(mn_w_at)) return;
+    mn_w_at[mn_n] = mn_words_n;
+    for k in 0..wl_text_n {
+        if (mn_words_n < len(mn_words)) {
+            mn_words[mn_words_n] = wl_text[k];
+            mn_words_n = mn_words_n + 1
+        }
+    }
+    mn_w_n[mn_n] = mn_words_n - mn_w_at[mn_n];
+    mn_l_at[mn_n] = mn_line_n;
+    mn_l_n[mn_n] = 0;
+    mn_n = mn_n + 1
+}
+
+mn_item_str(s: str) {
+    wl_text_n = 0;
+    for c in s {
+        wl_text[wl_text_n] = c;
+        wl_text_n = wl_text_n + 1
+    }
+    mn_item_text()
+}
+
+// The last item's line: bytes to send.
+mn_say(s: str) {
+    for c in s {
+        if (mn_line_n < len(mn_line)) {
+            mn_line[mn_line_n] = c;
+            mn_line_n = mn_line_n + 1
+        }
+    }
+    mn_l_n[mn_n - 1] = mn_line_n - mn_l_at[mn_n - 1]
+}
+
+mn_say_int(n: int) {
+    if (n < 0) {
+        mn_say("-");
+        mn_say_int(-n);
+        return
+    }
+    if (n >= 10) mn_say_int(n / 10);
+    if (mn_line_n < len(mn_line)) {
+        mn_line[mn_line_n] = (48 + n % 10) trunc i8;
+        mn_line_n = mn_line_n + 1
+    }
+    mn_l_n[mn_n - 1] = mn_line_n - mn_l_at[mn_n - 1]
+}
+
+mn_say_bytes(b: []i8, n: int) {
+    for k in 0..n {
+        if (mn_line_n < len(mn_line)) {
+            mn_line[mn_line_n] = b[k];
+            mn_line_n = mn_line_n + 1
+        }
+    }
+    mn_l_n[mn_n - 1] = mn_line_n - mn_l_at[mn_n - 1]
+}
+
+mn_show() {
+    mn_on = mn_n > 0
+}
+
+// Item k chosen: its line sent.
+mn_choose(k: int) {
+    mn_on = false;
+    if (k < 0 || k >= mn_n) return;
+    for x in mn_l_at[k]..mn_l_at[k] + mn_l_n[k] tc_byte(mn_line[x] as int);
+    tc_end()
+}
+
+// A row's menu: its ‚ìò, its actions, Delete.
+pn_row_menu(i: int) {
+    _t: int = rf(i, 4);
+    mn_begin("");
+    mn_title_n = 0;
+    for k in 0..wl_text_n {
+        if (k < len(mn_title)) {
+            mn_title[k] = wl_text[k];
+            mn_title_n = k + 1
+        }
+    }
+    _a: int = rf(i, 3);
+    arg_n: int = wl_text_n;
+    for k in 0..arg_n pn_arg[k] = wl_text[k];
+    if (rf_num(i, 25) != 0) {
+        mn_item_str("Details");
+        pn_menu_act(rf_num(i, 25), arg_n)
+    }
+    if (rf_num(i, 21) != 0) {
+        mn_item_str("Mark");
+        pn_menu_act(rf_num(i, 21), arg_n)
+    }
+    r: []i8 = pm_raw();
+    if (wl_field(r, pm_row_b[i], pm_row_e[i], 26)) {
+        p: int = wl_b;
+        e: int = wl_e;
+        while (p < e) {
+            q: int = p;
+            while (q < e && r[q] as int != 124) q = q + 1;
+            c: int = p;
+            while (c < q && r[c] as int != 58) c = c + 1;
+            if (c < q) {
+                wl_text_n = wl_unescape(r, c + 1, q, wl_text, 0);
+                mn_item_text();
+                pn_menu_act(wl_int(r, p, c), arg_n)
+            }
+            p = q + 1
+        }
+    }
+    del: int = rf_num(i, 15);
+    if (del != 0) {
+        // (Delete, unless an action already offers it.)
+        mn_item_str("Delete");
+        pn_menu_act(del, arg_n)
+    }
+    mn_show()
+}
+
+pn_arg: []i8 = new i8[64](0i8);
+
+pn_menu_act(action: int, arg_n: int) {
+    mn_say("act ");
+    mn_say_int(pm_id);
+    mn_say(" ");
+    mn_say_int(action);
+    mn_say(" ");
+    if (arg_n == 0) mn_say("0") else mn_say_bytes(pn_arg, arg_n);
+    mn_say(" 0")
+}
+
+// The bar's button's commands (History's Clear).
+pn_commands_menu() {
+    r: []i8 = pm_raw();
+    mn_begin("");
+    for k in 0..pm_cmds {
+        _t: int = wl_get(r, pm_cmd_b[k], pm_cmd_e[k], 3);
+        mn_item_text();
+        mn_say("act ");
+        mn_say_int(pm_id);
+        mn_say(" ");
+        mn_say_int(wl_field_num(r, pm_cmd_b[k], pm_cmd_e[k], 1));
+        mn_say(" ");
+        mn_say_int(wl_field_num(r, pm_cmd_b[k], pm_cmd_e[k], 2));
+        mn_say(" 0")
+    }
+    mn_show()
+}
+
+// A button at the foot: its action, or its menu (ARG:TITLE items), or
+// (style 4) the next of its segments.
+pn_do_tool(t: int) {
+    r: []i8 = pm_raw();
+    b: int = pm_tool_b[t];
+    e: int = pm_tool_e[t];
+    style: int = wl_field_num(r, b, e, 6);
+    if (style == 3) return;
+    action: int = wl_field_num(r, b, e, 1);
+    arg: int = wl_field_num(r, b, e, 2);
+    has_menu: bool = wl_field(r, b, e, 8) && wl_e > wl_b;
+    if (!has_menu) {
+        pn_act(action, arg, 0);
+        return
+    }
+    mb: int = wl_b;
+    me: int = wl_e;
+    if (style == 4) {
+        // (Segments at the foot: the next item's value.)
+        n: int = 0;
+        cur: int = -1;
+        p: int = mb;
+        while (p < me) {
+            q: int = p;
+            while (q < me && r[q] as int != 124) q = q + 1;
+            c: int = p;
+            while (c < q && r[c] as int != 58) c = c + 1;
+            if (wl_int(r, p, c) == arg) cur = n;
+            n = n + 1;
+            p = q + 1
+        }
+        want: int = (cur + 1) % (if (n > 0) n else 1);
+        p = mb;
+        k: int = 0;
+        while (p < me) {
+            q: int = p;
+            while (q < me && r[q] as int != 124) q = q + 1;
+            c: int = p;
+            while (c < q && r[c] as int != 58) c = c + 1;
+            if (k == want) pn_act(action, arg, wl_int(r, p, c));
+            k = k + 1;
+            p = q + 1
+        }
+        return
+    }
+    mn_begin("");
+    p: int = mb;
+    while (p < me) {
+        q: int = p;
+        while (q < me && r[q] as int != 124) q = q + 1;
+        c: int = p;
+        while (c < q && r[c] as int != 58) c = c + 1;
+        if (c < q) {
+            wl_text_n = wl_unescape(r, c + 1, q, wl_text, 0);
+            mn_item_text();
+            mn_say("act ");
+            mn_say_int(pm_id);
+            mn_say(" ");
+            mn_say_int(action);
+            mn_say(" ");
+            mn_say_int(wl_int(r, p, c));
+            mn_say(" 0")
+        }
+        p = q + 1
+    }
+    mn_show()
+}
+
+// ---- opening ----
+// The top screen shown (fresh: just opened, at its focus).
+pn_open(fresh: bool) {
+    pn_dirty = true;
+    if (pn_depth == 0) return;
+    top: int = pn_top();
+    if (!pm_read(top)) return;
+    pn_take_field();
+    pn_build();
+    if (fresh) {
+        pn_scroll = 0;
+        pn_focus = 0;
+        // (Its focus row, else its first row, else its first item.)
+        want: int = if (pm_focus_row >= 0) pm_focus_row else 0;
+        found: bool = false;
+        for f in 0..fi_n {
+            if (!found && fi_kind[f] == FI_ROW && fi_a[f] >= want) {
+                pn_focus = f;
+                found = true
+            }
+        }
+        if (!found) {
+            for f in 0..fi_n {
+                if (!found && (fi_kind[f] == FI_ROW || fi_kind[f] == FI_CELL || fi_kind[f] == FI_LINK)) {
+                    pn_focus = f;
+                    found = true
+                }
+            }
+        }
+        if (pm_focus_row >= 0) pn_scroll_to_focus()
+    }
+}
+
+// The screen made again (update): read and laid out, the focus kept.
+pn_update(id: int) {
+    if (pn_top() != id) return;
+    keep: int = pn_focus;
+    pm_read(id);
+    if (pn_typing_id != id) pn_take_field();
+    pn_build();
+    pn_focus = (if (keep < fi_n) keep else if (fi_n > 0) fi_n - 1 else 0);
+    pn_dirty = true
+}
+
+pn_retext(id: int) {
+    if (pn_top() != id) return;
+    pm_read(id);
+    pn_typing_id = -1;
+    pn_take_field();
+    pn_build()
+}
+
+// The focus moved by d items (the field skipped: it is always typed in).
+pn_move(d: int) {
+    if (fi_n == 0) return;
+    f: int = pn_focus + d;
+    if (f < 0) f = 0;
+    if (f >= fi_n) f = fi_n - 1;
+    pn_focus = f;
+    pn_moved = true;
+    pn_scroll_to_focus();
+    pn_dirty = true
+}
+
+// In a grid: the cell a line up or down (the nearest in column).
+pn_move_grid(d: int): bool {
+    if (pn_focus >= fi_n || fi_kind[pn_focus] != FI_CELL && !(pm_grid && fi_kind[pn_focus] == FI_ROW)) return false;
+    l: int = fi_line[pn_focus];
+    col: int = pn_item_col(pn_focus);
+    best: int = -1;
+    best_d: int = 100000;
+    target: int = -1;
+    // (The next line of cells, in d's way.)
+    for f in 0..fi_n {
+        if (fi_kind[f] == fi_kind[pn_focus] && (pm_grid || fi_a[f] == fi_a[pn_focus])) {
+            fl: int = fi_line[f];
+            if (d > 0 && fl > l && (target < 0 || fl < target)) target = fl;
+            if (d < 0 && fl < l && (target < 0 || fl > target)) target = fl
+        }
+    }
+    if (target < 0) return false;
+    for f in 0..fi_n {
+        if (fi_kind[f] == fi_kind[pn_focus] && fi_line[f] == target) {
+            dd: int = pn_item_col(f) - col;
+            if (dd < 0) dd = -dd;
+            if (dd < best_d) {
+                best_d = dd;
+                best = f
+            }
+        }
+    }
+    if (best < 0) return false;
+    pn_focus = best;
+    pn_scroll_to_focus();
+    pn_dirty = true;
+    true
+}
+
+// The column where item f starts on its line.
+pn_item_col(f: int): int {
+    l: int = fi_line[f];
+    if (l < 0 || l >= pv_lines) return 0;
+    x: int = 0;
+    found: int = -1;
+    for i in pv_l0[l]..pv_l1[l] {
+        if (found < 0 && pv_bg[i] == -2 - f) found = x;
+        x = x + tm_width(pv_cp[i])
+    }
+    if (found < 0) 0 else found
+}
+
+pn_body_rows(): int {
+    // (The bar, and the foot if it has buttons.)
+    n: int = pn_r1 - pn_r0 - 2 - (if (pm_tools > 0) 2 else 0);
+    if (n < 1) 1 else n
+}
+
+pn_scroll_to_focus() {
+    if (pn_focus >= fi_n) return;
+    l: int = fi_line[pn_focus];
+    if (fi_kind[pn_focus] == FI_TOOL || fi_kind[pn_focus] == FI_CONFIRM || fi_kind[pn_focus] == FI_LEFT || fi_kind[pn_focus] == FI_BUTTON) return;
+    rows: int = pn_body_rows();
+    // (Its last line too, for a row of many.)
+    last: int = l;
+    for k in l..pv_lines
+        if (pv_item[k] == pn_focus || k == l) last = k;
+    if (last - l >= rows) last = l + rows - 1;
+    if (l < pn_scroll + 1) pn_scroll = (if (l > 1) l - 1 else 0);
+    if (last >= pn_scroll + rows - 1) pn_scroll = last - rows + 2;
+    if (pn_scroll < 0) pn_scroll = 0
+}
+
+// ---- drawing ----
+pn_draw() {
+    if (pn_depth == 0) return;
+    if (pn_dirty || pn_built_w != pn_w) {
+        keep: int = pn_focus;
+        pn_build();
+        pn_focus = (if (keep < fi_n) keep else if (fi_n > 0) fi_n - 1 else 0)
+    }
+    r: []i8 = pm_raw();
+    bg: int = tm_mix(lk_ink, lk_bg, if (lk_dark) 50 else 30);
+    for row in pn_r0..pn_r1 {
+        for x in pn_x..pn_x + pn_w _p: int = tm_put(row, x, 32, lk_ink, bg, 0)
+    }
+    // (A rule at its left, beside the reader.)
+    if (pn_x > 0) {
+        for row in pn_r0..pn_r1 _q: int = tm_put(row, pn_x - 1, 9474, tm_mix(lk_faint,
+            lk_bg, 500), lk_bg, 0)
+    }
+    // The bar: Back or the left button, the title, the confirm or button.
+    br: int = pn_r0;
+    fx: int = pn_x + 1;
+    if (pm_left_b >= 0) {
+        _l: int = wl_get(r, pm_left_b, pm_left_e, 2);
+        fx = fx + pn_bar_button(br, fx, pn_item_of(FI_LEFT), bg)
+    } else fx = fx + tm_text(br, fx, if (pn_depth > 1) "\‚\Ä\π Back" else "\‚\ú\ï",
+        lk_accent, bg, 0);
+    fx = fx + 2;
+    _t: int = wl_get(r, pm_screen_b, pm_screen_e, 1);
+    rx: int = pn_x + pn_w - 1;
+    if (pm_confirm_b >= 0) {
+        _c: int = wl_get(r, pm_confirm_b, pm_confirm_e, 2);
+        cw: int = tm_cols_of(wl_text, 0, wl_text_n);
+        off: bool = wl_field_num(r, pm_confirm_b, pm_confirm_e, 3) == 1;
+        rx = rx - cw;
+        _b: int = pn_bar_text(br, rx, pn_item_of(FI_CONFIRM), bg, if (off) lk_faint else lk_accent,
+            TA_BOLD);
+        rx = rx - 2
+    } else if (pm_button_b >= 0) {
+        _c: int = wl_get(r, pm_button_b, pm_button_e, 1);
+        cw: int = tm_cols_of(wl_text, 0, wl_text_n);
+        rx = rx - cw;
+        _b: int = pn_bar_text(br, rx, pn_item_of(FI_BUTTON), bg, lk_accent, 0);
+        rx = rx - 2
+    }
+    _t2: int = wl_get(r, pm_screen_b, pm_screen_e, 1);
+    _w: int = tm_bytes(br, fx, wl_text, 0, wl_text_n, rx - fx, lk_ink, bg, TA_BOLD);
+    // The field (a search's): what is typed, the cursor.
+    body0: int = pn_r0 + 1;
+    for x in pn_x..pn_x + pn_w _u: int = tm_put(body0, x, 9472, tm_mix(lk_faint, bg,
+        300), bg, 0);
+    body0 = body0 + 1;
+    rows: int = pn_body_rows();
+    for k in 0..rows {
+        l: int = pn_scroll + k;
+        row: int = body0 + k;
+        if (l < pv_lines && row < pn_r1) pn_draw_line(row, l, bg)
+    }
+    // The field drawn over its lines (the first two: its own).
+    ff: int = pn_item_of(FI_FIELD);
+    if (ff >= 0 && fi_line[ff] >= pn_scroll && fi_line[ff] - pn_scroll < rows) {
+        row: int = body0 + fi_line[ff] - pn_scroll;
+        fbg: int = tm_mix(lk_ink, lk_bg, if (lk_dark) 120 else 70);
+        for x in pn_x + 2..pn_x + pn_w - 2 _v: int = tm_put(row, x, 32, lk_ink, fbg,
+            0);
+        x0: int = pn_x + 3;
+        _g: int = tm_put(row, x0, 8981, lk_faint, fbg, 0);
+        typing: bool = pn_typing_id == pm_id && pn_typing_row < 0;
+        if (typing && pn_ftext_n > 0) {
+            // (Its end shown, if it is long.)
+            room: int = pn_w - 8;
+            cw: int = tm_cols_of(pn_ftext, 0, pn_ftext_n);
+            from: int = 0;
+            while (cw > room && from < pn_ftext_n) {
+                u: int = tm_cp_at(pn_ftext, from, pn_ftext_n);
+                from = from + tm_cp_len;
+                cw = cw - tm_width(u)
+            }
+            cx: int = x0 + 2 + tm_bytes(row, x0 + 2, pn_ftext, from, pn_ftext_n, room,
+                lk_ink, fbg, 0);
+            _cu: int = tm_put(row, cx, 9612, lk_accent, fbg, 0)
+        } else {
+            _s: int = wl_get(r, pm_screen_b, pm_screen_e, 2);
+            if (typing) _cu2: int = tm_put(row, x0 + 2, 9612, lk_accent, fbg, 0);
+            _x: int = tm_bytes(row, x0 + 3, wl_text, 0, wl_text_n, pn_w - 9, lk_faint,
+                fbg, TA_ITALIC)
+        }
+    }
+    // The buttons at its foot.
+    if (pm_tools > 0) pn_draw_tools(pn_r1 - 1, bg);
+    // (Something below: a hint.)
+    if (pn_scroll + rows < pv_lines) _m: int = tm_put(pn_r1 - 1 - (if (pm_tools > 0) 2 else 0),
+        pn_x + pn_w - 2, 8595, lk_faint, bg, 0)
+}
+
+pn_item_of(kind: int): int {
+    for f in 0..fi_n
+        if (fi_kind[f] == kind) return f;
+    -1
+}
+
+pn_bar_button(
+    row: int,
+    x: int,
+    f: int,
+    bg: int
+): int {
+    pn_bar_text(row, x, f, bg, lk_accent, 0)
+}
+
+// wl_text at row, x as a button (stressed when it is the focus).
+pn_bar_text(
+    row: int,
+    x: int,
+    f: int,
+    bg: int,
+    fg: int,
+    at: int
+): int {
+    focused: bool = f >= 0 && f == pn_focus;
+    tm_bytes(row, x, wl_text, 0, wl_text_n, pn_w, if (focused) bg else fg, if (focused) fg else bg,
+        at)
+}
+
+pn_draw_line(row: int, l: int, bg: int) {
+    x: int = pn_x + 1;
+    focused_line: bool = pv_item[l] >= 0 && pv_item[l] == pn_focus;
+    lbg: int = if (focused_line) tm_mix(lk_accent, bg, if (lk_dark) 220 else 140) else bg;
+    if (focused_line) {
+        for xx in pn_x..pn_x + pn_w _p: int = tm_put(row, xx, 32, lk_ink, lbg, 0);
+        _bar: int = tm_put(row, pn_x, 9614, lk_accent, lbg, 0)
+    }
+    for i in pv_l0[l]..pv_l1[l] {
+        b: int = pv_bg[i];
+        cbg: int = lbg;
+        fg: int = pv_fg[i];
+        if (b <= -2) {
+            // (A cell or link of an item: stressed when it is the focus.)
+            if (-2 - b == pn_focus) {
+                cbg = lk_accent;
+                fg = lk_bg
+            }
+        } else if (b >= 0) cbg = b;
+        if (x < pn_x + pn_w - 1) x = x + tm_put(row, x, pv_cp[i], fg, cbg, pv_at[i])
+    }
+}
+
+pn_draw_tools(row: int, bg: int) {
+    r: []i8 = pm_raw();
+    for x in pn_x..pn_x + pn_w _u: int = tm_put(row - 1, x, 9472, tm_mix(lk_faint,
+        bg, 300), bg, 0);
+    x: int = pn_x + 2;
+    for place in 0..3 {
+        if (place == 2) {
+            // (Those at the right: from the right.)
+            w: int = 0;
+            for t in 0..pm_tools {
+                if (wl_field_num(r, pm_tool_b[t], pm_tool_e[t], 7) == 2) w = w + pn_tool_width(t) + 2
+            }
+            if (pn_x + pn_w - 1 - w > x) x = pn_x + pn_w - 1 - w
+        }
+        for t in 0..pm_tools {
+            if (wl_field_num(r, pm_tool_b[t], pm_tool_e[t], 7) == place) {
+                f: int = pn_tool_item(t);
+                style: int = wl_field_num(r, pm_tool_b[t], pm_tool_e[t], 6);
+                fg: int = if (style == 3) lk_faint else if (style == 2) 14495300 else lk_accent;
+                at: int = if (style == 1) TA_BOLD else 0;
+                focused: bool = f == pn_focus;
+                pn_tool_words(t);
+                x = x + tm_bytes(row, x, wl_text, 0, wl_text_n, pn_w, if (focused) bg else fg,
+                    if (focused) fg else bg, at) + 2
+            }
+        }
+    }
+}
+
+pn_tool_item(t: int): int {
+    for f in 0..fi_n
+        if (fi_kind[f] == FI_TOOL && fi_a[f] == t) return f;
+    -1
+}
+
+// A button's words: its title, else its icon's glyph and label.
+pn_tool_words(t: int) {
+    r: []i8 = pm_raw();
+    b: int = pm_tool_b[t];
+    e: int = pm_tool_e[t];
+    if (wl_get(r, b, e, 3) > 0) return;
+    if (wl_get(r, b, e, 6) == 1 && wl_field_num(r, b, e, 6) == 4) { }
+    _i: int = wl_get(r, b, e, 4);
+    g: int = pn_tool_glyph();
+    _l: int = wl_get(r, b, e, 5);
+    // (A glyph, then its label's first words.)
+    n: int = wl_text_n;
+    k: int = 0;
+    while (k < n && wl_text[k] as int != 44 && wl_text[k] as int != 46) k = k + 1;
+    x: int = k - 1;
+    while (x >= 0) {
+        wl_text[x + 2] = wl_text[x];
+        x = x - 1
+    }
+    wl_text_n = k + 2;
+    wl_text[0] = 63i8;
+    wl_text[1] = 32i8;
+    if (g > 0) {
+        // (Its glyph put in front, as UTF-8.)
+        pn_glyph_front(g)
+    }
+    if (k == 0) wl_text_n = wl_text_n - 1
+}
+
+pn_glyph_front(g: int) {
+    // (Up to 3 bytes for the glyph, replacing the ? placeholder.)
+    bytes: int = if (g < 128) 1 else if (g < 2048) 2 else 3;
+    n: int = wl_text_n;
+    k: int = n - 1;
+    while (k >= 1) {
+        wl_text[k + bytes - 1] = wl_text[k];
+        k = k - 1
+    }
+    if (bytes == 1) wl_text[0] = g trunc i8 else if (bytes == 2) {
+        wl_text[0] = (192 + g / 64) trunc i8;
+        wl_text[1] = (128 + g % 64) trunc i8
+    } else {
+        wl_text[0] = (224 + g / 4096) trunc i8;
+        wl_text[1] = (128 + g / 64 % 64) trunc i8;
+        wl_text[2] = (128 + g % 64) trunc i8
+    }
+    wl_text_n = n + bytes - 1
+}
+
+pn_tool_glyph(): int {
+    if (pn_is("play.fill")) return 9654;
+    if (pn_is("repeat")) return 8635;
+    if (pn_is("keyboard") || pn_is("keyboard.chevron.compact.down")) return 9000;
+    if (pn_is("plus")) return 43;
+    if (pn_is("square.and.arrow.up")) return 8679;
+    if (pn_is("square.and.pencil")) return 9998;
+    if (pn_is("chevron.up")) return 8963;
+    if (pn_is("chevron.down")) return 8964;
+    if (pn_is("speaker.wave.2")) return 9835;
+    if (pn_is("trash")) return 10005;
+    0
+}
+
+pn_tool_width(t: int): int {
+    pn_tool_words(t);
+    tm_cols_of(wl_text, 0, wl_text_n)
+}
+
+// ---- a click in the panel ----
+pn_click(row: int, x: int) {
+    if (row == pn_r0) {
+        // (The bar: Back at its left, the button at its right.)
+        if (x < pn_x + 9) {
+            if (pm_left_b >= 0) pn_do(pn_item_of(FI_LEFT), 0) else pn_back()
+        } else if (x > pn_x + pn_w - 14) {
+            f: int = pn_item_of(FI_CONFIRM);
+            if (f < 0) f = pn_item_of(FI_BUTTON);
+            if (f >= 0) pn_do(f, 0)
+        }
+        return
+    }
+    if (pm_tools > 0 && row == pn_r1 - 1) {
+        // (A button at the foot: the one under x.)
+        r: []i8 = pm_raw();
+        xx: int = pn_x + 2;
+        hit: int = -1;
+        for place in 0..3 {
+            if (place == 2) {
+                w: int = 0;
+                for t in 0..pm_tools
+                    if (wl_field_num(r, pm_tool_b[t], pm_tool_e[t], 7) == 2) w = w + pn_tool_width(t) + 2;
+                if (pn_x + pn_w - 1 - w > xx) xx = pn_x + pn_w - 1 - w
+            }
+            for t in 0..pm_tools {
+                if (wl_field_num(r, pm_tool_b[t], pm_tool_e[t], 7) == place) {
+                    tw: int = pn_tool_width(t);
+                    if (x >= xx && x < xx + tw) hit = t;
+                    xx = xx + tw + 2
+                }
+            }
+        }
+        if (hit >= 0) {
+            pn_focus = pn_tool_item(hit);
+            pn_do(pn_focus, 0)
+        }
+        return
+    }
+    l: int = pn_scroll + row - pn_r0 - 2;
+    if (l < 0 || l >= pv_lines) return;
+    // (The cell under x, if it is an item's; else the line's item.)
+    cx: int = pn_x + 1;
+    f: int = pv_item[l];
+    for i in pv_l0[l]..pv_l1[l] {
+        cw: int = tm_width(pv_cp[i]);
+        if (x >= cx && x < cx + cw && pv_bg[i] <= -2) f = -2 - pv_bg[i];
+        cx = cx + cw
+    }
+    if (f >= 0) {
+        pn_focus = f;
+        pn_dirty = true;
+        k: int = fi_kind[f];
+        // (A click on a toggle's or choice's line: its value moved.)
+        pn_do(f, 0);
+        _k: int = k
+    }
+}

@@ -1,0 +1,207 @@
+tag bible_tui;
+
+use_tag std, bible;
+
+// Other programs the terminal's platform runs: curl for the site's Worker
+// (the ESV), ffplay for the recordings, spd-say for the computer's voice,
+// xdg-open for a page, wl-copy or xclip for the clipboard. Each runs with
+// its output in a file (or nowhere), and is looked at, not waited for.
+extern l8_fork(): int;
+
+extern l8_execve(path: str, argv: []?str, envp: []?str): int;
+
+extern l8_dup2(oldfd: int, newfd: int): int;
+
+extern l8_waitpid(pid: i32, status: *i32, options: i32): int;
+
+extern l8_kill(pid: int, signal: int): int;
+
+extern l8_exit(code: int): noreturn;
+
+extern l8_environment(): []str@new;
+
+extern open(path: str, flags: int, mode: int): int;
+
+extern close(fd: int): int;
+
+// The environment, as the terminal gave it (the programs run get it too).
+pr_env: []?str = new ?str[1](null);
+
+pr_env_strs: []str = new str[0]("");
+
+pr_env_load() noregion {
+    pr_env_strs = l8_environment();
+    pr_env = new ?str[len(pr_env_strs) + 1](null);
+    for i in 0..len(pr_env_strs) pr_env[i] = pr_env_strs[i]
+}
+
+// Variable name's value into pr_var (its length; -1 unset).
+pr_var: []i8 = new i8[4096](0i8);
+
+pr_getenv(name: str): int {
+    for v in pr_env_strs {
+        if (len(v) > len(name) && v[len(name)] as int == 61) {
+            same: bool = true;
+            for i in 0..len(name)
+                if (v[i] != name[i]) same = false;
+            if (same) {
+                n: int = len(v) - len(name) - 1;
+                if (n > len(pr_var)) n = len(pr_var);
+                for i in 0..n pr_var[i] = v[len(name) + 1 + i];
+                return n
+            }
+        }
+    }
+    -1
+}
+
+// Whether a file is there (opened for reading).
+pr_exists(path: str): bool {
+    fd: int = open(path, 0, 0);
+    if (fd < 0) return false;
+    close(fd);
+    true
+}
+
+// A program found where programs are kept (/usr/bin, /bin, /usr/local/bin):
+// its path, or "".
+pr_find(name: str): str@new {
+    for dir in ["/usr/bin/", "/bin/", "/usr/local/bin/"] {
+        p: []i8 = new i8[len(dir) + len(name)](0i8);
+        for i in 0..len(dir) p[i] = dir[i];
+        for i in 0..len(name) p[len(dir) + i] = name[i];
+        s: str = cstr(p);
+        if (pr_exists(s)) return s
+    }
+    ""
+}
+
+// argv for the next program: its words' bytes, one after another.
+pr_argbuf: []i8 = new i8[65536](0i8);
+
+pr_arg_at: []int = new int[24](0);
+
+pr_arg_len: []int = new int[24](0);
+
+pr_args_n: int = 0;
+
+pr_argbuf_n: int = 0;
+
+pr_begin(path: str) {
+    pr_args_n = 0;
+    pr_argbuf_n = 0;
+    pr_arg(path)
+}
+
+pr_arg(s: str) {
+    if (pr_args_n >= len(pr_arg_at) - 1 || pr_argbuf_n + len(s) > len(pr_argbuf)) return;
+    pr_arg_at[pr_args_n] = pr_argbuf_n;
+    for c in s {
+        pr_argbuf[pr_argbuf_n] = c;
+        pr_argbuf_n = pr_argbuf_n + 1
+    }
+    pr_arg_len[pr_args_n] = len(s);
+    pr_args_n = pr_args_n + 1
+}
+
+// The program run: its output to out ("" nowhere), its errors to err ("":
+// nowhere), its input nothing. Its pid (-1: it could not).
+pr_spawn(path: str, out: str, err: str): int {
+    if (len(path) == 0) return -1;
+    null_fd: int = open("/dev/null", 2, 0);
+    // (O_WRONLY | O_CREAT | O_TRUNC.)
+    out_fd: int = if (len(out) > 0) open(out, 577, 384) else -1;
+    err_fd: int = if (len(err) > 0) open(err, 577, 384) else -1;
+    args: []?str = new ?str[pr_args_n + 1](null);
+    for k in 0..pr_args_n {
+        w: []i8 = new i8[pr_arg_len[k]](0i8);
+        for x in 0..pr_arg_len[k] w[x] = pr_argbuf[pr_arg_at[k] + x];
+        args[k] = cstr(w)
+    }
+    pid: int = l8_fork();
+    if (pid == 0) {
+        _i: int = l8_dup2(null_fd, 0);
+        _o: int = l8_dup2(if (out_fd >= 0) out_fd else null_fd, 1);
+        _e: int = l8_dup2(if (err_fd >= 0) err_fd else null_fd, 2);
+        _x: int = l8_execve(path, args, pr_env);
+        l8_exit(127)
+    }
+    if (null_fd >= 0) close(null_fd);
+    if (out_fd >= 0) close(out_fd);
+    if (err_fd >= 0) close(err_fd);
+    pid
+}
+
+// Whether pid has ended (its exit code in pr_code; 0 a signal's).
+pr_code: int = 0;
+
+pr_status: []i32 = new i32[1](0i32);
+
+pr_done(pid: int): bool {
+    if (pid <= 0) return true;
+    // (WNOHANG.)
+    r: int = l8_waitpid(pid trunc i32, &pr_status[0], 1i32);
+    if (r == 0) return false;
+    st: int = pr_status[0] as int;
+    pr_code = (if ((st & 127) == 0) st >> 8 & 255 else 0);
+    true
+}
+
+// Stopped: asked to end, and waited for in the loop (pr_reap).
+pr_stop(pid: int) {
+    if (pid <= 0) return;
+    _c: int = l8_kill(pid, 18);
+    _k: int = l8_kill(pid, 15);
+    if (pr_ending_n < len(pr_ending)) {
+        pr_ending[pr_ending_n] = pid;
+        pr_ending_n = pr_ending_n + 1
+    }
+}
+
+pr_ending: []int = new int[64](0);
+
+pr_ending_n: int = 0;
+
+pr_reap() {
+    k: int = 0;
+    while (k < pr_ending_n) {
+        if (pr_done(pr_ending[k])) {
+            pr_ending_n = pr_ending_n - 1;
+            pr_ending[k] = pr_ending[pr_ending_n]
+        } else k = k + 1
+    }
+}
+
+pr_pause(pid: int) {
+    if (pid > 0) _k: int = l8_kill(pid, 19)
+}
+
+pr_resume(pid: int) {
+    if (pid > 0) _k: int = l8_kill(pid, 18)
+}
+
+// ---- files ----
+pr_buf: []i8 = new i8[1048576](0i8);
+
+// A file read into pr_buf (its length).
+pr_read(path: str): int {
+    fd: int = open(path, 0, 0);
+    if (fd < 0) return 0;
+    n: int = 0;
+    more: bool = true;
+    while (more && n < len(pr_buf)) {
+        k: int = read(fd, pr_buf, n, len(pr_buf) - n);
+        if (k <= 0) more = false else n = n + k
+    }
+    close(fd);
+    n
+}
+
+// Bytes path from a buffer (b to e) and a name: a str.
+pr_join(dir: []i8, n: int, name: str): str@new {
+    p: []i8 = new i8[n + 1 + len(name)](0i8);
+    for i in 0..n p[i] = dir[i];
+    p[n] = 47i8;
+    for i in 0..len(name) p[n + 1 + i] = name[i];
+    cstr(p)
+}
