@@ -58,7 +58,12 @@ final class Reader extends ListView {
     });
     setOnScrollListener(new OnScrollListener() {
       @Override
-      public void onScrollStateChanged(AbsListView v, int state) {}
+      public void onScrollStateChanged(AbsListView v, int state) {
+        // (A finger's scroll begun; the reader at rest again: core's
+        // reading, core/reading.l8.)
+        if (state == SCROLL_STATE_TOUCH_SCROLL) Native.send("moving " + now());
+        else if (state == SCROLL_STATE_IDLE) post(Reader.this::rested);
+      }
 
       @Override
       public void onScroll(AbsListView v, int first, int n, int total) {
@@ -195,6 +200,7 @@ final class Reader extends ListView {
     }
     jumpC = -1;
     setSelectionFromTop(c, topInset - y);
+    post(this::rested);
   }
 
   // Verse v's place in chapter c's text (null: not there).
@@ -295,6 +301,35 @@ final class Reader extends ListView {
     if (c < 0 || c >= count || asked.get(c) != null) return;
     asked.put(c, true);
     Native.send("want " + c);
+  }
+
+  // The skin's clock for core (ms).
+  static long now() {
+    return android.os.SystemClock.uptimeMillis();
+  }
+
+  // The reader at rest: where (as the place is told), whether that
+  // chapter's end is on the screen, and the last chapter whose end is.
+  void rested() {
+    if (getChildCount() == 0 || jumpC >= 0) return;
+    tellPlace();
+    int bottom = getHeight() - getPaddingBottom();
+    int endsHi = saidC - 1;
+    for (int k = 0; k < getChildCount(); k++) {
+      View r = getChildAt(k);
+      int c = getFirstVisiblePosition() + k;
+      if (c >= saidC && r.getBottom() <= bottom && texts.get(c) != null) endsHi = c;
+    }
+    Native.send("rest " + saidC + " " + saidV + " " + Math.max(0, saidF) + " " + (endsHi >= saidC ? 1 : 0)
+        + " " + endsHi + " " + now());
+  }
+
+  // Core's wake: a tick at its time.
+  private final Runnable tick = () -> Native.send("tick " + now());
+
+  void wake(long at) {
+    removeCallbacks(tick);
+    postDelayed(tick, Math.max(50, at - now()));
   }
 
   // The place at the top, told when it changes: its chapter, the verse

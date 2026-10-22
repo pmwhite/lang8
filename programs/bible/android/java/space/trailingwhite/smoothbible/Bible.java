@@ -400,6 +400,13 @@ public final class Bible extends Activity {
       case "toast":
         android.widget.Toast.makeText(this, w.field(1), android.widget.Toast.LENGTH_SHORT).show();
         break;
+      case "wake":
+        try {
+          reader.wake(Long.parseLong(w.word(1)));
+        } catch (NumberFormatException e) {
+          // (Not a time: no tick.)
+        }
+        break;
       case "memorized":
         android.widget.Toast.makeText(this, "Added to Memory", android.widget.Toast.LENGTH_SHORT).show();
         break;
@@ -410,6 +417,8 @@ public final class Bible extends Activity {
         reader.jump(w.num(1), w.num(2));
         break;
       case "goto":
+        // (A jump the reader is moved by: the carried ribbon put down.)
+        Native.send("jumped 0");
         panel.dismiss();
         reader.jump(w.num(1), w.num(2));
         break;
