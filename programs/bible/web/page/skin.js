@@ -65,7 +65,11 @@ let inbox = "";
 let wakeUp = null;
 const files = new Map();
 
+// (?debug in the address: the wire both ways in the console.)
+const DEBUG = location.search.includes("debug");
+
 function send(line) {
+  if (DEBUG) console.log("→ " + line);
   inbox += line + "\n";
   if (wakeUp) {
     const w = wakeUp;
@@ -88,6 +92,43 @@ async function fetchData(id, name) {
     console.warn("smooth bible: no", name, e);
     send(`got ${id} -1`);
   }
+}
+
+// ---- the ESV, through the site's Worker (/api/v1/: it holds the key) ----
+const API = "/api/v1/";
+const WHO = { "X-Smooth-Bible": "web (1)" };
+let esvFile = 1000000;
+
+async function esvAsk(path) {
+  let r = null;
+  let j = null;
+  try {
+    r = await fetch(API + path, { headers: WHO, signal: AbortSignal.timeout(12000) });
+    j = await r.json();
+  } catch {}
+  if (!r || !r.ok || !j || !Array.isArray(j.chapters)) {
+    send(`esvfail ${r ? r.status : 0} ${j && j.error === "daily_limit" ? 1 : 0} ${(j && j.retry) | 0}`);
+    return;
+  }
+  for (const ch of j.chapters) {
+    const data = enc.encode(String(ch.records || "") + "\n");
+    const id = esvFile++;
+    files.set(id, data);
+    send(`esvch ${ch.book} ${ch.chapter} ${id} ${data.length}`);
+  }
+  send("esvdone");
+}
+
+// Whether the site gives the ESV, told to core.
+async function esvStatus() {
+  let status = 0;
+  let esv = 0;
+  try {
+    const r = await fetch(API + "status", { headers: WHO, signal: AbortSignal.timeout(8000) });
+    status = r.status;
+    if (r.ok) esv = (await r.json()).esv ? 1 : 0;
+  } catch {}
+  send(`esvstatus ${status} ${esv}`);
 }
 
 const imports = {
@@ -127,6 +168,10 @@ const imports = {
     const cap = Number(this.view().getBigInt64(p - 8, true));
     this.bytes().set(data.subarray(0, Math.min(cap, data.length)), p);
     return BigInt(data.length);
+  },
+  bw_esv(b, start, end) {
+    esvAsk(dec.decode(this.bytes().slice(Number(b) + Number(start), Number(b) + Number(end))));
+    return 0n;
   },
   bw_store_get(b, start, end, out) {
     const key = "sb." + dec.decode(this.bytes().slice(Number(b) + Number(start), Number(b) + Number(end)));
@@ -394,6 +439,7 @@ function newScreen(w) {
 
 // ---- what core said ----
 function said(text) {
+  if (DEBUG) console.log("← " + text.slice(0, 300).replace(/\n/g, " ⏎ "));
   let p = 0;
   while (p < text.length) {
     let e = text.indexOf("\n", p);
@@ -764,7 +810,8 @@ const reader = {
     const above = s.getBoundingClientRect().bottom <= barHeight() + 1 && this.loaded.size > 0;
     const put = () => {
       s.replaceChildren(body);
-      s.classList.remove("wait");
+      // (A chapter still to come, its line alone, kept a page tall.)
+      s.classList.toggle("wait", !verses.length);
       s.links = links;
     };
     if (above) this.keepPlace(put);
@@ -925,7 +972,7 @@ const reader = {
     if (t && s.links) {
       const l = s.links[+t.dataset.l];
       if (l) {
-        send(l[2] === 0 ? `footnote ${c} ${l[3]}` : l[2] === 2 ? `word ${l[3]}` : `preview ${l[3]}`);
+        send(l[2] === 0 ? `footnote ${c} ${l[3]}` : l[2] === 2 ? `word ${l[3]}` : l[2] === 3 ? `esvact ${l[3]} ${c}` : `preview ${l[3]}`);
         return;
       }
     }
@@ -1906,9 +1953,10 @@ function begin() {
   if (started) return;
   started = true;
   const c = chapterOfAddress(location.pathname);
-  const v = /^\/read\/(bsb|kjv|web|asv|ylt)\//.exec(location.pathname);
+  const v = /^\/read\/(bsb|kjv|web|asv|ylt|esv)\//.exec(location.pathname);
   if (v) send(`version ${v[1].toUpperCase()}`);
   if (c >= 0) send(`place ${c} 0 0`);
+  esvStatus();
   send(`start ${innerWidth} ${innerHeight} ${Math.round(devicePixelRatio * 100)} ${matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0} ${-new Date().getTimezoneOffset() * 60}`);
 }
 

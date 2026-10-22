@@ -229,12 +229,40 @@ esv_retry_due(c: int, now: f64): bool {
 // disk if it is held there).
 esv_came_pins: bool = false;
 
+// (A chapter's records may end with the next chapter's headings, the
+// proxy's split: they are taken off, and put back at the next chapter's
+// start when it comes in the same answer, starting with none of its own.)
+esv_carry: []i8 = new i8[4096](0i8);
+
+esv_carry_n: int = 0;
+
+esv_carry_c: int = -1;
+
+esv_join: []i8 = new i8[262144](0i8);
+
 esv_came(
     c: int,
-    b: []i8,
-    n: int,
+    b_in: []i8,
+    n_in: int,
     now: int
 ) {
+    b: []i8 = b_in;
+    n: int = n_in;
+    if (esv_carry_c == c && esv_carry_n > 0 && !esv_heading_at(b, 0, n) && esv_carry_n + n <= len(esv_join)) {
+        for i in 0..esv_carry_n esv_join[i] = esv_carry[i];
+        for i in 0..n esv_join[esv_carry_n + i] = b[i];
+        b = esv_join;
+        n = esv_carry_n + n
+    }
+    esv_carry_c = -1;
+    esv_carry_n = 0;
+    t: int = esv_tail_headings(b, n);
+    if (t < n && n - t <= len(esv_carry)) {
+        for i in t..n esv_carry[i - t] = b[i];
+        esv_carry_n = n - t;
+        esv_carry_c = c + 1;
+        n = t
+    }
     esv_came_pins = esv_pin_fill(c, b, n, now) > 0;
     if (esv_pin_only[c]) {
         esv_pin_only[c] = false;
@@ -244,6 +272,29 @@ esv_came(
     esv_insert(c, b, n, now);
     esv_touch(c, now);
     esv_state[c] = ESV_HERE
+}
+
+// Whether the record at p (to n) is a heading's (S, M, D, A or s).
+esv_heading_at(b: []i8, p: int, n: int): bool {
+    if (p >= n) return false;
+    k: int = b[p] as int;
+    k == 83 || k == 77 || k == 68 || k == 65 || k == 115
+}
+
+// Where the records' trailing headings begin (n: none).
+esv_tail_headings(b: []i8, n: int): int {
+    e: int = n;
+    while (e > 0 && b[e - 1] as int == 10) e = e - 1;
+    t: int = n;
+    while (e > 0) {
+        s: int = e;
+        while (s > 0 && b[s - 1] as int != 10) s = s - 1;
+        if (!esv_heading_at(b, s, e)) return t;
+        t = s;
+        e = s;
+        while (e > 0 && b[e - 1] as int == 10) e = e - 1
+    }
+    t
 }
 
 // ---- Memory's ESV passages (Â§13.6) ----
@@ -320,4 +371,194 @@ mp_add(
     ui_effect("pins_changed", -1, -1);
     ui_effect("mm_fetch", mem_index(id), -1);
     id
+}
+
+// ---- for a skin whose host only makes the requests ----
+// (Android's, the web's: core asks for the chapters the reader wants, draws
+// one that has not come as its line, and takes the host's answers. The
+// iPhone does these its own way.) The host's clock is the wall's here.
+ew_now(): f64 {
+    time(0) as f64
+}
+
+// Chapter c wanted by the reader in the ESV (with the one after it, if
+// that isn't here either).
+ew_want(c: int) {
+    if (c < 0 || c >= chapters || esv_held(c)) return;
+    esv_want_now(c, if (c + 1 < chapters && !esv_held(c + 1)) 2 else 1, ew_now())
+}
+
+// Chapter c's records came (b, n bytes): held, the ESV's text made again,
+// and the chapter drawn again if it is being read.
+sk_esv_came(c: int, b: []i8, n: int) {
+    if (c < 0 || c >= chapters) return;
+    esv_came(c, b, n, time(0));
+    esv_build();
+    if (text_cur == TEXT_ESV) sk_write_chapter(c)
+}
+
+// The request's answer all in: the next asked for, what shows the ESV
+// made again.
+sk_esv_done() {
+    esv_inflight = -1;
+    ew_pump();
+    sk_update_all()
+}
+
+// The request for count chapters from c failed (status 0: no answer;
+// daily: the daily limit; retry: when to, seconds): their lines drawn.
+sk_esv_failed(
+    c: int,
+    count: int,
+    status: int,
+    daily: bool,
+    retry: int
+) {
+    esv_inflight = -1;
+    esv_fail_states(c, count, esv_state_for(status, daily), retry, ew_now());
+    if (text_cur == TEXT_ESV) {
+        for x in c..c + count
+            if (x < chapters) sk_write_chapter(x)
+    }
+    sk_update_all()
+}
+
+// The client idle: one asked for directly, else the reader's next.
+ew_pump() {
+    now: f64 = ew_now();
+    if (!esv_next_queued(now)) esv_pump_reader(now, sk_c, sk_c, sk_c + 1)
+}
+
+// A tap on a chapter's line (ESV_TRY, ESV_BSB, ESV_SITE).
+sk_esv_act(what: int, c: int) {
+    if (what == ESV_TRY) {
+        esv_try_again(c, ew_now());
+        if (text_cur == TEXT_ESV) sk_write_chapter(c)
+    } else if (what == ESV_BSB) sk_use_version(TEXT_BSB) else if (what == ESV_SITE) {
+        fput_esv_url(c);
+        ui_effect_fbuf("url")
+    }
+}
+
+// The server said whether it gives the ESV (status 0: no answer); the
+// ESV read last read again, once it can be.
+sk_esv_status(status: int, esv: bool) {
+    l: int = esv_status_listed(status, esv);
+    if (l < 0) return;
+    on: bool = l == 1;
+    if (on == sk_esv_listed) return;
+    sk_esv_listed = on;
+    if (on && sk_started && pref_get("version") == TEXT_ESV && text_cur != TEXT_ESV) sk_use_version(TEXT_ESV);
+    sk_update_all()
+}
+
+// The reader at rest in chapter c (its last chapter whose end shows,
+// ends_hi): what shows held, the window there, the next asked for.
+ew_rest(c: int, ends_hi: int) {
+    if (c < 0) return;
+    esv_set_visible(c, if (ends_hi > c) ends_hi + 1 else c + 1);
+    esv_win_l = c;
+    ew_pump()
+}
+
+// Chapter c not here, drawn as its line: its title, the ESV's state
+// (loading, or why it cannot come), then Try Again (if it can help) and
+// Read in the BSB, links of KIND 3 (their ARG ESV_TRY, ESV_BSB).
+sk_write_esv_wait(c: int) {
+    st: int = esv_state[c];
+    fbuf_n = 0;
+    fput_title(c);
+    t1: int = fbuf_n;
+    fput(10);
+    if (st == ESV_HERE || st == ESV_LOADING) fput_str("Loading the ESV\â\€\¦") else fput_str(esv_line(st,
+        false));
+    t2: int = fbuf_n;
+    try_b: int = -1;
+    try_e: int = -1;
+    bsb_b: int = -1;
+    bsb_e: int = -1;
+    if (st >= ESV_OFFLINE) {
+        fput(10);
+        if (esv_can_try(st)) {
+            try_b = fbuf_n;
+            fput_str(esv_try_title);
+            try_e = fbuf_n;
+            fput_str("   ")
+        }
+        bsb_b = fbuf_n;
+        fput_str(esv_other_title(false));
+        bsb_e = fbuf_n
+    }
+    n: int = fbuf_n;
+    ui_str("chapter ");
+    ui_int(c);
+    ui_byte(9);
+    ui_field_bytes(fbuf, 0, n);
+    ui_byte(10);
+    ew_span(0, t1, STYLE_HEAD);
+    ew_span(t1, t2 + (if (n > t2) 1 else 0), RUN_FAINT);
+    if (n > t2 + 1) ew_span(t2 + 1, n, RUN_ACCENT);
+    if (try_b >= 0) ew_link(try_b, try_e, ESV_TRY);
+    if (bsb_b >= 0) ew_link(bsb_b, bsb_e, ESV_BSB);
+    ui_str("end\n")
+}
+
+ew_span(b: int, e: int, style: int) {
+    if (e <= b) return;
+    ui_str("span ");
+    ui_int(ui_utf16(fbuf, 0, b));
+    ui_byte(32);
+    ui_int(ui_utf16(fbuf, 0, e));
+    ui_byte(32);
+    ui_int(style);
+    ui_str(" 0\n")
+}
+
+ew_link(b: int, e: int, what: int) {
+    ui_str("link ");
+    ui_int(ui_utf16(fbuf, 0, b));
+    ui_byte(32);
+    ui_int(ui_utf16(fbuf, 0, e));
+    ui_str(" 3 ");
+    ui_int(what);
+    ui_byte(10)
+}
+
+// An ESV chapter's last line, into fbuf: "(ESV) Â· esv.org"; its runs and
+// its link (KIND 3, ESV_SITE), from base (UTF-16, the chapter's end).
+ew_tail() {
+    fbuf_n = 0;
+    fput(10);
+    fput_str(esv_footer_words());
+    fput_str(esv_site_title)
+}
+
+ew_tail_runs(base: int) {
+    ew_tail();
+    words: int = 1 + len(esv_footer_words());
+    a: int = base + ui_utf16(fbuf, 0, words);
+    e: int = base + ui_utf16(fbuf, 0, fbuf_n);
+    ui_str("span ");
+    ui_int(base);
+    ui_byte(32);
+    ui_int(a);
+    ui_byte(32);
+    ui_int(RUN_SMALL);
+    ui_str("""
+ 0
+span """);
+    ui_int(a);
+    ui_byte(32);
+    ui_int(e);
+    ui_byte(32);
+    ui_int(RUN_ACCENT);
+    ui_str("""
+ 0
+link """);
+    ui_int(a);
+    ui_byte(32);
+    ui_int(e);
+    ui_str(" 3 ");
+    ui_int(ESV_SITE);
+    ui_byte(10)
 }

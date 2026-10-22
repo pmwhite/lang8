@@ -148,9 +148,12 @@ export const convert = (html, book, first) => {
             chapter = c;
             const next = { chapter: c, records: [] };
             chapters.push(next);
-            // (The paragraph it begins in goes on in the new chapter.)
-            const last = out.length ? out[out.length - 1] : "";
-            if (last[0] === "P") next.records.push(out.pop());
+            // (The paragraph it begins in goes on in the new chapter, and
+            // the headings over it are the new chapter's.)
+            const moved = [];
+            if (out.length && out[out.length - 1][0] === "P") moved.unshift(out.pop());
+            while (out.length && "SMDAs".includes(out[out.length - 1][0])) moved.unshift(out.pop());
+            next.records.push(...moved);
             out = next.records;
           }
           verse(v || 1);

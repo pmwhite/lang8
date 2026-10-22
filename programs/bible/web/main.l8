@@ -54,6 +54,11 @@ extern bw_store_set(
 
 extern bw_store_remove(b: []i8, start: int, end: int): int;
 
+// An ESV request (b, start to end: the path under the site's /api/v1/),
+// which the page makes; its answer comes as lines (esvch, esvdone,
+// esvfail, below).
+extern bw_esv(b: []i8, start: int, end: int): int;
+
 // ---- what is kept (core/kept.l8's), a key each ----
 web_read() {
     n: int = bw_store_get(kp_name, 0, kp_name_n, fbuf);
@@ -292,6 +297,51 @@ web_num(what: int, _a: int): int {
     -1
 }
 
+// ---- the ESV (core/esv_client.l8 asks; the page fetches) ----
+// The request on its way: its first chapter, and how many.
+ew_c: int = -1;
+
+ew_count: int = 0;
+
+web_fetch(what: int, c: int, count: int): bool {
+    if (what != SK_FETCH_ESV || c < 0 || c >= chapters) return false;
+    ew_c = c;
+    ew_count = count;
+    fbuf_n = 0;
+    fput_str("esv/chapters?book=");
+    for x in 0..3 fput(bsb_code_byte(ch_book[c], x));
+    fput_str("&chapter=");
+    fput_int(ch_num[c]);
+    fput_str("&count=");
+    fput_int(count);
+    _n: int = bw_esv(fbuf, 0, fbuf_n);
+    true
+}
+
+// The book whose code is at b (3 bytes), or -1.
+book_at(line: []i8, b: int): int {
+    for k in 0..books {
+        same: bool = true;
+        for x in 0..3
+            if (bsb_code_byte(k, x) != line[b + x] as int) same = false;
+        if (same) return k
+    }
+    -1
+}
+
+// esvch BOOK NUM ID SIZE: a chapter of the answer (its records, file ID).
+esv_chapter_came(line: []i8, p: int, e: int) {
+    k: int = book_at(line, p + 6);
+    num: int = sk_num(line, p + 9, e);
+    id: int = sk_num(line, sk_num_end, e);
+    size: int = sk_num(line, sk_num_end, e);
+    if (size < 0) return;
+    buf: []i8 = new i8[size + 1](0i8);
+    _n: int = bw_file(id, buf);
+    if (k < 0 || num < 1 || num > book_count[k]) return;
+    sk_esv_came(book_first[k] + num - 1, buf, size)
+}
+
 // ---- the lines ----
 inbox: []i8 = new i8[1048576](0i8);
 
@@ -315,6 +365,14 @@ lines(n: int) noregion {
             if (i - p > 4 && sk_word_is(inbox, p, i, "got")) {
                 id: int = sk_num(inbox, p + 4, i);
                 got(id, sk_num(inbox, sk_num_end, i))
+            } else if (i - p > 12 && sk_word_is(inbox, p, i, "esvch")) esv_chapter_came(inbox,
+                p, i) else if (sk_word_is(inbox, p, i, "esvdone")) sk_esv_done() else if (sk_word_is(inbox,
+                p, i, "esvfail")) {
+                // (esvfail STATUS DAILY RETRY: the request failed.)
+                st: int = sk_num(inbox, p + 8, i);
+                daily: bool = sk_num(inbox, sk_num_end, i) != 0;
+                sk_esv_failed(ew_c, ew_count, st, daily, sk_num(inbox, sk_num_end,
+                    i))
             } else sk_line(inbox, p, i);
             p = i + 1
         }
@@ -335,7 +393,7 @@ main() noregion: int {
         switch_version: null,
         num: &web_num,
         fill: &sk_no_fill,
-        fetch: null
+        fetch: &web_fetch
     };
     sk_has_ribbons = true;
     sk_has_listen = true;

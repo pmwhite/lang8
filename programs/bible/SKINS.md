@@ -315,6 +315,7 @@ From the skin:
 | `want C` | chapter C's text, to show |
 | `place C V FRAC` | the reader's top: chapter, verse, thousandths of an em into it |
 | `dark 0/1` | the system's appearance changed |
+| `esvstatus STATUS ESV`, `esvact WHAT C` | whether the site's Worker gives the ESV (STATUS its answer's, 0 none); a tap on chapter C's ESV line (`link` KIND 3: ARG `ESV_TRY`, `ESV_BSB`, `ESV_SITE`). Core asks for the ESV's chapters near the place as a wire skin reads it (its host's `fetch`), draws one not here as its line, and ends each with "(ESV) · esv.org" |
 | `version ABBR` | the version an address names (`KJV`): before `start`, the one the reader opens in; after, read now |
 | `away` | the app put away: the settings kept now |
 | `word W` | a word of the original tapped (a `link` of KIND 2, its ARG the word): core's word screen (`SCR_WORD`: its form, where, transliteration, gloss, meaning, parsing; Learn This Word or its card's line; Word Study) |

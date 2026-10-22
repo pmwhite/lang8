@@ -1,5 +1,6 @@
 // The site as smoothbible.com serves it, for local development:
-//   node programs/bible/web/page/serve.mjs [SITE] [PORT]   (.build/bible-site, 8470)
+//   [SB_API=https://smoothbible.com] node programs/bible/web/page/serve.mjs [SITE] [PORT]
+//   (.build/bible-site, 8470; SB_API: the ESV's requests to that Worker)
 // Requests go to the real Worker (programs/bible/worker/worker.js), with
 // ASSETS standing in for Cloudflare's static assets over SITE as
 // wrangler.toml configures them (html_handling "auto-trailing-slash",
@@ -58,11 +59,21 @@ export function serve(site, port) {
 
   const server = http.createServer(async (req, res) => {
     const request = new Request(`http://smoothbible.com${req.url}`, { method: req.method, headers: req.headers });
-    const r = await worker.fetch(request, env);
+    // (The ESV's requests to a Worker that has its key, where SB_API names
+    // one: SB_API=https://smoothbible.com. Else this one's, without.)
+    const api = process.env.SB_API && req.url.startsWith("/api/");
+    const r = api
+      ? await fetch(process.env.SB_API + req.url, { headers: { "x-smooth-bible": req.headers["x-smooth-bible"] || "web (1)" } })
+      : await worker.fetch(request, env);
     let body = Buffer.from(await r.arrayBuffer());
     // (Compressed as Cloudflare does text, scripts and wasm, so the budgets
     // see what a phone would be sent; data files are gzip themselves.)
     const headers = Object.fromEntries(r.headers);
+    // (A proxied answer's body is already decoded.)
+    if (api) {
+      delete headers["content-encoding"];
+      delete headers["content-length"];
+    }
     if (/gzip/.test(req.headers["accept-encoding"] || "") && /^(text\/|application\/(wasm|javascript)|image\/svg)/.test(headers["content-type"] || "")) {
       body = zlib.gzipSync(body);
       headers["content-encoding"] = "gzip";
