@@ -1879,6 +1879,11 @@ addEventListener("keydown", (e) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
   const mods = (e.ctrlKey || e.metaKey ? 1 : 0) | (e.shiftKey ? 2 : 0) | (e.altKey ? 4 : 0);
   if (typing && !(mods & 1)) return;
+  // (Escape over the reader: the selection let go.)
+  if (e.key === "Escape" && !typing && panel.box.hidden && !tray.box.hidden) {
+    send("tapnone");
+    return;
+  }
   if (!typing && e.target.closest?.(".panel, .tray, .menu") && !(mods & 1)) return;
   const name = { " ": "space", Enter: "return", ArrowLeft: "left", ArrowUp: "up", ArrowDown: "down" }[e.key] ?? (e.key.length === 1 ? e.key.toLowerCase() : null);
   if (!name) return;
