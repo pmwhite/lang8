@@ -163,6 +163,13 @@ final class Reader extends ListView {
     if (at >= 0 && jumpC < 0) setSelectionFromTop(at, top);
   }
 
+  // A page down (d 1) or up (-1), less three lines.
+  void page(int d) {
+    float line = look.textSp() * look.spacing * getResources().getDisplayMetrics().scaledDensity;
+    int seen = Math.max((int) line, getHeight() - topInset - (int) (3 * line));
+    smoothScrollBy(d * seen, 250);
+  }
+
   void jump(int c, int v) {
     if (c < 0 || c >= count) return;
     jumpC = c;

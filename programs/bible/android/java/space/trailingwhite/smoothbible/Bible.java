@@ -223,6 +223,39 @@ public final class Bible extends Activity {
     Native.send("dark " + (systemDark() ? 1 : 0));
   }
 
+  // A hardware keyboard's keys, to core (key NAME MODS: core/keys.l8 makes
+  // them its commands). A field typed in keeps its own keys, but for ⌘'s.
+  @Override
+  public boolean dispatchKeyEvent(android.view.KeyEvent e) {
+    if (e.getAction() == android.view.KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
+      int mods = (e.isCtrlPressed() || e.isMetaPressed() ? 1 : 0) | (e.isShiftPressed() ? 2 : 0)
+          | (e.isAltPressed() ? 4 : 0);
+      String name = keyName(e);
+      View f = getCurrentFocus();
+      boolean typing = f instanceof android.widget.EditText;
+      if (name != null && ((mods & 1) != 0 || !typing)) {
+        Native.send("key " + name + " " + mods);
+        // (Space is core's page, not the list's too.)
+        if (name.equals("space") && !typing) return true;
+      }
+    }
+    return super.dispatchKeyEvent(e);
+  }
+
+  static String keyName(android.view.KeyEvent e) {
+    switch (e.getKeyCode()) {
+      case android.view.KeyEvent.KEYCODE_SPACE: return "space";
+      case android.view.KeyEvent.KEYCODE_ENTER: return "return";
+      case android.view.KeyEvent.KEYCODE_DPAD_LEFT: return "left";
+      case android.view.KeyEvent.KEYCODE_DPAD_UP: return "up";
+      case android.view.KeyEvent.KEYCODE_DPAD_DOWN: return "down";
+      default: break;
+    }
+    int ch = e.getUnicodeChar(0);
+    if (ch <= 32 || ch >= 127) return null;
+    return String.valueOf((char) Character.toLowerCase(ch));
+  }
+
   @Override
   protected void onPause() {
     super.onPause();
@@ -547,6 +580,9 @@ public final class Bible extends Activity {
         break;
       case "jump":
         reader.jump(w.num(1), w.num(2));
+        break;
+      case "page":
+        reader.page(w.num(1) == 1 ? 1 : -1);
         break;
       case "goto":
         // (A jump the reader is moved by: the carried ribbon put down.)
