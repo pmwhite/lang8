@@ -112,7 +112,7 @@ From core:
 | `field` TEXT WAIT FLAGS | after `screen`, if it has a field: its words now, how long typing rests before it is sent (ms; 0 at once), `g` Return goes (Go To), `f` it takes the keys as the screen opens |
 | `scopes` VALUE TITLES LABELS | the field's scopes (titles and spoken labels split by `\|`), the one chosen |
 | `plain` | a plain list, not grouped (Search's results) |
-| `focus N [1]` | after `screen`: the screen opens at its Nth row (of all, from 0): Go To at the book read; 1, selected too (the day a plan's days were opened for) |
+| `focus N [MODE]` | after `screen`: the screen opens at its Nth row (of all, from 0), at the top: Go To at the book read; MODE 1, selected and in the middle (the day a plan's days were opened for), 2 in the middle (a chooser's choice) |
 | `intro` TEXT | words above the first section (a plan's description) |
 | `toolbar` ACTION ARG TITLE STYLE | a button at the screen's foot doing ACTION with ARG (Start Plan): STYLE 0 plain, 1 prominent, 2 destructive (Stop Plan), 3 off |
 | `row` KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS VALUE OPTIONS LO HI LABEL | a row (below); LABEL what a screen reader says, if not its words |
@@ -120,6 +120,7 @@ From core:
 | `refill ID FADE` | screen ID made again as its field is typed in: its rows at once, the field as it is (FADE 1: what it shows changed kind, recent searches giving way to results: a cross-fade) |
 | `retext ID` | screen ID's field to show the screen's words (a recent search chosen) |
 | `blur ID` | the keyboard put away (Return in Search) |
+| `chosen OWNER` | Begin At's chapter chosen (OWNER 1: New Ribbon's, whose name follows it) |
 | `marked SLOT DAY`, `plan_start P`, `plan_stop P` | a plan's day marked read or not (the host keeps the plan's file, says today is done, schedules its reminders); Start Plan and Stop Plan, the host's (its files, reminders and the day's reader) |
 | `searched`, `esv_search PAGE` | Search searched again (a platform's own results for what it searched before are gone); the ESV's search asked for (the iPhone's, from its server) |
 | `reader N` | the reader has N chapters (the version changed, or at the start) |
@@ -188,8 +189,9 @@ action goes to core (`sk_act`); its effects are done the iPhone's way
 (`push` into the navigation the action came from, `present` as a sheet,
 `update` a cross-fade and reload, `dismiss`). The platform's work stays the
 app's: core's version switch is the iPhone's `switch_version`. Moved so far:
-Versions, History, the reading settings, Go To, Search, Reading Plans and a
-plan's days (2026-10-21; a plan's reminder is a host section, its switch
+Versions, History, the reading settings, Go To, Search, Reading Plans, a
+plan's days, A Chapter a Day and Begin At's books (2026-10-21; Begin At's
+chapters are the iPhone's grid, choosing; a plan's reminder is a host section, its switch
 and time the iPhone's notifications). Core's screens are the app's own controller class
 (`L8CoreList`), made again as they come back from a screen pushed over
 them.
