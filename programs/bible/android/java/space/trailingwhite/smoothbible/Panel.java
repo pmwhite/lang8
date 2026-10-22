@@ -1147,9 +1147,13 @@ final class Panel extends FrameLayout {
       Screen sc = screen;
       // (A Practice passage: in the reader's type, its links its words'
       // own color, a hidden word's tap showing it.)
-      boolean practice = false;
-      for (int j = 1; j < r.truns.length; j += 2)
+      boolean practice = false, scripture = false;
+      for (int j = 1; j < r.truns.length; j += 2) {
         if (r.truns[j] >= Look.RUN_PRACTICE) practice = true;
+        // (Words set in the reader's styles, a passage's preview: in its
+        // type too.)
+        if (r.truns[j] < 100) scripture = true;
+      }
       boolean plainLinks = practice;
       for (int j = 0; j + 3 < r.links.length; j += 4) {
         int b = (int) Math.max(0, Math.min(r.links[j], s.length()));
@@ -1179,13 +1183,13 @@ final class Panel extends FrameLayout {
       if (r.links.length > 0) t.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
       t.setTextIsSelectable(true);
       t.setTextColor(look.ink);
-      t.setTextSize(TypedValue.COMPLEX_UNIT_SP, practice ? look.textSp() : r.flag('h') ? 18 : 16);
-      if (practice) t.setTypeface(Typeface.SERIF);
+      t.setTextSize(TypedValue.COMPLEX_UNIT_SP, practice || scripture ? look.textSp() : r.flag('h') ? 18 : 16);
+      if (practice || scripture) t.setTypeface(Typeface.SERIF);
       if (r.flag('h')) {
         t.setTypeface(Typeface.DEFAULT_BOLD);
         t.setAccessibilityHeading(true);
       }
-      t.setLineSpacing(0, practice ? look.spacing : 1.2f);
+      t.setLineSpacing(0, practice || scripture ? look.spacing : 1.2f);
       if (practice) {
         // (Not selectable: a tap on a word is a link's; no wash as it is
         // pressed.)

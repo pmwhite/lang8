@@ -58,7 +58,9 @@ final class Screen {
   // does, its style (0 plain, 1 prominent, 2 destructive, 3 off), its place
   // (0 left, 1 middle, 2 right), and its menu (ARG:TITLE items).
   static final class Tool {
-    int action, arg, style, place;
+    int action, style, place;
+    // (Long: a reference packs a chapter and verse at each end.)
+    long arg;
     String title = "", icon = "", label = "", menu = "";
   }
 
@@ -66,7 +68,7 @@ final class Screen {
   static Tool tool(Wire w) {
     Tool t = new Tool();
     t.action = w.fieldNum(1);
-    t.arg = w.fieldNum(2);
+    t.arg = w.fieldLong(2);
     t.title = w.field(3);
     t.icon = w.field(4);
     t.label = w.field(5);

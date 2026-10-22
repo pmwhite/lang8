@@ -116,8 +116,14 @@ need view models in core, written as they are reached:
 1. **The reader**: chapters as laid-out runs (`ChapterLayout`,
    `measure_chapter`), continuous; its place reported back as chapter, verse
    and fraction. Its view model exists (`chapter` and `span` lines).
-2. The back capsule; the mini player; the day's reader; a passage's
-   preview; the share card; the edit menu; toasts.
+2. The back capsule; the mini player; the day's reader (its words and Mark
+   Read are core's: `core/day.l8`); the share card; the edit menu; toasts.
+
+A reference's preview is core's (`core/preview.l8`: its verses, each
+chapter's first and last, at most 80, the words around them): a skin with
+its own (the iPhone's, in the reader's typesetting with its highlights;
+`SK_NUM_OWN_VIEW` of `SCR_PASSAGE`) draws that plan; any other gets core's
+screen, a page of the verses in the reader's styles and Open in Reader.
 
 ## Practice
 
@@ -139,7 +145,8 @@ paragraphs; the end as its empty words. A skin that plays a passage and
 speaks a card says so (`SK_NUM_PRACTICE_AUDIO`), and one that takes typed
 letters (`SK_NUM_PRACTICE_KEYS`); their buttons are left out otherwise.
 
-The iPhone draws Practice in its own sheet (`SK_NUM_OWN_PRACTICE`: core
+The iPhone draws Practice in its own sheet (`SK_NUM_OWN_VIEW` of
+`SCR_PRACTICE`: core
 says `practice_session N HOW` once the session is queued), from the same
 state: each action of core's says what changed (`px_changed`'s `PX_CH_`
 bits: the words' looks, the buttons, a passage or card begun, the end,
