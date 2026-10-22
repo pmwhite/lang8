@@ -219,6 +219,10 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   the cross references and STEP's texts are CC BY 4.0; UBS's meanings CC
   BY-SA 4.0.
 - `core/text.l8` indexes the texts and exposes borrowed `TextSource` views.
+  `text_use` is only for the version the reader shows (and for building a
+  text); code that reads another version (the BSB's words for Study,
+  plans and the ESV's helpers, search under the ESV, Memory's passages)
+  takes `ready_source(t)` and a `source_` function instead of switching.
   `core/layout.l8` renders a source into a `ChapterLayout` with its own byte,
   run, verse and original-word buffers; `core/chapter_ranges.l8` measures it
   into separate `ChapterRanges` (UTF-16, bookmarks, notes and glosses).
