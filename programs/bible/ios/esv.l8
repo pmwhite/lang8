@@ -238,15 +238,8 @@ net_answer(
     esv_next()
 }
 
-// ---- states (core/esv_cache.l8's ESV_) ----
-// Each chapter's state, while it is not here.
-esv_state: []int = new int[1200](0);
-
-// When each began loading (for the spinner's 0.4 s).
-esv_since: []f64 = new f64[1200](0.0f64);
-
-// Not to ask again before this (busy, resting for today).
-esv_hold_until: f64 = 0.0f64;
+// ---- states (core/esv_cache.l8's ESV_; each chapter's, esv_state, and
+// the rest of asking for chapters: core/esv_client.l8's) ----
 
 // (Core's: the server's answer as a state; its "daily_limit" error read
 // here.)
@@ -356,55 +349,21 @@ esv_log() {
     } with IoError _e -> { }
 }
 
-// ---- asking for chapters: one request at a time ----
-// The request running (its chapter, -1: none), and the one waiting (a
-// newer one replaces it).
-esv_inflight: int = -1;
-
-esv_queued: int = -1;
-
-esv_queued_count: int = 1;
-
+// ---- asking for chapters: core's (core/esv_client.l8), the requests
+// made here ----
 // The notice the server sent with the text ("(ESV)").
 esv_notice: int = 0;
 
-// Chapter c wanted (and count chapters from it): asked for, or queued.
-// (Chapters asked for Memory's pins alone: not for the reader.)
-esv_pin_only: []bool = new bool[1200](false);
-
+// Chapter c wanted (and count chapters from it): core's, now.
 esv_want(c: int, count: int) {
-    if (c < 0 || c >= chapters) return;
-    // (The reader wants it too now: held as any other.)
-    esv_pin_only[c] = false;
-    if (!esv_wanted(c, time(0)) && (count < 2 || c + 1 >= chapters || !esv_wanted(c + 1,
-        time(0)))) return;
-    if (esv_inflight == c) return;
-    if (CACurrentMediaTime() < esv_hold_until) return;
-    if (esv_inflight >= 0) {
-        // (The one it replaces is no longer on its way.)
-        if (esv_queued >= 0 && esv_queued != c && esv_state[esv_queued] == ESV_LOADING) esv_state[esv_queued] = 0;
-        esv_queued = c;
-        esv_queued_count = count;
-        esv_mark_loading(c);
-        return
-    }
-    esv_ask(c, count)
+    esv_want_now(c, count, CACurrentMediaTime())
 }
 
-esv_mark_loading(c: int) {
-    if (esv_state[c] != ESV_LOADING) {
-        esv_state[c] = ESV_LOADING;
-        esv_since[c] = CACurrentMediaTime()
-    }
-}
-
-esv_ask(c: int, count: int) {
-    esv_inflight = c;
-    esv_mark_loading(c);
-    // (Its start, for the client's own limit; and the BSB's heights of what
-    // is asked measured now, off the fling, for its placeholders.)
-    esv_req_t[esv_req_i % len(esv_req_t)] = CACurrentMediaTime();
-    esv_req_i = esv_req_i + 1;
+// The request core asks for (sk_host.fetch: SK_FETCH_ESV): made, the BSB's
+// heights of what is asked measured now, off the fling, for its
+// placeholders; whether it began (else its failure shown).
+esv_fetch(what: int, c: int, count: int): bool {
+    if (what != SK_FETCH_ESV) return false;
     note_num("bible: esv asked ", c * 10 + count);
     if (text_cur == TEXT_ESV && table != 0) {
         for x in c..c + count
@@ -419,55 +378,23 @@ esv_ask(c: int, count: int) {
     fput_int(count);
     if (net_get_ns(fstring(), NET_CHAPTERS, c, count) == 0) {
         esv_inflight = -1;
-        esv_failed(c, count, ESV_OFFLINE, 0)
+        esv_failed(c, count, ESV_OFFLINE, 0);
+        return false
     }
+    true
 }
 
 // The next request: one asked for directly (Compare, a preview, Listen,
-// Try Again), or else the reader's next (esv_pump).
+// Try Again: core's queue), or else the reader's next (esv_pump).
 esv_next() {
-    if (esv_inflight >= 0) return;
-    if (esv_queued < 0) {
-        esv_pump();
-        return
-    }
-    c: int = esv_queued;
-    esv_queued = -1;
-    esv_ask(c, esv_queued_count)
+    if (!esv_next_queued(CACurrentMediaTime())) esv_pump()
 }
 
-// ---- the reader's window (DESIGN.md §9.4.11) ----
-// The landing chapter (where a glide will rest, or the reader is): the
-// chapters wanted are L - 1 to L + 2, asked for L, L + 1, L + 2, then
-// L - 1, one request at a time, the newest window always winning.
-esv_win_l: int = -1;
-
-// The starts of the last 20 requests: past 20 in 60 s, only a chapter on
-// the screen is asked for.
-esv_req_t: []f64 = new f64[20](-1000.0f64);
-
-esv_req_i: int = 0;
-
-esv_rate_ok(): bool {
-    oldest: f64 = esv_req_t[esv_req_i % len(esv_req_t)];
-    CACurrentMediaTime() - oldest >= 60.0f64
-}
-
+// ---- the reader's window (DESIGN.md §9.4.11): core's ----
 esv_window(l: int) {
     if (text_cur != TEXT_ESV || l < 0 || l >= chapters) return;
     esv_win_l = l;
     esv_pump()
-}
-
-// Whether chapter c is the reader's to ask for now: wanted, not on its way
-// or failed, and, if it is not on the screen, small enough and with room
-// to be held ahead, within the client's limit.
-esv_askable(c: int, on_screen: bool): bool {
-    if (c < 0 || c >= chapters || !esv_wanted(c, time(0)) || c == esv_inflight) return false;
-    st: int = esv_state[c];
-    if (st >= ESV_OFFLINE) return false;
-    if (on_screen) return true;
-    !esv_too_big(c) && esv_rate_ok() && esv_room_for(c)
 }
 
 // The client idle: the reader's next chapter asked for (a placeholder on
@@ -481,28 +408,8 @@ esv_pump() {
     note_num("bible: esv pump, on screen from ", ec_vis_lo);
     note_num("bible:   to ", ec_vis_hi);
     note_num("bible:   window at ", esv_win_l);
-    // (The chapter being read, first.)
-    if (cur >= 0 && esv_askable(cur, true)) {
-        esv_ask(cur, if (esv_askable(cur + 1, true)) 2 else 1);
-        return
-    }
-    if (ec_vis_lo >= 0) {
-        for c in ec_vis_lo..ec_vis_hi + 1 {
-            if (esv_askable(c, true)) {
-                esv_ask(c, if (esv_askable(c + 1, c + 1 <= ec_vis_hi || c + 1 == esv_win_l || c + 1 == esv_win_l + 1)) 2 else 1);
-                return
-            }
-        }
-    }
-    l: int = esv_win_l;
-    if (l < 0) return;
-    for d in [0, 1, 2, -1] {
-        c: int = l + d;
-        if (esv_askable(c, false)) {
-            esv_ask(c, if (d >= 0 && d < 2 && esv_askable(c + 1, false)) 2 else 1);
-            return
-        }
-    }
+    // (Core's order: the chapter being read, the screen's, the window's.)
+    esv_pump_reader(CACurrentMediaTime(), cur, ec_vis_lo, ec_vis_hi)
 }
 
 // ---- chapters come ----
@@ -586,10 +493,7 @@ esv_failed(
     retry: int
 ) {
     note_num("bible: esv failed, state ", state);
-    for x in c..c + count {
-        if (x < chapters && !esv_held(x)) esv_state[x] = state
-    }
-    if (state == ESV_BUSY || state == ESV_DAILY) esv_hold_until = CACurrentMediaTime() + (if (retry > 0) retry as f64 else 60.0f64);
+    esv_fail_states(c, count, state, retry, CACurrentMediaTime());
     esv_show_state(c);
     compare_esv_failed(state);
     preview_esv_failed(c, state);
@@ -1193,7 +1097,7 @@ esv_timer: int = 0;
 // asked again.
 esv_retry_timer() {
     if (esv_timer != 0) return;
-    esv_timer = after(30.0f64, "esvRetry:")
+    esv_timer = after(ESV_RETRY_EVERY, "esvRetry:")
 }
 
 esv_retry(_self: int, _cmd: int, _timer: int): int {
@@ -1204,8 +1108,7 @@ esv_retry(_self: int, _cmd: int, _timer: int): int {
     if (paths != 0) {
         for i in 0..msg(paths, sel("count")) {
             c: int = msg(msg1(paths, sel("objectAtIndex:"), i), sel("row"));
-            st: int = esv_state[c];
-            if (!esv_held(c) && (st == ESV_OFFLINE || st == ESV_UNAVAILABLE || (st == ESV_BUSY || st == ESV_DAILY) && CACurrentMediaTime() >= esv_hold_until)) {
+            if (esv_retry_due(c, CACurrentMediaTime())) {
                 any = true;
                 esv_want(c, 1)
             }

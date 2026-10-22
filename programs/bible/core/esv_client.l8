@@ -1,0 +1,190 @@
+tag bible;
+
+use_tag std;
+
+// Asking for the ESV's chapters (DESIGN.md §9.4.11), apart from any
+// platform: each chapter's state while it is not here, one request at a
+// time (a newer one waiting replaces the one waiting), the client's own
+// limit (past 20 requests in 60 s, only a chapter on the screen is asked
+// for), holding off after a busy or daily-limit answer, and the reader's
+// window (the chapter the reader lands in, L: the chapters wanted are L -
+// 1 to L + 2, asked for L, L + 1, L + 2, then L - 1; a chapter on the
+// screen first). The host makes each request (sk_host.fetch, SK_FETCH_ESV:
+// the chapter, how many) and gives the answer back; the clock is the
+// host's (seconds).
+import "skin.l8";
+
+SK_FETCH_ESV: int = 0;
+
+// Each chapter's state (ESV_), and when it began loading (for a spinner's
+// delay); chapters asked for Memory's pins alone (not the reader's).
+esv_state: []int = new int[1200](0);
+
+esv_since: []f64 = new f64[1200](0.0f64);
+
+esv_pin_only: []bool = new bool[1200](false);
+
+// Not to ask again before this (busy, resting for today).
+esv_hold_until: f64 = 0.0f64;
+
+// The request running (its chapter, -1: none), and the one waiting.
+esv_inflight: int = -1;
+
+esv_queued: int = -1;
+
+esv_queued_count: int = 1;
+
+// The starts of the last 20 requests; the landing chapter (-1: none).
+esv_req_t: []f64 = new f64[20](-1000.0f64);
+
+esv_req_i: int = 0;
+
+esv_win_l: int = -1;
+
+// Chapter c wanted (and count chapters from it): asked for, or queued.
+esv_want_now(c: int, count: int, now: f64) {
+    if (c < 0 || c >= chapters) return;
+    // (The reader wants it too now: held as any other.)
+    esv_pin_only[c] = false;
+    if (!esv_wanted(c, time(0)) && (count < 2 || c + 1 >= chapters || !esv_wanted(c + 1,
+        time(0)))) return;
+    if (esv_inflight == c) return;
+    if (now < esv_hold_until) return;
+    if (esv_inflight >= 0) {
+        // (The one it replaces is no longer on its way.)
+        if (esv_queued >= 0 && esv_queued != c && esv_state[esv_queued] == ESV_LOADING) esv_state[esv_queued] = 0;
+        esv_queued = c;
+        esv_queued_count = count;
+        esv_mark_loading(c, now);
+        return
+    }
+    esv_ask(c, count, now)
+}
+
+esv_mark_loading(c: int, now: f64) {
+    if (esv_state[c] != ESV_LOADING) {
+        esv_state[c] = ESV_LOADING;
+        esv_since[c] = now
+    }
+}
+
+// The request made (the host's), counted for the client's limit.
+esv_ask(c: int, count: int, now: f64) {
+    esv_inflight = c;
+    esv_mark_loading(c, now);
+    esv_req_t[esv_req_i % len(esv_req_t)] = now;
+    esv_req_i = esv_req_i + 1;
+    f: ?fn(what: int, a: int, b: int): bool = sk_host.fetch;
+    if (f == null) {
+        esv_inflight = -1;
+        esv_fail_states(c, count, ESV_OFFLINE, 0, now);
+        return
+    }
+    _ok: bool = f(SK_FETCH_ESV, c, count)
+}
+
+// The next request: one asked for directly (whether there was one; else
+// the host pumps the reader's next).
+esv_next_queued(now: f64): bool {
+    if (esv_inflight >= 0) return true;
+    if (esv_queued < 0) return false;
+    c: int = esv_queued;
+    esv_queued = -1;
+    esv_ask(c, esv_queued_count, now);
+    true
+}
+
+esv_rate_ok(now: f64): bool {
+    oldest: f64 = esv_req_t[esv_req_i % len(esv_req_t)];
+    now - oldest >= 60.0f64
+}
+
+// Whether chapter c is the reader's to ask for now: wanted, not on its way
+// or failed, and, if it is not on the screen, small enough and with room
+// to be held ahead, within the client's limit.
+esv_askable(c: int, on_screen: bool, now: f64): bool {
+    if (c < 0 || c >= chapters || !esv_wanted(c, time(0)) || c == esv_inflight) return false;
+    st: int = esv_state[c];
+    if (st >= ESV_OFFLINE) return false;
+    if (on_screen) return true;
+    !esv_too_big(c) && esv_rate_ok(now) && esv_room_for(c)
+}
+
+// The client idle: the reader's next chapter asked for: the chapter being
+// read (cur), then a placeholder on the screen (vis_lo to vis_hi), then
+// the window's.
+esv_pump_reader(
+    now: f64,
+    cur: int,
+    vis_lo: int,
+    vis_hi: int
+) {
+    if (esv_inflight >= 0 || now < esv_hold_until) return;
+    if (cur >= 0 && esv_askable(cur, true, now)) {
+        esv_ask(cur, if (esv_askable(cur + 1, true, now)) 2 else 1, now);
+        return
+    }
+    if (vis_lo >= 0) {
+        for c in vis_lo..vis_hi + 1 {
+            if (esv_askable(c, true, now)) {
+                esv_ask(c, if (esv_askable(c + 1, c + 1 <= vis_hi || c + 1 == esv_win_l || c + 1 == esv_win_l + 1,
+                    now)) 2 else 1, now);
+                return
+            }
+        }
+    }
+    l: int = esv_win_l;
+    if (l < 0) return;
+    for d in [0, 1, 2, -1] {
+        c: int = l + d;
+        if (esv_askable(c, false, now)) {
+            esv_ask(c, if (d >= 0 && d < 2 && esv_askable(c + 1, false, now)) 2 else 1,
+                now);
+            return
+        }
+    }
+}
+
+// A plan's day (§16.6): one of its chapters on the screen not here (its
+// rows lo to hi), else the day's first not here (by the cache's rules).
+esv_pump_day(now: f64, lo: int, hi: int) {
+    if (esv_inflight >= 0 || now < esv_hold_until) return;
+    for r in lo..hi + 1 {
+        if (r >= 0 && r < dy_n && esv_askable(dy_c[r], true, now)) {
+            esv_ask(dy_c[r], 1, now);
+            return
+        }
+    }
+    for r in 0..dy_n {
+        if (esv_askable(dy_c[r], false, now)) {
+            esv_ask(dy_c[r], 1, now);
+            return
+        }
+    }
+}
+
+// An answer that brought no chapters: their states (those not held), and,
+// busy or at the daily limit, a rest (the server's, else a minute).
+esv_fail_states(
+    c: int,
+    count: int,
+    state: int,
+    retry: int,
+    now: f64
+) {
+    for x in c..c + count {
+        if (x < chapters && !esv_held(x)) esv_state[x] = state
+    }
+    if (state == ESV_BUSY || state == ESV_DAILY) esv_hold_until = now + (if (retry > 0) retry as f64 else 60.0f64)
+}
+
+// Whether chapter c, on the screen and not here, is asked for again (every
+// 30 s while one is: one that could not come; busy or the daily limit,
+// once the rest is over).
+ESV_RETRY_EVERY: f64 = 30.0f64;
+
+esv_retry_due(c: int, now: f64): bool {
+    if (c < 0 || c >= chapters || esv_held(c)) return false;
+    st: int = esv_state[c];
+    st == ESV_OFFLINE || st == ESV_UNAVAILABLE || (st == ESV_BUSY || st == ESV_DAILY) && now >= esv_hold_until
+}

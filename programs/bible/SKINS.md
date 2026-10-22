@@ -298,7 +298,9 @@ From the skin:
 
 A host in L8 (android/main.l8) reads files and keeps the settings for core
 (`sk_host`: `save_prefs`, `save_kept` for what is kept, `words` and `num`
-for what only it knows, `fill` for its lists: `SK_NUM_MEMORY_TEXT`, a
+for what only it knows, `fill` for its lists, `fetch` for the requests it
+makes (`SK_FETCH_ESV`: the ESV's chapters, asked for by
+`core/esv_client.l8`'s rules, one at a time); `SK_NUM_MEMORY_TEXT`, a
 passage's words laid out, defaults to core's own from a loaded version),
 and handles lines of its own
 before core's (Android's `files DIR`). A version core wants that isn't
