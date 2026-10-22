@@ -36,7 +36,7 @@ final class Panel extends FrameLayout {
   final HashMap<Integer, Screen> screens = new HashMap<>();
   final ArrayList<Integer> stack = new ArrayList<>();
   private final LinearLayout page;
-  private final TextView title, back, button, empty;
+  private final TextView title, back, button, empty, tool;
   private final ListView list;
   private final Rows rows = new Rows();
   // The screen's field (Go To's): what is typed goes to core as it is
@@ -124,6 +124,17 @@ final class Panel extends FrameLayout {
     empty.setPadding(dp(32), dp(32), dp(32), dp(32));
     empty.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
     page.addView(empty, new LinearLayout.LayoutParams(-1, 0, 1));
+    // (The button at a screen's foot: Start Plan.)
+    tool = new TextView(c);
+    tool.setGravity(Gravity.CENTER);
+    tool.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+    tool.setPadding(dp(16), dp(14), dp(16), dp(14));
+    tool.setOnClickListener(v -> {
+      Screen s = rows.screen;
+      if (s != null && s.toolStyle != 3)
+        Native.send("act " + s.id + " " + s.toolAction + " " + s.toolArg + " 0");
+    });
+    page.addView(tool, new LinearLayout.LayoutParams(-1, -2));
     addView(page, new LayoutParams(-1, -1));
     setVisibility(GONE);
   }
@@ -209,6 +220,8 @@ final class Panel extends FrameLayout {
     title.setTextColor(look.ink);
     back.setTextColor(look.accent);
     button.setTextColor(look.accent);
+    Screen top = rows.screen;
+    tool.setTextColor(top != null && top.toolStyle == 2 ? 0xffd32f2f : look.accent);
     field.setTextColor(look.ink);
     field.setHintTextColor(look.faint);
     empty.setTextColor(look.faint);
@@ -256,6 +269,10 @@ final class Panel extends FrameLayout {
     list.setVisibility(showEmpty ? GONE : VISIBLE);
     back.setText(stack.size() > 1 ? "‹" : "✕");
     back.setContentDescription(stack.size() > 1 ? "Back" : "Close");
+    tool.setText(s.toolbar);
+    tool.setVisibility(s.toolbar.isEmpty() ? GONE : VISIBLE);
+    tool.setTypeface(s.toolStyle == 1 ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+    tool.setAlpha(s.toolStyle == 3 ? 0.4f : 1);
     rows.set(s);
     restyle();
     if (fresh && rows.focusItem >= 0) list.setSelectionFromTop(rows.focusItem, dp(160));
@@ -341,6 +358,7 @@ final class Panel extends FrameLayout {
       items.clear();
       focusItem = -1;
       int n = 0;
+      if (!s.intro.isEmpty()) items.add(new Intro(s.intro));
       for (Screen.Section sec : s.sections) {
         items.add(new Header(sec.header, sec.button, sec.buttonAction));
         for (Screen.Row r : sec.rows) {
@@ -400,6 +418,14 @@ final class Panel extends FrameLayout {
         line.addView(b);
         return line;
       }
+      if (o instanceof Intro) {
+        TextView t = new TextView(c);
+        t.setText(((Intro) o).text);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        t.setTextColor((look.ink & 0x00ffffff) | 0xcc000000);
+        t.setPadding(dp(20), dp(16), dp(20), dp(4));
+        return t;
+      }
       if (o instanceof Footer) {
         TextView t = new TextView(c);
         t.setText(((Footer) o).text);
@@ -420,6 +446,19 @@ final class Panel extends FrameLayout {
       line.setAlpha(r.flag('d') ? 0.4f : 1);
       // (What TalkBack says for it, as core words it.)
       if (!r.label.isEmpty()) line.setContentDescription(r.label);
+      if (r.circle > 0) {
+        // (A day's circle: read, partly, not; dimmed and inert, k.)
+        TextView ci = new TextView(c);
+        ci.setText(r.circle == 3 ? "●" : r.circle == 2 ? "◐" : "○");
+        ci.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        ci.setTextColor(r.circle == 1 ? look.faint : look.accent);
+        ci.setPadding(0, 0, dp(14), 0);
+        boolean off = r.flag('k');
+        ci.setAlpha(off ? 0.4f : 1);
+        if (!off) ci.setOnClickListener(v -> Native.send("act " + screen.id + " " + r.circleAction
+            + " " + r.arg + " 0"));
+        line.addView(ci);
+      }
       LinearLayout words = new LinearLayout(c);
       words.setOrientation(LinearLayout.VERTICAL);
       TextView t = new TextView(c);
@@ -468,7 +507,7 @@ final class Panel extends FrameLayout {
         TextView tr = new TextView(c);
         tr.setText(r.trailing);
         tr.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        tr.setTextColor(look.faint);
+        tr.setTextColor(r.flag('a') ? look.accent : look.faint);
         tr.setPadding(dp(12), 0, 0, 0);
         line.addView(tr);
       }
@@ -562,6 +601,14 @@ final class Panel extends FrameLayout {
 
   // core/skin.l8's CUSTOM_HIT: a verse a search found.
   static final int CUSTOM_HIT = 5;
+
+  private static final class Intro {
+    final String text;
+
+    Intro(String t) {
+      text = t;
+    }
+  }
 
   private static final class Header {
     final String text, button;

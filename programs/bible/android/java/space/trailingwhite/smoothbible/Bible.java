@@ -210,7 +210,16 @@ public final class Bible extends Activity {
         building.emptySymbol = w.field(1);
         building.emptyTitle = w.field(2);
         building.emptyLine = w.field(3);
-      } else if (word.equals("focus")) building.focus = w.num(1);
+      } else if (word.equals("focus")) {
+        building.focus = w.num(1);
+        building.focusSelect = w.num(2) == 1;
+      } else if (word.equals("intro")) building.intro = w.field(1);
+      else if (word.equals("toolbar")) {
+        building.toolAction = w.fieldNum(1);
+        building.toolArg = w.fieldNum(2);
+        building.toolbar = w.field(3);
+        building.toolStyle = w.fieldNum(4);
+      }
       else if (word.equals("field")) {
         building.searchText = w.field(1);
         building.wait = w.fieldNum(2);

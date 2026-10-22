@@ -112,12 +112,15 @@ From core:
 | `field` TEXT WAIT FLAGS | after `screen`, if it has a field: its words now, how long typing rests before it is sent (ms; 0 at once), `g` Return goes (Go To), `f` it takes the keys as the screen opens |
 | `scopes` VALUE TITLES LABELS | the field's scopes (titles and spoken labels split by `\|`), the one chosen |
 | `plain` | a plain list, not grouped (Search's results) |
-| `focus N` | after `screen`: the screen opens at its Nth row (of all, from 0): Go To at the book read |
+| `focus N [1]` | after `screen`: the screen opens at its Nth row (of all, from 0): Go To at the book read; 1, selected too (the day a plan's days were opened for) |
+| `intro` TEXT | words above the first section (a plan's description) |
+| `toolbar` ACTION ARG TITLE STYLE | a button at the screen's foot doing ACTION with ARG (Start Plan): STYLE 0 plain, 1 prominent, 2 destructive (Stop Plan), 3 off |
 | `row` KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS VALUE OPTIONS LO HI LABEL | a row (below); LABEL what a screen reader says, if not its words |
 | `present ID`, `push ID`, `update ID`, `pop`, `dismiss` | what to do with screens |
 | `refill ID FADE` | screen ID made again as its field is typed in: its rows at once, the field as it is (FADE 1: what it shows changed kind, recent searches giving way to results: a cross-fade) |
 | `retext ID` | screen ID's field to show the screen's words (a recent search chosen) |
 | `blur ID` | the keyboard put away (Return in Search) |
+| `marked SLOT DAY`, `plan_start P`, `plan_stop P` | a plan's day marked read or not (the host keeps the plan's file, says today is done, schedules its reminders); Start Plan and Stop Plan, the host's (its files, reminders and the day's reader) |
 | `searched`, `esv_search PAGE` | Search searched again (a platform's own results for what it searched before are gone); the ESV's search asked for (the iPhone's, from its server) |
 | `reader N` | the reader has N chapters (the version changed, or at the start) |
 | `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA` (UTF-16 places; core/text.l8's `STYLE_` and `PARA_`) and `verse V A B` lines, then `end` |
@@ -146,8 +149,11 @@ reader is: its title heavier, its icon larger, its words up to two lines),
 `t` its title in the accent (a link: Show All), `g` its icon faint; after
 HINT, MARKS: places in the detail to stress, pairs of UTF-16 offsets split by
 spaces (the words a search found), and LINES, the most lines of its detail
-(0: as many as it needs); `m` its detail smaller (a note: Versions'
-lines); a
+(0: as many as it needs), then CIRCLE and CIRCLE_ACTION: a circle at its
+start (0 none; 1 empty, 2 half, 3 full: a plan's day not read, partly,
+read) doing CIRCLE_ACTION with the row's ARG; `m` its detail smaller (a
+note: Versions' lines), `k` its circle dimmed and inert (a plan not
+followed), `a` its trailing words in the accent (Today); a
 choice's OPTIONS are its labels split by `|`, VALUE the one chosen; a slider
 goes from LO to HI.
 
@@ -182,8 +188,9 @@ action goes to core (`sk_act`); its effects are done the iPhone's way
 (`push` into the navigation the action came from, `present` as a sheet,
 `update` a cross-fade and reload, `dismiss`). The platform's work stays the
 app's: core's version switch is the iPhone's `switch_version`. Moved so far:
-Versions, History, the reading settings, Go To, Search and Reading Plans
-(2026-10-21). Core's screens are the app's own controller class
+Versions, History, the reading settings, Go To, Search, Reading Plans and a
+plan's days (2026-10-21; a plan's reminder is a host section, its switch
+and time the iPhone's notifications). Core's screens are the app's own controller class
 (`L8CoreList`), made again as they come back from a screen pushed over
 them.
 Search's recent searches stay in the iPhone's defaults (`recentSearches`):

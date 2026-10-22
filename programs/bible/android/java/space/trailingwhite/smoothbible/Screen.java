@@ -16,6 +16,12 @@ final class Screen {
   int wait, scope;
   boolean go, focusField, plain;
   String[] scopes = new String[0], scopeLabels = new String[0];
+  // Words above its first section, whether its focus row is selected too,
+  // and the button at its foot (its action, argument, title and style:
+  // 0 plain, 1 prominent, 2 destructive, 3 off).
+  String intro = "", toolbar = "";
+  boolean focusSelect;
+  int toolAction, toolArg, toolStyle;
   // What it shows with no rows, and its button's title and commands.
   String emptySymbol = "", emptyTitle = "", emptyLine = "", button = "";
   final ArrayList<Command> commands = new ArrayList<>();
@@ -36,7 +42,7 @@ final class Screen {
   static final class Row {
     String kind = "", title = "", detail = "", icon = "", acc = "", flags = "", options = "",
         label = "", trailing = "", hint = "";
-    int action, arg, value, lo, hi, deleteAction, custom, lines;
+    int action, arg, value, lo, hi, deleteAction, custom, lines, circle, circleAction;
     // Places in the detail to stress: pairs of UTF-16 offsets.
     int[] marks = new int[0];
 
@@ -66,6 +72,8 @@ final class Screen {
     r.custom = w.fieldNum(16);
     r.hint = w.field(17);
     r.lines = w.fieldNum(19);
+    r.circle = w.fieldNum(20);
+    r.circleAction = w.fieldNum(21);
     String m = w.field(18).trim();
     if (!m.isEmpty()) {
       String[] parts = m.split(" ");
