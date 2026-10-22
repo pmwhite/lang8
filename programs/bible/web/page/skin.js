@@ -420,7 +420,7 @@ function newScreen(w) {
 
 // ---- what core said ----
 function said(text) {
-  if (DEBUG) console.log("← " + text.slice(0, 300).replace(/\n/g, " ⏎ "));
+  if (DEBUG) console.log("← " + text.replace(/\n/g, " ⏎ "));
   let p = 0;
   while (p < text.length) {
     let e = text.indexOf("\n", p);
@@ -596,6 +596,12 @@ function line(w) {
     case "audio_stop":
       sound.stop();
       break;
+    case "timer": {
+      // (core's timer: told when it is up.)
+      const tok = w.num(1);
+      setTimeout(() => send(`timer ${tok}`), Math.max(0, w.num(2)));
+      break;
+    }
     case "speech_stop":
       voice.stop();
       break;
@@ -1422,7 +1428,13 @@ const panel = {
     for (const t of s.tools) {
       const b = el("button", `tool st${t.style}`);
       b.type = "button";
-      b.textContent = t.title || t.label || glyph(t.icon);
+      // (A title; else core's icon, drawn, its label spoken.)
+      const ic = SYMBOLS[t.icon];
+      if (t.title) b.textContent = t.title;
+      else if (ic) {
+        b.appendChild(icon(ic));
+        b.classList.add("icon");
+      } else b.textContent = t.label || glyph(t.icon);
       if (t.label) b.setAttribute("aria-label", t.label);
       b.disabled = t.style === 3;
       b.addEventListener("click", () => {
@@ -1801,6 +1813,14 @@ function marked(node, r) {
   }
   node.append(r.detail.slice(at));
 }
+
+// Core's icons (Apple's symbols' names) as the page's own (icons.svg).
+const SYMBOLS = {
+  "play.fill": "play", repeat: "repeat", "speaker.wave.2": "volume", keyboard: "keyboard",
+  "keyboard.chevron.compact.down": "keyboard-off", plus: "plus", "square.and.arrow.up": "share",
+  "square.and.pencil": "pencil", "chevron.up": "chevron-up", "chevron.down": "chevron-down",
+  "pause.fill": "pause", "stop.fill": "square",
+};
 
 // An icon core names (an SF Symbol's name) as a character, where one reads
 // as it ("" for those left out).

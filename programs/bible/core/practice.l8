@@ -192,6 +192,7 @@ px_start(how: int, arg: int) {
 }
 
 px_closed() {
+    pxw_stop();
     px_live = false;
     crd_reading = -1;
     px_step = PX_END;
@@ -1492,7 +1493,7 @@ sk_px_act(
     if (action == ACT_PX_LEVEL) px_set_level(value) else if (action == ACT_PX_MAIN) px_main() else if (action == ACT_PX_AGAIN) px_again() else if (action == ACT_PX_GRADE) px_grade(arg) else if (action == ACT_PX_WORD) px_show_word(arg) else if (action == ACT_PX_VERSE) _v: bool = px_show_verse(arg) else if (action == ACT_PX_READ_AGAIN) px_reading_again() else if (action == ACT_PX_TYPE) {
         px_typing_set(!px_keys_up);
         px_keys_set(!px_keys_up)
-    } else if (action == ACT_PX_KEY) px_type(arg) else ui_effect("practice_audio",
+    } else if (action == ACT_PX_KEY) px_type(arg) else if (hs_on && (action == ACT_PX_LISTEN || action == ACT_PX_ECHO)) pxw_press(if (action == ACT_PX_LISTEN) 1 else 2) else ui_effect("practice_audio",
         action, arg);
     // (What changed: all of it, made again.)
     px_changed = 0;
@@ -1671,4 +1672,162 @@ pxa_next_chapter(x: int): int {
 // Echo's next verse after the pause (-1: the end, playback stopped).
 pxa_next(): int {
     if (pxa_x + 1 > pxa_x1) -1 else pxa_x + 1
+}
+
+// ---- Listen and Echo, for a skin without its own Practice audio ----
+// (Core plays them through the skin's primitives, as Listen does: a
+// recording's clip (audio_play), or the voice (say), and Echo's pause
+// (timer TOKEN MS, the skin's answer timer TOKEN). Their tokens are
+// PXW_TOK and up, and the voice's verses PXW_SAY plus the verse's place.)
+PXW_TOK: int = 1000000;
+
+PXW_SAY: int = 100000;
+
+pxw_tok: int = PXW_TOK;
+
+pxw_avail(s: int, c: int): bool {
+    audio_effective(s, c, false, true, lw_failed_at[s], ew_now()) == s
+}
+
+// Listen (1) or Echo (2) pressed.
+pxw_press(mode: int) {
+    k: int = pxa_press(mode);
+    if (k == PXA_NONE) return;
+    if (pxa_mode != 0) pxw_stop();
+    if (k == PXA_STOP) return;
+    if (lw_on) lw_stop();
+    s: int = clamp_index(sk_num_of(SK_NUM_AUDIO_SOURCE, mq_ver[px_i]), SOURCES);
+    if (!pxa_plan(mode, s, &pxw_avail)) return;
+    pxw_verse(pxa_x0)
+}
+
+// Verse x heard: Listen's to the passage's last verse in its chapter (or,
+// by the voice, to its end), Echo's alone.
+pxw_verse(x: int) {
+    pxa_x = x;
+    px_wash = x;
+    px_turn = -1;
+    pxw_paint();
+    listen: bool = pxa_mode == 1;
+    if (pxa_player) {
+        c: int = mv_c[x];
+        last: int = if (listen) pxa_last_in_chapter(x) else x;
+        audio_url(pxa_src, c);
+        if (au_n > 0) {
+            pxw_tok = pxw_tok + 1;
+            if (!ui_wire) return;
+            ui_effect("speech_stop", -1, -1);
+            ui_str("audio_play ");
+            ui_int(pxw_tok);
+            ui_byte(32);
+            ui_int(c);
+            ui_byte(32);
+            ui_int(pxa_from(x));
+            ui_byte(32);
+            ui_int(pxa_to(last));
+            ui_byte(32);
+            ui_int((lw_rate() * 1000.0f64) as int);
+            ui_byte(9);
+            ui_field_bytes(au, 0, au_n);
+            ui_byte(10);
+            return
+        }
+        pxa_player = false
+    }
+    // (The voice: its verses said in turn.)
+    ui_effect("audio_stop", -1, -1);
+    ui_effect("speech_stop", -1, -1);
+    last: int = if (listen) pxa_x1 else x;
+    t: int = mq_ver[px_i];
+    if (t == TEXT_ESV) {
+        esv_pin_build(mq_id[px_i]);
+        t = TEXT_PIN
+    }
+    source: TextSource = ready_source(t);
+    for y in x..last + 1 {
+        _n: int = source_speak_text(&source, mv_c[y], mv_v[y]);
+        fbuf_n = 0;
+        fput_bytes(vt, 0, vt_n);
+        lw_say(PXW_SAY + y, mv_v[y])
+    }
+}
+
+// The clip's place: the verse being heard washed.
+pxw_time(tok: int, t: int) {
+    if (tok != pxw_tok || pxa_mode != 1) return;
+    c: int = mv_c[pxa_x];
+    v: int = audio_verse_at(pxa_src, c, t);
+    for x in pxa_x..pxa_x1 + 1 {
+        if (mv_c[x] == c && mv_v[x] == v && x != px_wash) {
+            px_wash = x;
+            pxw_paint()
+        }
+    }
+}
+
+// The clip's end: Listen on to the next chapter's part; Echo's pause.
+pxw_ended(tok: int) {
+    if (tok != pxw_tok || pxa_mode == 0) return;
+    if (pxa_mode == 1) {
+        n: int = pxa_next_chapter(pxa_x);
+        if (n >= 0) pxw_verse(n) else pxw_stop();
+        return
+    }
+    pxw_pause(pxa_to(pxa_x) - pxa_from(pxa_x))
+}
+
+// A verse said by the voice (y its place): Listen washes the next; Echo
+// pauses after it (its length guessed by its words).
+pxw_spoken(y: int) {
+    if (pxa_mode == 0 || y < pxa_x0 || y > pxa_x1) return;
+    if (pxa_mode == 1) {
+        if (y >= pxa_x1) {
+            pxw_stop();
+            return
+        }
+        px_wash = y + 1;
+        pxw_paint();
+        return
+    }
+    words: int = 1;
+    for w in 0..mw_n
+        if (mw_vi[w] == y) words = words + 1;
+    pxw_pause(words * 40)
+}
+
+// Echo's turn: the verse's length again and a second, its words
+// underlined, then the next.
+pxw_pause(cs: int) {
+    px_wash = -1;
+    px_turn = pxa_x;
+    pxw_paint();
+    pxw_tok = pxw_tok + 1;
+    ui_effect("timer", pxw_tok, pxa_pause(cs) * 10)
+}
+
+pxw_timer(tok: int) {
+    if (tok != pxw_tok || pxa_mode != 2) return;
+    n: int = pxa_next();
+    if (n < 0) pxw_stop() else pxw_verse(n)
+}
+
+pxw_stop() {
+    if (pxa_mode == 0 && px_wash < 0 && px_turn < 0) return;
+    pxa_mode = 0;
+    px_wash = -1;
+    px_turn = -1;
+    pxw_tok = pxw_tok + 1;
+    ui_effect("audio_stop", -1, -1);
+    ui_effect("speech_stop", -1, -1);
+    pxw_paint()
+}
+
+// Practice's screen made again (its words' looks, its buttons).
+pxw_paint() {
+    for i in 0..sk_n {
+        if (sk_kinds[i] == SCR_PRACTICE) {
+            sk_build(i);
+            ui_effect("update", sk_ids[i], -1)
+        }
+    }
 }
