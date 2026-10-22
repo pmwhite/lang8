@@ -440,7 +440,7 @@ final class Panel extends FrameLayout {
       if (!r.detail.isEmpty() && !valueDetail) {
         TextView d = new TextView(c);
         d.setText(marked(r));
-        d.setTextSize(TypedValue.COMPLEX_UNIT_SP, hit ? 16 : 14);
+        d.setTextSize(TypedValue.COMPLEX_UNIT_SP, hit ? 16 : r.flag('m') ? 13 : 14);
         d.setTextColor(hit ? (look.ink & 0x00ffffff) | 0xcc000000 : look.faint);
         if (hit) {
           // (Its words as the reader's, up to four lines.)
@@ -449,9 +449,10 @@ final class Panel extends FrameLayout {
           d.setMaxLines(4);
           d.setEllipsize(TextUtils.TruncateAt.END);
           d.setPadding(0, dp(3), 0, 0);
-        } else if (r.flag('s')) {
-          // (The Bible's words: a line, or two for the row to go to.)
-          d.setMaxLines(r.flag('b') ? 2 : 1);
+        } else if (r.flag('s') || r.lines > 0) {
+          // (The Bible's words: a line, or two for the row to go to; or
+          // as many as the row says.)
+          d.setMaxLines(r.lines > 0 ? r.lines : r.flag('b') ? 2 : 1);
           d.setEllipsize(TextUtils.TruncateAt.END);
         }
         words.addView(d);
@@ -480,11 +481,12 @@ final class Panel extends FrameLayout {
           d.setPadding(dp(12), 0, dp(4), 0);
           line.addView(d);
         }
-        String mark = r.acc.equals("check") ? "✓" : r.acc.equals("more") ? "›" : "";
+        boolean done = r.acc.equals("done");
+        String mark = r.acc.equals("check") || done ? "✓" : r.acc.equals("more") ? "›" : "";
         if (!mark.isEmpty()) {
           TextView a = new TextView(c);
           a.setText(mark);
-          a.setTextSize(TypedValue.COMPLEX_UNIT_SP, r.acc.equals("check") ? 18 : 22);
+          a.setTextSize(TypedValue.COMPLEX_UNIT_SP, r.acc.equals("more") ? 22 : 18);
           a.setTextColor(r.acc.equals("check") ? look.accent : look.faint);
           a.setPadding(dp(8), 0, 0, 0);
           line.addView(a);

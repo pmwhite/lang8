@@ -138,14 +138,16 @@ by its kind) and HINT (what VoiceOver adds). `goto C V` puts the screens away an
 moves the reader (the iPhone's own jump).
 
 A row's KIND is `item`, `toggle`, `choice`, `slider`, `field`, `button` or
-`custom`; ACC is empty, `more`, `check` or `info`; FLAGS are letters: `d`
+`custom`; ACC is empty, `more`, `check`, `info` or `done` (a faint check: today's reading read); FLAGS are letters: `d`
 disabled, `x` destructive, `o` on, `v` the detail is a value on the right, `s`
 the detail is the Bible's words (the divine name in small capitals), `f` its
 words faint (nothing to do), `b` strong (the row to go to, or where the
 reader is: its title heavier, its icon larger, its words up to two lines),
 `t` its title in the accent (a link: Show All), `g` its icon faint; after
 HINT, MARKS: places in the detail to stress, pairs of UTF-16 offsets split by
-spaces (the words a search found); a
+spaces (the words a search found), and LINES, the most lines of its detail
+(0: as many as it needs); `m` its detail smaller (a note: Versions'
+lines); a
 choice's OPTIONS are its labels split by `|`, VALUE the one chosen; a slider
 goes from LO to HI.
 
@@ -180,7 +182,10 @@ action goes to core (`sk_act`); its effects are done the iPhone's way
 (`push` into the navigation the action came from, `present` as a sheet,
 `update` a cross-fade and reload, `dismiss`). The platform's work stays the
 app's: core's version switch is the iPhone's `switch_version`. Moved so far:
-Versions, History, the reading settings, Go To and Search (2026-10-21).
+Versions, History, the reading settings, Go To, Search and Reading Plans
+(2026-10-21). Core's screens are the app's own controller class
+(`L8CoreList`), made again as they come back from a screen pushed over
+them.
 Search's recent searches stay in the iPhone's defaults (`recentSearches`):
 core keeps them while it runs and asks the host to keep them
 (`SK_KEPT_SEARCHES`). Its ESV results, from the iPhone's server, are a host

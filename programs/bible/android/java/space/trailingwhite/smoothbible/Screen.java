@@ -36,7 +36,7 @@ final class Screen {
   static final class Row {
     String kind = "", title = "", detail = "", icon = "", acc = "", flags = "", options = "",
         label = "", trailing = "", hint = "";
-    int action, arg, value, lo, hi, deleteAction, custom;
+    int action, arg, value, lo, hi, deleteAction, custom, lines;
     // Places in the detail to stress: pairs of UTF-16 offsets.
     int[] marks = new int[0];
 
@@ -65,6 +65,7 @@ final class Screen {
     r.deleteAction = w.fieldNum(15);
     r.custom = w.fieldNum(16);
     r.hint = w.field(17);
+    r.lines = w.fieldNum(19);
     String m = w.field(18).trim();
     if (!m.isEmpty()) {
       String[] parts = m.split(" ");
