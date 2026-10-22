@@ -22,7 +22,7 @@ final class Voice {
       tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
         @Override
         public void onStart(String id) {
-          Native.send("spoke " + id.replace(':', ' '));
+          Native.send("spoke " + id.replace(':', ' ') + " " + Reader.now());
         }
 
         @Override
