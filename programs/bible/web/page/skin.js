@@ -528,6 +528,9 @@ function line(w) {
     case "version":
       bar.version(w.field(1));
       break;
+    case "carried":
+      bar.carried(w.word(1), w.field(1));
+      break;
     case "selection":
       reader.selection(w.field(1));
       break;
@@ -561,6 +564,17 @@ function line(w) {
     case "toast":
       toast(w.field(1));
       break;
+    case "savefile": {
+      // (A file to save: downloaded, as a page saves one.)
+      const a = el("a");
+      a.href = URL.createObjectURL(new Blob([w.field(2)], { type: "text/plain;charset=utf-8" }));
+      a.download = w.field(1);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      break;
+    }
     case "memorized":
       toast("Added to Memory");
       break;
@@ -627,6 +641,21 @@ const bar = {
     $(".t", this.titleButton).textContent = t;
     this.titleButton.setAttribute("aria-label", `${t}, Go To`);
     document.title = `${t} · Smooth Bible`;
+  },
+  // The ribbon carried: a strip of its color before the title.
+  carried(hex, words) {
+    let m = $(".bar .ribbon");
+    if (!m) {
+      m = el("span", "ribbon");
+      m.setAttribute("role", "img");
+      this.titleButton.prepend(m);
+    }
+    m.hidden = hex === "-";
+    if (hex !== "-") {
+      m.style.background = "#" + hex;
+      m.setAttribute("aria-label", words);
+      m.title = words;
+    }
   },
   version(v) {
     this.versionWord = v;
