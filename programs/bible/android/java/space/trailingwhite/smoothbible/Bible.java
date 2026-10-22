@@ -493,6 +493,9 @@ public final class Bible extends Activity {
       case "tray_away":
         tray.hide();
         break;
+      case "selection":
+        reader.selection(w.field(1));
+        break;
       case "clear_selection":
         reader.clearSelection();
         tray.hide();

@@ -124,7 +124,7 @@ platform does are the host's (below); a skin that doesn't do one ignores it.
 Every list in the app is core's, and so are (2026-10-22) the chapter grid,
 a verse's Study (the interlinear, cross references, the commentary), a
 word's definition, the Manual's pages, the note editor, the selection
-tray and its menus (`select`, `trayact`), the title's menu (`titlemenu`,
+tray and its menus (`tapverse`, `trayact`), the title's menu (`titlemenu`,
 `menuact`), Practice (below), a plan's day, a reference's preview and a
 footnote. What each skin still draws itself is drawing only, from core's
 models, words and rules:
@@ -279,7 +279,7 @@ Other lines from core:
 | `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation |
 | `url` ADDRESS | a page outside the app to open |
 | `place C V*1000+FRAC`, `back` WORDS | the reader to a place (a ribbon's, the way back's); the capsule's words (none: away). A skin with jumps of its own (`SK_NUM_OWN_JUMPS`: the iPhone) does `core/jump.l8`'s steps itself and gets `goto`, `ribbon_open`, `ribbon_added` instead |
-| `awake MS` | Keep Screen On: the screen kept on MS more (after a `rest`, a `select`), or let go now (0: a sheet opened, the setting off). A skin offers the setting with `sk_has_keep_on` |
+| `awake MS` | Keep Screen On: the screen kept on MS more (after a `rest`, a tap), or let go now (0: a sheet opened, the setting off). A skin offers the setting with `sk_has_keep_on` |
 | `settings` | a setting changed that doesn't lay the text out again |
 
 The host's effects (what only a platform can do; a skin without one ignores
@@ -315,7 +315,8 @@ From the skin:
 | `place C V FRAC` | the reader's top: chapter, verse, thousandths of an em into it |
 | `dark 0/1` | the system's appearance changed |
 | `away` | the app put away: the settings kept now |
-| `select C V...` | the verses selected (none: the tray away); the tray's model written as screen 0 |
+| `tapverse C V`, `tapnone` | a verse tapped (core toggles it: another chapter's starts again), or the reader elsewhere (the selection let go); core says `selection` C V... (C -1: none) for the skin to paint, and writes the tray's model as screen 0 (`tray`, `tray_away`). A skin hit-tests in this order: a footnote's mark, a word of the original, a reference, a note's mark, the ESV's line, a chapter's note, then a verse (within a few points), else elsewhere |
+| `select C V...` | the verses selected, whole (none: the tray away), for a skin that keeps its own selection |
 | `trayact ACTION V`, `titlemenu`, `menuact ACTION ARG` | a tray's button; the title's menu's model, as screen 0; one of its items |
 | `versestudy C V` | verse C:V's Study, as core's screen (a skin's answer to `study_verse`) |
 | `spoke C V MS`, `spoken C V`, `listenstop` | the skin's voice began (MS its clock: following waits 8 s after a finger moves the reader) and finished saying verse C:V (0 the chapter's title), or was stopped: a skin without its own Listen (`SK_NUM_OWN_LISTEN`) speaks what core's session gives it (`say C V` WORDS, `player` TITLE STATE, `follow C V`, `listen_stop`) |

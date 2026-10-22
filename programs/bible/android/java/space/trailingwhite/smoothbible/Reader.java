@@ -245,11 +245,13 @@ final class Reader extends ListView {
   private void tapped(float x, float y) {
     int c = pointToPosition((int) x, (int) y);
     View row = c == INVALID_POSITION ? null : childFor(c);
-    if (!(row instanceof TextView)) return;
-    TextView tv = (TextView) row;
-    Layout l = tv.getLayout();
+    TextView tv = row instanceof TextView ? (TextView) row : null;
+    Layout l = tv == null ? null : tv.getLayout();
     int[] vs = verses.get(c);
-    if (l == null || vs == null) return;
+    if (l == null || vs == null) {
+      Native.send("tapnone");
+      return;
+    }
     int line = l.getLineForVertical((int) y - row.getTop() - tv.getPaddingTop());
     int off = l.getOffsetForHorizontal(line, x - tv.getPaddingLeft());
     // (A footnote's mark or a reference under the finger, give or take a
@@ -263,18 +265,29 @@ final class Reader extends ListView {
         }
       }
     }
+    // (A verse: core toggles it, and says the selection; elsewhere, it is
+    // let go.)
     int v = 0;
     for (int i = 0; i < vs.length; i += 3) if (off >= vs[i + 1] && off < vs[i + 2]) v = vs[i];
-    if (v <= 0) return;
-    if (c != selC) clearSelection();
+    Native.send(v > 0 ? "tapverse " + c + " " + v : "tapnone");
+  }
+
+  // Core's selection (its chapter, -1 none, then its verses), painted.
+  void selection(String words) {
+    String[] w = words.trim().split(" ");
+    int c = -1;
+    try {
+      c = Integer.parseInt(w[0]);
+    } catch (NumberFormatException e) {
+      // (None.)
+    }
+    int was = selC;
+    sel.clear();
     selC = c;
-    if (!sel.remove(v)) sel.add(v);
-    markSelection(c);
+    for (int i = 1; i < w.length && c >= 0; i++) sel.add(Integer.parseInt(w[i]));
+    if (was >= 0 && was != c) markSelection(was);
+    if (c >= 0) markSelection(c);
     changed();
-    StringBuilder b = new StringBuilder("select " + c);
-    for (int k : sel) b.append(' ').append(k);
-    Native.send(b.toString());
-    if (sel.isEmpty()) selC = -1;
   }
 
   // The selection washed (an underline of the accent's color under it).
