@@ -203,6 +203,22 @@ final class Reader extends ListView {
     post(this::rested);
   }
 
+  // Listen's verse followed: the reader moved to it if it isn't on the
+  // screen (and no finger is on it).
+  void follow(int c, int v) {
+    if (c < 0 || c >= count) return;
+    View row = childFor(c);
+    int[] r = range(c, v);
+    if (row instanceof TextView && r != null) {
+      Layout l = ((TextView) row).getLayout();
+      if (l != null) {
+        int y = row.getTop() + ((TextView) row).getPaddingTop() + l.getLineTop(l.getLineForOffset(r[0]));
+        if (y > topInset && y < getHeight() - getPaddingBottom() - 200) return;
+      }
+    }
+    jump(c, v);
+  }
+
   // Verse v's place in chapter c's text (null: not there).
   private int[] range(int c, int v) {
     int[] vs = verses.get(c);

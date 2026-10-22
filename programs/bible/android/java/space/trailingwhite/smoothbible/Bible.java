@@ -29,6 +29,10 @@ public final class Bible extends Activity {
   Tray tray;
   // The way back (core's capsule): its words, at the reader's foot.
   TextView capsule;
+  // Listen: the voice, and the small player (core's words, and Stop).
+  Voice voice;
+  LinearLayout player;
+  TextView playerTitle, playerState;
   FrameLayout root;
   LinearLayout bar;
   TextView title, version, settings, library;
@@ -79,6 +83,34 @@ public final class Bible extends Activity {
     bar.addView(settings);
     root.addView(bar, new FrameLayout.LayoutParams(-1, dp(52), Gravity.TOP));
     reader.topInset = dp(52);
+    player = new LinearLayout(this);
+    player.setOrientation(LinearLayout.HORIZONTAL);
+    player.setGravity(Gravity.CENTER_VERTICAL);
+    player.setPadding(dp(16), dp(8), dp(8), dp(8));
+    player.setVisibility(View.GONE);
+    LinearLayout words = new LinearLayout(this);
+    words.setOrientation(LinearLayout.VERTICAL);
+    playerTitle = new TextView(this);
+    playerTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+    playerTitle.setTypeface(Typeface.DEFAULT_BOLD);
+    playerState = new TextView(this);
+    playerState.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+    words.addView(playerTitle);
+    words.addView(playerState);
+    player.addView(words, new LinearLayout.LayoutParams(0, -2, 1));
+    TextView stop = new TextView(this);
+    stop.setText("\u25A0");
+    stop.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+    stop.setPadding(dp(16), dp(8), dp(16), dp(8));
+    stop.setContentDescription("Stop Listening");
+    stop.setOnClickListener(v -> {
+      if (voice != null) voice.stop();
+      player.setVisibility(View.GONE);
+      Native.send("listenstop");
+    });
+    player.addView(stop);
+    FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
+    root.addView(player, pp);
     capsule = new TextView(this);
     capsule.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
     capsule.setTypeface(Typeface.DEFAULT_BOLD);
@@ -111,6 +143,7 @@ public final class Bible extends Activity {
       panel.setPadding(0, bars.top, 0, bars.bottom);
       tray.setPadding(dp(16), dp(10), dp(16), dp(10) + bars.bottom);
       ((FrameLayout.LayoutParams) capsule.getLayoutParams()).bottomMargin = dp(16) + bars.bottom;
+      player.setPadding(dp(16), dp(8), dp(8), dp(8) + bars.bottom);
       return insets;
     });
     restyle();
@@ -441,6 +474,28 @@ public final class Bible extends Activity {
         // (The reader to a place: chapter, verse, how far into it.)
         panel.dismiss();
         reader.jump(w.num(1), w.num(2) / 1000);
+        break;
+      case "say":
+        if (voice == null) voice = new Voice(this);
+        voice.say(w.num(1) + ":" + w.num(2), w.field(1));
+        break;
+      case "player": {
+        playerTitle.setText(w.field(1));
+        playerState.setText(w.field(2));
+        player.setBackgroundColor(look.bg);
+        playerTitle.setTextColor(look.ink);
+        playerState.setTextColor(look.faint);
+        ((TextView) player.getChildAt(1)).setTextColor(look.accent);
+        player.setElevation(dp(8));
+        player.setVisibility(View.VISIBLE);
+        break;
+      }
+      case "listen_stop":
+        if (voice != null) voice.stop();
+        player.setVisibility(View.GONE);
+        break;
+      case "follow":
+        reader.follow(w.num(1), w.num(2));
         break;
       case "wake":
         try {
