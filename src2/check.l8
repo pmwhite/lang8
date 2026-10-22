@@ -186,8 +186,162 @@ var_view_ty(var: ?*Obj): ?*Type@var {
 }
 
 narrow_push(var: ?*Obj@new, ty: ?*Type@new) noregion {
-    f: *NarrowFrame = new NarrowFrame { var: var, ty: ty, next: narrow_top };
+    f: *NarrowFrame = new NarrowFrame {
+        var: var,
+        ty: ty,
+        next: narrow_top,
+        path: null,
+        barrier: false,
+        kill: false
+    };
     narrow_top = f
+}
+
+narrow_push_kill(var: ?*Obj@new, ty: ?*Type@new) noregion {
+    f: *NarrowFrame = new NarrowFrame {
+        var: var,
+        ty: ty,
+        next: narrow_top,
+        path: null,
+        barrier: false,
+        kill: true
+    };
+    narrow_top = f
+}
+
+narrow_push_path(path: *Expr@new, ty: ?*Type@new) noregion {
+    f: *NarrowFrame = new NarrowFrame {
+        var: null,
+        ty: ty,
+        next: narrow_top,
+        path: path,
+        barrier: false,
+        kill: false
+    };
+    narrow_top = f
+}
+
+// No field path keeps its narrowing past here (logged, as a kill is, so
+// that it holds after the branch it is in).
+narrow_barrier() noregion {
+    f: *NarrowFrame = new NarrowFrame {
+        var: null,
+        ty: null,
+        next: narrow_top,
+        path: null,
+        barrier: true,
+        kill: false
+    };
+    narrow_top = f;
+    kill_note(null)
+}
+
+// ---- field paths (DESIGN: as variables are narrowed) ----
+// A path: fields read from a local (h.p, h.a.b), its root that local.
+path_root(n: *Expr): ?*Obj {
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return null;
+            if (!v.is_local || v.is_func || is_addr_taken(v)) return null;
+            v
+        }
+        MemberAccess k -> path_root(k.lhs);
+        _ -> null
+    }
+}
+
+path_equal(a: *Expr, b: *Expr): bool {
+    match a.kind {
+        Var ka -> {
+            match b.kind {
+                Var kb -> ka.var != null && ka.var == kb.var;
+                _ -> false
+            }
+        }
+        MemberAccess ka -> {
+            match b.kind {
+                MemberAccess kb -> ka.member != null && ka.member == kb.member && path_equal(ka.lhs,
+                    kb.lhs);
+                _ -> false
+            }
+        }
+        _ -> false
+    }
+}
+
+// cond as `path != null` (ne) or `path == null`, path an optional field
+// path: the path narrowed.
+narrow_push_path_test(cond: ?*Expr, ne: bool) noregion raises Error {
+    if (cond == null) return;
+    match cond.kind {
+        Binary k -> {
+            tested: bool = false;
+            match k.op {
+                Ne -> tested = ne;
+                Eq -> tested = !ne;
+                _ -> { }
+            }
+            if (!tested) return;
+            if (is_null_expr(k.rhs)) narrow_push_opt_path(k.lhs) else if (is_null_expr(k.lhs)) narrow_push_opt_path(k.rhs)
+        }
+        _ -> { }
+    }
+}
+
+narrow_push_opt_path(n: *Expr@new) noregion raises Error {
+    match n.kind {
+        MemberAccess k -> {
+            m: ?*Member = k.member;
+            if (m == null || path_root(n) == null) return;
+            t: ?*Type = decay(m.ty);
+            if (t != null && is_optional(t)) narrow_push_path(n, unwrap_optional(t))
+        }
+        _ -> { }
+    }
+}
+
+// Field path n's narrowed type, if a test still holds for it: none past a
+// barrier, or a kill of its root.
+path_view_ty(n: *Expr): ?*Type {
+    root: ?*Obj = path_root(n);
+    if (root == null) return null;
+    f: ?*NarrowFrame = narrow_top;
+    while (f != null) {
+        if (f.barrier) return null;
+        if (f.kill && f.var == root) return null;
+        fp: ?*Expr = f.path;
+        if (fp != null) {
+            if (path_equal(fp, n)) return f.ty
+        }
+        f = f.next
+    }
+    null
+}
+
+// Whether n, just typed, may write memory a field path reads: a call, a
+// store not into a plain local, or an address taken of other than one.
+writes_memory(n: *Expr): bool {
+    match n.kind {
+        Funcall _ -> true;
+        Assign k -> {
+            match k.lhs.kind {
+                Var v -> {
+                    o: ?*Obj = v.var;
+                    o == null || !o.is_local
+                }
+                _ -> true
+            }
+        }
+        Addr k -> {
+            match k.lhs.kind {
+                Var _ -> false;
+                _ -> true
+            }
+        }
+        New _ -> false;
+        _ -> false
+    }
 }
 
 narrow_reset(saved: ?*NarrowFrame@immortal) {
@@ -197,7 +351,7 @@ narrow_reset(saved: ?*NarrowFrame@immortal) {
 kill_var_facts(o: ?*Obj@new) noregion {
     if (o == null) return;
     if (o.ty != null) {
-        narrow_push(o, o.ty);
+        narrow_push_kill(o, o.ty);
         kill_note(o)
     }
 }
@@ -215,6 +369,18 @@ type KillEntry = {
 kill_log: ?*KillEntry = null;
 
 kill_n: int = 0;
+
+narrow_push_barrier_again() noregion {
+    f: *NarrowFrame = new NarrowFrame {
+        var: null,
+        ty: null,
+        next: narrow_top,
+        path: null,
+        barrier: true,
+        kill: false
+    };
+    narrow_top = f
+}
 
 kill_note(var: ?*Obj@new) noregion {
     e: *KillEntry = new KillEntry { var: var, seq: kill_n, next: kill_log };
@@ -371,7 +537,9 @@ kill_again(lo: int, hi: int) noregion {
     e: ?*KillEntry = kill_log;
     while (e != null && e.seq >= lo) {
         v: ?*Obj = e.var;
-        if (e.seq < hi && v != null) narrow_push(v, v.ty);
+        if (e.seq < hi) {
+            if (v != null) narrow_push_kill(v, v.ty) else narrow_push_barrier_again()
+        }
         e = e.next
     }
 }
@@ -1166,6 +1334,7 @@ narrow_push_ne_nulls(cond: ?*Expr) noregion raises Error {
                     if (vt == null) error("missing type");
                     narrow_push(v, unwrap_optional(vt))
                 }
+                narrow_push_path_test(cond, true)
             }
         }
     }
@@ -1187,6 +1356,7 @@ narrow_push_eq_nulls(cond: ?*Expr) noregion raises Error {
                     if (vt == null) error("missing type");
                     narrow_push(v, unwrap_optional(vt))
                 }
+                narrow_push_path_test(cond, false)
             }
         }
     }
@@ -2505,6 +2675,8 @@ check_region_calls_inits(inits: ?*FieldInit) raises Error {
 check_region_calls_stmt(s: ?*Stmt) raises Error {
     if (s == null) return;
     fn: ?*Function = current_fn;
+    // (Not an if expression: src1, which builds this, narrows only its
+    // statement.)
     file: int = current_file_id;
     if (fn != null) file = fn.browse_file;
     outer_file: int = diag_stmt_file;

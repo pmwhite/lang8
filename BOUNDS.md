@@ -46,12 +46,26 @@ that address. The bulk-operation checks listed above remain.
 `*T` is never null; `?*T` may be. The type checker enforces this without
 run-time checks: a `?*T` cannot be dereferenced, have a member accessed, or be
 used as a `*T` until a null test narrows it. `if (p != null)`, `while (p !=
-null)`, `p != null && ...`, `p == null || ...`, and a guard that returns or
-raises all narrow a local variable. Narrowing applies to variables, not to
-fields; copy a field to a local before testing it:
+null)`, `p != null && ...`, `p == null || ...`, an `if` expression's
+branches, and a guard that returns or raises all narrow a local variable.
+An assignment ends a variable's narrowing, including one in a branch that
+can fall through, and a variable a loop assigns keeps no narrowing from
+before the loop.
+
+A field path read from a local or a parameter (`holder.item`,
+`h.p.next`) is narrowed the same way, until anything that could change
+it: a call, a store other than to a plain local (another pointer may
+reach the same record), or the start of a loop. Otherwise copy the field
+to a local:
+
+```l8
+if (holder.item == null) return 0;
+holder.item.value
+```
 
 ```l8
 item: ?*Item = holder.item;
+refresh(holder);
 if (item == null) return 0;
 item.value
 ```
