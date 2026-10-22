@@ -114,12 +114,14 @@ From core:
 | `plain` | a plain list, not grouped (Search's results) |
 | `focus N [MODE]` | after `screen`: the screen opens at its Nth row (of all, from 0), at the top: Go To at the book read; MODE 1, selected and in the middle (the day a plan's days were opened for), 2 in the middle (a chooser's choice) |
 | `intro` TEXT | words above the first section (a plan's description) |
+| `confirm` ACTION TITLE | the screen's confirming button at the top, in place of Done (New Ribbon's Add; on a sheet of its own, Cancel beside it) |
 | `toolbar` ACTION ARG TITLE STYLE | a button at the screen's foot doing ACTION with ARG (Start Plan): STYLE 0 plain, 1 prominent, 2 destructive (Stop Plan), 3 off |
 | `row` KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS VALUE OPTIONS LO HI LABEL | a row (below); LABEL what a screen reader says, if not its words |
 | `present ID`, `push ID`, `update ID`, `pop`, `dismiss` | what to do with screens |
 | `refill ID FADE` | screen ID made again as its field is typed in: its rows at once, the field as it is (FADE 1: what it shows changed kind, recent searches giving way to results: a cross-fade) |
 | `retext ID` | screen ID's field to show the screen's words (a recent search chosen) |
 | `blur ID` | the keyboard put away (Return in Search) |
+| `ribbon_added ID`, `ribbon_open I`, `ribbon_color ID` | New Ribbon's Add done (the host goes to its place, picks it up, says so); a ribbon opened from its screen; a ribbon's color changed (its glyph in the bar follows) |
 | `chosen OWNER` | Begin At's chapter chosen (OWNER 1: New Ribbon's, whose name follows it) |
 | `marked SLOT DAY`, `plan_start P`, `plan_stop P` | a plan's day marked read or not (the host keeps the plan's file, says today is done, schedules its reminders); Start Plan and Stop Plan, the host's (its files, reminders and the day's reader) |
 | `searched`, `esv_search PAGE` | Search searched again (a platform's own results for what it searched before are gone); the ESV's search asked for (the iPhone's, from its server) |
@@ -154,7 +156,9 @@ spaces (the words a search found), and LINES, the most lines of its detail
 start (0 none; 1 empty, 2 half, 3 full: a plan's day not read, partly,
 read) doing CIRCLE_ACTION with the row's ARG; `m` its detail smaller (a
 note: Versions' lines), `k` its circle dimmed and inert (a plan not
-followed), `a` its trailing words in the accent (Today); a
+followed), `a` its trailing words in the accent (Today), `r` a field
+whose Return is the screen's confirm; a `field` row's TITLE is its
+placeholder and DETAIL its words; a
 choice's OPTIONS are its labels split by `|`, VALUE the one chosen; a slider
 goes from LO to HI.
 
@@ -167,6 +171,7 @@ From the skin:
 | `act ID ACTION ARG VALUE` | a row's action (VALUE: a toggle's 1 or 0, a choice's index, a slider's value). An action on a screen means those over it have gone |
 | `query ID TEXT` | screen ID's field typed in (TEXT to the line's end), once typing has rested the screen's WAIT |
 | `scope ID N` | scope N chosen in screen ID's field |
+| `text ID ACTION ARG TEXT` | a `field` row's editing ended: its action with the words in it (a ribbon's name) |
 | `submit ID` | Return (Go) in screen ID's field: its first suggestion |
 | `closed ID` | the skin closed screen ID (and those over it) |
 | `want C` | chapter C's text, to show |
@@ -190,7 +195,9 @@ action goes to core (`sk_act`); its effects are done the iPhone's way
 `update` a cross-fade and reload, `dismiss`). The platform's work stays the
 app's: core's version switch is the iPhone's `switch_version`. Moved so far:
 Versions, History, the reading settings, Go To, Search, Reading Plans, a
-plan's days, A Chapter a Day and Begin At's books (2026-10-21; Begin At's
+plan's days, A Chapter a Day, Begin At's books, New Ribbon and a ribbon's
+own screen (2026-10-21; fields and swatches are kept cells, so a field keeps
+the keyboard through a reload; Android doesn't draw them yet; Begin At's
 chapters are the iPhone's grid, choosing; a plan's reminder is a host section, its switch
 and time the iPhone's notifications). Core's screens are the app's own controller class
 (`L8CoreList`), made again as they come back from a screen pushed over

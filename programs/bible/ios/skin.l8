@@ -23,6 +23,7 @@ uk_save_prefs() { }
 
 uk_save_kept(what: int) {
     if (what == SK_KEPT_HISTORY) save_history();
+    if (what == SK_KEPT_RIBBONS) ribbons_changed();
     if (what == SK_KEPT_SEARCHES) {
         if (sk_searches_n == 0) {
             msg1(defaults(), sel("removeObjectForKey:"), nsstring("recentSearches"));
@@ -273,6 +274,8 @@ uk_cell(t: int, path: int): int {
     if (row.custom == CUSTOM_THEMES) return theme_cell(t);
     if (row.custom == CUSTOM_LISTEN) return listen_cell(t);
     if (row.custom == CUSTOM_HIT) return uk_hit_cell(t, i);
+    if (row.kind == UI_FIELD) return uk_field_cell(k, i);
+    if (row.custom == CUSTOM_SWATCHES) return uk_swatch_cell(k, i);
     if (row.circle > 0) return uk_circle_cell(t, k, i);
     if (row.kind == UI_TOGGLE || row.kind == UI_CHOICE) return uk_control_cell(t,
         k, i);
@@ -281,7 +284,10 @@ uk_cell(t: int, path: int): int {
         kind);
     config: int = list_config(kind);
     msg1(config, sel("setText:"), uk_text(row.title));
-    msg1(text_props(config), sel("setColor:"), if (row.destructive || row.tinted) c_accent else if (row.faint) c_faint else c_ink);
+    msg1(text_props(config), sel("setColor:"), if (row.destructive) msg(cls("UIColor"),
+        sel("systemRedColor")) else if (row.tinted) c_accent else if (row.faint) c_faint else c_ink);
+    // (A button's words centered: Delete Ribbon.)
+    if (row.kind == UI_BUTTON) msg1(text_props(config), sel("setAlignment:"), 1);
     // (A strong row's title: Go To's reference, the book being read.)
     msg1(text_props(config), sel("setFont:"), if (row.custom == CUSTOM_FONT) font_sample(row.arg) else if (row.strong) sans(17.0f64,
         0.3f64) else msg1(cls("UIFont"), sel("preferredFontForTextStyle:"), objc_const("UIFontTextStyleBody")));
@@ -435,6 +441,163 @@ uk_tool(_self: int, _cmd: int, item: int): int {
 // Whether slot k's screen has a button at its foot (its toolbar shown
 // while it is).
 uk_tooled: []bool = new bool[UK_SLOTS](false);
+
+// ---- fields and swatches: a cell each kept for the screen's while it is
+// up (a field keeps the keys through a reload; the swatches' check moves
+// with a fade) ----
+uk_fcells: []int = new int[UK_SLOTS](0);
+
+uk_fields: []int = new int[UK_SLOTS](0);
+
+uk_swcells: []int = new int[UK_SLOTS](0);
+
+// Slot k's field (row i): the app's field cell, its placeholder faint, its
+// words as core has them (unless being typed in).
+uk_field_cell(k: int, i: int): int {
+    row: UiRow = ui_rows[i];
+    if (uk_fcells[k] == 0) {
+        field_cell(field_pair);
+        uk_fcells[k] = held(0, field_pair[0]);
+        uk_fields[k] = held(0, field_pair[1])
+    }
+    f: int = uk_fields[k];
+    keys[0] = k_color;
+    values[0] = c_faint;
+    msg1(f, sel("setAttributedPlaceholder:"), if (row.title.n > 0) attributed_str(uk_text(row.title),
+        nsdictionary(keys, values, 1)) else 0);
+    if ((msg(f, sel("isFirstResponder")) & 255) == 0) msg1(f, sel("setText:"), if (row.detail.n > 0) uk_text(row.detail) else nsstring(""));
+    if (row.label.n > 0) msg1(f, sel("setAccessibilityLabel:"), uk_text(row.label));
+    uk_fcells[k]
+}
+
+// The slot whose field f is (-1: none of core's).
+uk_slot_of_field(f: int): int {
+    for k in 0..UK_SLOTS
+        if (f != 0 && uk_fields[k] == f && uk_ids[k] != 0) return k;
+    -1
+}
+
+// Slot k's field row (of the screen just ensured), or -1.
+uk_field_row(): int {
+    for i in 0..ui_rows_n
+        if (ui_rows[i].kind == UI_FIELD) return i;
+    -1
+}
+
+// Slot k's field's words given to core (its row's action).
+uk_field_commit(k: int) {
+    if (k < 0 || uk_fields[k] == 0 || !uk_ensure(k)) return;
+    i: int = uk_field_row();
+    if (i < 0) return;
+    action: int = ui_rows[i].action;
+    arg: int = ui_rows[i].arg;
+    n: int = nsstring_into(msg(uk_fields[k], sel("text")), uk_query_buf);
+    uk_sync();
+    sk_text(uk_ids[k], action, arg, uk_query_buf, 0, n);
+    uk_effects()
+}
+
+// A field's editing ended (its words to core); whether it was core's.
+uk_field_end(f: int): bool {
+    k: int = uk_slot_of_field(f);
+    if (k < 0) return false;
+    uk_field_commit(k);
+    true
+}
+
+// A field's Return: the screen's confirm (New Ribbon's Add), or the
+// editing ended; whether it was core's.
+uk_field_return(f: int): bool {
+    k: int = uk_slot_of_field(f);
+    if (k < 0) return false;
+    i: int = if (uk_ensure(k)) uk_field_row() else -1;
+    if (i >= 0 && ui_rows[i].field_go) uk_confirm(k) else msg(f, sel("resignFirstResponder"));
+    true
+}
+
+// The theme changed: the kept cells in it (their backgrounds, a field's
+// words, the swatches' colors).
+uk_restyle_kept() {
+    for k in 0..UK_SLOTS {
+        for c in [uk_fcells[k], uk_swcells[k]] {
+            if (c != 0) msg1(c, sel("setBackgroundColor:"), cell_bg())
+        }
+        if (uk_fields[k] != 0) msg1(uk_fields[k], sel("setTextColor:"), c_ink);
+        if (uk_swcells[k] != 0 && uk_ensure(k)) {
+            for i in 0..ui_rows_n
+                if (ui_rows[i].custom == CUSTOM_SWATCHES) swatches_set(swatch_stack(uk_swcells[k],
+                    10 + k), ui_rows[i].value)
+        }
+    }
+}
+
+// The field of core's screen of kind (the demos').
+uk_field_of(kind: int): int {
+    k: int = uk_slot_of(uk_table_of(kind));
+    if (k < 0) 0 else uk_fields[k]
+}
+
+uk_field_commit_kind(kind: int) {
+    uk_field_commit(uk_slot_of(uk_table_of(kind)))
+}
+
+// Slot k's swatches (row i): the app's swatch cell (its owner 10 + k), the
+// one chosen checked.
+uk_swatch_cell(k: int, i: int): int {
+    row: UiRow = ui_rows[i];
+    if (uk_swcells[k] == 0) uk_swcells[k] = held(0, swatch_cell(10 + k, row.value)) else swatches_set(swatch_stack(uk_swcells[k],
+        10 + k), row.value);
+    uk_swcells[k]
+}
+
+// A swatch of slot k's tapped (color c): its row's action, core's.
+uk_swatch_tapped(k: int, c: int) {
+    if (k < 0 || k >= UK_SLOTS || !uk_ensure(k)) return;
+    for i in 0..ui_rows_n {
+        if (ui_rows[i].custom == CUSTOM_SWATCHES) {
+            action: int = ui_rows[i].action;
+            arg: int = ui_rows[i].arg;
+            uk_sync();
+            sk_act(uk_ids[k], action, arg, c);
+            uk_effects();
+            return
+        }
+    }
+}
+
+uk_swatch_stack(kind: int): int {
+    k: int = uk_slot_of(uk_table_of(kind));
+    if (k < 0) 0 else swatch_stack(uk_swcells[k], 10 + k)
+}
+
+// The screen's confirm (its button, or its field's Return): the field's
+// words given first, the keyboard put away.
+uk_confirm(k: int) {
+    if (k < 0 || k >= UK_SLOTS || uk_ids[k] == 0) return;
+    uk_field_commit(k);
+    if (uk_fields[k] != 0) msg(uk_fields[k], sel("resignFirstResponder"));
+    if (!uk_ensure(k)) return;
+    action: int = ui_confirm_action;
+    uk_sync();
+    uk_nav = msg(uk_vcs[k], sel("navigationController"));
+    sk_act(uk_ids[k], action, 0, 0);
+    uk_effects()
+}
+
+uk_confirm_tapped(_self: int, _cmd: int, item: int): int {
+    uk_confirm(msg(item, sel("tag")));
+    0
+}
+
+uk_confirm_kind(kind: int) {
+    uk_confirm(uk_slot_of(uk_table_of(kind)))
+}
+
+// Whether slot k's screen was pushed (else presented: Cancel beside its
+// confirm).
+uk_pushed: []bool = new bool[UK_SLOTS](false);
+
+uk_making_push: bool = false;
 
 // A verse found: its reference small, in the accent; its words as the
 // reader's, the matches in full ink, bold and washed, the rest softer, up
@@ -809,9 +972,20 @@ uk_dress(k: int, fade: bool) {
         if (style == UI_TOOL_OFF) msg1(item, sel("setEnabled:"), 0);
         toolbar_one(vc, item, fade)
     }
+    msg1(vc, sel("setTitle:"), uk_text(ui_title));
     // (At the top right: the screen's button, as History's Clear; else
     // Done.)
     item: int = msg(vc, sel("navigationItem"));
+    if (ui_confirm.n > 0) {
+        // (Its confirm, New Ribbon's Add; on a sheet of its own, Cancel.)
+        add: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:style:target:action:"),
+            uk_text(ui_confirm), 2, app_obj, sel("coreConfirm:")), sel("autorelease"));
+        msg1(add, sel("setTag:"), k);
+        msg1(item, sel("setRightBarButtonItem:"), add);
+        if (!uk_pushed[k]) msg1(item, sel("setLeftBarButtonItem:"), system_item(1,
+            "closeSheet:"));
+        return
+    }
     if (ui_button.n == 0) {
         // (Done, if it isn't there: not made again as a query is typed.)
         old: int = msg(item, sel("rightBarButtonItem"));
@@ -870,6 +1044,10 @@ uk_make(id: int): int {
     uk_tables[k] = keep(msg(vc, sel("tableView")));
     uk_waits[k] = ui_search_wait;
     uk_seen[k] = false;
+    uk_pushed[k] = uk_making_push;
+    // (Its field made now, to take the keys as it appears.)
+    fi: int = uk_field_row();
+    if (fi >= 0) _f: int = uk_field_cell(k, fi);
     msg1(vc, sel("setTitle:"), uk_text(ui_title));
     item: int = msg(vc, sel("navigationItem"));
     msg1(item, sel("setLargeTitleDisplayMode:"), if (goto) 0 else 2);
@@ -906,6 +1084,9 @@ uk_will_appear(self: int, cmd: int, animated: int): int {
                 uk_stale = true;
                 msg(uk_tables[k], sel("reloadData"));
                 uk_dress(k, false)
+            } else if (uk_ensure(k) && ui_focus >= 0 && ui_rows[ui_focus].kind == UI_FIELD) {
+                // (A field first: the keyboard rising with the screen.)
+                if (uk_fields[k] != 0 && !demo_no_keyboard) msg(uk_fields[k], sel("becomeFirstResponder"))
             } else if (uk_ensure(k) && ui_focus >= 0) {
                 // (First: at its focus, at the top; selected, in the
                 // middle.)
@@ -925,6 +1106,8 @@ uk_will_appear(self: int, cmd: int, animated: int): int {
 // (Going: its toolbar hidden, if it had one.)
 uk_will_go(self: int, cmd: int, animated: int): int {
     _r: int = super1(self, uk_class, cmd, animated);
+    // (Leaving ends the editing, and so keeps a name typed.)
+    msg1(msg(self, sel("view")), sel("endEditing:"), 1);
     for k in 0..UK_SLOTS {
         if (uk_vcs[k] == self && uk_vcs[k] != 0 && uk_tooled[k]) {
             nav: int = msg(self, sel("navigationController"));
@@ -1158,6 +1341,10 @@ uk_kind_of(id: int): int {
 
 uk_free(k: int) {
     uk_searches[k] = 0;
+    if (uk_fields[k] != 0) msg1(uk_fields[k], sel("setDelegate:"), 0);
+    uk_fields[k] = held(uk_fields[k], 0);
+    uk_fcells[k] = held(uk_fcells[k], 0);
+    uk_swcells[k] = held(uk_swcells[k], 0);
     release(uk_tables[k]);
     release(uk_vcs[k]);
     uk_tables[k] = 0;
@@ -1180,7 +1367,9 @@ uk_effects() {
             show_chapters(sk_args[sk_find(e.a)])
         } else if (e.word == "push" && uk_kind_of(e.a) == SCR_BEGIN_CHAPTERS) show_chapters_mode(sk_args[sk_find(e.a)],
             true) else if (e.word == "push") {
+            uk_making_push = true;
             k: int = uk_make(e.a);
+            uk_making_push = false;
             sheet: int = if (uk_nav != 0) uk_nav else presented();
             if (k >= 0 && sheet != 0) msg2(sheet, sel("pushViewController:animated:"),
                 uk_vcs[k], 1)
@@ -1237,10 +1426,15 @@ uk_effects() {
                 if (day_state(plan_day(p, e.b)) == 2 && e.b == plan_today_of(i2, today())) day_done(i2);
                 daily_reschedule()
             }
-        } else if (e.word == "plan_start") plans_start_now(e.a, if (e.a == PLAN_DAY1) bg_c else cur) else if (e.word == "chosen") {
-            // (New Ribbon's name follows its place, under the chooser.)
-            note_num("bible: begin at book ", ch_book[bg_c]);
-            if (e.a == 1) nr_placeholder()
+        } else if (e.word == "plan_start") plans_start_now(e.a, if (e.a == PLAN_DAY1) bg_c else cur) else if (e.word == "chosen") note_num("bible: begin at book ",
+            ch_book[bg_c]) else if (e.word == "ribbon_added") uk_ribbon_added(e.a) else if (e.word == "ribbon_open") ribbon_open(e.a) else if (e.word == "ribbon_color") {
+            // (The bar's glyph, if this is the ribbon carried, cross-fades
+            // to it.)
+            if (e.a == rb_carried && title_ribbon != 0) {
+                if (!reduce_motion()) fade_layer(msg(title_ribbon, sel("layer")),
+                    0.2f64);
+                title_place()
+            }
         } else if (e.word == "plan_stop") {
             detail_plan = e.a;
             _s: int = plan_stop(0, 0, 0)
@@ -1271,6 +1465,19 @@ uk_effects() {
     ui_effects_n = 0;
     uk_nav = 0;
     uk_in_effects = false
+}
+
+// New Ribbon's Add done: the reader at the ribbon's place, unless it is
+// there already (the sheet, or Go To, away); the ribbon picked up, with
+// the toast.
+uk_ribbon_added(id: int) {
+    ribbons_log();
+    there: bool = bg_c == cur && (bg_v == place_v || bg_v < 2 && place_v < 2);
+    if (there) dismiss_sheets() else ribbon_place_go(bg_c, bg_v, bg_f);
+    ribbon_pick_up(id, false);
+    reading_jumped();
+    ribbons_changed();
+    toast_reading_with(id)
 }
 
 // Plan p's days (core's), at day d (selected, select), pushed in nav or
@@ -1335,7 +1542,8 @@ add_skin_methods(app: int) {
     add_method1(app, sel("coreSearchFire:"), &uk_search_fire, "v@:@");
     add_method1(app, sel("coreCircle:"), &uk_circle, "v@:@");
     add_method1(app, sel("coreCircleAction:"), &uk_circle_action, "B@:@");
-    add_method1(app, sel("coreTool:"), &uk_tool, "v@:@")
+    add_method1(app, sel("coreTool:"), &uk_tool, "v@:@");
+    add_method1(app, sel("coreConfirm:"), &uk_confirm_tapped, "v@:@")
 }
 
 // The sheets gone: their lists let go, and core's screens with them.
