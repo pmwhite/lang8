@@ -47,10 +47,12 @@ that address. The bulk-operation checks listed above remain.
 run-time checks: a `?*T` cannot be dereferenced, have a member accessed, or be
 used as a `*T` until a null test narrows it. `if (p != null)`, `while (p !=
 null)`, `p != null && ...`, `p == null || ...`, an `if` expression's
-branches, and a guard that returns or raises all narrow a local variable.
-An assignment ends a variable's narrowing, including one in a branch that
-can fall through, and a variable a loop assigns keeps no narrowing from
-before the loop.
+branches, and a guard that returns or raises all narrow a local variable,
+as does giving it (or declaring it with) a value that cannot be null. An
+assignment of anything else ends its narrowing, including one in a branch
+that can fall through, and a variable a loop assigns keeps no narrowing
+from before the loop. A narrowed variable may still be tested against null;
+its address is a pointer to its declared type.
 
 A field path read from a local or a parameter (`holder.item`,
 `h.p.next`) is narrowed the same way, until anything that could change

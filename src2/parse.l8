@@ -2205,8 +2205,10 @@ parse_postfix() noregion raises Error: *Expr@new {
                         add_type(n);
                         t: ?*Type = decay(n.ty);
                         sty: *Type = n.ty or error("missing type");
-                        if (t != null && is_opt_pointer(t)) error_ty("member access on optional pointer (use if (p != null) / while (p != null) to narrow)",
-                            t);
+                        // (Through an optional pointer, the member is found
+                        // all the same: checking the body, which knows every
+                        // assignment before it, says whether it is narrowed.)
+                        if (t != null && is_opt_pointer(t)) t = unwrap_optional(t);
                         if (t != null && is_pointer(t) && is_struct_ty(type_base(t))) sty = type_base(t) else {
                             if (t != null && is_pointer(t) && is_exn_ty(type_base(t))) sty = type_base(t) else {
                                 if (!is_struct_ty(sty) && !is_exn_ty(sty)) error_ty("member access on non-struct",
@@ -2528,7 +2530,34 @@ type_eq_cmp(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
         p.ty = ty_bool;
         return
     }
+    // (A variable or field narrowed may still be tested against null, or
+    // against another of its declared, optional, type.)
+    // Both are then compared as declared, as the code made for them expects.
+    ld: ?*Type = decay(declared_ty(lhs));
+    rd: ?*Type = decay(declared_ty(rhs));
+    if (bind_null_to_pointer(ld, rhs) || bind_null_to_pointer(rd, lhs) || ld != null && rd != null && types_equal(ld,
+        rd)) {
+        lhs.ty = declared_ty(lhs);
+        rhs.ty = declared_ty(rhs);
+        p.ty = ty_bool;
+        return
+    }
     error_ty_vs_expr(lhs, "comparison type mismatch", lt, rt)
+}
+
+// The type e is declared with, whatever narrowing gives it here.
+declared_ty(e: *Expr): ?*Type@e {
+    match e.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v != null) v.ty else e.ty
+        }
+        MemberAccess k -> {
+            m: ?*Member = k.member;
+            if (m != null) m.ty else e.ty
+        }
+        _ -> e.ty
+    }
 }
 
 type_ord_cmp(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
@@ -3206,7 +3235,10 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 _ -> { }
             }
             match q.lhs.kind {
-                Var vp -> kill_var_facts(vp.var);
+                Var vp -> {
+                    kill_var_facts(vp.var);
+                    narrow_after_store(vp.var, q.rhs)
+                }
                 Index ik -> {
                     ilt: ?*Type = ik.lhs.ty;
                     if (ilt != null && is_str(ilt)) error("cannot assign through str index")
@@ -3236,7 +3268,9 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 }
                 _ -> { }
             }
-            aty: ?*Type = q.lhs.ty;
+            // (A variable's or a field's own type: a pointer to it may
+            // store what its narrowing excludes.)
+            aty: ?*Type = declared_ty(q.lhs);
             p.ty = ptr_to(aty or error("missing type"));
             return
         }
