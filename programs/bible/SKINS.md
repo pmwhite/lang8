@@ -134,7 +134,7 @@ models, words and rules:
    `measure_chapter`; `chapter`, `span`, `verse`, `link` and `mark`
    lines), continuous; its place, rests and jumps told back.
 2. The back capsule (`back` WORDS), the mini player (`core/listen.l8`'s
-   words), the share card (`core/share.l8`'s pieces), the text's own menu
+   words), the share card (below), the text's own menu
    (`core/tray.l8`'s commands), a word's popover (`core/word.l8`), toasts
    (`toast`).
 
@@ -142,6 +142,23 @@ The iPhone keeps richer versions of some of core's screens (its own
 Practice sheet, day's reader, preview, footnote popover, jumps), each
 drawn from core's state and saying so through `SK_NUM_OWN_VIEW` and
 `SK_NUM_OWN_JUMPS`.
+
+Share as Image is core's composer (`core/share.l8`'s `SCR_SHARE`) for a
+skin that draws cards (`sk_has_card`; core's host says so): Share on
+verses that fit a card opens it (else it shares their words). Its shape
+is the screen's segments, its background a swatches row, then Share
+Image and Share Text. The card is a `custom` row of `CUSTOM_CARD`: its
+title the reference, its suffix the version, its detail the words with
+runs `RUN_CARD` + the piece's kind (0 words, 1 supplied, 2 His words, 3
+both, 4 a verse's number) + 8 (an indented line) + 16 (Greek) + 32
+(Hebrew, right to left) + 64 (a divine name's small capitals), its
+options the colors (background, words, faint, accent), its value the
+shape and its trailing core's measures (`W H MARGIN GAP REF VERSION MOST
+LEAST STEP`): the skin sets the words at the largest size from MOST to
+LEAST that fits above the reference, lines 1.35 high (1.5 in Hebrew),
+centered, and draws them at the card's pixels. Share Image says
+`share_image` WORDS: the skin shares the card it drew last (the web: the
+page's share of a PNG, else a download).
 
 A reference's preview is core's (`core/preview.l8`: its verses, each
 chapter's first and last, at most 80, the words around them): a skin with
@@ -292,12 +309,13 @@ Memory's, else a plan's slot plus 1), `remind_time MINUTES`, `open_settings`,
 `searched`, `esv_search PAGE`, `esv_want C`, `audio_source`, `voice`,
 `cellular`, `download`, `download_delete`, `export`, `memorize C V` and
 `mm_added VERSION` (an ESV passage, whose verses the host keeps; any
-other version's is added by core, which says `memorized ID`),
-`mm_version`, `mm_delete`, `passage`, `practice_session N HOW` (a host
+other version's is added by core, which toasts Added to Memory),
+`mm_version`, `mm_delete`, `practice_session N HOW` (a host
 with its own Practice), `practice_audio ACTION ARG` (Listen, Echo, Speak
 on core's Practice), `toast SYMBOL` WORDS (a toast's words, and its
 symbol: 0 plus, 1 a check, 2 the brain), `read_in CV RIBBON`
 (the reader in the Hebrew and Greek), `study_verse`, `copy`, `share`,
+`share_image` (Share as Image's card, above),
 `highlighted`, `bookmarked`, `clear_selection`, `tray`, `tray_away`.
 
 From the skin:

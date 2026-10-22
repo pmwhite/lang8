@@ -329,9 +329,11 @@ let building = null;
 let section = null;
 let chapter = null;
 
-// core/skin.l8's CUSTOM_HIT (a verse found) and CUSTOM_SWATCHES.
+// core/skin.l8's CUSTOM_HIT (a verse found), CUSTOM_SWATCHES and
+// CUSTOM_CARD (a card of verses to share).
 const CUSTOM_HIT = 5;
 const CUSTOM_SWATCHES = 6;
+const CUSTOM_CARD = 11;
 
 function screenLine(w) {
   const word = w.word(0);
@@ -562,6 +564,9 @@ function line(w) {
       break;
     case "copy":
       navigator.clipboard?.writeText(w.field(1)).then(() => toast("Copied"), () => {});
+      break;
+    case "share_image":
+      shareCard(w.field(1));
       break;
     case "share":
       if (navigator.share) navigator.share({ text: w.field(1) }).catch(() => {});
@@ -1558,6 +1563,7 @@ const panel = {
     if (r.kind === "tiles") return this.tilesRow(s, r);
     if (r.cells.length) return this.cellsRow(s, r);
     if (r.custom === CUSTOM_SWATCHES) return this.swatches(s, r);
+    if (r.custom === CUSTOM_CARD) return cardRow(r);
     const tappable = r.kind === "item" || r.kind === "button" || r.kind === "custom";
     const line = el("div", `row k-${r.kind}`);
     if (r.flag("d")) line.classList.add("off");
@@ -1827,6 +1833,184 @@ const panel = {
     return line;
   },
 };
+
+// ---- the card (core/share.l8's): drawn at its pixels on a canvas ----
+// Its words' runs: RUN_CARD + the piece's kind (0 words, 1 supplied, 2 His
+// words, 3 both, 4 a verse's number) + 8 indented + 16 Greek + 32 Hebrew
+// + 64 small capitals.
+const RUN_CARD = 300;
+let card = null;
+
+function cardRow(r) {
+  card = { r, canvas: drawCard(r), file: null };
+  const box = el("div", "card");
+  const c = card.canvas;
+  c.setAttribute("role", "img");
+  c.setAttribute("aria-label", r.label);
+  box.appendChild(c);
+  // (Drawn again once the faces have come; its image made ready to share,
+  // a share needing it at once.)
+  const mine = card;
+  document.fonts.ready.then(() => {
+    if (card !== mine) return;
+    const again = drawCard(r);
+    c.getContext("2d").drawImage(again, 0, 0);
+    c.toBlob((b) => {
+      if (card === mine && b) mine.file = new File([b], cardName(r), { type: "image/png" });
+    }, "image/png");
+  });
+  return box;
+}
+
+function cardName(r) {
+  return `${r.title} ${r.suffix}`.replace(/[:/\\]/g, "_").replace(/\s+/g, " ").trim() + ".png";
+}
+
+function cardFaces() {
+  const css = getComputedStyle(document.documentElement);
+  const v = (n, d) => css.getPropertyValue(n).trim() || d;
+  return { body: v("--body", "serif"), ui: v("--ui", "system-ui, sans-serif"), orig: v("--orig", "serif") };
+}
+
+function drawCard(r) {
+  const m = r.trailing.split(" ").map(Number);
+  const [W, H, margin, gap, refSize, versionSize, most, least, step] = m;
+  const [bg, ink, faint, accent] = split(r.options).map((h) => "#" + h);
+  const f = cardFaces();
+  const c = document.createElement("canvas");
+  c.width = W;
+  c.height = H;
+  const g = c.getContext("2d");
+  // The pieces: words split where they may break (after a space), lines
+  // broken where core breaks them.
+  const pieces = [];
+  let at = 0;
+  for (const [end, st] of r.runs) {
+    if (end > at) pieces.push({ text: r.detail.slice(at, end), st: st - RUN_CARD });
+    at = end;
+  }
+  if (at < r.detail.length) pieces.push({ text: r.detail.slice(at), st: 0 });
+  const rtl = pieces.some((p) => p.st & 32);
+  const atoms = [];
+  let atom = { parts: [], brk: false, indent: false };
+  const flush = (brk) => {
+    if (atom.parts.length) atoms.push(atom);
+    atom = { parts: [], brk, indent: false };
+  };
+  for (const p of pieces) {
+    for (const bit of p.text.split(/(\n| )/)) {
+      if (bit === "\n") flush(true);
+      else if (bit === " ") {
+        if (atom.parts.length) atom.parts[atom.parts.length - 1].text += " ";
+        flush(false);
+      } else if (bit) {
+        if (!atom.parts.length) atom.indent = !!(p.st & 8);
+        atom.parts.push({ text: bit, st: p.st });
+      }
+    }
+  }
+  flush(false);
+  const font = (st, s) => {
+    const k = st & 7;
+    if (k === 4) return `${s * 0.6}px ${f.ui}`;
+    const size = st & 64 ? s * 0.8 : st & 32 ? s * 1.15 : s;
+    const face = st & 32 ? f.ui : st & 16 ? f.orig : f.body;
+    return `${k === 1 || k === 3 ? "italic " : ""}${size}px ${face}`;
+  };
+  const color = (st) => ((st & 7) === 4 ? faint : (st & 7) === 2 || (st & 7) === 3 ? accent : ink);
+  const w = W - 2 * margin;
+  const width = (a, s) => a.parts.reduce((x, p) => {
+    g.font = font(p.st, s);
+    return x + g.measureText(p.text).width;
+  }, 0);
+  // Lines at size s: each its atoms, indent and whether a paragraph ends.
+  const lay = (s) => {
+    const lines = [];
+    let line = null;
+    for (const a of atoms) {
+      const aw = width(a, s);
+      const ind = a.indent ? 40 : 0;
+      if (!line || a.brk || (line.w + aw > w - line.ind && line.atoms.length)) {
+        if (line && a.brk) line.end = true;
+        line = { atoms: [], w: 0, ind: line && !a.brk ? line.ind : ind, end: false };
+        lines.push(line);
+      }
+      line.atoms.push({ a, w: aw });
+      line.w += aw;
+    }
+    const lh = s * (rtl ? 1.5 : 1.35);
+    const h = lines.length * lh + lines.filter((l) => l.end).length * s * 0.25;
+    return { lines, lh, h };
+  };
+  const refH = refSize * 1.25;
+  const room = H - 2 * margin - gap - refH;
+  let s = most;
+  let L = lay(s);
+  while (s > least && L.h > room) {
+    s -= step;
+    L = lay(s);
+  }
+  const top = Math.max(margin, (H - L.h - gap - refH) / 2);
+  g.fillStyle = bg;
+  g.fillRect(0, 0, W, H);
+  g.textBaseline = "alphabetic";
+  let y = top;
+  for (const line of L.lines) {
+    const base = y + L.lh * 0.78;
+    let x = rtl ? W - margin - line.ind : margin + line.ind;
+    for (const { a } of line.atoms) {
+      for (const p of rtl ? [...a.parts].reverse() : a.parts) {
+        g.font = font(p.st, s);
+        g.fillStyle = color(p.st);
+        const pw = g.measureText(p.text).width;
+        if (rtl) x -= pw;
+        g.fillText(p.text, x, (p.st & 7) === 4 ? base - s * 0.3 : base);
+        if (!rtl) x += pw;
+      }
+    }
+    y += L.lh + (line.end ? s * 0.25 : 0);
+  }
+  // The reference, then the version, under the words (at the right under
+  // Hebrew).
+  const ry = top + L.h + gap + refSize;
+  g.font = `600 ${refSize}px ${f.ui}`;
+  const rw = g.measureText(r.title).width;
+  g.font = `${versionSize}px ${f.ui}`;
+  const vw = g.measureText(" " + r.suffix.trim()).width;
+  let x = rtl ? W - margin - rw - vw : margin;
+  g.font = `600 ${refSize}px ${f.ui}`;
+  g.fillStyle = accent;
+  g.fillText(r.title, x, ry);
+  x += rw;
+  g.font = `${versionSize}px ${f.ui}`;
+  g.fillStyle = faint;
+  g.fillText(" " + r.suffix.trim(), x, ry);
+  return c;
+}
+
+// Share Image: the card's image to the platform's share (else saved).
+function shareCard(words) {
+  if (!card) return;
+  const go = (file) => {
+    if (navigator.canShare?.({ files: [file] })) {
+      navigator.share({ files: [file] }).catch(() => {});
+      return;
+    }
+    const a = el("a");
+    a.href = URL.createObjectURL(file);
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  };
+  void words;
+  if (card.file) go(card.file);
+  else {
+    const mine = card;
+    drawCard(mine.r).toBlob((b) => b && go(new File([b], cardName(mine.r), { type: "image/png" })), "image/png");
+  }
+}
 
 function fieldRow(s) {
   for (const sec of s.sections) for (const r of sec.rows) if (r.kind === "field") return r;
