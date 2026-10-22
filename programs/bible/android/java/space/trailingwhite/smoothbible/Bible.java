@@ -201,9 +201,8 @@ public final class Bible extends Activity {
         section = new Screen.Section();
         section.header = w.field(1);
         section.footer = w.field(2);
-        section.host = w.fieldNum(3);
-        section.button = w.field(4);
-        section.buttonAction = w.fieldNum(5);
+        section.button = w.field(3);
+        section.buttonAction = w.fieldNum(4);
         building.sections.add(section);
       } else if (word.equals("row") && section != null) section.rows.add(Screen.row(w));
       else if (word.equals("empty")) {

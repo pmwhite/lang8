@@ -35,7 +35,7 @@ final class Screen {
 
   static final class Section {
     String header = "", footer = "", button = "";
-    int host, buttonAction;
+    int buttonAction;
     final ArrayList<Row> rows = new ArrayList<>();
   }
 
