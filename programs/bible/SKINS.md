@@ -35,6 +35,83 @@ switch or a checkbox, the platform's fonts and icons). Core decides **what**
 is there and **what happens** (which rows a screen has, their words, what a tap
 does to the app's state, where the reader goes next).
 
+## A new skin: the contract
+
+A new platform gets every feature by doing what this list says and no more
+(owner, 2026-10-22: the more skins, the more generic core). Anything a
+feature needs beyond it is a gap in core, to be closed there, not in the
+skin. The web is the reference: `web/main.l8` (the platform, about 120
+lines) and `web/page/skin.js` (the skin).
+
+**1. The platform, in L8** (core's host, `core/host.l8`, does the rest):
+
+- `kept_store = KeptStore { read, write, append, remove }`: one named file
+  (`kp_name`) read into `fbuf`, written from it, added to, deleted
+  (`core/kept.l8` names them and says what goes in each).
+- `host_io = HostIO { ask, http, file, say }`: a data file asked for by
+  name (the site's `data/` names: `bsb` ... `ylt`, `orig.txt`, `lang/*`,
+  `help.txt`, `xrefs.bin`, `mhcc.txt`, `audio/*.tim`,
+  `audio/henson.paths`), a GET, a file or answer's bytes, lines to the
+  skin.
+- `hs_start()`, then what the platform is: `sk_device` (its name: "Device",
+  "Phone"), `sk_follows_text_size`, `sk_fonts` (its reader's faces, in the
+  settings' order), `hs_notify_off` (where notifications are turned back
+  on, if not its Settings).
+- A loop: wait for lines, take them into `hs_inbox` (the web's `bw_take`), `hs_lines(n)`,
+  `hs_after()`. Kept allocations happen only here, never in a callback.
+- Its own lines in: `got ID SIZE` (a data file came; -1 none), `http ID
+  STATUS SIZE` (an answer came), `api BASE` (the site's `/api/v1/`).
+
+**2. The skin draws** what core describes:
+
+- Screens: `screen` ... `end` with every row kind, and these `CUSTOM_`
+  kinds where the plain row won't do: `CUSTOM_SWATCHES` (colors to choose),
+  `CUSTOM_CARD` (Share as Image's card, drawn at its pixels),
+  `CUSTOM_FONT` (each font in its own face), `CUSTOM_HIT` (a verse found).
+  The others may show as their kind's row. Their placement: `present`,
+  `push`, `present_over`, `panel`, `update`, `refill`, `retext`, `blur`,
+  `focus`, `pop`, `pop_to`, `close`, `dismiss`; the skin's own Back says
+  `closed ID`.
+- The reader: `reader`, then `chapter`, `span`, `verse`, `link` and `mark`
+  lines as it asks (`want C`); `look`, `title`, `version`, `jump`, `goto`,
+  `place`, `relayout`, `page`; `selection`, `carried`, `hearing`, `back`,
+  `wake`. It says where it is: `rest`, `moving`, `tick`, `jumped`, `place`.
+- The tray (`tray`, `tray_away`: screen 0), the title's menu
+  (`titlemenu`, `menuact`), toasts (`toast`), the small player (`player`).
+- Icons by their SF Symbols names (its own drawing of each), runs by their
+  styles (`STYLE_*`, `RUN_*`), `keys ACTION` (a screen that takes typed
+  letters: Practice's).
+
+**3. The skin does** what only a platform can, each a line or two:
+
+| What | Lines |
+|---|---|
+| Begin, and its appearance | `start W H DENSITY DARK TZ`, `version ABBR`, `dark`, `away` |
+| Taps | `tap`, `act`, `query`, `scope`, `text`, `submit`, `tapverse`, `tapnone`, `trayact`, `word`, `footnote`, `preview`, `esvact`, `versestudy`, `back` |
+| Keys | `key NAME MODS` |
+| Recordings | `audio_play`, `audio_stop` → `audiotime`, `audioended`, `audiofailed` |
+| Its voice | `voices` (once); `say`, `speech_stop` → `spoke`, `spoken` |
+| Listening's controls | `listen_pause`, `listen_resume`, `listen_stop`, `follow`; `listenplay`, `listenpause`, `listenprev`, `listennext`, `listenstop` (its own player's too: a lock screen's) |
+| Time | `timer TOK MS` → `timer TOK` |
+| The screen kept on | `awake MS` |
+| Reminders | `notify_ask` → `notifyok`; `notify_clear`, `notify`; one opened → `reminded` |
+| Sharing | `copy`, `share`, `share_image`, `savefile`, `url` |
+
+**4. A skin on core's host never gets** the lines for a host with views or
+state of its own (the iPhone's): `open`, `plan_today`, `plan_details`,
+`plan_stopped`, `marked`, `ribbon_added`, `ribbon_open`, `ribbon_moved`,
+`ribbon_color`, `ribbon_toast`, `read_in`, `practice_session`,
+`practice_audio`, `preview`, `footnote`, `study_moved`, `esv_want`,
+`esv_search`, `searched`, `mm_fetch`, `pins_changed`, `export`, `remind`,
+`remind_time`, `open_settings`, `audio_source`, `voice`, `cellular`,
+`download`, `download_delete`, `settings`, `chosen`. It may ignore any line
+it doesn't know.
+
+What core's host turns on for its skins: ribbons and plans, Listen, Keep
+Screen On, reminders, Share as Image, the Manual and Acknowledgements.
+Downloads (`sk_has_downloads`) need a platform that keeps recordings; the
+web's can't (their hosts don't allow pages to read them), so it streams.
+
 ## Screens as data
 
 A screen is built by core when it is shown and again whenever core says it
