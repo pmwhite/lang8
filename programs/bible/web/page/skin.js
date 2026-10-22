@@ -94,43 +94,22 @@ async function fetchData(id, name) {
   }
 }
 
-// ---- the ESV, through the site's Worker (/api/v1/: it holds the key) ----
+// ---- the network: a GET for core's host (the site's Worker, /api/v1/:
+// it holds the ESV's key), its answer a file core reads ----
 // (On smoothbible.com the Worker answers /api/; a development server, and
 // a tailnet that forwards only /read, answer /read/api/ too: serve.mjs.)
 const API = location.hostname === "smoothbible.com" ? "/api/v1/" : "/read/api/v1/";
-const WHO = { "X-Smooth-Bible": "web (1)" };
-let esvFile = 1000000;
 
-async function esvAsk(path) {
-  let r = null;
-  let j = null;
-  try {
-    r = await fetch(API + path, { headers: WHO, signal: AbortSignal.timeout(12000) });
-    j = await r.json();
-  } catch {}
-  if (!r || !r.ok || !j || !Array.isArray(j.chapters)) {
-    send(`esvfail ${r ? r.status : 0} ${j && j.error === "daily_limit" ? 1 : 0} ${(j && j.retry) | 0}`);
-    return;
-  }
-  for (const ch of j.chapters) {
-    const data = enc.encode(String(ch.records || "") + "\n");
-    const id = esvFile++;
-    files.set(id, data);
-    send(`esvch ${ch.book} ${ch.chapter} ${id} ${data.length}`);
-  }
-  send("esvdone");
-}
-
-// Whether the site gives the ESV, told to core.
-async function esvStatus() {
+async function httpGet(id, url) {
   let status = 0;
-  let esv = 0;
+  let bytes = new Uint8Array(0);
   try {
-    const r = await fetch(API + "status", { headers: WHO, signal: AbortSignal.timeout(8000) });
+    const r = await fetch(url, { headers: { "X-Smooth-Bible": "web (1)" }, signal: AbortSignal.timeout(12000) });
     status = r.status;
-    if (r.ok) esv = (await r.json()).esv ? 1 : 0;
+    bytes = new Uint8Array(await r.arrayBuffer());
   } catch {}
-  send(`esvstatus ${status} ${esv}`);
+  files.set(id, bytes);
+  send(`http ${id} ${status} ${bytes.length}`);
 }
 
 const imports = {
@@ -171,8 +150,8 @@ const imports = {
     this.bytes().set(data.subarray(0, Math.min(cap, data.length)), p);
     return BigInt(data.length);
   },
-  bw_esv(b, start, end) {
-    esvAsk(dec.decode(this.bytes().slice(Number(b) + Number(start), Number(b) + Number(end))));
+  bw_http(id, b, n) {
+    httpGet(Number(id), dec.decode(this.bytes().slice(Number(b), Number(b) + Number(n))));
     return 0n;
   },
   bw_store_get(b, start, end, out) {
@@ -1958,7 +1937,6 @@ function begin() {
   const v = /^\/read\/(bsb|kjv|web|asv|ylt|esv)\//.exec(location.pathname);
   if (v) send(`version ${v[1].toUpperCase()}`);
   if (c >= 0) send(`place ${c} 0 0`);
-  esvStatus();
   send(`start ${innerWidth} ${innerHeight} ${Math.round(devicePixelRatio * 100)} ${matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0} ${-new Date().getTimezoneOffset() * 60}`);
 }
 
@@ -1969,6 +1947,8 @@ player.init();
 // (The panel's entries are the browser's Back; the reader's place is
 // core's, never the browser's restoring.)
 history.scrollRestoration = "manual";
+// (Where core's host finds the site's Worker.)
+send(`api ${API}`);
 history.replaceState({ sb: 0 }, "");
 reader.main.textContent = "";
 
