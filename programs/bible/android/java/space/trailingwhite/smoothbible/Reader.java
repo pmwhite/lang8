@@ -259,8 +259,10 @@ final class Reader extends ListView {
     long[] lk = links.get(c);
     if (lk != null) {
       for (int i = 0; i + 3 < lk.length; i += 4) {
-        if (off >= lk[i] - 1 && off <= lk[i + 1] && lk[i + 2] != 2) {
-          Native.send(lk[i + 2] == 0 ? "footnote " + c + " " + lk[i + 3] : "preview " + lk[i + 3]);
+        if (off >= lk[i] - 1 && off <= lk[i + 1]) {
+          long k = lk[i + 2];
+          Native.send(k == 0 ? "footnote " + c + " " + lk[i + 3] : k == 2 ? "word " + lk[i + 3]
+              : "preview " + lk[i + 3]);
           return;
         }
       }

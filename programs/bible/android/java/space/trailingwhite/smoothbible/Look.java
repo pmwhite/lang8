@@ -23,9 +23,10 @@ final class Look {
   int margin = 28;
   boolean dark, red;
   int bg = 0xFFFBF8F2, ink = 0xFF1E1C19, heading = 0xFF4F4943, faint = 0xFF8A8378,
-      accent = 0xFF9C3A2C, rule = 0xFF1E1C19;
+      accent = 0xFF9C3A2C, rule = 0xFF1E1C19, glossLine = 0x521E1C19;
 
-  // look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE
+  // look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS
+  // (GLOSS: the rule's strength under a glossed word, thousandths)
   void read(Wire w) {
     size = w.num(1) / 1000f;
     spacing = w.num(2) / 1000f;
@@ -38,6 +39,7 @@ final class Look {
     faint = color(w.word(9));
     accent = color(w.word(10));
     rule = color(w.word(11));
+    glossLine = alpha(rule, w.num(12) / 1000f);
   }
 
   static int color(String hex) {
@@ -56,7 +58,8 @@ final class Look {
   static final int BODY = 0, VERSE = 1, BOOK = 2, NUMERAL = 3, HEAD = 4, SUBHEAD = 5, REF = 6,
       TITLE = 7, MAJOR = 8, RANGE = 9, ACROSTIC = 10, NOTE = 11, BOOKLABEL = 12, CAPS = 13,
       RULE = 14, NUMERAL1 = 15, JESUS = 16, JESUS_CAPS = 17, XREF = 18, SUPPLIED = 19,
-      JESUS_SUPPLIED = 20, PASSAGE = 21;
+      JESUS_SUPPLIED = 20, PASSAGE = 21, ORIG = 22, ORIG_GL = 23, OTITLE = 24, OTITLE_GL = 25,
+      QERE = 26, APPARATUS = 27, APP_ENTRY = 28;
   static final int PROSE = 0, Q1 = 1, Q2 = 2, L1 = 3, L2 = 4, CENTER = 5, RIGHT = 6, VERSE_LINE = 7;
 
   private static void span(SpannableStringBuilder s, Object o, int a, int b) {
@@ -137,6 +140,23 @@ final class Look {
         break;
       case RULE:
         span(s, new Rule(rule), a, b);
+        break;
+      case ORIG_GL:
+      case OTITLE_GL:
+        // (A glossed word: a thin underline in the rule's color.)
+        span(s, new Glossed(glossLine), a, b);
+        if (style == OTITLE_GL) span(s, new ForegroundColorSpan(heading), a, b);
+        break;
+      case OTITLE:
+        span(s, new ForegroundColorSpan(heading), a, b);
+        break;
+      case QERE:
+      case APPARATUS:
+      case APP_ENTRY:
+        // (The apparatus: small, in the sans face, faint.)
+        span(s, new RelativeSizeSpan(0.78f), a, b);
+        span(s, new TypefaceSpan("sans-serif"), a, b);
+        span(s, new ForegroundColorSpan(faint), a, b);
         break;
       default:
         break;
@@ -358,6 +378,21 @@ final class Look {
 
   // The divider between chapters (an object character in the text): a
   // short line across the middle of its line.
+  static final class Glossed extends android.text.style.CharacterStyle {
+    final int color;
+
+    Glossed(int color) {
+      this.color = color;
+    }
+
+    @Override
+    public void updateDrawState(android.text.TextPaint tp) {
+      // (Its own stroke, as a suggestion's: not the ink's underline.)
+      tp.underlineColor = color;
+      tp.underlineThickness = Math.max(1f, tp.getTextSize() / 18f);
+    }
+  }
+
   static final class Rule extends ReplacementSpan {
     final int color;
 
