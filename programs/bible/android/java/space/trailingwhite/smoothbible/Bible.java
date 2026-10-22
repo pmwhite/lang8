@@ -336,6 +336,13 @@ public final class Bible extends Activity {
       case "dismiss":
         panel.dismiss();
         break;
+      case "refresh":
+        // (What is kept changed: every screen shown made again.)
+        Native.send("refresh");
+        break;
+      case "memorized":
+        android.widget.Toast.makeText(this, "Added to Memory", android.widget.Toast.LENGTH_SHORT).show();
+        break;
       case "reader":
         reader.setCount(w.num(1));
         break;

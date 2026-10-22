@@ -197,8 +197,35 @@ final class Panel extends FrameLayout {
   }
 
   void update(int id) {
-    if (!stack.isEmpty() && stack.get(stack.size() - 1) == id) show(false);
+    if (stack.isEmpty() || stack.get(stack.size() - 1) != id) return;
+    // (While its field is being typed in, made again once the typing
+    // rests: a list made again under the field loses letters the keyboard
+    // is composing.)
+    EditText f = rowFields.get(id);
+    long since = android.os.SystemClock.uptimeMillis() - typed;
+    if (f != null && f.hasFocus() && since < 600) {
+      later.removeCallbacks(rest);
+      later.postDelayed(rest, 600 - since);
+      return;
+    }
+    boolean typing = f != null && f.hasFocus();
+    show(false);
+    // (Still taking the keys, where they were.)
+    if (typing) {
+      int at = f.getSelectionStart(), to = f.getSelectionEnd();
+      f.post(() -> {
+        f.requestFocus();
+        if (at >= 0 && to <= f.getText().length()) f.setSelection(at, to);
+      });
+    }
   }
+
+  // When a row's field was last typed in, and the screen made again once
+  // its typing rests.
+  private long typed;
+  private final Runnable rest = () -> {
+    if (!stack.isEmpty()) update(stack.get(stack.size() - 1));
+  };
 
   void dismiss() {
     stack.clear();
@@ -277,11 +304,18 @@ final class Panel extends FrameLayout {
   }
 
   // The top screen shown (fresh: just opened, at its focus).
+  // The screen shown last.
+  private int shown = -1;
+
   private void show(boolean fresh) {
     Screen s = screens.get(stack.get(stack.size() - 1));
     if (s == null) return;
     field.setVisibility(s.search.isEmpty() ? GONE : VISIBLE);
-    if (s.search.isEmpty()) keyboardAway();
+    // (The keyboard away as another screen shows, unless its field wants
+    // it; not as the same one is made again, where a row's field may be
+    // taking the keys: its letters being composed would be lost.)
+    if (s.id != shown && (s.search.isEmpty() || !s.focusField)) keyboardAway();
+    shown = s.id;
     field.setHint(s.search);
     field.setImeOptions(s.go ? EditorInfo.IME_ACTION_GO : EditorInfo.IME_ACTION_SEARCH);
     if (s.id != fieldFor) {
@@ -1111,6 +1145,12 @@ final class Panel extends FrameLayout {
       CharSequence words = look.rich(r.title, r.truns);
       android.text.SpannableStringBuilder s = new android.text.SpannableStringBuilder(words);
       Screen sc = screen;
+      // (A Practice passage: in the reader's type, its links its words'
+      // own color, a hidden word's tap showing it.)
+      boolean practice = false;
+      for (int j = 1; j < r.truns.length; j += 2)
+        if (r.truns[j] >= Look.RUN_PRACTICE) practice = true;
+      boolean plainLinks = practice;
       for (int j = 0; j + 3 < r.links.length; j += 4) {
         int b = (int) Math.max(0, Math.min(r.links[j], s.length()));
         int e = (int) Math.max(b, Math.min(r.links[j + 1], s.length()));
@@ -1124,7 +1164,7 @@ final class Panel extends FrameLayout {
 
           @Override
           public void updateDrawState(android.text.TextPaint p) {
-            p.setColor(look.accent);
+            if (!plainLinks) p.setColor(look.accent);
           }
         }, b, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
       }
@@ -1139,12 +1179,20 @@ final class Panel extends FrameLayout {
       if (r.links.length > 0) t.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
       t.setTextIsSelectable(true);
       t.setTextColor(look.ink);
-      t.setTextSize(TypedValue.COMPLEX_UNIT_SP, r.flag('h') ? 18 : 16);
+      t.setTextSize(TypedValue.COMPLEX_UNIT_SP, practice ? look.textSp() : r.flag('h') ? 18 : 16);
+      if (practice) t.setTypeface(Typeface.SERIF);
       if (r.flag('h')) {
         t.setTypeface(Typeface.DEFAULT_BOLD);
         t.setAccessibilityHeading(true);
       }
-      t.setLineSpacing(0, 1.2f);
+      t.setLineSpacing(0, practice ? look.spacing : 1.2f);
+      if (practice) {
+        // (Not selectable: a tap on a word is a link's; no wash as it is
+        // pressed.)
+        t.setTextIsSelectable(false);
+        t.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
+        t.setHighlightColor(0);
+      }
       t.setPadding(dp(20), dp(r.flag('h') ? 20 : 0), dp(20), dp(r.flag('h') ? 6 : 10));
       if (!r.label.isEmpty()) t.setContentDescription(r.label);
       return t;
@@ -1184,6 +1232,7 @@ final class Panel extends FrameLayout {
 
             @Override
             public void afterTextChanged(Editable e) {
+              typed = android.os.SystemClock.uptimeMillis();
               Screen.Row now = Panel.fieldRow(s);
               if (now != null) Native.send("text " + s.id + " " + now.action + " " + now.arg + " "
                   + e.toString());
@@ -1207,8 +1256,15 @@ final class Panel extends FrameLayout {
       f.setTextColor(look.ink);
       f.setHintTextColor(look.faint);
       if (!r.label.isEmpty()) f.setContentDescription(r.label);
+      // (Its box the same view each time the screen is made again: the
+      // list keeps a view it is given back focused, the keyboard's typing
+      // going on into it; a new parent would take its focus, and what is
+      // typed meanwhile would be lost.)
+      if (f.getParent() instanceof FrameLayout && "field".equals(((View) f.getParent()).getTag()))
+        return (View) f.getParent();
       if (f.getParent() instanceof ViewGroup) ((ViewGroup) f.getParent()).removeView(f);
       FrameLayout box = new FrameLayout(c);
+      box.setTag("field");
       box.setPadding(dp(16), dp(4), dp(16), dp(4));
       box.addView(f, new FrameLayout.LayoutParams(-1, -2));
       return box;

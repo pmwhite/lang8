@@ -149,7 +149,8 @@ final class Look {
   static final int RUN_NUMBER = 100, RUN_MISSING = 101, RUN_GREEK = 102, RUN_HEBREW = 103,
       RUN_TRANSLIT = 104, RUN_CODE = 105, RUN_FAINT = 106, RUN_STRONG = 107, RUN_PLAIN = 108,
       RUN_SMALL = 109, RUN_GREEK_FAINT = 110, RUN_HEBREW_FAINT = 111, RUN_READING = 112,
-      RUN_ITALIC = 113, RUN_ACCENT = 114, RUN_SYMBOL = 115, RUN_SYMBOL_BOLD = 116;
+      RUN_ITALIC = 113, RUN_ACCENT = 114, RUN_SYMBOL = 115, RUN_SYMBOL_BOLD = 116,
+      RUN_SCRIPTURE = 117, RUN_PRACTICE = 200;
 
   // Words set by their runs (END, STYLE pairs; END in UTF-16 units, as
   // Java counts): the reader's styles, or core's RUN_.
@@ -168,6 +169,10 @@ final class Look {
   private void run(SpannableStringBuilder s, int a, int b, int st) {
     if (st < 100) {
       style(s, a, b, st);
+      return;
+    }
+    if (st >= RUN_PRACTICE && st < RUN_PRACTICE + 256) {
+      practice(s, a, b, st - RUN_PRACTICE);
       return;
     }
     switch (st) {
@@ -215,6 +220,10 @@ final class Look {
       case RUN_ACCENT:
         span(s, new ForegroundColorSpan(accent), a, b);
         break;
+      case RUN_SCRIPTURE:
+        span(s, new TypefaceSpan("serif"), a, b);
+        span(s, new ForegroundColorSpan(ink), a, b);
+        break;
       case RUN_SYMBOL:
       case RUN_SYMBOL_BOLD:
         // (An iPhone symbol, by name: here a small mark in its place.)
@@ -222,6 +231,80 @@ final class Look {
         break;
       default:
         break;
+    }
+  }
+
+  // A Practice passage's run (core/ui.l8's RUN_PRACTICE): its color (clear,
+  // ink, learned, faint), its underline (the rule, the accent, half the
+  // accent, the accent dotted), the verse heard washed, its script. An
+  // underlined run draws itself, so that its line shows under clear
+  // letters.
+  private void practice(SpannableStringBuilder s, int a, int b, int look) {
+    int color = look & 3, under = (look >> 2) & 7;
+    int c = color == 0 ? 0 : color == 1 ? ink : color == 2 ? alpha(ink, 0.35f) : faint;
+    int wash = (look & 32) != 0 ? alpha(accent, 0.16f) : 0;
+    if ((look & 192) != 0) span(s, new TypefaceSpan("serif"), a, b);
+    if (under == 0) {
+      span(s, new ForegroundColorSpan(c), a, b);
+      if (wash != 0) span(s, new android.text.style.BackgroundColorSpan(wash), a, b);
+      return;
+    }
+    int line = under == 1 ? alpha(rule, 0.3f) : under == 3 ? alpha(accent, 0.5f) : accent;
+    span(s, new Under(c, line, under == 4, wash), a, b);
+  }
+
+  static int alpha(int color, float a) {
+    return (Math.round(a * 255) << 24) | (color & 0xFFFFFF);
+  }
+
+  // Words drawn in their color (none: clear, their room kept) with a line
+  // under them, solid or dotted, on the wash.
+  static final class Under extends ReplacementSpan {
+    final int color, line, wash;
+    final boolean dotted;
+
+    Under(int color, int line, boolean dotted, int wash) {
+      this.color = color;
+      this.line = line;
+      this.dotted = dotted;
+      this.wash = wash;
+    }
+
+    @Override
+    public int getSize(Paint p, CharSequence t, int a, int b, Paint.FontMetricsInt fm) {
+      if (fm != null) {
+        Paint.FontMetricsInt m = p.getFontMetricsInt();
+        fm.ascent = m.ascent;
+        fm.descent = m.descent;
+        fm.top = m.top;
+        fm.bottom = m.bottom;
+        fm.leading = m.leading;
+      }
+      return Math.round(p.measureText(t, a, b));
+    }
+
+    @Override
+    public void draw(Canvas c, CharSequence t, int a, int b, float x, int top, int y, int bottom,
+        Paint p) {
+      float w = p.measureText(t, a, b);
+      int was = p.getColor();
+      float stroke = p.getStrokeWidth();
+      if (wash != 0) {
+        p.setColor(wash);
+        c.drawRect(x, top, x + w, bottom, p);
+      }
+      if (color != 0) {
+        p.setColor(color);
+        c.drawText(t, a, b, x, y, p);
+      }
+      p.setColor(line);
+      float thick = Math.max(1.5f, p.getTextSize() / 14);
+      float uy = y + p.getTextSize() * 0.2f;
+      if (dotted) {
+        for (float d = x; d < x + w; d += thick * 3) c.drawCircle(d + thick / 2, uy, thick / 2, p);
+      } else c.drawRect(x, uy - thick / 2, x + w, uy + thick / 2, p);
+      p.setColor(was);
+      p.setStrokeWidth(stroke);
     }
   }
 
