@@ -304,7 +304,7 @@ From the skin:
 
 | Line | Meaning |
 |---|---|
-| `start W H DENSITY DARK` | the app begun: the window (points), its scale (hundredths), the system's appearance |
+| `start W H DENSITY DARK TZ` | the app begun: the window (points), its scale (hundredths), the system's appearance, its time zone (seconds east of UTC: the day turns at its midnight) |
 | `tap goto`, `tap versions`, `tap settings`, `tap history`, `tap search`, `tap library` | the bar's buttons |
 | `act ID ACTION ARG VALUE` | an action (VALUE: a toggle's 1 or 0, a choice's, segment's, filter's or sort's index, a slider's value, a time's minutes, a swatch's color). An action on a screen means those over it have gone |
 | `query ID TEXT` | screen ID's field typed in (TEXT to the line's end), once typing has rested |

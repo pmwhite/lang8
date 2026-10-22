@@ -734,7 +734,7 @@ const reader = {
 
   // The first chapter on the screen (below the bar).
   anchor() {
-    const y = barHeight();
+    const y = barHeight() + 2;
     for (const s of this.main.children) if (s.getBoundingClientRect().bottom > y) return s;
     return null;
   },
@@ -1899,7 +1899,7 @@ function begin() {
   started = true;
   const c = chapterOfAddress(location.pathname);
   if (c >= 0) send(`place ${c} 0 0`);
-  send(`start ${innerWidth} ${innerHeight} ${Math.round(devicePixelRatio * 100)} ${matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0}`);
+  send(`start ${innerWidth} ${innerHeight} ${Math.round(devicePixelRatio * 100)} ${matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0} ${-new Date().getTimezoneOffset() * 60}`);
 }
 
 panel.init();

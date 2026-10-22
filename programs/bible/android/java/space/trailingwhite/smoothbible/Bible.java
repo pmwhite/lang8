@@ -209,7 +209,8 @@ public final class Bible extends Activity {
     Native.start();
     android.util.DisplayMetrics m = getResources().getDisplayMetrics();
     Native.send("start " + (int) (m.widthPixels / m.density) + " " + (int) (m.heightPixels / m.density)
-        + " " + (int) (m.density * 100) + " " + (systemDark() ? 1 : 0));
+        + " " + (int) (m.density * 100) + " " + (systemDark() ? 1 : 0) + " "
+        + java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000);
   }
 
   boolean systemDark() {

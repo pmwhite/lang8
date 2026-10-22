@@ -141,6 +141,12 @@ export async function instantiate(module, sys, extra = {}) {
     l8_heap_used() {
       return instance.exports.l8_heap.value - heapBase;
     },
+    // libc's time: seconds since 1970, also at t if it isn't null.
+    time(t) {
+      const s = BigInt(Math.floor(Date.now() / 1000));
+      if (t) view().setBigInt64(Number(t), s, true);
+      return s;
+    },
     l8_time() {
       return BigInt(Math.floor(Date.now() / 1000));
     },
