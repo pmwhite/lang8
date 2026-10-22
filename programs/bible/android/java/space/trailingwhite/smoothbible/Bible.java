@@ -258,6 +258,7 @@ public final class Bible extends Activity {
         building.scopes = w.field(2).split("\\|");
         building.scopeLabels = w.field(3).split("\\|");
       } else if (word.equals("plain")) building.plain = true;
+      else if (word.equals("grid")) building.grid = true;
       else if (word.equals("button")) building.button = w.field(1);
       else if (word.equals("command")) {
         Screen.Command c = new Screen.Command();

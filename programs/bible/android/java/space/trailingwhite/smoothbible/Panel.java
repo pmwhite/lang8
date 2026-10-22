@@ -603,7 +603,11 @@ final class Panel extends FrameLayout {
       if (!s.intro.isEmpty()) items.add(new Intro(look.rich(s.intro, s.introRuns)));
       for (Screen.Section sec : s.sections) {
         items.add(sec);
-        for (Screen.Row r : sec.rows) {
+        if (s.grid) {
+          // (A grid: its rows one item of square buttons.)
+          if (!sec.rows.isEmpty()) items.add(new Grid(sec));
+          n += sec.rows.size();
+        } else for (Screen.Row r : sec.rows) {
           if (n++ == s.focus) focusItem = items.size();
           items.add(r);
         }
@@ -640,6 +644,28 @@ final class Panel extends FrameLayout {
       Context c = getContext();
       if (o instanceof Screen.Section) return header((Screen.Section) o);
       if (o instanceof Hero) return hero(screen);
+      if (o instanceof Grid) {
+        Flow flow = new Flow(c, dp(10), dp(10), false);
+        flow.setPadding(dp(20), dp(12), dp(20), dp(24));
+        Screen s = screen;
+        for (Screen.Row r : ((Grid) o).section.rows) {
+          TextView b = new TextView(c);
+          b.setText(String.valueOf(r.value));
+          b.setGravity(Gravity.CENTER);
+          b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19);
+          boolean chosen = r.acc.equals("check");
+          b.setTextColor(chosen ? look.bg : look.ink);
+          GradientDrawable g = new GradientDrawable();
+          g.setCornerRadius(dp(14));
+          g.setColor(chosen ? look.accent : (look.faint & 0x00ffffff) | 0x22000000);
+          b.setBackground(g);
+          b.setContentDescription(r.title);
+          b.setOnClickListener(v -> Native.send("act " + s.id + " " + r.action + " " + r.arg + " 0"));
+          b.setLayoutParams(new ViewGroup.LayoutParams(dp(56), dp(56)));
+          flow.addView(b);
+        }
+        return flow;
+      }
       if (o instanceof Intro) {
         TextView t = new TextView(c);
         t.setText(((Intro) o).text);
@@ -1305,6 +1331,14 @@ final class Panel extends FrameLayout {
   static final int CUSTOM_HIT = 5, CUSTOM_SWATCHES = 6;
 
   private static final class Hero {}
+
+  private static final class Grid {
+    final Screen.Section section;
+
+    Grid(Screen.Section s) {
+      section = s;
+    }
+  }
 
   private static final class Credit {}
 

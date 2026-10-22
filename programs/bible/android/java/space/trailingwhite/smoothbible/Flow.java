@@ -24,8 +24,12 @@ final class Flow extends ViewGroup {
     int x = 0, y = 0, line = 0;
     for (int i = 0; i < getChildCount(); i++) {
       View v = getChildAt(i);
-      v.measure(MeasureSpec.makeMeasureSpec(room, MeasureSpec.AT_MOST),
-          MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED));
+      // (A child's own size, if it gives one: a grid's square.)
+      ViewGroup.LayoutParams lp = v.getLayoutParams();
+      v.measure(lp != null && lp.width > 0 ? MeasureSpec.makeMeasureSpec(lp.width, MeasureSpec.EXACTLY)
+          : MeasureSpec.makeMeasureSpec(room, MeasureSpec.AT_MOST),
+          lp != null && lp.height > 0 ? MeasureSpec.makeMeasureSpec(lp.height, MeasureSpec.EXACTLY)
+          : MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED));
       if (x > 0 && x + v.getMeasuredWidth() > room) {
         y += line + lineGap;
         x = 0;

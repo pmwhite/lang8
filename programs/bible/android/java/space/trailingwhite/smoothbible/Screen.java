@@ -15,7 +15,7 @@ final class Screen {
   // chosen; and whether its list is plain.
   String searchText = "";
   int wait, scope;
-  boolean go, focusField, plain;
+  boolean go, focusField, plain, grid;
   String[] scopes = new String[0], scopeLabels = new String[0];
   // Words above its first section (set by their runs), and whether its
   // focus row is selected too.
