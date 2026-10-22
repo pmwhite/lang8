@@ -250,7 +250,7 @@ Other lines from core:
 | `refill ID FADE` | screen ID made again as its field is typed in (FADE 1: a cross-fade) |
 | `retext ID`, `blur ID` | the field to show the screen's words; the keyboard put away |
 | `reader N` | the reader has N chapters |
-| `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA`, `verse V A B` and `mark V HEX BOOKMARK NOTE` lines (a verse's highlight's color, `-` none; bookmarked; noted), then `end` |
+| `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA`, `verse V A B`, `link A B KIND ARG` (a footnote's mark, KIND 0, ARG its place; a reference, 1, ARG the reference; a word of the original's, 2) and `mark V HEX BOOKMARK NOTE` lines (a verse's highlight's color, `-` none; bookmarked; noted), then `end` |
 | `jump C V`, `goto C V`, `relayout` | the reader moved; the screens away, then moved; every chapter to be asked for again |
 | `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE` | all a skin needs of look.l8 |
 | `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation |
@@ -293,6 +293,7 @@ From the skin:
 | `select C V...` | the verses selected (none: the tray away); the tray's model written as screen 0 |
 | `trayact ACTION V`, `titlemenu`, `menuact ACTION ARG` | a tray's button; the title's menu's model, as screen 0; one of its items |
 | `versestudy C V` | verse C:V's Study, as core's screen (a skin's answer to `study_verse`) |
+| `footnote C P`, `preview REF` | a footnote's mark tapped (its place P in chapter C), a reference tapped: core's footnote (`core/footnote.l8`) or preview, or the host's own (`SK_NUM_OWN_VIEW`) |
 | `refresh` | what core's screens show has changed (the host's own state): each made again |
 
 A host in L8 (android/main.l8) reads files and keeps the settings for core

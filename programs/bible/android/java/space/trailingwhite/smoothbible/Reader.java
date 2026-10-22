@@ -24,6 +24,9 @@ final class Reader extends ListView {
   // Each chapter's text as core gave it, and its verses (number, start, end).
   final SparseArray<SpannableStringBuilder> texts = new SparseArray<>();
   final SparseArray<int[]> verses = new SparseArray<>();
+  // Each chapter's links (A, B, KIND, ARG each: a footnote's mark, 0; a
+  // reference, 1; a word of the original's, 2), as core gave them.
+  final SparseArray<long[]> links = new SparseArray<>();
   final SparseArray<Boolean> asked = new SparseArray<>();
   int topInset;
   // A jump not yet made exactly: to verse jumpV of chapter jumpC, once it
@@ -73,6 +76,7 @@ final class Reader extends ListView {
   void forget() {
     texts.clear();
     verses.clear();
+    links.clear();
     asked.clear();
     adapter.notifyDataSetChanged();
   }
@@ -111,6 +115,20 @@ final class Reader extends ListView {
     }
     texts.put(c, s);
     verses.put(c, java.util.Arrays.copyOf(vs, nv * 3));
+    java.util.ArrayList<long[]> ls = new java.util.ArrayList<>();
+    for (Wire w : lines) {
+      if (!w.word(0).equals("link")) continue;
+      long arg;
+      try {
+        arg = Long.parseLong(w.word(4));
+      } catch (NumberFormatException e) {
+        continue;
+      }
+      ls.add(new long[] {w.num(1), w.num(2), w.num(3), arg});
+    }
+    long[] lk = new long[ls.size() * 4];
+    for (int i = 0; i < ls.size(); i++) System.arraycopy(ls.get(i), 0, lk, i * 4, 4);
+    links.put(c, lk);
     // (What is marked: a highlight's color behind its verse.)
     for (Wire w : lines) {
       if (!w.word(0).equals("mark") || w.word(2).equals("-")) continue;
@@ -205,6 +223,17 @@ final class Reader extends ListView {
     if (l == null || vs == null) return;
     int line = l.getLineForVertical((int) y - row.getTop() - tv.getPaddingTop());
     int off = l.getOffsetForHorizontal(line, x - tv.getPaddingLeft());
+    // (A footnote's mark or a reference under the finger, give or take a
+    // letter: core's, not a selection.)
+    long[] lk = links.get(c);
+    if (lk != null) {
+      for (int i = 0; i + 3 < lk.length; i += 4) {
+        if (off >= lk[i] - 1 && off <= lk[i + 1] && lk[i + 2] != 2) {
+          Native.send(lk[i + 2] == 0 ? "footnote " + c + " " + lk[i + 3] : "preview " + lk[i + 3]);
+          return;
+        }
+      }
+    }
     int v = 0;
     for (int i = 0; i < vs.length; i += 3) if (off >= vs[i + 1] && off < vs[i + 2]) v = vs[i];
     if (v <= 0) return;
