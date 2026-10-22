@@ -11,7 +11,7 @@ first new skin is Android.
 | Layer | Where | What it is |
 |---|---|---|
 | The Bible and what is kept | `core/*.l8` (text, layout, store, plans, memory, ...) | Data and rules. No platform, no screens. Unchanged by this. |
-| The app | `core/ui.l8`, `core/skin.l8`, `core/learn_screens.l8`, `core/prefs.l8` | Every screen as data, what each action does, the settings. No platform. |
+| The app | `core/ui.l8`, `core/skin.l8` and the screens it imports (`learn_screens.l8`, `verse_study.l8`, `tray.l8`, `note.l8`, `practice.l8`), `core/prefs.l8` | Every screen as data, what each action does, the settings. No platform. |
 | A skin | `ios/`, `android/`, later `web/` | Draws screens and a few views of its own, gives core the platform (files, network, voice, sharing). |
 
 A skin decides **how** things look and move (a sheet or a pushed screen, a
@@ -31,10 +31,13 @@ build them). It is a title, sections, and rows, and what is around them:
   rich), a word as its heading (`hero`: Study's, Forms'), segments (the
   Library's Highlights, Notes, Bookmarks, Memory), a filter by color, a
   sort, a confirming button (New Ribbon's Add, off until it can be), a
-  button with a menu (History's Clear), buttons at its foot (`tool`s: their
-  place left, middle or right, a title or an icon, a style, and a menu),
-  an index down its side (a concordance's books), and what it shows with no
-  rows.
+  button at the left of its bar (a note's Cancel), a button with a menu
+  (History's Clear), buttons at its foot (`tool`s: their place left, middle
+  or right, a title or an icon, a style, and a menu; or segments), an index
+  down its side (a concordance's books), and what it shows with no rows. A
+  screen may be a *page* (its rows paragraphs, no lines between them: the
+  Manual's, a commentary's, Practice) or a *grid* (its rows square buttons:
+  a book's chapters).
 - **Section**: a header and a footer (either may be empty), faint words
   after its header, a button in its header, a credit under it (the ESV's),
   over a grid its columns' names, and rows; a section may be *lazy* (its
@@ -51,6 +54,12 @@ build them). It is a title, sections, and rows, and what is around them:
     editing ends or, live, as they are typed).
   - `time`: a time of day (minutes past midnight: a reminder's).
   - `button`: a full-width action (Delete Ribbon).
+  - `text`: a page's paragraph, its title its words (by its runs), with
+    links in it (UTF-16 places, each an action and argument) and maybe a
+    heading.
+  - `tiles`: the interlinear's words, its cells tiles (a word, its
+    English and transliteration, what is hidden), in lines as wide as the
+    list.
   - `custom`: a view the skin makes itself (below), with an argument.
   Any row may also have: a circle at its start (a plan's day), a glyph in a
   column of its own at its start and words at its end (a letter's example),
@@ -71,6 +80,11 @@ build them). It is a title, sections, and rows, and what is around them:
 - **Actions** are numbers chosen by the screen's kind: `(screen id, action,
   argument, value)`. A skin never interprets them; it hands them back.
 
+A screen belongs to a *group*: the sheet (0) or, on a wide window, the
+panel beside the reader (1). Closing one lets its group go, the other kept;
+a screen may also be presented over the sheet up (a note over the Library),
+which stays.
+
 ## What happens: effects
 
 Core answers an action by changing its state and returning effects, which
@@ -80,6 +94,7 @@ the skin carries out in its own idiom:
 |---|---|---|---|
 | `push id`, `present id` | pushed in the sheet the action came from; a sheet | a page in the panel stack; a full-height panel | panel view with a URL |
 | `pop`, `pop_to id`, `dismiss` | pop, pop to it, dismiss | back, back to it, close | history back, close |
+| `present_over id`, `close id`, `panel id` | a sheet over the sheet; that screen's sheet away; in the panel beside the reader | a panel over the panel; back; a panel | same |
 | `update id`, `refill id fade`, `refresh` | that screen's rows made again; again as its field is typed; every screen | same | same |
 | `jump c v`, `goto c v`, `relayout` | the reader moves there; the sheets away, then there; laid out again | same | same |
 | `url` ADDRESS | Safari | the browser | a link |
@@ -91,18 +106,46 @@ platform does are the host's (below); a skin that doesn't do one ignores it.
 
 ## Views a skin makes itself
 
-Every list in the app is core's (2026-10-22). These are still drawn by each
-skin, and need view models in core, written as they are reached:
+Every list in the app is core's, and so are (2026-10-22) the chapter grid,
+a verse's Study (the interlinear, cross references, the commentary), a
+word's definition, the Manual's pages, the note editor, the selection
+tray and its menus (`select`, `trayact`), the title's menu (`titlemenu`,
+`menuact`) and Practice (below). These are still drawn by each skin, and
+need view models in core, written as they are reached:
 
 1. **The reader**: chapters as laid-out runs (`ChapterLayout`,
    `measure_chapter`), continuous; its place reported back as chapter, verse
    and fraction. Its view model exists (`chapter` and `span` lines).
-2. The bar and title and its menus; the selection tray and its menus; the
-   back capsule; the mini player; the day's reader.
-3. The chapter grid (Go To; Android draws core's list), the Study sheet (its
-   segments: the interlinear, cross references, the commentary), Practice and
-   its cards, the Manual's pages, a definition, the note editor, the share
-   card.
+2. The back capsule; the mini player; the day's reader; a passage's
+   preview; the share card; the edit menu; toasts.
+
+## Practice
+
+`core/practice.l8` is Practice apart from any platform: a session's queue
+(passages, cards, words to read), each passage's steps and level, the
+words shown, helped and missed, typing's first letters, the grades, a
+card's state, Practise Reading's rounds, and the end. Every opener (the
+Library, a passage's row, the tray's Memorize, a language's cards,
+Practise Reading, Learn 8 Letters) is core's `px_start`.
+
+A skin without its own Practice gets core's screen (`SCR_PRACTICE`): the
+passage as a page's paragraph whose runs are each word's look
+(`RUN_PRACTICE` plus a look: its color, clear, ink, learned or faint; its
+underline, the rule, the accent, half the accent or the accent dotted,
+times 4; 32 the verse heard; 64 Greek, 128 Hebrew), a hidden word's tap
+showing it and a verse number's its verse; the levels as segments; the
+count at the bar's left; the step's buttons; a card's face as a hero and
+paragraphs; the end as its empty words. A skin that plays a passage and
+speaks a card says so (`SK_NUM_PRACTICE_AUDIO`), and one that takes typed
+letters (`SK_NUM_PRACTICE_KEYS`); their buttons are left out otherwise.
+
+The iPhone draws Practice in its own sheet (`SK_NUM_OWN_PRACTICE`: core
+says `practice_session N HOW` once the session is queued), from the same
+state: each action of core's says what changed (`px_changed`'s `PX_CH_`
+bits: the words' looks, the buttons, a passage or card begun, the end,
+the keys put away, playback stopped, a scroll, a tick felt), the words'
+looks are core's runs (`px_looks`), the buttons core's list (`px_tools`),
+and a card's words core's, part by part (`px_card_part`).
 
 ## Settings
 
@@ -126,38 +169,41 @@ printf 'start 400 800 100 0\ntap goto\nact 1 1 42 0\n' | .build/skin-text progra
 
 Its own lines make up what a test needs: `visit C V TIME`, `plans`, `plan P
 D`, `follow P DAY`, `open KIND ARG` (any screen, presented), `compare C V N`,
-`study C V K`, `esv C V WORDS` (a result of the ESV's own search).
+`study C V K`, `esv C V WORDS` (a result of the ESV's own search), `memorize
+C V1 V2` (a passage in Memory, to practise).
 
 A screen, from core:
 
 | Line | Meaning |
 |---|---|
 | `screen ID KIND ARG` TITLE SEARCH | a screen built; then the lines below, its `section`, `row` and `cell` lines, then `end` |
-| `focus N [MODE]` | the screen opens at its Nth row (of all, from 0), at the top; MODE 1 selected and in the middle, 2 in the middle |
-| `intro` TEXT RUNS | words above the first section (a plan's description; the language page's) |
+| `focus N [MODE]` | the screen opens at its Nth row (of all, from 0), at the top; MODE 1 selected and in the middle, 2 in the middle, 3 at the top and washed (a Manual's part gone to by a link) |
+| `intro` TEXT RUNS QUOTE | words above the first section (a plan's description; the language page's); QUOTE 1, a quote (an accent's bar beside it) |
+| `left` ACTION TITLE ICON STYLE | a button at the left of the bar, in place of Back (a note's Cancel; Practice's count, inert) |
 | `hero` WORD SCRIPT SUB LINE RUNS | a word as the heading: large in its script (`RUN_GREEK`, `RUN_HEBREW`), its transliteration, a line under them |
 | `index` TITLES | an index down the list's side, a title each section (split by `\|`) |
 | `confirm` ACTION TITLE OFF | the confirming button at the top, in place of Done (OFF 1: not yet) |
 | `tool` ACTION ARG TITLE ICON LABEL STYLE PLACE MENU | a button at the foot: its title, or ICON and the spoken LABEL; STYLE 0 plain, 1 prominent, 2 destructive, 3 off; PLACE 0 left, 1 middle, 2 right; MENU, if any, its items `ARG:TITLE` split by `\|`, each doing ACTION with its ARG |
-| `segments` ACTION CHOSEN LABELS | segments over the list; choosing one is ACTION with its index as VALUE |
+| `segments` ACTION CHOSEN LABELS TITLE | segments over the list (TITLE 1: in the bar, as its title); choosing one is ACTION with its index as VALUE |
 | `filter` ACTION CHOSEN COLORS LABELS | a filter by color: All, then a circle each (hex, spoken labels); choosing is ACTION with its index (-1 All) |
 | `sort` ACTION CHOSEN TITLES | how its rows are sorted, a menu; choosing is ACTION with its index |
 | `field` TEXT WAIT FLAGS | its field's words, how long typing rests before they are sent (ms), `g` Return goes (Go To), `f` it takes the keys as the screen opens |
 | `scopes` VALUE TITLES LABELS | the field's scopes, the one chosen |
 | `plain` | a plain list, not grouped |
+| `page`, `grid` | its rows a page's paragraphs; its rows square buttons, their VALUE their words |
 | `empty` SYMBOL TITLE LINE | what it shows with no rows |
 | `button` TITLE, then `command` ACTION ARG TITLE FLAGS | its button at the top and its menu (`x`: destructive) |
 | `section` HEADER FOOTER BUTTON ACTION SUFFIX CREDIT COLUMNS | a section: a button in its header doing ACTION; faint words after its header; CREDIT 1 the ESV's under it; COLUMNS a grid's columns' names |
 | `row` ... | a row (below) |
-| `cell` ACTION ARG SCRIPT TEXT SUB COUNT LABEL | after its row, a grid's cell: its words in a script (0 none: a faint "—"), what it does, its count, what a screen reader says, and its tap (ACTION 0: none) |
+| `cell` ACTION ARG SCRIPT TEXT SUB COUNT LABEL TR FLAGS ACTIONS | after its row, a grid's cell or a tile: its words in a script (0 none: a faint "—"), what it does, its count, what a screen reader says, and its tap (ACTION 0: none); a tile's transliteration and what it hides (`UI_TILE_`), and the actions a screen reader offers |
 
 A row's fields, in order: `row` KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS
 VALUE OPTIONS LO HI LABEL TRAILING DELETE CUSTOM HINT MARKS LINES CIRCLE
 CIRCLE_ACTION SUFFIX ICON_COLOR NOTE INFO ACTIONS RUNS TRUNS TITLE_LINES
-FIELD_KIND LEAD LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS.
+FIELD_KIND LEAD LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS LINKS.
 
-- KIND is `item`, `toggle`, `choice`, `slider`, `field`, `button`, `custom`
-  or `time`; ACC is empty, `more`, `check`, `info`, `done` (a faint check) or
+- KIND is `item`, `toggle`, `choice`, `slider`, `field`, `button`, `custom`,
+  `time`, `text` or `tiles`; ACC is empty, `more`, `check`, `info`, `done` (a faint check) or
   `link` (a page outside the app).
 - FLAGS are letters: `d` disabled, `x` destructive, `o` on, `v` the detail is
   a value on the right, `s` the detail is the Bible's words (the divine name
@@ -167,7 +213,7 @@ FIELD_KIND LEAD LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS.
   in the accent, `r` a field whose Return is the screen's confirm, `q` the
   words its screen's field searches for marked in it, `w` waiting (a
   spinner), `l` a field whose words go to core as they are typed, `u` its
-  actions also a menu at its end.
+  actions also a menu at its end, `h` a page's heading.
 - VALUE is a toggle's or choice's state, a slider's value (from LO to HI), a
   time's minutes, swatches' chosen color; OPTIONS a choice's labels split by
   `|`; LABEL what a screen reader says, if not its words; TRAILING words at
@@ -184,9 +230,10 @@ FIELD_KIND LEAD LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS.
   offers (`ACTION:TITLE` split by `|`, each with the row's ARG; the one that
   is DELETE destructive), and ACTION_ICONS their icons; RUNS, TRUNS and SRUNS
   its detail's, title's and side words' runs; TITLE_LINES the most lines of
-  its title; FIELD_KIND what a field takes (0 a name, 1 a reference); LEAD a
-  glyph at its start in LEAD_STYLE's script; SIDE words at its end over
-  SIDE_NOTE.
+  its title; FIELD_KIND what a field takes (0 a name, 1 a reference, 2 prose:
+  a note's many lines); LEAD a glyph at its start in LEAD_STYLE's script;
+  SIDE words at its end over SIDE_NOTE; LINKS a paragraph's links
+  (`B:E:ACTION:ARG` split by `|`, B and E UTF-16 places in its title).
 
 Other lines from core:
 
@@ -210,11 +257,14 @@ it): `open WHAT` (a screen still the platform's own: core/skin.l8's
 SLOT`, `plan_details SLOT`, `remind WHO ON` (a reminder's switch: WHO 0
 Memory's, else a plan's slot plus 1), `remind_time MINUTES`, `open_settings`,
 `searched`, `esv_search PAGE`, `esv_want C`, `audio_source`, `voice`,
-`cellular`, `download`, `download_delete`, `export`, `note C V`, `mm_add`,
-`mm_added`, `mm_version`, `mm_delete`, `passage`, `practice`, `practice_all`,
-`cards LANG`, `practice_reading LANG`, `practice_new N` (Practice of core's
-`sk_pq`), `learned LANG`, `words_added N`, `read_in CV RIBBON` (the reader
-in the Hebrew and Greek), `definition`, `add_to_note`, `interlinear`.
+`cellular`, `download`, `download_delete`, `export`, `memorize C V` and
+`mm_added VERSION` (an ESV passage, whose verses the host keeps; any
+other version's is added by core, which says `memorized ID`),
+`mm_version`, `mm_delete`, `passage`, `practice_session N HOW` (a host
+with its own Practice), `practice_audio ACTION ARG` (Listen, Echo, Speak
+on core's Practice), `learned LANG`, `words_added N`, `read_in CV RIBBON`
+(the reader in the Hebrew and Greek), `study_verse`, `copy`, `share`,
+`highlighted`, `bookmarked`, `clear_selection`, `tray`, `tray_away`.
 
 From the skin:
 
@@ -232,11 +282,15 @@ From the skin:
 | `place C V FRAC` | the reader's top: chapter, verse, thousandths of an em into it |
 | `dark 0/1` | the system's appearance changed |
 | `away` | the app put away: the settings kept now |
+| `select C V...` | the verses selected (none: the tray away); the tray's model written as screen 0 |
+| `trayact ACTION V`, `titlemenu`, `menuact ACTION ARG` | a tray's button; the title's menu's model, as screen 0; one of its items |
 | `refresh` | what core's screens show has changed (the host's own state): each made again |
 
 A host in L8 (android/main.l8) reads files and keeps the settings for core
 (`sk_host`: `save_prefs`, `save_kept` for what is kept, `words` and `num`
-for what only it knows, `fill` for its lists), and handles lines of its own
+for what only it knows, `fill` for its lists: `SK_NUM_MEMORY_TEXT`, a
+passage's words laid out, defaults to core's own from a loaded version),
+and handles lines of its own
 before core's (Android's `files DIR`). A version core wants that isn't
 loaded is asked for in `sk_want_text`: the host loads it in its own loop (a
 text is kept for good, so loading it can't happen inside an action) and
@@ -289,7 +343,10 @@ Built as Better's is (`tools/android/`, no Gradle): L8 as a shared library on
 its own thread, Java's framework widgets (no AndroidX), data files from the
 APK's assets copied to the app's files. It draws the whole screen model
 (2026-10-22: checked on the emulator with Go To, the Library, Memory, the
-Greek page, the Alphabet, the reading settings). Still to do there: the
-language data and what is kept (ribbons, history, marks, cards) as files, so
-that Study, Learn and the Library have something to show; then the views
-above.
+Greek page, the Alphabet, the reading settings, the chapter grid, and
+Practice: Add Passage, then a passage's levels, a word shown, Check). A
+row's field keeps the keys while its screen is made again, and the screen
+waits for typing to rest before it is. Still to do there: selecting
+verses (the tray), the language data and what is kept (ribbons, history,
+marks, Memory, cards) as files, so that Study, Learn and the Library keep
+what is shown; then the views above.
