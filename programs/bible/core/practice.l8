@@ -141,6 +141,12 @@ PX_CH_WRONG: int = 1024;
 // (A word missed while typed: its words in fbuf, "Missed: everyone".)
 PX_CH_MISS: int = 2048;
 
+// A card's answer shown (its words cross-fading in), and a word read
+// spoken (a skin that speaks).
+PX_CH_ANSWER: int = 4096;
+
+PX_CH_SPEAK: int = 8192;
+
 px_changed: int = 0;
 
 px_ch(bits: int) {
@@ -172,12 +178,19 @@ px_entry_ok(e: int): bool {
 // ---- a session ----
 // A session of the first n of px_q (with px_back) begun; first line
 // whether the one-time line shows.
-px_session(n: int, first_line: bool) {
+px_session(n: int) {
     px_qn = n;
     px_at = 0;
     px_one = px_one_next;
     px_one_next = 0;
-    px_first_line = first_line;
+    // (The one-time line, once ever; typing as it was left.)
+    px_first_line = !pref_on("memorySeen", false);
+    if (px_first_line) set_pref_on("memorySeen", true);
+    px_typing = pref_on("memoryType", false);
+    px_keys_up = false;
+    crd_ask_at = -1;
+    for x in 0..n
+        if (x < len(crd_ret)) crd_ret[x] = RET_FIRST;
     px_changed = 0;
     px_begin()
 }
@@ -185,6 +198,7 @@ px_session(n: int, first_line: bool) {
 // Today's passages (the Library's Practice), into px_q (the host adds its
 // cards after them); how many.
 px_queue_today(): int {
+    crd_reading = -1;
     memory_today(sk_today_now(), 0);
     n: int = 0;
     for k in 0..td_today {
@@ -192,11 +206,23 @@ px_queue_today(): int {
         px_back[n] = false;
         n = n + 1
     }
+    // (Then today's cards: Â§14.3.1.)
+    if (cd_n == 0) return n;
+    _l: int = sk_num_of(SK_NUM_LANG, 0);
+    cd_today(sk_today_now());
+    for x in 0..ct_n {
+        if (n < len(px_q)) {
+            px_q[n] = -ct[x] - 1;
+            px_back[n] = false;
+            n = n + 1
+        }
+    }
     n
 }
 
 // One passage (a row, or Memorizing), whatever its state.
 px_queue_one(i: int): int {
+    crd_reading = -1;
     if (i < 0 || i >= mq_n) return 0;
     px_q[0] = mq_id[i];
     px_back[0] = false;
@@ -205,7 +231,8 @@ px_queue_one(i: int): int {
 }
 
 // "2 of 3": the session's entry shown and its entries, each once (a Not
-// Yet's second try is not counted again); n 0 or 1, no count.
+// Yet's second try, or a new card back for its judgement, is not counted
+// again); n 0 or 1, no count.
 px_count_at: int = 0;
 
 px_count_n: int = 0;
@@ -214,7 +241,7 @@ px_count_find() {
     n: int = 0;
     at: int = 0;
     for x in 0..px_qn {
-        if (!px_back[x]) {
+        if (!px_back[x] && (x >= len(crd_ret) || crd_ret[x] == RET_FIRST)) {
             n = n + 1;
             if (x <= px_at) at = n
         }
@@ -233,9 +260,10 @@ px_begin() {
         px_finish();
         return
     }
-    // (A card, or a word to read: the skin's.)
+    // (A card, or a word to read.)
     if (px_q[px_at] < 0) {
         px_i = -1;
+        px_card_begin(px_q[px_at]);
         px_ch(PX_CH_CARD);
         return
     }
@@ -356,6 +384,16 @@ px_main_title(): str {
 
 // Next (a level on), Check, or what comes after Check.
 px_main() {
+    // (A card: Next after a new one's first showing or a word read, else
+    // Check.)
+    if (px_step == PX_CARD_NEW || px_step == PX_READ_DONE) {
+        px_card_next();
+        return
+    }
+    if (px_step == PX_CARD || px_step == PX_READ) {
+        px_card_check();
+        return
+    }
     if (px_step == PX_NEW && px_level < LV_BLANK) {
         px_set_level(px_level + 1);
         return
@@ -417,6 +455,10 @@ px_after_step() {
 // Check: every word practised shown; then the judgement (review), Again
 // and Next Verse (a new part), or Next.
 px_check() {
+    if (px_step == PX_CARD || px_step == PX_READ) {
+        px_card_check();
+        return
+    }
     for w in px_a0..px_a1 px_shown[w] = true;
     px_cur = -1;
     if (px_step == PX_WARMUP) px_step = PX_WARMUP_DONE else if (px_step == PX_NEW) px_step = PX_NEW_DONE else if (px_step == PX_JOINED) px_step = PX_JOINED_DONE else if (px_step == PX_REVIEW) px_step = PX_REVIEW_DONE;
@@ -431,6 +473,10 @@ px_suggested(): int {
 // A grade: kept, and on to the next passage (a Not Yet comes once more at
 // the end).
 px_grade(g: int) {
+    if (px_step == PX_CARD_DONE) {
+        px_card_grade(g);
+        return
+    }
     if (px_step != PX_REVIEW_DONE || px_i < 0) return;
     // (A Not Yet's second try, at the session's end: nothing changes.)
     if (px_back[px_at]) memory_grade_again(px_i, g, px_helps(), px_misses(), time(0)) else _c: bool = memory_grade(px_i,
@@ -452,15 +498,27 @@ px_next_passage() {
     px_begin()
 }
 
-// The end: "That's all for today." and the next review, into fbuf.
+// The end: "That's all for today." and the next review.
 px_finish() {
     px_ch(PX_CH_END | PX_CH_KEYS_DOWN | PX_CH_STOP | PX_CH_TOOLS);
     px_step = PX_END;
     px_i = -1
 }
 
+// The end's words into fbuf: its first line ("That's all for today.";
+// Practise Reading's "That's 10 words. Again?"), or the line under it.
+px_end_first() {
+    fbuf_n = 0;
+    if (px_step == PX_READ_END) {
+        fput_str("That\â\€\™s ");
+        fput_int(px_qn);
+        fput_str(if (px_qn == 1) " word. Again?" else " words. Again?")
+    } else fput_str("That\â\€\™s all for today.")
+}
+
 px_end_words() {
     fbuf_n = 0;
+    if (px_step == PX_READ_END) return;
     // (A session of one passage: its own next review, whatever came after
     // a Not Yet.)
     single: int = if (px_one > 0) mem_index(px_one) else -1;
@@ -475,6 +533,12 @@ px_end_words() {
 // ---- Type: first letters (Â§13.3.6) ----
 px_typing_allowed(): bool {
     px_step == PX_WARMUP || px_step == PX_NEW || px_step == PX_JOINED || px_step == PX_REVIEW
+}
+
+// Typing on or off (memoryType, kept): the keys up as each passage begins.
+px_typing_set(on: bool) {
+    px_typing = on;
+    set_pref_on("memoryType", on)
 }
 
 // The keys up or down (the skin's): the word to type the next not shown.
@@ -524,4 +588,189 @@ px_type(k: int) {
         return
     }
     px_ch(PX_CH_PAINT | PX_CH_SCROLL_CUR)
+}
+
+// ---- cards and words to read (Â§14.3), in a session ----
+// The card shown (its index; -1: a word read), its language, whether this
+// is a new card's first showing, whether its answer shows, and its verse
+// and word in context; Practise Reading's language (-1: none), its round
+// of ten and the word read; whether the one-time line shows; where Your
+// Words' question was asked (its place in the queue; -1 none yet); each
+// entry's kind of return (RET_), set as it is queued.
+crd_k: int = -1;
+
+crd_lang: int = 0;
+
+crd_first: bool = false;
+
+crd_checked: bool = false;
+
+crd_vi: int = -1;
+
+crd_w: int = -1;
+
+crd_reading: int = -1;
+
+crd_round: int = 0;
+
+crd_read_w: int = -1;
+
+crd_hint: bool = false;
+
+crd_ask_at: int = -1;
+
+crd_ret: []int = new int[512](0);
+
+// A language's cards due today (from its page, its Today row, Your Words).
+px_queue_cards(lang: int): int {
+    crd_reading = -1;
+    _l: int = sk_num_of(SK_NUM_LANG, 0);
+    cd_today(sk_today_now());
+    n: int = 0;
+    for x in 0..ct_n {
+        k: int = ct[x];
+        if (cd_lang[k] == lang && n < len(px_q)) {
+            px_q[n] = -k - 1;
+            px_back[n] = false;
+            n = n + 1
+        }
+    }
+    n
+}
+
+// Practise Reading: ten words (Â§14.3.3), a round at a time.
+px_queue_reading(lang: int): int {
+    _l: int = sk_num_of(SK_NUM_LANG, 0);
+    crd_reading = lang;
+    crd_round = 0;
+    px_reading_words()
+}
+
+px_reading_words(): int {
+    learn_reading_words(crd_reading, crd_round * 10, time(0));
+    if (pr_n == 0 && crd_round > 0) {
+        crd_round = 0;
+        learn_reading_words(crd_reading, 0, time(0))
+    }
+    for x in 0..pr_n {
+        px_q[x] = -pr_w[x] - READ_CODE;
+        px_back[x] = false;
+        crd_ret[x] = RET_FIRST
+    }
+    pr_n
+}
+
+// Again (at Practise Reading's end): the next ten.
+px_reading_again() {
+    if (px_step != PX_READ_END) return;
+    crd_round = crd_round + 1;
+    px_qn = px_reading_words();
+    px_at = 0;
+    px_begin()
+}
+
+// Entry e begun: a card (its context found; a new one back once more at
+// the end, hidden, for a judgement), or a word to read.
+px_card_begin(e: int) {
+    if (crd_reading >= 0) {
+        crd_read_w = px_entry_word(e);
+        crd_k = -1;
+        crd_lang = crd_reading;
+        crd_first = false;
+        crd_checked = false;
+        crd_vi = -1;
+        crd_w = crd_read_w;
+        // (Its one-time line, the first word ever read.)
+        if (!pref_on("learnReadSeen", false)) {
+            crd_hint = true;
+            set_pref_on("learnReadSeen", true)
+        }
+        px_step = PX_READ;
+        return
+    }
+    k: int = px_entry_card(e);
+    crd_k = k;
+    crd_lang = cd_lang[k];
+    crd_first = cd_state[k] == MS_NEW;
+    crd_checked = crd_first;
+    // (The one-time line, the first time a new letter or joined word is
+    // seen; a word card asks its question instead.)
+    if (crd_first && cd_kind[k] != CK_WORD && !pref_on("learnSeen", false)) {
+        crd_hint = true;
+        set_pref_on("learnSeen", true)
+    }
+    learn_shown(k, sk_today_now());
+    if (crd_first && px_qn < len(px_q)) {
+        px_q[px_qn] = -k - 1;
+        px_back[px_qn] = false;
+        crd_ret[px_qn] = RET_NEW;
+        px_qn = px_qn + 1
+    }
+    _c: bool = learn_context(k, time(0));
+    crd_vi = ctx_vi;
+    crd_w = ctx_w;
+    if (crd_ask_at < 0 && cd_kind[k] == CK_WORD) crd_ask_at = px_at;
+    px_step = (if (crd_first) PX_CARD_NEW else PX_CARD);
+    sk_kept(SK_KEPT_CARDS)
+}
+
+// The session's title while a card shows: "Greek Words" ("Greek Letters"
+// while only letters are in it); "Practise Reading".
+px_card_title(): str {
+    if (crd_reading >= 0) return "Practise Reading";
+    letters: bool = true;
+    for x in px_at..px_qn {
+        c: int = px_entry_card(px_q[x]);
+        if (c >= 0 && c < cd_n && cd_kind[c] != CK_LETTER) letters = false;
+        if (px_q[x] > 0) letters = false
+    }
+    if (crd_lang == 0 && letters) return "Greek Letters";
+    if (crd_lang == 0) return "Greek Words";
+    if (letters) "Hebrew Letters" else "Hebrew Words"
+}
+
+// The main button's title while a card shows.
+px_card_main_title(): str {
+    if (px_step == PX_CARD_NEW || px_step == PX_READ_DONE) "Next" else "Check"
+}
+
+// Check: the answer shown; then the judgement (reading: the
+// transliteration, and Next; nothing said).
+px_card_check() {
+    if (px_step != PX_CARD && px_step != PX_READ) return;
+    crd_checked = true;
+    if (px_step == PX_READ) {
+        px_step = PX_READ_DONE;
+        px_ch(PX_CH_SPEAK)
+    } else px_step = PX_CARD_DONE;
+    px_ch(PX_CH_ANSWER | PX_CH_TOOLS)
+}
+
+// A judgement: kept; Not Yet's card once more at the end.
+px_card_grade(g: int) {
+    if (px_step != PX_CARD_DONE || crd_k < 0) return;
+    k: int = crd_k;
+    ret: int = if (px_back[px_at]) RET_RETRY else crd_ret[px_at];
+    next: int = learn_judged(k, g, ret, sk_today_now(), time(0), crd_vi);
+    sk_kept(SK_KEPT_CARDS);
+    px_ch(PX_CH_HAPTIC);
+    if (next == RET_RETRY && px_qn < len(px_q)) {
+        px_q[px_qn] = -k - 1;
+        px_back[px_qn] = true;
+        crd_ret[px_qn] = RET_RETRY;
+        px_qn = px_qn + 1
+    }
+    px_card_next()
+}
+
+// On: the next entry (a passage, a card, a word), or the end (Practise
+// Reading's: "That's 10 words. Again?").
+px_card_next() {
+    crd_hint = false;
+    if (crd_reading >= 0 && px_at + 1 >= px_qn) {
+        px_step = PX_READ_END;
+        px_ch(PX_CH_END | PX_CH_TOOLS);
+        return
+    }
+    px_next_passage()
 }
