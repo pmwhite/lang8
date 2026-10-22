@@ -65,8 +65,10 @@ let inbox = "";
 let wakeUp = null;
 const files = new Map();
 
-// (?debug in the address: the wire both ways in the console.)
+// (?debug in the address: the wire both ways in the console, and a line
+// sent by hand: sbSend("...").)
 const DEBUG = location.search.includes("debug");
+if (DEBUG) window.sbSend = (line) => send(line);
 
 function send(line) {
   if (DEBUG) console.log("→ " + line);
@@ -647,7 +649,7 @@ function line(w) {
       reminders.clear();
       break;
     case "notify":
-      reminders.add(Number(w.word(1)), w.field(1), w.field(2));
+      reminders.add(Number(w.word(1)), `${w.num(2)} ${w.num(3)}`, w.field(1), w.field(2));
       break;
     case "awake":
       awake(w.num(1));
@@ -2287,13 +2289,18 @@ const reminders = {
     for (const t of this.timers) clearTimeout(t);
     this.timers = [];
   },
-  add(at, title, body) {
+  // (Each opened: core's `reminded PLAN MEMORY`.)
+  add(at, opens, title, body) {
     const ms = at * 1000 - Date.now();
     if (ms < 0 || ms > 2 ** 31 - 1 || !window.Notification) return;
     this.timers.push(setTimeout(() => {
       if (Notification.permission !== "granted") return;
       const n = new Notification(title, { body, icon: "/img/apple-touch-icon.png", tag: "daily" });
-      n.onclick = () => window.focus();
+      n.onclick = () => {
+        window.focus();
+        n.close();
+        send(`reminded ${opens}`);
+      };
     }, ms));
   },
 };
