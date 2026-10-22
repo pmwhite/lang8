@@ -3,7 +3,12 @@ package space.trailingwhite.smoothbible;
 import android.content.Context;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
+import android.text.Editable;
+import android.text.InputType;
 import android.text.TextUtils;
+import android.text.TextWatcher;
+import android.view.inputmethod.EditorInfo;
+import android.widget.EditText;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -34,6 +39,11 @@ final class Panel extends FrameLayout {
   private final TextView title, back, button, empty;
   private final ListView list;
   private final Rows rows = new Rows();
+  // The screen's field (Go To's): what is typed goes to core as it is
+  // (query ID TEXT), Go as submit ID.
+  private final EditText field;
+  private int fieldFor = -1;
+  private boolean filling;
 
   Panel(Context c, Look look) {
     super(c);
@@ -60,6 +70,31 @@ final class Panel extends FrameLayout {
     bar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
     bar.addView(button);
     page.addView(bar, new LinearLayout.LayoutParams(-1, dp(56)));
+    field = new EditText(c);
+    field.setSingleLine();
+    field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+    field.setImeOptions(EditorInfo.IME_ACTION_GO);
+    field.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+    field.addTextChangedListener(new TextWatcher() {
+      @Override
+      public void beforeTextChanged(CharSequence s, int a, int b, int n) {}
+
+      @Override
+      public void onTextChanged(CharSequence s, int a, int b, int n) {}
+
+      @Override
+      public void afterTextChanged(Editable e) {
+        if (!filling && rows.screen != null) Native.send("query " + rows.screen.id + " " + e);
+      }
+    });
+    field.setOnEditorActionListener((v, action, ev) -> {
+      if (rows.screen == null) return false;
+      Native.send("submit " + rows.screen.id);
+      return true;
+    });
+    LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(-1, -2);
+    fp.setMargins(dp(16), 0, dp(16), dp(4));
+    page.addView(field, fp);
     list = new ListView(c);
     list.setAdapter(rows);
     list.setDivider(null);
@@ -93,21 +128,29 @@ final class Panel extends FrameLayout {
   void present(int id) {
     stack.clear();
     stack.add(id);
-    show();
+    show(true);
   }
 
   void push(int id) {
     stack.add(id);
-    show();
+    show(true);
   }
 
   void update(int id) {
-    if (!stack.isEmpty() && stack.get(stack.size() - 1) == id) show();
+    if (!stack.isEmpty() && stack.get(stack.size() - 1) == id) show(false);
   }
 
   void dismiss() {
     stack.clear();
+    keyboardAway();
     setVisibility(GONE);
+  }
+
+  private void keyboardAway() {
+    android.view.inputmethod.InputMethodManager m = (android.view.inputmethod.InputMethodManager)
+        getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+    if (m != null) m.hideSoftInputFromWindow(getWindowToken(), 0);
+    field.clearFocus();
   }
 
   // Back: the top screen let go, and core told.
@@ -115,8 +158,10 @@ final class Panel extends FrameLayout {
     if (stack.isEmpty()) return false;
     int id = stack.remove(stack.size() - 1);
     Native.send("closed " + id);
-    if (stack.isEmpty()) setVisibility(GONE);
-    else show();
+    if (stack.isEmpty()) {
+      keyboardAway();
+      setVisibility(GONE);
+    } else show(false);
     return true;
   }
 
@@ -125,13 +170,26 @@ final class Panel extends FrameLayout {
     title.setTextColor(look.ink);
     back.setTextColor(look.accent);
     button.setTextColor(look.accent);
+    field.setTextColor(look.ink);
+    field.setHintTextColor(look.faint);
     empty.setTextColor(look.faint);
     rows.notifyDataSetChanged();
   }
 
-  private void show() {
+  // The top screen shown (fresh: just opened, at its focus).
+  private void show(boolean fresh) {
     Screen s = screens.get(stack.get(stack.size() - 1));
     if (s == null) return;
+    field.setVisibility(s.search.isEmpty() ? GONE : VISIBLE);
+    if (s.search.isEmpty()) keyboardAway();
+    field.setHint(s.search);
+    if (s.id != fieldFor) {
+      // (Another screen's field: empty again, without telling core.)
+      filling = true;
+      field.setText("");
+      filling = false;
+      fieldFor = s.id;
+    }
     title.setText(s.title);
     button.setText(s.button);
     button.setVisibility(s.button.isEmpty() ? GONE : VISIBLE);
@@ -147,6 +205,8 @@ final class Panel extends FrameLayout {
     back.setContentDescription(stack.size() > 1 ? "Back" : "Close");
     rows.set(s);
     restyle();
+    if (fresh && rows.focusItem >= 0) list.setSelectionFromTop(rows.focusItem, dp(160));
+    else if (fresh) list.setSelection(0);
     setVisibility(VISIBLE);
   }
 
@@ -196,13 +256,20 @@ final class Panel extends FrameLayout {
   private final class Rows extends BaseAdapter {
     Screen screen;
     final ArrayList<Object> items = new ArrayList<>();
+    // Where the screen's focus row is among the items (-1: none).
+    int focusItem = -1;
 
     void set(Screen s) {
       screen = s;
       items.clear();
+      focusItem = -1;
+      int n = 0;
       for (Screen.Section sec : s.sections) {
         items.add(new Header(sec.header));
-        items.addAll(sec.rows);
+        for (Screen.Row r : sec.rows) {
+          if (n++ == s.focus) focusItem = items.size();
+          items.add(r);
+        }
         if (!sec.footer.isEmpty()) items.add(new Footer(sec.footer));
       }
       notifyDataSetChanged();
@@ -267,7 +334,9 @@ final class Panel extends FrameLayout {
       TextView t = new TextView(c);
       t.setText(r.title);
       t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-      t.setTextColor(r.flag('x') ? look.accent : r.flag('f') ? look.faint : look.ink);
+      t.setTextColor(r.flag('x') || r.flag('t') ? look.accent : r.flag('f') ? look.faint : look.ink);
+      // (Strong: the row to go to, or the book being read.)
+      if (r.flag('b')) t.setTypeface(Typeface.DEFAULT_BOLD);
       words.addView(t);
       boolean valueDetail = r.flag('v');
       if (!r.detail.isEmpty() && !valueDetail) {
@@ -275,6 +344,11 @@ final class Panel extends FrameLayout {
         d.setText(r.detail);
         d.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         d.setTextColor(look.faint);
+        if (r.flag('s')) {
+          // (The Bible's words: a line, or two for the row to go to.)
+          d.setMaxLines(r.flag('b') ? 2 : 1);
+          d.setEllipsize(TextUtils.TruncateAt.END);
+        }
         words.addView(d);
       }
       boolean slider = r.kind.equals("slider");

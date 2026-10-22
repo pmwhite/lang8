@@ -199,7 +199,8 @@ public final class Bible extends Activity {
         building.emptySymbol = w.field(1);
         building.emptyTitle = w.field(2);
         building.emptyLine = w.field(3);
-      } else if (word.equals("button")) building.button = w.field(1);
+      } else if (word.equals("focus")) building.focus = w.num(1);
+      else if (word.equals("button")) building.button = w.field(1);
       else if (word.equals("command")) {
         Screen.Command c = new Screen.Command();
         c.action = w.fieldNum(1);
@@ -243,6 +244,7 @@ public final class Bible extends Activity {
         panel.push(w.num(1));
         break;
       case "update":
+      case "refill":
         panel.update(w.num(1));
         break;
       case "pop":

@@ -108,9 +108,11 @@ From core:
 | Line | Meaning |
 |---|---|
 | `screen ID KIND ARG` TITLE SEARCH | a screen built; then its `section` and `row` lines, then `end` |
-| `section` HEADER FOOTER | a section of the screen |
+| `section` HEADER FOOTER HOST | a section of the screen; HOST, if not 0, a section the platform makes itself (core/skin.l8's `HOST_`: Go To's ribbons and plan, only where the host has them) |
+| `focus N` | after `screen`: the screen opens at its Nth row (of all, from 0): Go To at the book read |
 | `row` KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS VALUE OPTIONS LO HI LABEL | a row (below); LABEL what a screen reader says, if not its words |
 | `present ID`, `push ID`, `update ID`, `pop`, `dismiss` | what to do with screens |
+| `refill ID` | screen ID made again as its field is typed in: its rows at once, the field as it is |
 | `reader N` | the reader has N chapters (the version changed, or at the start) |
 | `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA` (UTF-16 places; core/text.l8's `STYLE_` and `PARA_`) and `verse V A B` lines, then `end` |
 | `jump C V`, `relayout` | the reader moved; every chapter to be asked for again |
@@ -133,7 +135,9 @@ A row's KIND is `item`, `toggle`, `choice`, `slider`, `field`, `button` or
 `custom`; ACC is empty, `more`, `check` or `info`; FLAGS are letters: `d`
 disabled, `x` destructive, `o` on, `v` the detail is a value on the right, `s`
 the detail is the Bible's words (the divine name in small capitals), `f` its
-words faint (nothing to do); a
+words faint (nothing to do), `b` strong (the row to go to, or where the
+reader is: its title heavier, its icon larger, its words up to two lines),
+`t` its title in the accent (a link: Show All), `g` its icon faint; a
 choice's OPTIONS are its labels split by `|`, VALUE the one chosen; a slider
 goes from LO to HI.
 
@@ -143,7 +147,9 @@ From the skin:
 |---|---|
 | `start W H DENSITY DARK` | the app begun: the window (points), its scale (hundredths), the system's appearance |
 | `tap goto`, `tap versions`, `tap settings`, `tap history` | the bar's buttons (History, for now) |
-| `act ID ACTION ARG VALUE` | a row's action (VALUE: a toggle's 1 or 0, a choice's index, a slider's value) |
+| `act ID ACTION ARG VALUE` | a row's action (VALUE: a toggle's 1 or 0, a choice's index, a slider's value). An action on a screen means those over it have gone |
+| `query ID TEXT` | screen ID's field typed in (TEXT to the line's end) |
+| `submit ID` | Return (Go) in screen ID's field: its first suggestion |
 | `closed ID` | the skin closed screen ID (and those over it) |
 | `want C` | chapter C's text, to show |
 | `place C V FRAC` | the reader's top: chapter, verse, thousandths of an em into it |
@@ -165,7 +171,19 @@ action goes to core (`sk_act`); its effects are done the iPhone's way
 (`push` into the navigation the action came from, `present` as a sheet,
 `update` a cross-fade and reload, `dismiss`). The platform's work stays the
 app's: core's version switch is the iPhone's `switch_version`. Moved so far:
-Versions, History and the reading settings (2026-10-21). The settings are
+Versions, History, the reading settings and Go To (2026-10-21).
+
+Go To shows how a screen moves while parts of it are still the iPhone's
+own. Its ribbons and reading plan are host sections: core places them
+(first, as `HOST_RIBBONS` and `HOST_PLAN`) and ios/skin.l8 hands their
+rows, taps, swipes and ⓘ to ios/daily.l8 as before, which animates them
+itself (their section numbers are unchanged). A book's chapters are
+core's screen on Android, and on the iPhone its own grid (`push` of
+`SCR_CHAPTERS` opens `show_chapters`). Recent is taken as Go To opens and
+kept while it shows, so that a row changed under it by the app's own
+sections can't change Recent's count in the middle of a table update.
+The controller is the app's own class (`books_class`), for its first
+layout at core's focus and its ribbons made again as it comes back. The settings are
 kept by the iPhone as before: ios/skin.l8 copies them into core's
 (`uk_prefs_from_app`) before a screen is built, and does a change core
 made the app's way (`uk_app_from_prefs`: the theme's fade, red letters,

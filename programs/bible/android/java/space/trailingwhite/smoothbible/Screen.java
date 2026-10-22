@@ -6,6 +6,8 @@ import java.util.ArrayList;
 final class Screen {
   int id, kind, arg;
   String title = "", search = "";
+  // The row shown first as it opens (of all its rows, in order; -1: none).
+  int focus = -1;
   // What it shows with no rows, and its button's title and commands.
   String emptySymbol = "", emptyTitle = "", emptyLine = "", button = "";
   final ArrayList<Command> commands = new ArrayList<>();
