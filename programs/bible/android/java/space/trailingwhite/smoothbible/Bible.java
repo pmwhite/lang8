@@ -29,10 +29,21 @@ public final class Bible extends Activity {
   Tray tray;
   // The way back (core's capsule): its words, at the reader's foot.
   TextView capsule;
-  // Listen: the voice, and the small player (core's words, and Stop).
+  // Listen: the voice, the recordings, and the small player (core's
+  // words: Previous, Pause or Play, Next, Stop).
   Voice voice;
+  final Sound sound = new Sound();
   LinearLayout player;
-  TextView playerTitle, playerState;
+  TextView playerTitle, playerState, playerToggle;
+  boolean playing;
+  // The carried ribbon's color (none: no ribbon carried) and the title.
+  String carried = "", titleWords = "";
+  // The card Share as Image draws (core's CUSTOM_CARD row, its last).
+  Screen.Row card;
+  // What a reminder opened says, once core has begun (-1: none).
+  int remindedPlan = -1, remindedMemory;
+  // A file being saved (savefile: its words, until a place is chosen).
+  String saving;
   FrameLayout root;
   LinearLayout bar;
   TextView title, version, settings, library;
@@ -105,17 +116,18 @@ public final class Bible extends Activity {
     words.addView(playerTitle);
     words.addView(playerState);
     player.addView(words, new LinearLayout.LayoutParams(0, -2, 1));
-    TextView stop = new TextView(this);
-    stop.setText("\u25A0");
-    stop.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
-    stop.setPadding(dp(16), dp(8), dp(16), dp(8));
-    stop.setContentDescription("Stop Listening");
+    playerButton("\u23EE\uFE0E", "Previous", "listenprev");
+    playerToggle = playerButton("\u23F8\uFE0E", "Pause", null);
+    playerToggle.setOnClickListener(v -> Native.send(playing ? "listenpause" : "listenplay"));
+    playerButton("\u23ED\uFE0E", "Next", "listennext");
+    TextView stop = playerButton("\u2715", "Stop Listening", null);
     stop.setOnClickListener(v -> {
       if (voice != null) voice.stop();
+      sound.stop();
       player.setVisibility(View.GONE);
+      Session.hide(this);
       Native.send("listenstop");
     });
-    player.addView(stop);
     FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
     root.addView(player, pp);
     capsule = new TextView(this);
@@ -161,6 +173,17 @@ public final class Bible extends Activity {
     }).start();
   }
 
+  private TextView playerButton(String text, String label, String line) {
+    TextView b = new TextView(this);
+    b.setText(text);
+    b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+    b.setPadding(dp(12), dp(8), dp(12), dp(8));
+    b.setContentDescription(label);
+    if (line != null) b.setOnClickListener(v -> Native.send(line));
+    player.addView(b);
+    return b;
+  }
+
   private TextView button(String text, String tap) {
     TextView b = new TextView(this);
     b.setText(text);
@@ -178,7 +201,8 @@ public final class Bible extends Activity {
   // (And the language data, the cross references, the commentary, the
   // Manual.)
   static final String[] DATA = {"xref_index.bin", "xrefs.bin", "mhcc.txt", "help.txt", "orig.txt",
-      "plans/mcheyne.txt", "plans/chrono.txt"};
+      "plans/mcheyne.txt", "plans/chrono.txt", "audio/souer.tim", "audio/hays.tim",
+      "audio/gilbert.tim", "audio/henson.tim", "audio/henson.paths"};
 
   private void copyVersions(File dir) {
     long apk = new File(getApplicationInfo().sourceDir).lastModified();
@@ -192,6 +216,8 @@ public final class Bible extends Activity {
     }
     new File(dir, "lang").mkdirs();
     new File(dir, "plans").mkdirs();
+    new File(dir, "audio").mkdirs();
+    new File(dir, "http").mkdirs();
     for (String name : names) {
       File f = new File(dir, name);
       if (f.exists() && f.lastModified() >= apk) continue;
@@ -204,14 +230,163 @@ public final class Bible extends Activity {
     }
   }
 
+  // (Core's host: where the app's files are, then where the site's Worker
+  // is, for the ESV; then the app begun.)
   private void begin(File dir) {
     Native.send("files " + dir.getAbsolutePath());
     Native.start();
+    Native.send("api https://smoothbible.com/api/v1/");
+    if (Native.ready) ready();
+  }
+
+  // Core's host ready (the reader's version and what is kept read): the
+  // app begun, and a reminder that opened it told.
+  private boolean begun;
+
+  private void ready() {
+    if (begun) return;
+    begun = true;
+    // (The voice made now, so core knows the device's voices: Voice's.)
+    if (voice == null) voice = new Voice(this);
     android.util.DisplayMetrics m = getResources().getDisplayMetrics();
     Native.send("start " + (int) (m.widthPixels / m.density) + " " + (int) (m.heightPixels / m.density)
         + " " + (int) (m.density * 100) + " " + (systemDark() ? 1 : 0) + " "
         + java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000);
+    reminded(getIntent());
   }
+
+  // A reminder opened (its extras): core told, once it has begun.
+  private void reminded(android.content.Intent in) {
+    if (!begun || in == null || !in.hasExtra("remindedPlan")) return;
+    Native.send("reminded " + in.getIntExtra("remindedPlan", 0) + " " + in.getIntExtra("remindedMemory", 0));
+    in.removeExtra("remindedPlan");
+  }
+
+  @Override
+  protected void onNewIntent(android.content.Intent in) {
+    super.onNewIntent(in);
+    setIntent(in);
+    reminded(in);
+  }
+
+  // ---- what only the platform does (SKINS.md, the contract) ----
+  // A GET for core's host: its body to the files' http/ID, then told.
+  private void httpGet(int id, String url) {
+    File out = new File(getFilesDir(), "http/" + id);
+    new Thread(() -> {
+      int status = 0;
+      long size = 0;
+      try {
+        java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+        c.setRequestProperty("X-Smooth-Bible", "android (1)");
+        c.setConnectTimeout(12000);
+        c.setReadTimeout(12000);
+        status = c.getResponseCode();
+        InputStream in = status >= 400 ? c.getErrorStream() : c.getInputStream();
+        try (OutputStream o = new FileOutputStream(out)) {
+          if (in != null) {
+            byte[] b = new byte[65536];
+            for (int k; (k = in.read(b)) > 0; ) {
+              o.write(b, 0, k);
+              size += k;
+            }
+            in.close();
+          }
+        }
+        c.disconnect();
+      } catch (Exception e) {
+        status = 0;
+        size = 0;
+      }
+      Native.send("http " + id + " " + status + " " + size);
+    }).start();
+  }
+
+  // Notifications asked for (a reminder's switch): the answer core's.
+  private int notifyWho;
+
+  private void notifyAsk(int who) {
+    android.app.NotificationManager nm = getSystemService(android.app.NotificationManager.class);
+    if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission(
+        android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+      notifyWho = who;
+      requestPermissions(new String[] {android.Manifest.permission.POST_NOTIFICATIONS}, 7);
+      return;
+    }
+    Native.send("notifyok " + who + " " + (nm.areNotificationsEnabled() ? 1 : 0));
+  }
+
+  @Override
+  public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
+    if (code != 7) return;
+    boolean ok = results.length > 0 && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED;
+    Native.send("notifyok " + notifyWho + " " + (ok ? 1 : 0));
+  }
+
+  // Share as Image: the card drawn last, as a PNG, to the share sheet.
+  private void shareCard() {
+    if (card == null) return;
+    android.graphics.Bitmap b = Card.draw(card, look.face());
+    if (b == null) return;
+    String name = (card.title + " " + card.suffix.trim()).replaceAll("[:/\\\\]", "_").trim() + ".png";
+    File f = new File(Shared.dir(this), name);
+    try (OutputStream o = new FileOutputStream(f)) {
+      b.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, o);
+    } catch (java.io.IOException e) {
+      return;
+    }
+    android.net.Uri u = Shared.uri(name);
+    android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_SEND);
+    i.setType("image/png");
+    i.putExtra(android.content.Intent.EXTRA_STREAM, u);
+    i.setClipData(android.content.ClipData.newRawUri(name, u));
+    i.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+    startActivity(android.content.Intent.createChooser(i, null));
+  }
+
+  // A file to save (the Library's export): where, the person's choice.
+  private void saveFile(String name, String words) {
+    saving = words;
+    android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_CREATE_DOCUMENT);
+    i.addCategory(android.content.Intent.CATEGORY_OPENABLE);
+    // (Its type by its name's ending, so the name is kept as it is.)
+    i.setType(name.endsWith(".md") ? "text/markdown" : "text/plain");
+    i.putExtra(android.content.Intent.EXTRA_TITLE, name);
+    try {
+      startActivityForResult(i, 8);
+    } catch (RuntimeException e) {
+      saving = null;
+    }
+  }
+
+  @Override
+  protected void onActivityResult(int code, int result, android.content.Intent data) {
+    super.onActivityResult(code, result, data);
+    if (code != 8 || saving == null) return;
+    String words = saving;
+    saving = null;
+    if (result != RESULT_OK || data == null || data.getData() == null) return;
+    try (OutputStream o = getContentResolver().openOutputStream(data.getData())) {
+      o.write(words.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+      android.widget.Toast.makeText(this, "Saved", android.widget.Toast.LENGTH_SHORT).show();
+    } catch (Exception e) {
+      android.widget.Toast.makeText(this, "Not saved", android.widget.Toast.LENGTH_SHORT).show();
+    }
+  }
+
+  // The bar's title, the carried ribbon's glyph before it in its color.
+  void showTitle() {
+    if (carried.isEmpty()) {
+      title.setText(titleWords);
+      return;
+    }
+    android.text.SpannableString s = new android.text.SpannableString("\u258E " + titleWords);
+    s.setSpan(new android.text.style.ForegroundColorSpan(Look.color(carried)), 0, 1,
+        android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    title.setText(s);
+  }
+
+  private final android.os.Handler timers = new android.os.Handler(android.os.Looper.getMainLooper());
 
   boolean systemDark() {
     return (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
@@ -233,7 +408,14 @@ public final class Bible extends Activity {
           | (e.isAltPressed() ? 4 : 0);
       String name = keyName(e);
       View f = getCurrentFocus();
-      boolean typing = f instanceof android.widget.EditText;
+      boolean typing = f instanceof android.widget.EditText && !panel.isKeyTrap(f);
+      // (A screen that takes letters, Practice's: each one its action.)
+      Screen top = panel.top();
+      int ch = e.getUnicodeChar();
+      if (top != null && top.keys > 0 && !typing && (mods & 1) == 0 && ch > 32) {
+        Native.send("act " + top.id + " " + top.keys + " " + ch + " 0");
+        return true;
+      }
       if (name != null && ((mods & 1) != 0 || !typing)) {
         Native.send("key " + name + " " + mods);
         // (Space is core's page, not the list's too.)
@@ -341,7 +523,12 @@ public final class Bible extends Activity {
       if (word.equals("section")) {
         section = Screen.section(w);
         building.sections.add(section);
-      } else if (word.equals("row") && section != null) section.rows.add(Screen.row(w));
+      } else if (word.equals("row") && section != null) {
+        Screen.Row r = Screen.row(w);
+        section.rows.add(r);
+        // (Share as Image's card: the one its Share Image shares.)
+        if (r.custom == Panel.CUSTOM_CARD) card = r;
+      } else if (word.equals("keys")) building.keys = w.num(1);
       else if (word.equals("cell") && section != null && !section.rows.isEmpty())
         section.rows.get(section.rows.size() - 1).cells.add(Screen.cell(w));
       else if (word.equals("empty")) {
@@ -552,22 +739,94 @@ public final class Bible extends Activity {
         break;
       case "say":
         if (voice == null) voice = new Voice(this);
-        voice.say(w.num(1) + ":" + w.num(2), w.field(1));
+        sound.stop();
+        voice.say(w.num(1) + ":" + w.num(2), w.field(1), w.num(3) > 0 ? w.num(3) / 1000f : 1, w.field(2));
         break;
       case "player": {
         playerTitle.setText(w.field(1));
         playerState.setText(w.field(2));
+        playing = !w.field(3).equals("0");
+        playerToggle.setText(playing ? "\u23F8\uFE0E" : "\u25B6\uFE0E");
+        playerToggle.setContentDescription(playing ? "Pause" : "Play");
         player.setBackgroundColor(look.bg);
         playerTitle.setTextColor(look.ink);
         playerState.setTextColor(look.faint);
-        ((TextView) player.getChildAt(1)).setTextColor(look.accent);
+        for (int i = 1; i < player.getChildCount(); i++) ((TextView) player.getChildAt(i)).setTextColor(look.accent);
         player.setElevation(dp(8));
         player.setVisibility(View.VISIBLE);
+        Session.show(this, w.field(1), playing, w.field(4), w.field(5));
         break;
       }
       case "listen_stop":
         if (voice != null) voice.stop();
+        sound.stop();
         player.setVisibility(View.GONE);
+        Session.hide(this);
+        break;
+      case "audio_play":
+        if (voice != null) voice.stop();
+        sound.play(w.num(1), w.num(3), w.num(4), w.num(5) > 0 ? w.num(5) / 1000f : 1, w.field(1));
+        break;
+      case "audio_stop":
+        sound.stop();
+        break;
+      case "speech_stop":
+        if (voice != null) voice.stop();
+        break;
+      case "listen_pause":
+        sound.pause();
+        if (voice != null) voice.pause();
+        break;
+      case "listen_resume":
+        sound.resume();
+        if (voice != null) voice.resume();
+        break;
+      case "hearing":
+        reader.hearing(w.num(1), w.num(2));
+        break;
+      case "timer": {
+        // (Core's timer: told when it is up.)
+        String tok = w.word(1);
+        timers.postDelayed(() -> Native.send("timer " + tok), Math.max(0, w.num(2)));
+        break;
+      }
+      case "http_get":
+        httpGet(w.num(1), w.word(2));
+        break;
+      case "notify_ask":
+        notifyAsk(w.num(1));
+        break;
+      case "notify_clear":
+        Reminder.clear(this);
+        break;
+      case "notify":
+        try {
+          Reminder.add(this, Long.parseLong(w.word(1)), w.num(2), w.num(3), w.field(1), w.field(2));
+        } catch (NumberFormatException e) {
+          // (Not a time: none.)
+        }
+        break;
+      case "open_settings":
+        try {
+          startActivity(new android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+              .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, getPackageName()));
+        } catch (RuntimeException e) {
+          // (No such settings: nothing.)
+        }
+        break;
+      case "share_image":
+        shareCard();
+        break;
+      case "savefile":
+        saveFile(w.field(1), w.field(2));
+        break;
+      case "ready":
+        Native.ready = true;
+        ready();
+        break;
+      case "carried":
+        carried = w.word(1);
+        showTitle();
         break;
       case "follow":
         reader.follow(w.num(1), w.num(2));
@@ -578,9 +837,6 @@ public final class Bible extends Activity {
         } catch (NumberFormatException e) {
           // (Not a time: no tick.)
         }
-        break;
-      case "memorized":
-        android.widget.Toast.makeText(this, "Added to Memory", android.widget.Toast.LENGTH_SHORT).show();
         break;
       case "reader":
         reader.setCount(w.num(1));
@@ -616,7 +872,8 @@ public final class Bible extends Activity {
         restyle();
         break;
       case "title":
-        title.setText(w.field(1));
+        titleWords = w.field(1);
+        showTitle();
         break;
       case "version":
         version.setText(w.field(1));

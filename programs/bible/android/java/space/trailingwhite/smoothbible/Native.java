@@ -22,6 +22,9 @@ final class Native {
   private static final Handler main = new Handler(Looper.getMainLooper());
 
   static Bible app;
+  // Whether core's host has said ready (once a process: an activity made
+  // again begins at once).
+  static boolean ready;
 
   // (From L8's thread: lines, newline-ended.)
   static void said(byte[] lines) {

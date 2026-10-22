@@ -65,6 +65,9 @@ final class Panel extends FrameLayout {
   // Each screen's field row (New Ribbon's name), kept across its updates
   // so that typing in it goes on.
   private final HashMap<Integer, EditText> rowFields = new HashMap<>();
+  // A screen that takes letters (Practice's typing: keys ACTION): the
+  // keyboard up for this, each letter typed sent as its action.
+  private final EditText trap;
 
   Panel(Context c, Look look) {
     super(c);
@@ -167,7 +170,60 @@ final class Panel extends FrameLayout {
     foot.setPadding(dp(8), 0, dp(8), 0);
     page.addView(foot, new LinearLayout.LayoutParams(-1, -2));
     addView(page, new LayoutParams(-1, -1));
+    trap = new EditText(c);
+    trap.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+    trap.setAlpha(0);
+    trap.setCursorVisible(false);
+    trap.addTextChangedListener(new TextWatcher() {
+      @Override
+      public void beforeTextChanged(CharSequence s, int a, int b, int n) {}
+
+      @Override
+      public void onTextChanged(CharSequence s, int a, int b, int n) {}
+
+      @Override
+      public void afterTextChanged(Editable e) {
+        if (e.length() == 0) return;
+        Screen s = top();
+        String typed = e.toString();
+        e.clear();
+        if (s == null || s.keys == 0) return;
+        typed.codePoints().forEach(ch -> {
+          if (ch > 32) Native.send("act " + s.id + " " + s.keys + " " + ch + " 0");
+        });
+      }
+    });
+    addView(trap, new LayoutParams(1, 1));
+    // (Over the selection's tray, which stays under it.)
+    setElevation(dp(24));
     setVisibility(GONE);
+  }
+
+  // The screen on top (null: none).
+  Screen top() {
+    return stack.isEmpty() || getVisibility() != VISIBLE ? null : screens.get(stack.get(stack.size() - 1));
+  }
+
+  boolean isKeyTrap(View v) {
+    return v == trap;
+  }
+
+  // The keyboard up for a screen that takes letters, or away from it.
+  private void keys(Screen s) {
+    android.view.inputmethod.InputMethodManager m = (android.view.inputmethod.InputMethodManager)
+        getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+    if (s.keys > 0) {
+      if (!trap.hasFocus()) {
+        trap.requestFocus();
+        trap.post(() -> {
+          if (m != null) m.showSoftInput(trap, 0);
+        });
+      }
+    } else if (trap.hasFocus()) {
+      trap.clearFocus();
+      if (m != null) m.hideSoftInputFromWindow(getWindowToken(), 0);
+    }
   }
 
   int dp(float n) {
@@ -361,6 +417,7 @@ final class Panel extends FrameLayout {
     back.setContentDescription(!s.left.isEmpty() ? s.left : stack.size() > 1 ? "Back" : "Close");
     rows.set(s);
     restyle();
+    keys(s);
     if (fresh && rows.focusItem >= 0) list.setSelectionFromTop(rows.focusItem, dp(160));
     else if (fresh) list.setSelection(0);
     setVisibility(VISIBLE);
@@ -505,6 +562,15 @@ final class Panel extends FrameLayout {
   // iPhone's symbols), or its label.
   private static String glyph(String icon, String label) {
     switch (icon) {
+      case "play.fill":
+        return "\u25B6";
+      case "repeat":
+        return "\u21BB";
+      case "keyboard":
+      case "keyboard.chevron.compact.down":
+        return "\u2328";
+      case "speaker.wave.2":
+        return "\uD83D\uDD08";
       case "plus":
         return "+";
       case "square.and.arrow.up":
@@ -831,6 +897,7 @@ final class Panel extends FrameLayout {
       if (r.kind.equals("tiles")) return tilesRow(r);
       if (!r.cells.isEmpty()) return gridRow(r);
       if (r.custom == CUSTOM_SWATCHES) return swatches(r);
+      if (r.custom == CUSTOM_CARD) return cardRow(r);
       LinearLayout line = new LinearLayout(c);
       line.setGravity(Gravity.CENTER_VERTICAL);
       line.setPadding(dp(20), dp(10), dp(20), dp(10));
@@ -888,6 +955,7 @@ final class Panel extends FrameLayout {
       t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
       t.setTextColor(r.flag('x') || r.flag('t') ? look.accent : r.flag('f') ? look.faint : look.ink);
       if (r.kind.equals("button")) t.setGravity(Gravity.CENTER_HORIZONTAL);
+      if (r.custom == CUSTOM_FONT) t.setTypeface(Look.faceOf((int) r.arg));
       if (r.titleLines > 0) {
         t.setMaxLines(r.titleLines);
         t.setEllipsize(TextUtils.TruncateAt.END);
@@ -1326,6 +1394,31 @@ final class Panel extends FrameLayout {
       return line;
     }
 
+    // Share as Image's card (core's CUSTOM_CARD), drawn at its pixels and
+    // shown as large as fits, its corners rounded.
+    private View cardRow(Screen.Row r) {
+      Context c = getContext();
+      android.widget.ImageView iv = new android.widget.ImageView(c);
+      android.graphics.Bitmap b = Card.draw(r, look.face());
+      if (b != null) iv.setImageBitmap(b);
+      iv.setAdjustViewBounds(true);
+      iv.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+      iv.setMaxHeight(getResources().getDisplayMetrics().heightPixels / 2);
+      iv.setClipToOutline(true);
+      iv.setOutlineProvider(new android.view.ViewOutlineProvider() {
+        @Override
+        public void getOutline(View v, android.graphics.Outline o) {
+          o.setRoundRect(0, 0, v.getWidth(), v.getHeight(), dp(12));
+        }
+      });
+      iv.setElevation(dp(4));
+      iv.setContentDescription(r.label);
+      FrameLayout box = new FrameLayout(c);
+      box.setPadding(dp(24), dp(16), dp(24), dp(16));
+      box.addView(iv, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_HORIZONTAL));
+      return box;
+    }
+
     // The ribbons' colors (core's CUSTOM_SWATCHES): a circle each (its hex
     // in the row's options, its name in its detail), the chosen ringed.
     private View swatches(Screen.Row r) {
@@ -1366,6 +1459,22 @@ final class Panel extends FrameLayout {
         return "⊕";
       case "arrow.right.circle.fill":
         return "→";
+      case "square.and.arrow.up":
+        return "⇪";
+      case "text.quote":
+        return "\u201C";
+      case "book.closed":
+        return "\uD83D\uDCD6";
+      case "brain":
+        return "✦";
+      case "doc.on.doc":
+        return "⧉";
+      case "square.and.pencil":
+      case "note.text":
+        return "✎";
+      case "bookmark":
+      case "bookmark.fill":
+        return "\uD83D\uDD16";
       default:
         return "";
     }
@@ -1386,9 +1495,10 @@ final class Panel extends FrameLayout {
     return s;
   }
 
-  // core/skin.l8's CUSTOM_HIT (a verse a search found) and CUSTOM_SWATCHES
-  // (the ribbons' colors).
-  static final int CUSTOM_HIT = 5, CUSTOM_SWATCHES = 6;
+  // core/skin.l8's CUSTOM_FONT (a font, in its own face), CUSTOM_HIT (a
+  // verse a search found), CUSTOM_SWATCHES (colors to choose) and
+  // CUSTOM_CARD (Share as Image's card).
+  static final int CUSTOM_FONT = 4, CUSTOM_HIT = 5, CUSTOM_SWATCHES = 6, CUSTOM_CARD = 11;
 
   private static final class Hero {}
 

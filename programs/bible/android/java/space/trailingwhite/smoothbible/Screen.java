@@ -6,6 +6,8 @@ import java.util.ArrayList;
 // around them (its field, tools, segments, filter, sort, confirm, hero).
 final class Screen {
   int id, kind, arg;
+  // The action each typed letter is (Practice's typing: keys ACTION; 0 none).
+  int keys;
   String title = "", search = "";
   // The row shown first as it opens (of all its rows, in order; -1: none).
   int focus = -1;

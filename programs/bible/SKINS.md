@@ -103,9 +103,11 @@ state of its own (the iPhone's): `open`, `plan_today`, `plan_details`,
 `ribbon_color`, `ribbon_toast`, `read_in`, `practice_session`,
 `practice_audio`, `preview`, `footnote`, `study_moved`, `esv_want`,
 `esv_search`, `searched`, `mm_fetch`, `pins_changed`, `export`, `remind`,
-`remind_time`, `open_settings`, `audio_source`, `voice`, `cellular`,
-`download`, `download_delete`, `settings`, `chosen`. It may ignore any line
-it doesn't know.
+`remind_time`, `audio_source`, `voice`, `cellular`, `download`,
+`download_delete`, `settings`, `chosen`; nor `open_settings` where the
+platform gives `hs_notify_off` (where notifications are turned back on:
+the web's); else it opens the platform's notification settings
+(Android's). It may ignore any line it doesn't know.
 
 What core's host turns on for its skins: ribbons and plans, Listen, Keep
 Screen On, reminders, Share as Image, the Manual and Acknowledgements.
@@ -500,7 +502,28 @@ days, core's day's reader (`SCR_DAY`: its passages, Mark Read, the day's
 end), Day Done. A skin with a day's reader of its own (the iPhone's)
 says so (`SK_NUM_OWN_VIEW` of `SCR_DAY`, and of `SCR_PLAN`, `SCR_DAY1`,
 `SCR_MANUAL`, `SCR_VOICE` for its own sheets) and gets the effects
-instead. Still to do there: reminders; then the views above.
+instead.
+
+Since 2026-10-22 its host is core's (`core/host.l8`), as the web's is: its
+L8 (`android/main.l8`) is only the platform's primitives, read from the
+app's files (a version asked as `bsb` is `bsb.txt`), the kept files there,
+and a GET made by the Java side (`http_get ID URL` to it; it writes the
+body to the files' `http/ID` and says `http ID STATUS SIZE`); it sends
+`api https://smoothbible.com/api/v1/` and waits for `ready` before
+`start`. The Java side meets the contract with Android's own parts: the
+ESV through the site's Worker, recordings (`MediaPlayer`), the device's
+voices (`TextToSpeech`: rate, a voice chosen, paused and resumed), a media
+session and its notification, reminders (alarms, exact where the person
+allows, else within ten minutes; notifications; one opened says
+`reminded`), Share as Image (the card drawn on a `Canvas`, shared through
+the app's own `Shared` provider), a file saved where the person chooses,
+typed letters for Practice (the keyboard up while a screen has `keys`),
+the reader's fonts (Serif, Sans Serif, Monospace), the verse heard washed,
+and the carried ribbon before the title. Checked on the emulator
+(2026-10-22): the ESV read, searched and compared; recordings and the
+phone's voice; a reminder at its time, opened; a card shared; Practice
+typed; a file saved. What L8 writes to standard error goes to the log
+(glue.c).
 
 ## The web, the second new skin
 

@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 extern void l8_android_main(char **envp);
 extern char **environ;
@@ -53,8 +54,30 @@ JNIEXPORT void JNICALL Java_space_trailingwhite_smoothbible_Native_push(JNIEnv *
   free(s);
 }
 
+static void *errors(void *arg) {
+  int fd = *(int *)arg;
+  char b[1024];
+  for (ssize_t n; (n = read(fd, b, sizeof b - 1)) > 0;) {
+    b[n] = 0;
+    __android_log_print(ANDROID_LOG_WARN, "smoothbible", "%s", b);
+  }
+  return 0;
+}
+
 static void *run(void *arg) {
   (*vm)->AttachCurrentThread(vm, &l8_env, 0);
+  // (What L8 writes to standard error, its runtime's errors among it, to
+  // the log: Android has nowhere else for it.)
+  int p[2];
+  if (pipe(p) == 0) {
+    dup2(p[1], 2);
+    dup2(p[1], 1);
+    close(p[1]);
+    int *fd = malloc(sizeof(int));
+    *fd = p[0];
+    pthread_t t;
+    pthread_create(&t, 0, errors, fd);
+  }
   LOG("starting L8");
   l8_android_main(environ);
   LOG("L8 returned");

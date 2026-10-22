@@ -22,6 +22,8 @@ final class Look {
   float size = 1, spacing = 1.32f;
   int margin = 28;
   boolean dark, red;
+  // The reader's font (of main.l8's sk_fonts: Serif, Sans Serif, Monospace).
+  int font;
   int bg = 0xFFFBF8F2, ink = 0xFF1E1C19, heading = 0xFF4F4943, faint = 0xFF8A8378,
       accent = 0xFF9C3A2C, rule = 0xFF1E1C19, glossLine = 0x521E1C19;
 
@@ -40,6 +42,15 @@ final class Look {
     accent = color(w.word(10));
     rule = color(w.word(11));
     glossLine = alpha(rule, w.num(12) / 1000f);
+    font = w.num(13);
+  }
+
+  Typeface face() {
+    return faceOf(font);
+  }
+
+  static Typeface faceOf(int f) {
+    return f == 1 ? Typeface.SANS_SERIF : f == 2 ? Typeface.MONOSPACE : Typeface.SERIF;
   }
 
   static int color(String hex) {
@@ -159,6 +170,9 @@ final class Look {
         span(s, new ForegroundColorSpan(faint), a, b);
         break;
       default:
+        // (Core's own runs in a chapter: an ESV chapter's line, faint, and
+        // its links, in the accent.)
+        if (style >= 100) run(s, a, b, style);
         break;
     }
   }

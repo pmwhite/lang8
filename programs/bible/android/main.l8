@@ -2,20 +2,23 @@ tag bible_android;
 
 use_tag std, bible;
 
-// Smooth Bible on Android (SKINS.md): the app (core/skin.l8) on a thread
-// of its own, in a shared library the Java side loads (glue.c, Bible.java),
-// built with `l8 arm64 --target android` (android/build.sh). It does what
-// only a host can: it reads the versions, and keeps the settings and what
-// is kept (core's files), in the app's files (the Java side copies the
-// versions there from the APK's assets first). Every other line the Java
-// side sends is the app's, and what the app answers (ui_out) goes back to
-// it as it is.
+// Smooth Bible on Android (SKINS.md): the app (core) on a thread of its
+// own, in a shared library the Java side loads (glue.c, Bible.java), built
+// with `l8 arm64 --target android` (android/build.sh). Its host is core's
+// (core/host.l8), as the web's is; this gives it Android's primitives: a
+// data file (the app's files, copied there from the APK's assets by the
+// Java side first), a GET (made by the Java side, its answer a file of the
+// app's), the app's files for what is kept, and the lines to and from the
+// skin.
 //
-//   files DIR      where the app's files are (first, before anything)
-//   ...            the wire (SKINS.md): start, tap, act, want, place, ...
+//   files DIR      where the app's files are (the first line, always)
+//   ...            the wire (SKINS.md), and the host's got, http, api
+//
+// To the Java side, besides core's lines: `http_get ID URL` (a GET whose
+// body it writes to DIR/http/ID, then says `http ID STATUS SIZE`).
 import "../../../stdlib/write.l8";
 
-import "../core/skin.l8";
+import "../core/host.l8";
 
 extern and_wait(ms: int): int;
 
@@ -23,13 +26,13 @@ extern and_take(buf: []i8, cap: int): int;
 
 extern and_say_at(text: []i8, at: int, n: int): int;
 
-extern and_log(text: str, n: int): int;
-
 extern close(fd: int): int;
 
 extern unlink_raw(path: *i8): int = unlink;
 
 extern open_raw(path: *i8, flags: int, mode: int): int = open;
+
+extern lseek(fd: int, offset: int, whence: int): int;
 
 // ---- files ----
 files_dir: []i8 = new i8[1024](0i8);
@@ -38,184 +41,59 @@ files_n: int = 0;
 
 path: []i8 = new i8[1200](0i8);
 
-// The path of kept file kp_name (core/kept.l8's) in the app's files,
-// NUL-ended, in path.
+path_n: int = 0;
+
+path_begin() {
+    path_n = 0;
+    for i in 0..files_n path_put(files_dir[i] as int);
+    path_put(47)
+}
+
+path_put(k: int) {
+    if (path_n < len(path) - 1) {
+        path[path_n] = k trunc i8;
+        path_n = path_n + 1
+    }
+}
+
+path_end() {
+    path[path_n] = 0i8
+}
+
+// The path of kept file kp_name (core/kept.l8's) in the app's files.
 kp_path() {
-    n: int = 0;
-    for i in 0..files_n {
-        path[n] = files_dir[i];
-        n = n + 1
-    }
-    path[n] = 47i8;
-    n = n + 1;
-    for i in 0..kp_name_n {
-        path[n] = kp_name[i];
-        n = n + 1
-    }
-    path[n] = 0i8
+    path_begin();
+    for i in 0..kp_name_n path_put(kp_name[i] as int);
+    path_end()
 }
 
-// The path of name in the app's files, NUL-ended, in path.
-file_path(name: str) {
-    n: int = 0;
-    for i in 0..files_n {
-        path[n] = files_dir[i];
-        n = n + 1
-    }
-    path[n] = 47i8;
-    n = n + 1;
-    for c in name {
-        if (n < len(path) - 1) {
-            path[n] = c;
-            n = n + 1
-        }
-    }
-    path[n] = 0i8
-}
-
-got_n: int = 0;
-
-// File name read whole (got_n bytes; none if it is not there).
-read_file(name: str, most: int): []i8@new {
-    buf: []i8 = new i8[most](0i8);
-    got_n = 0;
-    file_path(name);
+// File path's size (-1: it isn't there).
+path_size(): int {
     fd: int = open_raw(&path[0], 0, 0);
-    if (fd < 0) return buf;
+    if (fd < 0) return -1;
+    n: int = lseek(fd, 0, 2);
+    close(fd);
+    n
+}
+
+// File path read into out (as much as fits): how much.
+path_read(out: []i8): int {
+    fd: int = open_raw(&path[0], 0, 0);
+    if (fd < 0) return 0;
+    got: int = 0;
     more: bool = true;
-    while (more) {
-        k: int = read(fd, buf, got_n, len(buf) - got_n);
-        if (k <= 0) more = false else got_n = got_n + k
+    while (more && got < len(out)) {
+        k: int = read(fd, out, got, len(out) - got);
+        if (k <= 0) more = false else got = got + k
     }
     close(fd);
-    buf
-}
-
-extern lseek(fd: int, offset: int, whence: int): int;
-
-// File name read whole, in a buffer its size (got_n its length; none if it
-// is not there).
-read_whole(name: str): []i8@new {
-    file_path(name);
-    fd: int = open_raw(&path[0], 0, 0);
-    size: int = if (fd < 0) 0 else lseek(fd, 0, 2);
-    if (fd >= 0) _r: int = lseek(fd, 0, 0);
-    buf: []i8 = new i8[size + 1](0i8);
-    got_n = 0;
-    if (fd < 0) return buf;
-    more: bool = true;
-    while (more && got_n < size) {
-        k: int = read(fd, buf, got_n, size - got_n);
-        if (k <= 0) more = false else got_n = got_n + k
-    }
-    close(fd);
-    buf
-}
-
-// The language data (the Hebrew and Greek, the lexicons, the cross
-// references, the commentary), what Learn reads, and the Manual, read
-// whole as the iPhone maps them.
-load_lang() noregion {
-    lw = read_whole("lang/words.bin");
-    lw_n = got_n / 12;
-    if (got_n == 0) return;
-    lv = read_whole("lang/verses.bin");
-    lv_n = got_n / 8 - 1;
-    lsup = read_whole("lang/supplied.bin");
-    lsup_n = got_n / 8;
-    lforms = read_whole("lang/forms.txt");
-    lforms_len = got_n;
-    lmorph = read_whole("lang/morph.txt");
-    lmorph_len = got_n;
-    lconc = read_whole("lang/conc.bin");
-    lconc_len = got_n;
-    llex = read_whole("lang/lexicon.txt");
-    llex_len = got_n;
-    lgram = read_whole("lang/grammar.txt");
-    lgram_len = got_n;
-    lsen = read_whole("lang/senses.bin");
-    lsen_n = got_n;
-    lrel = read_whole("lang/related.bin");
-    lrel_n = got_n;
-    lxi = read_whole("xref_index.bin");
-    lxi_n = got_n / 4;
-    lxr = read_whole("xrefs.bin");
-    lxr_n = got_n;
-    lmh = read_whole("mhcc.txt");
-    lmh_n = got_n;
-    lmean = read_whole("lang/meanings.bin");
-    lmean_n = got_n;
-    lmeant = read_whole("lang/meanings.txt");
-    lmeant_n = got_n;
-    mean_index();
-    lang_index();
-    lvoc = read_whole("lang/vocab.bin");
-    lvoc_n = got_n;
-    llet = read_whole("lang/letters.txt");
-    llet_n = got_n;
-    learn_index_files();
-    if (lang_ready) learn_index_lang();
-    hlp = read_whole("help.txt");
-    hlp_n = got_n;
-    help_index()
-}
-
-// (The host's numbers: the language data, read at the start.)
-android_num(what: int, _a: int): int {
-    if (what == SK_NUM_LANG || what == SK_NUM_LEARN) return if (lang_ready) 1 else 0;
-    // (Read aloud by the device's own voice; no recordings yet.)
-    if (what == SK_NUM_AUDIO_SOURCE) return SRC_VOICE;
-    if (what == SK_NUM_VOICE_SEEN || what == SK_NUM_BETTER_VOICE) return 1;
-    -1
-}
-
-version_files: []str = ["bsb.txt", "kjv.txt", "web.txt", "asv.txt", "ylt.txt", "",
-    "orig.txt"];
-
-// The Hebrew and Greek's words (its text is counted by them, and its
-// glosses read them), the Ketiv, and its accents: once.
-orig_loaded: bool = false;
-
-load_orig() noregion: bool {
-    if (!orig_loaded) {
-        orig_loaded = true;
-        og = read_whole("lang/orig-words.bin");
-        og_n = got_n / 12;
-        lket = read_whole("lang/orig-ketiv.txt");
-        lket_n = got_n;
-        ket_index();
-        og_setting = clamp_index(pref_get("origGlosses"), 4) - 1;
-        lay_accents = pref_is("origAccents");
-        if (lay_accents) {
-            og_acc = read_whole("lang/orig-accents.txt");
-            og_acc_n = got_n;
-            og_acc_index()
-        }
-    }
-    og_n > 0
-}
-
-load_version(t: int) noregion: bool {
-    if (t < 0 || t >= len(version_files) || len(version_files[t]) == 0) return false;
-    if (t == TEXT_ORIG && !load_orig()) return false;
-    buf: []i8 = read_file(version_files[t], 8388608);
-    if (got_n == 0) return false;
-    text_load(t, buf, got_n);
-    true
+    got
 }
 
 // ---- what is kept (core/kept.l8's), as files of the app's ----
 kp_read_file() {
     kp_path();
-    fd: int = open_raw(&path[0], 0, 0);
-    fbuf_n = 0;
-    if (fd < 0) return;
-    more: bool = true;
-    while (more) {
-        r: int = read(fd, fbuf, fbuf_n, len(fbuf) - fbuf_n);
-        if (r <= 0) more = false else fbuf_n = fbuf_n + r
-    }
-    close(fd)
+    fbuf_n = path_read(fbuf)
 }
 
 kp_write_file() {
@@ -244,58 +122,143 @@ kp_remove_file() {
     _u: int = unlink_raw(&path[0])
 }
 
-// The plans: M'Cheyne's and the Chronological's days (in the APK), the
-// plans made, then those followed (plans.txt's numbers, each its file).
-load_plans() noregion {
-    m: []i8 = read_whole("plans/mcheyne.txt");
-    if (got_n > 0) plan_file_set(PLAN_MCHEYNE, m, got_n);
-    k: []i8 = read_whole("plans/chrono.txt");
-    if (got_n > 0) plan_file_set(PLAN_CHRONO, k, got_n)
+// ---- the data files core's host asks for ----
+// Each id's name as asked (a version's, "bsb", is bsb.txt in the files),
+// and the asks not yet answered: answered in the loop, `got ID SIZE`.
+ASKED_MOST: int = 128;
+
+asked_name: []i8 = new i8[128 * 64](0i8);
+
+asked_len: []int = new int[128](0);
+
+waiting: []int = new int[128](0);
+
+waiting_n: int = 0;
+
+android_ask(id: int, name: str) {
+    if (id < 0 || id >= ASKED_MOST) return;
+    n: int = 0;
+    for c in name {
+        if (n < 64) {
+            asked_name[id * 64 + n] = c;
+            n = n + 1
+        }
+    }
+    asked_len[id] = n;
+    if (waiting_n < len(waiting)) {
+        waiting[waiting_n] = id;
+        waiting_n = waiting_n + 1
+    }
+}
+
+// Data file id's path (its name, or its name with .txt).
+asked_path(id: int, txt: bool) {
+    path_begin();
+    for i in 0..asked_len[id] path_put(asked_name[id * 64 + i] as int);
+    if (txt)
+        for c in ".txt" path_put(c as int);
+    path_end()
+}
+
+// A GET's answer's path: http/ID.
+http_path(id: int) {
+    path_begin();
+    for c in "http/" path_put(c as int);
+    d: int = 1;
+    while (d * 10 <= id) d = d * 10;
+    while (d > 0) {
+        path_put(48 + id / d % 10);
+        d = d / 10
+    }
+    path_end()
+}
+
+// File or answer id into out: its length.
+android_file(id: int, out: []i8): int {
+    if (id >= ASKED_MOST) http_path(id) else {
+        asked_path(id, false);
+        if (path_size() < 0) asked_path(id, true)
+    }
+    path_read(out)
+}
+
+// The asks answered: each `got ID SIZE` (-1: not there), as lines core's
+// host reads next; whether there were any.
+answer_asks() noregion: bool {
+    if (waiting_n == 0) return false;
+    n: int = 0;
+    for w in 0..waiting_n {
+        id: int = waiting[w];
+        asked_path(id, false);
+        size: int = path_size();
+        if (size < 0) {
+            asked_path(id, true);
+            size = path_size()
+        }
+        fbuf_n = 0;
+        fput_str("got ");
+        fput_int(id);
+        fput(32);
+        fput_int(size);
+        fput(10);
+        for i in 0..fbuf_n {
+            hs_inbox[n] = fbuf[i];
+            n = n + 1
+        }
+    }
+    waiting_n = 0;
+    hs_lines(n);
+    true
+}
+
+// ---- the network: a GET, made by the Java side ----
+http_line: []i8 = new i8[4096](0i8);
+
+android_http(id: int, b: []i8, n: int) {
+    k: int = 0;
+    for c in "http_get " {
+        http_line[k] = c;
+        k = k + 1
+    }
+    d: int = 1;
+    while (d * 10 <= id) d = d * 10;
+    while (d > 0) {
+        http_line[k] = (48 + id / d % 10) trunc i8;
+        k = k + 1;
+        d = d / 10
+    }
+    http_line[k] = 32i8;
+    k = k + 1;
+    for i in 0..n {
+        if (k < len(http_line) - 1) {
+            http_line[k] = b[i];
+            k = k + 1
+        }
+    }
+    http_line[k] = 10i8;
+    _s: int = and_say_at(http_line, 0, k + 1)
+}
+
+android_say(b: []i8, start: int, n: int) {
+    _s: int = and_say_at(b, start, n)
 }
 
 // ---- the lines ----
-inbox: []i8 = new i8[1048576](0i8);
-
-begun: bool = false;
-
-// What the app said, sent on whole, at most a megabyte at a time (at a
-// line's end).
-flush() {
-    p: int = 0;
-    while (p < ui_out_n) {
-        e: int = if (ui_out_n - p > 1048576) p + 1048576 else ui_out_n;
-        while (e > p + 1 && ui_out[e - 1] as int != 10) e = e - 1;
-        _n: int = and_say_at(ui_out, p, e - p);
-        p = e
-    }
-    ui_out_n = 0
-}
-
-is_files(b: int, e: int): bool {
-    e - b > 6 && inbox[b] as int == 102 && inbox[b + 1] as int == 105 && inbox[b + 2] as int == 108 && inbox[b + 3] as int == 101 && inbox[b + 4] as int == 115 && inbox[b + 5] as int == 32
-}
-
-lines(n: int) noregion {
-    p: int = 0;
-    for i in 0..n {
-        if (inbox[i] as int == 10) {
-            if (is_files(p, i)) {
-                files_n = i - p - 6;
-                for k in 0..files_n files_dir[k] = inbox[p + 6 + k];
-                if (!begun) {
-                    begun = true;
-                    if (!load_version(0)) _l: int = and_log("smoothbible: no bsb.txt in the files",
-                        36);
-                    text_use(0);
-                    kept_load_prefs();
-                    load_lang();
-                    load_plans();
-                    kept_load()
-                }
-            } else sk_line(inbox, p, i);
-            p = i + 1
+// The first: where the app's files are (files DIR); taken off the front.
+take_files(n: int): int {
+    if (n < 6 || !sk_word_is(hs_inbox, 0, n, "files")) return n;
+    e: int = 0;
+    while (e < n && hs_inbox[e] as int != 10) e = e + 1;
+    files_n = 0;
+    for k in 6..e {
+        if (files_n < len(files_dir)) {
+            files_dir[files_n] = hs_inbox[k];
+            files_n = files_n + 1
         }
     }
+    rest: int = n - e - 1;
+    for k in 0..rest hs_inbox[k] = hs_inbox[e + 1 + k];
+    rest
 }
 
 main() noregion: int {
@@ -305,33 +268,36 @@ main() noregion: int {
         append: &kp_append_file,
         remove: &kp_remove_file
     };
-    sk_host = SkinHost {
-        save_prefs: &kept_save_prefs,
-        save_kept: &kept_save,
-        words: &sk_no_words,
-        switch_version: null,
-        num: &android_num,
-        fill: &sk_no_fill,
-        fetch: null
+    host_io = HostIO {
+        ask: &android_ask,
+        http: &android_http,
+        file: &android_file,
+        say: &android_say
     };
-    // (Go To's ribbons and plans: kept here now. No reminders yet.)
-    sk_has_ribbons = true;
-    // (Listen: the device's voice, core's session.)
-    sk_has_listen = true;
-    sk_has_keep_on = true;
+    begun: bool = false;
     while (true) {
         _w: int = and_wait(1000);
-        n: int = and_take(inbox, len(inbox));
+        n: int = and_take(hs_inbox, len(hs_inbox));
         if (n > 0) {
-            lines(n);
-            // (A version core wants, loaded here, then read.)
-            t: int = sk_want_text;
-            if (t >= 0) {
-                sk_want_text = -1;
-                if (load_version(t)) sk_use_version(t)
+            if (!begun) {
+                n = take_files(n);
+                if (files_n > 0) {
+                    begun = true;
+                    hs_start();
+                    // (A phone's: its fonts, Android's own faces.)
+                    sk_device = "Phone";
+                    sk_device_prose = "phone";
+                    sk_fonts = ["Serif", "Sans Serif", "Monospace"]
+                }
             }
-            flush()
-        }
+            if (begun) {
+                hs_lines(n);
+                while (answer_asks()) { }
+                hs_after();
+                // (What it said made more asks: answered too.)
+                while (answer_asks()) hs_after()
+            }
+        } else if (begun && answer_asks()) hs_after()
     }
     0
 }

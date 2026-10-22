@@ -143,6 +143,7 @@ final class Reader extends ListView {
           android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
     if (c == selC) markSelection(c);
+    if (c == heardC) markHeard(c);
     changed();
     if (c == jumpC) post(this::finishJump);
   }
@@ -261,8 +262,9 @@ final class Reader extends ListView {
       for (int i = 0; i + 3 < lk.length; i += 4) {
         if (off >= lk[i] - 1 && off <= lk[i + 1]) {
           long k = lk[i + 2];
+          // (3: an ESV chapter's line, Try Again, Read in the BSB, esv.org.)
           Native.send(k == 0 ? "footnote " + c + " " + lk[i + 3] : k == 2 ? "word " + lk[i + 3]
-              : "preview " + lk[i + 3]);
+              : k == 3 ? "esvact " + lk[i + 3] + " " + c : "preview " + lk[i + 3]);
           return;
         }
       }
@@ -309,6 +311,34 @@ final class Reader extends ListView {
       if (r != null) s.setSpan(new Sel(Look.alpha(look.accent, 0.18f)), r[0], r[1],
           android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
+  }
+
+  // The verse being heard (Listen's), washed; C -1, none.
+  static final class Heard extends android.text.style.BackgroundColorSpan {
+    Heard(int color) {
+      super(color);
+    }
+  }
+
+  private int heardC = -1, heardV;
+
+  void hearing(int c, int v) {
+    int was = heardC;
+    heardC = c;
+    heardV = v;
+    if (was >= 0) markHeard(was);
+    if (c >= 0 && c != was) markHeard(c);
+    changed();
+  }
+
+  private void markHeard(int c) {
+    SpannableStringBuilder s = texts.get(c);
+    if (s == null) return;
+    for (Heard o : s.getSpans(0, s.length(), Heard.class)) s.removeSpan(o);
+    if (c != heardC || heardV <= 0) return;
+    int[] r = range(c, heardV);
+    if (r != null) s.setSpan(new Heard(Look.alpha(look.accent, 0.12f)), r[0], r[1],
+        android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
   }
 
   // The selection let go (core's clear_selection, or another chapter's).
@@ -435,9 +465,13 @@ final class Reader extends ListView {
       tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, look.textSp());
       tv.setLineSpacing(0, look.spacing);
       tv.setTextColor(look.ink);
-      tv.setTypeface(android.graphics.Typeface.SERIF);
+      tv.setTypeface(look.face());
       tv.setTextIsSelectable(false);
       SpannableStringBuilder s = texts.get(i);
+      // (A chapter still to come, its line alone (no verses: the ESV's
+      // waiting), kept a screen tall, so what is below it doesn't move up.)
+      int[] vs = verses.get(i);
+      tv.setMinHeight(s != null && vs != null && vs.length == 0 ? getHeight() : 0);
       if (s == null) {
         want(i);
         // (A guess at its height until it comes: about a chapter's.)
