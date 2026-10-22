@@ -74,9 +74,11 @@ function send(line) {
   }
 }
 
+// (A version and the plans first; the language data and the Manual at low
+// priority, after the reader: host ids from 12.)
 async function fetchData(id, name) {
   try {
-    const r = await fetch(`${DATA}/${name}.gz`);
+    const r = await fetch(`${DATA}/${name}.gz`, { priority: id >= 12 ? "low" : "high" });
     if (!r.ok) throw new Error(r.status);
     const body = r.body.pipeThrough(new DecompressionStream("gzip"));
     const bytes = new Uint8Array(await new Response(body).arrayBuffer());
@@ -604,6 +606,7 @@ const bar = {
     const b = $(".bar .version");
     b.textContent = v;
     b.setAttribute("aria-label", `Version: ${v}`);
+    if (reader.said.c >= 0) address(reader.said.c);
   },
 };
 
@@ -1898,6 +1901,8 @@ function begin() {
   if (started) return;
   started = true;
   const c = chapterOfAddress(location.pathname);
+  const v = /^\/read\/(bsb|kjv|web|asv|ylt)\//.exec(location.pathname);
+  if (v) send(`version ${v[1].toUpperCase()}`);
   if (c >= 0) send(`place ${c} 0 0`);
   send(`start ${innerWidth} ${innerHeight} ${Math.round(devicePixelRatio * 100)} ${matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0} ${-new Date().getTimezoneOffset() * 60}`);
 }

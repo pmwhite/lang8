@@ -315,6 +315,7 @@ From the skin:
 | `want C` | chapter C's text, to show |
 | `place C V FRAC` | the reader's top: chapter, verse, thousandths of an em into it |
 | `dark 0/1` | the system's appearance changed |
+| `version ABBR` | the version an address names (`KJV`): before `start`, the one the reader opens in; after, read now |
 | `away` | the app put away: the settings kept now |
 | `word W` | a word of the original tapped (a `link` of KIND 2, its ARG the word): core's word screen (`SCR_WORD`: its form, where, transliteration, gloss, meaning, parsing; Learn This Word or its card's line; Word Study) |
 | `tapverse C V`, `tapnone` | a verse tapped (core toggles it: another chapter's starts again), or the reader elsewhere (the selection let go); core says `selection` C V... (C -1: none) for the skin to paint, and writes the tray's model as screen 0 (`tray`, `tray_away`). A skin hit-tests in this order: a footnote's mark, a word of the original, a reference, a note's mark, the ESV's line, a chapter's note, then a verse (within a few points), else elsewhere |
