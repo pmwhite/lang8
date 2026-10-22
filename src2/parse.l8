@@ -1939,19 +1939,59 @@ parse_primary() noregion raises Error: *Expr@new {
     error("expected expression")
 }
 
+// A loop about to be parsed (tok after while or for): a local it assigns,
+// or takes the address of, keeps no narrowing from before it, since a
+// later turn may come after the assignment. Its tokens are scanned from
+// its condition through its body: a braced block, or a statement up to a
+// ; (or the end of the block, or an else) at its own depth.
+loop_kills() noregion {
+    if (!parse_resolve) return;
+    t: *Token = tok;
+    depth: int = 0;
+    braced: bool = false;
+    prev: TokKind = TokKind.Eof;
+    while (t.kind != TokKind.Eof) {
+        k: TokKind = t.kind;
+        if (k == TokKind.LParen || k == TokKind.LBrack || k == TokKind.LBrace) {
+            if (depth == 0 && k == TokKind.LBrace) braced = true;
+            depth = depth + 1
+        } else if (k == TokKind.RParen || k == TokKind.RBrack || k == TokKind.RBrace) {
+            depth = depth - 1;
+            if (depth < 0 || depth == 0 && braced && k == TokKind.RBrace) return
+        } else if (depth == 0 && (k == TokKind.Semi || k == TokKind.Else)) return;
+        if (k == TokKind.Ident && len(t.qualifier) == 0 && prev != TokKind.Dot) {
+            if (t.next.kind == TokKind.Assign || prev == TokKind.Amp) {
+                v: ?*Obj = find_var(intern(source, t.pos, t.len));
+                if (v != null && v.is_local) kill_var_facts(v)
+            }
+        }
+        prev = k;
+        t = t.next
+    }
+}
+
 parse_if_expr() noregion raises Error: *Expr@new {
     skip(TokKind.If);
     skip(TokKind.LParen);
     cond: *Expr = parse_expr();
     skip(TokKind.RParen);
+    // (Each branch narrowed as it is parsed, as an if statement's is: a
+    // member of a pointer the condition proves non-null is found then.)
+    save: ?*NarrowFrame = narrow_top;
+    narrow_push_ne_nulls(cond);
+    killed: int = kill_n;
     enter_scope();
     then: *Expr = parse_expr();
     leave_scope();
+    narrow_reset(save);
     if (tok.kind != TokKind.Else) error("if expression requires else");
     tok = tok.next;
+    narrow_push_eq_nulls(cond);
     enter_scope();
     els: *Expr = parse_expr();
     leave_scope();
+    narrow_reset(save);
+    kill_again(killed, kill_n);
     new_if_expr(cond, then, els)
 }
 
@@ -2860,11 +2900,13 @@ type_if_expr(
         ct);
     save: ?*NarrowFrame = narrow_top;
     narrow_push_ne_nulls(cond);
+    killed: int = kill_n;
     add_type(then);
     narrow_reset(save);
     narrow_push_eq_nulls(cond);
     add_type(els);
     narrow_reset(save);
+    kill_again(killed, kill_n);
     tt: ?*Type = decay(then.ty);
     et: ?*Type = decay(els.ty);
     tn: bool = is_null_value_expr(then);
@@ -3341,7 +3383,9 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
                 ct);
             save: ?*NarrowFrame = narrow_top;
             narrow_push_ne_nulls(k.cond);
+            killed: int = kill_n;
             add_type_stmt(k.then);
+            then_killed: int = kill_n;
             then_nn: ?*Obj = null;
             els: ?*Stmt = k.els;
             if (els == null && !stmt_always_diverges(k.then)) {
@@ -3351,11 +3395,16 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
                 }
             }
             narrow_reset(save);
+            // (What a branch that falls through assigned holds after the
+            // whole if; the else is checked without the then's.)
             if (els != null) {
                 narrow_push_eq_nulls(k.cond);
                 add_type_stmt(els);
-                narrow_reset(save)
+                narrow_reset(save);
+                if (!stmt_always_diverges(k.then)) kill_again(killed, then_killed);
+                if (!stmt_always_diverges(els)) kill_again(then_killed, kill_n)
             } else {
+                if (!stmt_always_diverges(k.then)) kill_again(killed, then_killed);
                 if (then_nn != null) {
                     dt: ?*Type = decay(then_nn.ty);
                     if (dt != null && is_optional(dt)) narrow_push(then_nn, unwrap_optional(dt))
@@ -3364,6 +3413,8 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             return
         }
         While k -> {
+            kill_assigned_expr(k.cond);
+            kill_assigned_stmt(k.body);
             add_type(k.cond);
             ct2: ?*Type = decay(k.cond.ty);
             if (ct2 == null || !is_bool_ty(ct2)) error_ty_expr(k.cond, "condition must be bool",
@@ -3375,6 +3426,7 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             return
         }
         For k -> {
+            kill_assigned_stmt(k.body);
             add_type(k.iter);
             hk: ?*Expr = k.hi;
             if (hk != null) {
@@ -3852,26 +3904,35 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         skip(TokKind.RParen);
         save: ?*NarrowFrame = narrow_top;
         narrow_push_ne_nulls(cond);
+        killed: int = kill_n;
         enter_scope();
         then: *Stmt = parse_stmt();
         leave_scope();
         narrow_reset(save);
+        then_killed: int = kill_n;
         els: ?*Stmt = null;
         if (tok.kind == TokKind.Else) {
             tok = tok.next;
             narrow_push_eq_nulls(cond);
             enter_scope();
-            els = parse_stmt();
+            els_stmt: *Stmt = parse_stmt();
+            els = els_stmt;
             leave_scope();
-            narrow_reset(save)
+            narrow_reset(save);
+            // (What a branch that falls through assigned holds after.)
+            if (!stmt_parse_diverges(then)) kill_again(killed, then_killed);
+            if (!stmt_parse_diverges(els_stmt)) kill_again(then_killed, kill_n)
         } else {
             /* if (x == null) { return/error/...; } → x is non-null afterward */
-            if (stmt_parse_diverges(then)) narrow_push_eq_nulls(cond)
+            if (stmt_parse_diverges(then)) narrow_push_eq_nulls(cond) else kill_again(killed,
+                then_killed)
         }
         return new_if(cond, then, els)
     }
     if (tok.kind == TokKind.While) {
         tok = tok.next;
+        loop_kills();
+        loop_killed: int = kill_n;
         skip(TokKind.LParen);
         cond2: *Expr = parse_expr();
         skip(TokKind.RParen);
@@ -3881,10 +3942,12 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         body: *Stmt = parse_stmt();
         leave_scope();
         narrow_reset(save2);
+        kill_again(loop_killed, kill_n);
         return new_while(cond2, body)
     }
     if (tok.kind == TokKind.For) {
         tok = tok.next;
+        loop_kills();
         if (tok.kind != TokKind.Ident) error("expected name after for");
         iname: []i8 = cur_tokstr();
         ipos: int = tok.pos;

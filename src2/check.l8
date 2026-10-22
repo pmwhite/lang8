@@ -196,7 +196,184 @@ narrow_reset(saved: ?*NarrowFrame@immortal) {
 
 kill_var_facts(o: ?*Obj@new) noregion {
     if (o == null) return;
-    if (o.ty != null) narrow_push(o, o.ty)
+    if (o.ty != null) {
+        narrow_push(o, o.ty);
+        kill_note(o)
+    }
+}
+
+// Every fact killed (a variable assigned, or its address taken), newest
+// first, numbered. A branch's frames are let go when it ends, its kills
+// with them; kill_again makes those of a branch that may fall through
+// hold after the whole if, as its assignments do.
+type KillEntry = {
+    var: ?*Obj;
+    seq: int;
+    next: ?*KillEntry
+}
+
+kill_log: ?*KillEntry = null;
+
+kill_n: int = 0;
+
+kill_note(var: ?*Obj@new) noregion {
+    e: *KillEntry = new KillEntry { var: var, seq: kill_n, next: kill_log };
+    kill_log = e;
+    kill_n = kill_n + 1
+}
+
+// Before a loop is checked: a local it assigns, or takes the address of,
+// keeps no narrowing from before it, since a later turn may come after
+// the assignment.
+kill_assigned_stmts(s: ?*Stmt) noregion {
+    n: ?*Stmt = s;
+    while (n != null) {
+        kill_assigned_stmt(n);
+        n = n.next
+    }
+}
+
+kill_assigned_stmt(s: *Stmt) noregion {
+    match s.kind {
+        Return k -> kill_assigned_expr(k.lhs);
+        If k -> {
+            kill_assigned_expr(k.cond);
+            kill_assigned_stmt(k.then);
+            els: ?*Stmt = k.els;
+            if (els != null) kill_assigned_stmt(els)
+        }
+        While k -> {
+            kill_assigned_expr(k.cond);
+            kill_assigned_stmt(k.body)
+        }
+        For k -> {
+            kill_assigned_expr(k.iter);
+            kill_assigned_expr(k.hi);
+            kill_assigned_stmt(k.body)
+        }
+        Block k -> kill_assigned_stmts(k.body);
+        ExprStmt k -> kill_assigned_expr(k.lhs);
+        Decl k -> kill_assigned_expr(k.init);
+        Match k -> {
+            kill_assigned_expr(k.cond);
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                kill_assigned_stmt(arm.body);
+                arm = arm.next
+            }
+        }
+        Raise k -> kill_assigned_inits(k.inits);
+        Try k -> {
+            kill_assigned_stmt(k.body);
+            arm: ?*CatchArm = k.arms;
+            while (arm != null) {
+                kill_assigned_stmt(arm.body);
+                arm = arm.next
+            }
+        }
+        Region k -> kill_assigned_stmt(k.body);
+        Expect _ -> { }
+    }
+}
+
+kill_assigned_inits(inits: ?*FieldInit) noregion {
+    f: ?*FieldInit = inits;
+    while (f != null) {
+        kill_assigned_expr(f.lhs);
+        f = f.next
+    }
+}
+
+kill_assigned_list(e: ?*Expr) noregion {
+    a: ?*Expr = e;
+    while (a != null) {
+        kill_assigned_expr(a);
+        a = a.next
+    }
+}
+
+kill_assigned_expr(e: ?*Expr) noregion {
+    if (e == null) return;
+    match e.kind {
+        Assign k -> {
+            match k.lhs.kind {
+                Var v -> kill_var_facts(v.var);
+                _ -> kill_assigned_expr(k.lhs)
+            }
+            kill_assigned_expr(k.rhs)
+        }
+        Addr k -> {
+            match k.lhs.kind {
+                Var v -> kill_var_facts(v.var);
+                _ -> kill_assigned_expr(k.lhs)
+            }
+        }
+        Binary k -> {
+            kill_assigned_expr(k.lhs);
+            kill_assigned_expr(k.rhs)
+        }
+        LogAnd k -> {
+            kill_assigned_expr(k.lhs);
+            kill_assigned_expr(k.rhs)
+        }
+        LogOr k -> {
+            kill_assigned_expr(k.lhs);
+            kill_assigned_expr(k.rhs)
+        }
+        OrElse k -> {
+            kill_assigned_expr(k.lhs);
+            kill_assigned_expr(k.rhs)
+        }
+        Index k -> {
+            kill_assigned_expr(k.lhs);
+            kill_assigned_expr(k.idx)
+        }
+        Deref k -> kill_assigned_expr(k.lhs);
+        Not k -> kill_assigned_expr(k.lhs);
+        Neg k -> kill_assigned_expr(k.lhs);
+        BitNot k -> kill_assigned_expr(k.lhs);
+        As k -> kill_assigned_expr(k.lhs);
+        Trunc k -> kill_assigned_expr(k.lhs);
+        MemberAccess k -> kill_assigned_expr(k.lhs);
+        Funcall k -> {
+            kill_assigned_list(k.args);
+            kill_assigned_expr(k.target)
+        }
+        New k -> {
+            kill_assigned_expr(k.lhs);
+            kill_assigned_expr(k.fill);
+            kill_assigned_inits(k.inits)
+        }
+        StructLit k -> kill_assigned_inits(k.inits);
+        VariantLit k -> kill_assigned_inits(k.inits);
+        If k -> {
+            kill_assigned_expr(k.cond);
+            kill_assigned_expr(k.then);
+            kill_assigned_expr(k.els)
+        }
+        Match k -> {
+            kill_assigned_expr(k.cond);
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                kill_assigned_stmt(arm.body);
+                arm = arm.next
+            }
+        }
+        Block k -> kill_assigned_stmts(k.body);
+        Sizeof k -> kill_assigned_expr(k.e);
+        ArrayLit k -> kill_assigned_list(k.elems);
+        _ -> { }
+    }
+}
+
+// The kills numbered lo up to hi made again.
+kill_again(lo: int, hi: int) noregion {
+    e: ?*KillEntry = kill_log;
+    while (e != null && e.seq >= lo) {
+        v: ?*Obj = e.var;
+        if (e.seq < hi && v != null) narrow_push(v, v.ty);
+        e = e.next
+    }
 }
 
 is_stack_object(n: *Expr): bool {
