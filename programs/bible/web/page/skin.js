@@ -621,6 +621,19 @@ function line(w) {
       sound.stop();
       player.hide();
       break;
+    case "notify_ask": {
+      // (Notifications asked for; the answer core's.)
+      const who = w.num(1);
+      if (!window.Notification) send(`notifyok ${who} 0`);
+      else Notification.requestPermission().then((p) => send(`notifyok ${who} ${p === "granted" ? 1 : 0}`));
+      break;
+    }
+    case "notify_clear":
+      reminders.clear();
+      break;
+    case "notify":
+      reminders.add(Number(w.word(1)), w.field(1), w.field(2));
+      break;
     case "awake":
       awake(w.num(1));
       break;
@@ -2070,6 +2083,25 @@ function tellVoices() {
   send("voices\t" + vs.map((v) => `${q(v)}:${v.lang}:${v.name.replace(/[\t\n]/g, " ")}`).join("\t"));
 }
 if (window.speechSynthesis) speechSynthesis.addEventListener("voiceschanged", tellVoices);
+
+// ---- reminders: shown at their time while the page is open (a page
+// can't wake itself) ----
+const reminders = {
+  timers: [],
+  clear() {
+    for (const t of this.timers) clearTimeout(t);
+    this.timers = [];
+  },
+  add(at, title, body) {
+    const ms = at * 1000 - Date.now();
+    if (ms < 0 || ms > 2 ** 31 - 1 || !window.Notification) return;
+    this.timers.push(setTimeout(() => {
+      if (Notification.permission !== "granted") return;
+      const n = new Notification(title, { body, icon: "/img/apple-touch-icon.png", tag: "daily" });
+      n.onclick = () => window.focus();
+    }, ms));
+  },
+};
 
 // ---- Keep Screen On ----
 let lock = null;
