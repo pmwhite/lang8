@@ -114,20 +114,26 @@ From core:
 | `reader N` | the reader has N chapters (the version changed, or at the start) |
 | `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA` (UTF-16 places; core/text.l8's `STYLE_` and `PARA_`) and `verse V A B` lines, then `end` |
 | `jump C V`, `relayout` | the reader moved; every chapter to be asked for again |
+| `open WHAT` | open a screen still the platform's own (core/skin.l8's `OPEN_`: Glosses, Voice, the Manual, Acknowledgements) |
+| `listen`, `settings` | Listen's button tapped; a setting changed that doesn't lay the text out again (the reading speed, Keep Screen On) |
 | `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE` | sizes in thousandths of the default (19 points), margins in points, colors as hex: all a skin needs of look.l8 |
 | `title` TEXT, `version` TEXT | the bar's title (the chapter at the top) and the version's abbreviation |
 
 After `screen`, an `empty` SYMBOL TITLE LINE line says what it shows with
 no rows, and a `button` TITLE line its button at the top, followed by
 `command` ACTION ARG TITLE FLAGS lines, its menu (`x`: destructive).
-A row ends with TRAILING (words at its end: a time) and DELETE (the action
-swiping it away does; 0: it can't be). `goto C V` puts the screens away and
+A row ends with TRAILING (words at its end: a time), DELETE (the action
+swiping it away does; 0: it can't be), CUSTOM (its own presentation, where a
+skin has one: core/skin.l8's `CUSTOM_`, the settings' Listen button, size
+control, theme swatches and font samples; a skin without one draws the row
+by its kind) and HINT (what VoiceOver adds). `goto C V` puts the screens away and
 moves the reader (the iPhone's own jump).
 
 A row's KIND is `item`, `toggle`, `choice`, `slider`, `field`, `button` or
 `custom`; ACC is empty, `more`, `check` or `info`; FLAGS are letters: `d`
 disabled, `x` destructive, `o` on, `v` the detail is a value on the right, `s`
-the detail is the Bible's words (the divine name in small capitals); a
+the detail is the Bible's words (the divine name in small capitals), `f` its
+words faint (nothing to do); a
 choice's OPTIONS are its labels split by `|`, VALUE the one chosen; a slider
 goes from LO to HI.
 
@@ -159,7 +165,12 @@ action goes to core (`sk_act`); its effects are done the iPhone's way
 (`push` into the navigation the action came from, `present` as a sheet,
 `update` a cross-fade and reload, `dismiss`). The platform's work stays the
 app's: core's version switch is the iPhone's `switch_version`. Moved so far:
-Versions and History (2026-10-21).
+Versions, History and the reading settings (2026-10-21). The settings are
+kept by the iPhone as before: ios/skin.l8 copies them into core's
+(`uk_prefs_from_app`) before a screen is built, and does a change core
+made the app's way (`uk_app_from_prefs`: the theme's fade, red letters,
+Keep Screen On). A host says what its platform has (`sk_has_listen`,
+`sk_fonts`, ...) and gives the words only it knows (`SkinHost.words`).
 
 ## Moving the iPhone
 

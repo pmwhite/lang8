@@ -267,7 +267,7 @@ final class Panel extends FrameLayout {
       TextView t = new TextView(c);
       t.setText(r.title);
       t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-      t.setTextColor(r.flag('x') ? look.accent : look.ink);
+      t.setTextColor(r.flag('x') ? look.accent : r.flag('f') ? look.faint : look.ink);
       words.addView(t);
       boolean valueDetail = r.flag('v');
       if (!r.detail.isEmpty() && !valueDetail) {

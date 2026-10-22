@@ -25,16 +25,95 @@ uk_save_kept(what: int) {
     if (what == SK_KEPT_HISTORY) save_history()
 }
 
+// Words only the app knows: who reads the version aloud; the Listen
+// section's footer, while it applies (the version read by the iPhone's
+// voice, no better voice installed, and Voice never opened).
+uk_words(what: int) {
+    fbuf_n = 0;
+    if (what == SK_WORDS_VOICE) {
+        audio_load();
+        fput_str(if (text_cur == TEXT_ORIG) "None yet" else src_readers[audio_source(text_cur)])
+    } else if (what == SK_WORDS_LISTEN_FOOTER) {
+        if (!def_bool("voiceScreenSeen") && audio_source(text_cur) == SRC_VOICE && !better_voice_installed()) fput_str("This version is read by the iPhone\â\€\™s voice. A more natural voice can be downloaded in Voice.")
+    }
+}
+
 // Core made ready for the iPhone (once, as the app begins).
 uk_begin() {
     ui_wire = false;
     sk_device = "iPhone";
     sk_has_orig = true;
-    sk_host = SkinHost { save_prefs: &uk_save_prefs, save_kept: &uk_save_kept, switch_version: &uk_switch_version }
+    sk_host = SkinHost {
+        save_prefs: &uk_save_prefs,
+        save_kept: &uk_save_kept,
+        words: &uk_words,
+        switch_version: &uk_switch_version
+    };
+    sk_has_listen = true;
+    sk_has_manual = true;
+    sk_has_acknowledgements = true;
+    sk_has_keep_on = true;
+    sk_fonts = font_names
+}
+
+// The app's settings, as core keeps them (by the defaults' names), so its
+// screens show them as they are.
+uk_prefs_from_app() {
+    set_pref("sizeStep", set_size);
+    set_pref("theme", set_theme);
+    set_pref("font", set_font);
+    set_pref("spacing", set_spacing);
+    set_pref("margins", set_margins);
+    set_pref_on("showVerseNumbers", lay_verse_numbers);
+    set_pref_on("showHeadings", lay_headings);
+    set_pref_on("showNotes", lay_notes);
+    set_pref_on("verseLines", lay_verse_lines);
+    set_pref_on("redLetter", red_letter);
+    set_pref_on("keepScreenOn", keep_on);
+    set_pref_on("origAccents", lay_accents);
+    set_pref("listenRate", clamp(def_int("listenRate"), 0, 2))
+}
+
+// A setting core changed, done as the app does it (kept, and the reader
+// made again, faded where the app fades it).
+uk_app_from_prefs() {
+    n: int = clamp(pref("sizeStep", set_size), 0, 7);
+    if (n != set_size) set_size_step(n);
+    if (pref("theme", set_theme) != set_theme) {
+        set_theme = clamp(pref("theme", 0), 0, 5);
+        haptic_select();
+        settings_changed(true)
+    }
+    if (pref("font", set_font) != set_font) {
+        set_font = clamp(pref("font", 0), 0, len(font_names) - 1);
+        settings_changed(false)
+    }
+    spacing: int = clamp(pref("spacing", set_spacing), 0, 2);
+    margin: int = clamp(pref("margins", set_margins), 0, 2);
+    shown: bool = pref_on("showVerseNumbers", lay_verse_numbers) != lay_verse_numbers || pref_on("showHeadings",
+        lay_headings) != lay_headings || pref_on("showNotes", lay_notes) != lay_notes || pref_on("verseLines",
+        lay_verse_lines) != lay_verse_lines;
+    if (spacing != set_spacing || margin != set_margins || shown) {
+        set_spacing = spacing;
+        set_margins = margin;
+        lay_verse_numbers = pref_on("showVerseNumbers", lay_verse_numbers);
+        lay_headings = pref_on("showHeadings", lay_headings);
+        lay_notes = pref_on("showNotes", lay_notes);
+        lay_verse_lines = pref_on("verseLines", lay_verse_lines);
+        save_settings();
+        make_look();
+        relayout()
+    }
+    if (pref_on("redLetter", red_letter) != red_letter) set_red_letter(!red_letter);
+    if (pref_on("keepScreenOn", keep_on) != keep_on) set_keep_on(!keep_on);
+    if (pref_on("origAccents", lay_accents) != lay_accents) set_accents(!lay_accents);
+    rate: int = clamp(pref("listenRate", 1), 0, 2);
+    if (rate != clamp(def_int("listenRate"), 0, 2)) listen_set_speed(rate)
 }
 
 // What core reads of the app's state, as it is now.
 uk_sync() {
+    uk_prefs_from_app();
     sk_esv_listed = esv_listed();
     sk_c = cur;
     sk_tz = local_offset()
@@ -84,6 +163,8 @@ uk_text(t: UiText): int {
 
 uk_sections(t: int): int {
     k: int = uk_slot_of(t);
+    // (A reload begins here: the app's settings may have changed since.)
+    uk_stale = true;
     if (k < 0 || !uk_ensure(k)) 0 else ui_sections_n
 }
 
@@ -110,21 +191,28 @@ uk_row_at(path: int): int {
 }
 
 // A row as the app's lists draw it: its words (a subtitle under, or a value
-// beside, its title), an image, and a check or a disclosure.
+// beside, its title), an image, and a check or a disclosure; a switch or a
+// segmented control for a toggle or a choice; or the app's own cell for a
+// row with its own presentation (the settings' size, themes, Listen).
 uk_cell(t: int, path: int): int {
     k: int = uk_slot_of(t);
     if (k < 0 || !uk_ensure(k)) return list_cell(t, "none", 0);
     i: int = uk_row_at(path);
     if (i < 0) return list_cell(t, "none", 0);
     row: UiRow = ui_rows[i];
+    if (row.custom == CUSTOM_SIZE) return size_cell(t);
+    if (row.custom == CUSTOM_THEMES) return theme_cell(t);
+    if (row.custom == CUSTOM_LISTEN) return listen_cell(t);
+    if (row.kind == UI_TOGGLE || row.kind == UI_CHOICE) return uk_control_cell(t,
+        k, i);
     kind: int = if (row.detail.n == 0) 0 else if (row.value_detail) 1 else 2;
     cell: int = list_cell(t, if (kind == 2) "coresub" else if (kind == 1) "corevalue" else "corerow",
         kind);
     config: int = list_config(kind);
     msg1(config, sel("setText:"), uk_text(row.title));
-    msg1(text_props(config), sel("setColor:"), if (row.destructive) c_accent else c_ink);
-    msg1(text_props(config), sel("setFont:"), msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
-        objc_const("UIFontTextStyleBody")));
+    msg1(text_props(config), sel("setColor:"), if (row.destructive) c_accent else if (row.faint) c_faint else c_ink);
+    msg1(text_props(config), sel("setFont:"), if (row.custom == CUSTOM_FONT) font_sample(row.arg) else msg1(cls("UIFont"),
+        sel("preferredFontForTextStyle:"), objc_const("UIFontTextStyleBody")));
     if (row.detail.n > 0 && row.scripture) {
         // (The Bible's words: the divine name in small capitals, one line.)
         msg1(config, sel("setSecondaryAttributedText:"), preview(uk_text(row.detail),
@@ -158,12 +246,99 @@ uk_cell(t: int, path: int): int {
         msg(l, sel("sizeToFit"));
         msg1(cell, sel("setAccessoryView:"), l)
     }
-    msg1(cell, sel("setSelectionStyle:"), if (row.disabled) 0 else 3);
+    msg1(cell, sel("setSelectionStyle:"), if (row.disabled || row.faint) 0 else 3);
     msg1(cell, sel("setUserInteractionEnabled:"), if (row.disabled) 0 else 1);
     if (row.label.n > 0) msg1(cell, sel("setAccessibilityLabel:"), uk_text(row.label)) else msg1(cell,
         sel("setAccessibilityLabel:"), 0);
     msg1(cell, sel("setAccessibilityTraits:"), if (row.acc == ACC_CHECK) objc_const("UIAccessibilityTraitSelected") else 0);
+    msg1(cell, sel("setAccessibilityHint:"), if (row.hint.n > 0) uk_text(row.hint) else 0);
     cell
+}
+
+// A toggle's switch, or a choice's segmented control, beside its title (a
+// choice's under it at the accessibility sizes). Its tag says its slot and
+// row: k * 4096 + i.
+uk_control_cell(t: int, k: int, i: int): int {
+    row: UiRow = ui_rows[i];
+    control: int = 0;
+    if (row.kind == UI_TOGGLE) {
+        control = msg(make("UISwitch"), sel("autorelease"));
+        msg1(control, sel("setOn:"), if (row.on) 1 else 0);
+        msg1(control, sel("setOnTintColor:"), c_accent);
+        msg3(control, sel("addTarget:action:forControlEvents:"), app_obj, sel("coreToggle:"),
+            4096)
+    } else {
+        // (Its options, split at |.)
+        n: int = 0;
+        p: int = row.options.at;
+        e: int = row.options.at + row.options.n;
+        for x in row.options.at..e + 1 {
+            if (x == e || ui_pool[x] as int == 124) {
+                if (n < len(one)) one[n] = nsstring_at(bytes_address(ui_pool) + p,
+                    x - p);
+                n = n + 1;
+                p = x + 1
+            }
+        }
+        control = msg(msg1(msg(cls("UISegmentedControl"), sel("alloc")), sel("initWithItems:"),
+            nsarray(one, n)), sel("autorelease"));
+        msg1(control, sel("setSelectedSegmentIndex:"), row.value);
+        msg3(control, sel("addTarget:action:forControlEvents:"), app_obj, sel("coreChoice:"),
+            4096);
+        msg_rect(control, sel("setFrame:"), 0.0f64, 0.0f64, 220.0f64, 32.0f64)
+    }
+    msg1(control, sel("setTag:"), k * 4096 + i);
+    fbuf_n = 0;
+    fput_bytes(ui_pool, row.title.at, row.title.at + row.title.n);
+    if (row.kind == UI_CHOICE && ax_size()) {
+        cell: int = fresh_cell(t);
+        content: int = msg(cell, sel("contentView"));
+        column: int = stack(1, 10.0f64);
+        label: int = make("UILabel");
+        msg1(label, sel("setText:"), fstring());
+        msg1(label, sel("setFont:"), msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
+            objc_const("UIFontTextStyleBody")));
+        msg1(label, sel("setTextColor:"), c_ink);
+        msg1(label, sel("setNumberOfLines:"), 0);
+        msg1(column, sel("addArrangedSubview:"), label);
+        release(label);
+        msg1(column, sel("addArrangedSubview:"), control);
+        msg1(content, sel("addSubview:"), column);
+        pin_by(column, content, "leadingAnchor", 16.0f64);
+        pin_by(column, content, "trailingAnchor", -16.0f64);
+        pin_by(column, content, "topAnchor", 12.0f64);
+        pin_by(column, content, "bottomAnchor", -12.0f64);
+        return cell
+    }
+    cell: int = fresh_cell(t);
+    config: int = list_config(0);
+    msg1(config, sel("setText:"), fstring());
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryView:"), control);
+    cell
+}
+
+// A switch switched, or a segment chosen: its row's action, core's.
+uk_control_act(control: int, value: int) {
+    n: int = msg(control, sel("tag"));
+    k: int = n / 4096;
+    i: int = n % 4096;
+    if (k < 0 || k >= UK_SLOTS || !uk_ensure(k) || i >= ui_rows_n) return;
+    row: UiRow = ui_rows[i];
+    uk_sync();
+    sk_act(uk_ids[k], row.action, row.arg, value);
+    uk_effects()
+}
+
+uk_toggled(_self: int, _cmd: int, sw: int): int {
+    uk_control_act(sw, if ((msg(sw, sel("isOn")) & 255) != 0) 1 else 0);
+    0
+}
+
+uk_chose(_self: int, _cmd: int, s: int): int {
+    uk_control_act(s, msg(s, sel("selectedSegmentIndex")));
+    0
 }
 
 // A row tapped: its action, core's, and what core says then.
@@ -181,6 +356,11 @@ uk_picked(t: int, s: int, r: int) {
 // Where a screen core pushes goes: the navigation the action came from
 // (0: the sheet up).
 uk_nav: int = 0;
+
+// The next sheet's detents (sheet_of's), and the last sheet presented.
+uk_detents: int = 0;
+
+uk_sheet: int = 0;
 
 // A row swiped: whether it can be, and its deletion (core's action).
 uk_can_edit(t: int, path: int): bool {
@@ -342,7 +522,11 @@ uk_effects() {
                 uk_vcs[k], 1)
         } else if (e.word == "present") {
             k: int = uk_make(e.a);
-            if (k >= 0) present(sheet_of(uk_vcs[k], 0))
+            if (k >= 0) {
+                uk_sheet = sheet_of(uk_vcs[k], uk_detents);
+                present(uk_sheet)
+            }
+            uk_detents = 0
         } else if (e.word == "update") {
             k: int = uk_slot_of_id(e.a);
             if (k >= 0) {
@@ -351,7 +535,11 @@ uk_effects() {
                 msg(uk_tables[k], sel("reloadData"));
                 uk_dress(k, true)
             }
-        } else if (e.word == "goto") {
+        } else if (e.word == "relayout" || e.word == "settings") uk_app_from_prefs() else if (e.word == "open") {
+            if (e.a == OPEN_GLOSSES) open_glosses() else if (e.a == OPEN_VOICE) {
+                if (text_cur != TEXT_ORIG) open_voice()
+            } else if (e.a == OPEN_MANUAL) help_open_manual() else if (e.a == OPEN_ACKNOWLEDGEMENTS) open_acknowledgements()
+        } else if (e.word == "listen") _l: int = listen_button_tapped(0, 0, 0) else if (e.word == "goto") {
             // (The app's own jump: the sheet away, the way back shown.)
             jump(e.a, e.b)
         } else if (e.word == "dismiss") dismiss_sheets() else if (e.word == "pop") {
@@ -406,7 +594,9 @@ uk_button_of(kind: int): int {
 }
 
 add_skin_methods(app: int) {
-    add_method1(app, sel("coreCommand:"), &uk_command, "v@:@")
+    add_method1(app, sel("coreCommand:"), &uk_command, "v@:@");
+    add_method1(app, sel("coreToggle:"), &uk_toggled, "v@:@");
+    add_method1(app, sel("coreChoice:"), &uk_chose, "v@:@")
 }
 
 // The sheets gone: their lists let go, and core's screens with them.
