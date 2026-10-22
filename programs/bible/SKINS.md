@@ -109,7 +109,7 @@ From core:
 |---|---|
 | `screen ID KIND ARG` TITLE SEARCH | a screen built; then its `section` and `row` lines, then `end` |
 | `section` HEADER FOOTER | a section of the screen |
-| `row` KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS VALUE OPTIONS LO HI | a row (below) |
+| `row` KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS VALUE OPTIONS LO HI LABEL | a row (below); LABEL what a screen reader says, if not its words |
 | `present ID`, `push ID`, `update ID`, `pop`, `dismiss` | what to do with screens |
 | `reader N` | the reader has N chapters (the version changed, or at the start) |
 | `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA` (UTF-16 places; core/text.l8's `STYLE_` and `PARA_`) and `verse V A B` lines, then `end` |
@@ -138,6 +138,20 @@ From the skin:
 
 A host in L8 (android/main.l8) reads files and keeps the settings for core
 (`sk_host`), and handles lines of its own before core's (Android's `files DIR`).
+A version core wants that isn't loaded is asked for in `sk_want_text`: the
+host loads it in its own loop (a text is kept for good, so loading it can't
+happen inside an action) and calls `sk_use_version` again.
+
+## The iPhone as a skin
+
+`ios/skin.l8` draws core's screens in the app's own lists: eight slots in
+the table registry (`ios/tables.l8`) whose rows come from core's records,
+not the wire (`ui_wire` is off, and effects queue in `ui_effects`). A row's
+action goes to core (`sk_act`); its effects are done the iPhone's way
+(`push` into the navigation the action came from, `present` as a sheet,
+`update` a cross-fade and reload, `dismiss`). The platform's work stays the
+app's: core's version switch is the iPhone's `switch_version`. Moved so far:
+Versions (2026-10-21).
 
 ## Moving the iPhone
 

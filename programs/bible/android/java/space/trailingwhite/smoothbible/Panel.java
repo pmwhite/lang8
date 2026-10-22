@@ -208,6 +208,8 @@ final class Panel extends FrameLayout {
       line.setPadding(dp(20), dp(10), dp(20), dp(10));
       line.setMinimumHeight(dp(52));
       line.setAlpha(r.flag('d') ? 0.4f : 1);
+      // (What TalkBack says for it, as core words it.)
+      if (!r.label.isEmpty()) line.setContentDescription(r.label);
       LinearLayout words = new LinearLayout(c);
       words.setOrientation(LinearLayout.VERTICAL);
       TextView t = new TextView(c);

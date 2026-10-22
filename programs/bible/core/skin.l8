@@ -18,19 +18,30 @@ import "chapter_ranges.l8";
 
 // ---- what the host does for the app ----
 type SkinHost = {
-    // Version t loaded (text_load), if it can be: whether it is.
-    load_text: fn(t: int) noregion: bool;
     // The settings kept (prefs_format into fbuf, then kept).
-    save_prefs: fn()
+    save_prefs: fn();
+    // The reader switched to version t, as the platform does it (none:
+    // core's own, sk_switch_version); whether it was.
+    switch_version: ?fn(t: int): bool
 }
 
-sk_no_load(_t: int) noregion: bool {
-    false
-}
+// A version wanted that is not loaded (-1: none): the host loads it (it
+// keeps the text for good, which only its own loop can), then calls
+// sk_use_version(t) again.
+sk_want_text: int = -1;
 
 sk_no_save() { }
 
-sk_host: SkinHost = SkinHost { load_text: &sk_no_load, save_prefs: &sk_no_save };
+sk_host: SkinHost = SkinHost { save_prefs: &sk_no_save, switch_version: null };
+
+// What the platform has, as its host says: the Hebrew and Greek's data,
+// and the ESV (listed once our server has said it can give it), and what
+// it calls itself (On This iPhone).
+sk_has_orig: bool = false;
+
+sk_esv_listed: bool = false;
+
+sk_device: str = "Phone";
 
 // ---- the screens, and their actions ----
 SCR_GOTO: int = 1;
@@ -316,17 +327,56 @@ sk_build_chapters(id: int, b: int) {
 }
 
 // The versions: each its name, the one read checked.
+// The versions (DESIGN.md Â§9.3.2): on this device, the original languages
+// (the Hebrew and Greek, Â§14.11.2) and online (the ESV), each its name and
+// a line about it, the one read checked.
 sk_build_versions(id: int) {
-    ui_begin(id, SCR_VERSIONS, 0, "Versions");
+    ui_begin(id, SCR_VERSIONS, 0, "Version");
+    fbuf_n = 0;
+    fput_str("On This ");
+    fput_str(sk_device);
     ui_section("", "");
-    for i in 0..len(sk_versions) {
-        t: int = sk_versions[i];
-        ui_row(UI_ITEM, ACT_VERSION, t);
-        ui_set_title(text_names[t]);
-        ui_set_detail(text_abbrs[t]);
-        ui_set_value_detail();
-        if (t == text_cur) ui_set_acc(ACC_CHECK)
+    ui_set_header_fbuf();
+    for i in 0..len(sk_versions) sk_version_row(sk_versions[i]);
+    if (sk_has_orig) {
+        ui_section("Original Languages", "");
+        sk_version_row(TEXT_ORIG)
     }
+    if (sk_esv_listed) {
+        ui_section("Online", "");
+        fbuf_n = 0;
+        fput_str("The ESV comes from Crossway\â\€\™s ESV API. Only the chapters you\â\€\™re reading are kept on this ");
+        fput_str(sk_device);
+        fput(46);
+        ui_set_footer_fbuf();
+        sk_version_row(TEXT_ESV)
+    }
+}
+
+sk_version_row(t: int) {
+    ui_row(UI_ITEM, ACT_VERSION, t);
+    ui_set_title(text_names[t]);
+    ui_set_detail(version_lines[t]);
+    if (t == text_cur) ui_set_acc(ACC_CHECK);
+    // (Read as it is shown, its dots as pauses.)
+    fbuf_n = 0;
+    fput_str(text_names[t]);
+    fput_str(", ");
+    line: str = version_lines[t];
+    i: int = 0;
+    while (i < len(line)) {
+        k: int = line[i] as int & 255;
+        if (k == 194 && i + 1 < len(line) && (line[i + 1] as int & 255) == 183) {
+            // (" Â· " as ", ".)
+            if (fbuf_n > 0 && fbuf[fbuf_n - 1] as int == 32) fbuf_n = fbuf_n - 1;
+            fput(44);
+            i = i + 2
+        } else {
+            fput(k);
+            i = i + 1
+        }
+    }
+    ui_set_label_fbuf()
 }
 
 // The reading settings: the text's size, its theme, its layout, and what
@@ -367,7 +417,7 @@ sk_act(
     action: int,
     arg: int,
     value: int
-) noregion {
+) {
     if (sk_find(id) < 0) return;
     if (action == ACT_BOOK) {
         sk_open(SCR_CHAPTERS, arg, true);
@@ -409,12 +459,12 @@ sk_keep_place() {
 }
 
 // Version t read, if it is loaded or can be.
-sk_use_version(t: int) noregion {
-    if (t != text_cur && !tx_ready[t]) {
-        load: fn(t: int) noregion: bool = sk_host.load_text;
-        if (!load(t)) return
-    }
-    text_use(t);
+sk_use_version(t: int) {
+    if (t == text_cur) return;
+    host_switch: ?fn(t: int): bool = sk_host.switch_version;
+    if (host_switch != null) {
+        if (!host_switch(t)) return
+    } else if (!sk_switch_version(t)) return;
     set_pref("version", t);
     sk_save();
     ui_effect("reader", chapters, -1);
@@ -423,14 +473,24 @@ sk_use_version(t: int) noregion {
     sk_update_all()
 }
 
+// Version t read: loaded, if it is not, and made the current one.
+sk_switch_version(t: int): bool {
+    if (t < 0 || t >= TEXT_PIN) return false;
+    if (t != text_cur && !tx_ready[t]) {
+        sk_want_text = t;
+        return false
+    }
+    text_use(t);
+    true
+}
+
 // ---- the skin's lines ----
 // The app begun: the settings (prefs_parse'd by the host) applied, the
 // version read and the place kept, the look, the reader and its place.
-sk_start() noregion {
+sk_start() {
     t: int = pref("version", 0);
     if (t != text_cur && t >= 0 && t < TEXT_PIN) {
-        load: fn(t: int) noregion: bool = sk_host.load_text;
-        if (tx_ready[t] || load(t)) text_use(t)
+        if (tx_ready[t]) text_use(t) else sk_want_text = t
     }
     sk_apply_prefs();
     sk_c = pref("chapter", book_first[42]);
@@ -473,7 +533,7 @@ sk_word_is(
 }
 
 // One line the skin sent (bytes b to e of line, without its newline).
-sk_line(line: []i8, b: int, e: int) noregion {
+sk_line(line: []i8, b: int, e: int) {
     if (sk_word_is(line, b, e, "start")) {
         sk_width = sk_num(line, b + 5, e);
         sk_height = sk_num(line, sk_num_end, e);
@@ -515,7 +575,7 @@ sk_line(line: []i8, b: int, e: int) noregion {
 }
 
 // Each line of bytes b to e (newline-ended), in turn.
-sk_lines(buf: []i8, b: int, e: int) noregion {
+sk_lines(buf: []i8, b: int, e: int) {
     p: int = b;
     for i in b..e {
         if (buf[i] as int == 10) {

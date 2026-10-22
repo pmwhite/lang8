@@ -14,7 +14,8 @@ final class Screen {
   }
 
   static final class Row {
-    String kind = "", title = "", detail = "", icon = "", acc = "", flags = "", options = "";
+    String kind = "", title = "", detail = "", icon = "", acc = "", flags = "", options = "",
+        label = "";
     int action, arg, value, lo, hi;
 
     boolean flag(char c) {
@@ -37,6 +38,7 @@ final class Screen {
     r.options = w.field(10);
     r.lo = w.fieldNum(11);
     r.hi = w.fieldNum(12);
+    r.label = w.field(13);
     return r;
   }
 }
