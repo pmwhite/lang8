@@ -137,7 +137,7 @@ public final class Bible extends Activity {
 
   // (And the language data, the cross references, the commentary, the
   // Manual.)
-  static final String[] DATA = {"xref_index.bin", "xrefs.bin", "mhcc.txt", "help.txt",
+  static final String[] DATA = {"xref_index.bin", "xrefs.bin", "mhcc.txt", "help.txt", "orig.txt",
       "plans/mcheyne.txt", "plans/chrono.txt"};
 
   private void copyVersions(File dir) {
