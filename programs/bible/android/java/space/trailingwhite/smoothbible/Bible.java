@@ -27,6 +27,8 @@ public final class Bible extends Activity {
   Reader reader;
   Panel panel;
   Tray tray;
+  // The way back (core's capsule): its words, at the reader's foot.
+  TextView capsule;
   FrameLayout root;
   LinearLayout bar;
   TextView title, version, settings, library;
@@ -77,6 +79,19 @@ public final class Bible extends Activity {
     bar.addView(settings);
     root.addView(bar, new FrameLayout.LayoutParams(-1, dp(52), Gravity.TOP));
     reader.topInset = dp(52);
+    capsule = new TextView(this);
+    capsule.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+    capsule.setTypeface(Typeface.DEFAULT_BOLD);
+    capsule.setPadding(dp(16), dp(10), dp(16), dp(10));
+    capsule.setVisibility(View.GONE);
+    capsule.setContentDescription("Go back");
+    capsule.setOnClickListener(v -> {
+      capsule.setVisibility(View.GONE);
+      Native.send("back");
+    });
+    FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START);
+    cp.setMargins(dp(16), 0, 0, dp(16));
+    root.addView(capsule, cp);
     tray = new Tray(this, look);
     root.addView(tray, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
     panel = new Panel(this, look);
@@ -95,6 +110,7 @@ public final class Bible extends Activity {
       reader.setClipToPadding(false);
       panel.setPadding(0, bars.top, 0, bars.bottom);
       tray.setPadding(dp(16), dp(10), dp(16), dp(10) + bars.bottom);
+      ((FrameLayout.LayoutParams) capsule.getLayoutParams()).bottomMargin = dp(16) + bars.bottom;
       return insets;
     });
     restyle();
@@ -186,6 +202,8 @@ public final class Bible extends Activity {
         android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
     else d.unregisterOnBackInvokedCallback(backCallback);
   }
+
+  private final Runnable capsuleAway = () -> capsule.setVisibility(View.GONE);
 
   void restyle() {
     root.setBackgroundColor(look.bg);
@@ -399,6 +417,30 @@ public final class Bible extends Activity {
       }
       case "toast":
         android.widget.Toast.makeText(this, w.field(1), android.widget.Toast.LENGTH_SHORT).show();
+        break;
+      case "back": {
+        // (The capsule: back to the place left, for 12 s.)
+        String words = w.field(1);
+        capsule.removeCallbacks(capsuleAway);
+        if (words.isEmpty()) {
+          capsule.setVisibility(View.GONE);
+          break;
+        }
+        capsule.setText("\u2039 " + words);
+        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+        g.setCornerRadius(dp(20));
+        g.setColor(look.dark ? 0xF24A4744 : 0xEBFFFFFF);
+        capsule.setBackground(g);
+        capsule.setTextColor(look.ink);
+        capsule.setElevation(dp(4));
+        capsule.setVisibility(View.VISIBLE);
+        capsule.postDelayed(capsuleAway, 12000);
+        break;
+      }
+      case "place":
+        // (The reader to a place: chapter, verse, how far into it.)
+        panel.dismiss();
+        reader.jump(w.num(1), w.num(2) / 1000);
         break;
       case "wake":
         try {

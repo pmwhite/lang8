@@ -255,6 +255,7 @@ Other lines from core:
 | `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE` | all a skin needs of look.l8 |
 | `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation |
 | `url` ADDRESS | a page outside the app to open |
+| `place C V*1000+FRAC`, `back` WORDS | the reader to a place (a ribbon's, the way back's); the capsule's words (none: away). A skin with jumps of its own (`SK_NUM_OWN_JUMPS`: the iPhone) does `core/jump.l8`'s steps itself and gets `goto`, `ribbon_open`, `ribbon_added` instead |
 | `settings` | a setting changed that doesn't lay the text out again |
 
 The host's effects (what only a platform can do; a skin without one ignores
@@ -294,6 +295,7 @@ From the skin:
 | `trayact ACTION V`, `titlemenu`, `menuact ACTION ARG` | a tray's button; the title's menu's model, as screen 0; one of its items |
 | `versestudy C V` | verse C:V's Study, as core's screen (a skin's answer to `study_verse`) |
 | `rest C V FRAC END ENDS_HI MS`, `moving MS`, `tick MS`, `jumped KIND` | the reader at rest (chapter, verse, thousandths of an em; its end on the screen; the last chapter whose end is; the skin's clock), begun to move (a finger's scroll), the time core asked for (`wake MS`), a jump (0 with a way back, 1 the capsule's, 2 neither): `core/reading.l8` counts chapters read (20 s at rest, end seen), moves the carried ribbon, and puts a chapter dwelt in 20 s onto the history |
+| `back` | the capsule tapped: core goes back (`place`), or opens the plan's day it came from |
 | `footnote C P`, `preview REF` | a footnote's mark tapped (its place P in chapter C), a reference tapped: core's footnote (`core/footnote.l8`) or preview, or the host's own (`SK_NUM_OWN_VIEW`) |
 | `refresh` | what core's screens show has changed (the host's own state): each made again |
 
