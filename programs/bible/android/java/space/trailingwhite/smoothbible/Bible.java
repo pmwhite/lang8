@@ -28,7 +28,7 @@ public final class Bible extends Activity {
   Panel panel;
   FrameLayout root;
   LinearLayout bar;
-  TextView title, version, settings;
+  TextView title, version, settings, library;
   android.widget.ImageView search;
   // A screen or a chapter being said (between its first line and end).
   Screen building;
@@ -61,12 +61,16 @@ public final class Bible extends Activity {
     version = button("", "versions");
     settings = button("Aa", "settings");
     settings.setContentDescription("Settings");
+    // (The Library: what is kept, Memory, and the languages.)
+    library = button("☰", "library");
+    library.setContentDescription("Library");
     search = new android.widget.ImageView(this);
     search.setImageResource(android.R.drawable.ic_menu_search);
     search.setPadding(dp(10), dp(10), dp(10), dp(10));
     search.setContentDescription("Search");
     search.setOnClickListener(v -> Native.send("tap search"));
     bar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+    bar.addView(library);
     bar.addView(search, new LinearLayout.LayoutParams(dp(44), dp(44)));
     bar.addView(version);
     bar.addView(settings);
@@ -172,6 +176,7 @@ public final class Bible extends Activity {
     title.setTextColor(look.ink);
     version.setTextColor(look.accent);
     settings.setTextColor(look.accent);
+    library.setTextColor(look.accent);
     search.setColorFilter(look.accent);
     Window w = getWindow();
     w.setStatusBarColor(look.bg);
@@ -198,13 +203,11 @@ public final class Bible extends Activity {
     String word = w.word(0);
     if (building != null) {
       if (word.equals("section")) {
-        section = new Screen.Section();
-        section.header = w.field(1);
-        section.footer = w.field(2);
-        section.button = w.field(3);
-        section.buttonAction = w.fieldNum(4);
+        section = Screen.section(w);
         building.sections.add(section);
       } else if (word.equals("row") && section != null) section.rows.add(Screen.row(w));
+      else if (word.equals("cell") && section != null && !section.rows.isEmpty())
+        section.rows.get(section.rows.size() - 1).cells.add(Screen.cell(w));
       else if (word.equals("empty")) {
         building.emptySymbol = w.field(1);
         building.emptyTitle = w.field(2);
@@ -212,12 +215,33 @@ public final class Bible extends Activity {
       } else if (word.equals("focus")) {
         building.focus = w.num(1);
         building.focusSelect = w.num(2) == 1;
-      } else if (word.equals("intro")) building.intro = w.field(1);
-      else if (word.equals("toolbar")) {
-        building.toolAction = w.fieldNum(1);
-        building.toolArg = w.fieldNum(2);
-        building.toolbar = w.field(3);
-        building.toolStyle = w.fieldNum(4);
+      } else if (word.equals("intro")) {
+        building.intro = w.field(1);
+        building.introRuns = Screen.runs(w.field(2));
+      } else if (word.equals("hero")) {
+        building.hero = w.field(1);
+        building.heroScript = w.fieldNum(2);
+        building.heroSub = w.field(3);
+        building.heroLine = w.field(4);
+        building.heroRuns = Screen.runs(w.field(5));
+      } else if (word.equals("tool")) building.tools.add(Screen.tool(w));
+      else if (word.equals("confirm")) {
+        building.confirmAction = w.fieldNum(1);
+        building.confirm = w.field(2);
+        building.confirmOff = w.fieldNum(3) == 1;
+      } else if (word.equals("segments")) {
+        building.segmentsAction = w.fieldNum(1);
+        building.segment = w.fieldNum(2);
+        building.segments = Screen.split(w.field(3));
+      } else if (word.equals("filter")) {
+        building.filterAction = w.fieldNum(1);
+        building.filter = w.fieldNum(2);
+        building.filterColors = Screen.split(w.field(3));
+        building.filterLabels = Screen.split(w.field(4));
+      } else if (word.equals("sort")) {
+        building.sortAction = w.fieldNum(1);
+        building.sort = w.fieldNum(2);
+        building.sorts = Screen.split(w.field(3));
       }
       else if (word.equals("field")) {
         building.searchText = w.field(1);
@@ -278,6 +302,18 @@ public final class Bible extends Activity {
         break;
       case "pop":
         panel.back();
+        break;
+      case "pop_to":
+        panel.popTo(w.num(1));
+        break;
+      case "url":
+        // (A page outside the app, in the browser.)
+        try {
+          startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
+              android.net.Uri.parse(w.field(1))));
+        } catch (RuntimeException e) {
+          // (No browser: nothing.)
+        }
         break;
       case "retext":
         panel.retext(w.num(1));

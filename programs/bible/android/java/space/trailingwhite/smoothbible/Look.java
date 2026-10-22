@@ -143,6 +143,83 @@ final class Look {
     }
   }
 
+  // core/ui.l8's runs beyond the reader's styles: a verse's number, a verse
+  // a version lacks, Greek and Hebrew (faint or not), a transliteration, a
+  // code, faint, strong, plain, small, the reader's face, italic, accent.
+  static final int RUN_NUMBER = 100, RUN_MISSING = 101, RUN_GREEK = 102, RUN_HEBREW = 103,
+      RUN_TRANSLIT = 104, RUN_CODE = 105, RUN_FAINT = 106, RUN_STRONG = 107, RUN_PLAIN = 108,
+      RUN_SMALL = 109, RUN_GREEK_FAINT = 110, RUN_HEBREW_FAINT = 111, RUN_READING = 112,
+      RUN_ITALIC = 113, RUN_ACCENT = 114;
+
+  // Words set by their runs (END, STYLE pairs; END in UTF-16 units, as
+  // Java counts): the reader's styles, or core's RUN_.
+  CharSequence rich(String text, int[] runs) {
+    if (runs.length < 2) return text;
+    SpannableStringBuilder s = new SpannableStringBuilder(text);
+    int from = 0;
+    for (int i = 0; i + 1 < runs.length; i += 2) {
+      int e = Math.max(from, Math.min(runs[i], s.length()));
+      if (e > from) run(s, from, e, runs[i + 1]);
+      from = e;
+    }
+    return s;
+  }
+
+  private void run(SpannableStringBuilder s, int a, int b, int st) {
+    if (st < 100) {
+      style(s, a, b, st);
+      return;
+    }
+    switch (st) {
+      case RUN_NUMBER:
+        span(s, new RelativeSizeSpan(0.78f), a, b);
+        span(s, new ForegroundColorSpan(faint), a, b);
+        break;
+      case RUN_MISSING:
+      case RUN_TRANSLIT:
+        span(s, new StyleSpan(Typeface.ITALIC), a, b);
+        span(s, new ForegroundColorSpan(faint), a, b);
+        break;
+      case RUN_GREEK:
+      case RUN_HEBREW:
+      case RUN_READING:
+        span(s, new TypefaceSpan("serif"), a, b);
+        span(s, new ForegroundColorSpan(ink), a, b);
+        break;
+      case RUN_GREEK_FAINT:
+      case RUN_HEBREW_FAINT:
+        span(s, new TypefaceSpan("serif"), a, b);
+        span(s, new ForegroundColorSpan(faint), a, b);
+        break;
+      case RUN_CODE:
+        span(s, new TypefaceSpan("monospace"), a, b);
+        break;
+      case RUN_FAINT:
+        span(s, new ForegroundColorSpan(faint), a, b);
+        break;
+      case RUN_STRONG:
+        span(s, new StyleSpan(Typeface.BOLD), a, b);
+        span(s, new ForegroundColorSpan(ink), a, b);
+        break;
+      case RUN_PLAIN:
+        span(s, new ForegroundColorSpan(ink), a, b);
+        break;
+      case RUN_SMALL:
+        span(s, new RelativeSizeSpan(0.87f), a, b);
+        span(s, new ForegroundColorSpan(faint), a, b);
+        break;
+      case RUN_ITALIC:
+        span(s, new StyleSpan(Typeface.ITALIC), a, b);
+        span(s, new ForegroundColorSpan(ink), a, b);
+        break;
+      case RUN_ACCENT:
+        span(s, new ForegroundColorSpan(accent), a, b);
+        break;
+      default:
+        break;
+    }
+  }
+
   // A paragraph of kind para over a to b (whole lines).
   void para(SpannableStringBuilder s, int a, int b, int para, int em) {
     switch (para) {

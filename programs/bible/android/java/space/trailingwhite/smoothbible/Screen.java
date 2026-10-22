@@ -2,7 +2,8 @@ package space.trailingwhite.smoothbible;
 
 import java.util.ArrayList;
 
-// A screen as core built it (SKINS.md): its sections and rows.
+// A screen as core built it (SKINS.md): its sections and rows, and what is
+// around them (its field, tools, segments, filter, sort, confirm, hero).
 final class Screen {
   int id, kind, arg;
   String title = "", search = "";
@@ -16,12 +17,28 @@ final class Screen {
   int wait, scope;
   boolean go, focusField, plain;
   String[] scopes = new String[0], scopeLabels = new String[0];
-  // Words above its first section, whether its focus row is selected too,
-  // and the button at its foot (its action, argument, title and style:
-  // 0 plain, 1 prominent, 2 destructive, 3 off).
-  String intro = "", toolbar = "";
+  // Words above its first section (set by their runs), and whether its
+  // focus row is selected too.
+  String intro = "";
+  int[] introRuns = new int[0];
   boolean focusSelect;
-  int toolAction, toolArg, toolStyle;
+  // A word as its heading: the word, its script (a RUN_), its
+  // transliteration, and a line under them (by its runs).
+  String hero = "", heroSub = "", heroLine = "";
+  int heroScript;
+  int[] heroRuns = new int[0];
+  // The buttons at its foot.
+  final ArrayList<Tool> tools = new ArrayList<>();
+  // Its confirming button at the top (New Ribbon's Add), off or not.
+  String confirm = "";
+  int confirmAction;
+  boolean confirmOff;
+  // Its segments (labels, the one shown, what choosing does), a filter by
+  // color (circles' hex colors and spoken labels, the one chosen, -1 All)
+  // and a sort (titles, the one in force).
+  String[] segments = new String[0], filterColors = new String[0], filterLabels = new String[0],
+      sorts = new String[0];
+  int segment, segmentsAction, filter = -1, filterAction, sort, sortAction;
   // What it shows with no rows, and its button's title and commands.
   String emptySymbol = "", emptyTitle = "", emptyLine = "", button = "";
   final ArrayList<Command> commands = new ArrayList<>();
@@ -31,27 +48,98 @@ final class Screen {
     String title = "";
     boolean destructive;
   }
+
+  // A button at the foot: its title (or icon, and spoken label), what it
+  // does, its style (0 plain, 1 prominent, 2 destructive, 3 off), its place
+  // (0 left, 1 middle, 2 right), and its menu (ARG:TITLE items).
+  static final class Tool {
+    int action, arg, style, place;
+    String title = "", icon = "", label = "", menu = "";
+  }
+
+  // A tool line: tool ACTION ARG TITLE ICON LABEL STYLE PLACE MENU.
+  static Tool tool(Wire w) {
+    Tool t = new Tool();
+    t.action = w.fieldNum(1);
+    t.arg = w.fieldNum(2);
+    t.title = w.field(3);
+    t.icon = w.field(4);
+    t.label = w.field(5);
+    t.style = w.fieldNum(6);
+    t.place = w.fieldNum(7);
+    t.menu = w.field(8);
+    return t;
+  }
+
   final ArrayList<Section> sections = new ArrayList<>();
 
   static final class Section {
-    String header = "", footer = "", button = "";
-    int buttonAction;
+    String header = "", footer = "", button = "", headerSuffix = "";
+    int buttonAction, credit;
+    String[] columns = new String[0];
     final ArrayList<Row> rows = new ArrayList<>();
+  }
+
+  // A section line: section HEADER FOOTER BUTTON ACTION SUFFIX CREDIT COLUMNS.
+  static Section section(Wire w) {
+    Section s = new Section();
+    s.header = w.field(1);
+    s.footer = w.field(2);
+    s.button = w.field(3);
+    s.buttonAction = w.fieldNum(4);
+    s.headerSuffix = w.field(5);
+    s.credit = w.fieldNum(6);
+    s.columns = split(w.field(7));
+    return s;
+  }
+
+  // A row's action a screen reader offers (and its long press, and its
+  // menu).
+  static final class Action {
+    int action;
+    String title = "", icon = "";
+  }
+
+  // A grid's cell: its words in a script, what it does, its count, what
+  // TalkBack says, and its tap.
+  static final class Cell {
+    int action, arg, script;
+    String text = "", sub = "", count = "", label = "";
+  }
+
+  static Cell cell(Wire w) {
+    Cell c = new Cell();
+    c.action = w.fieldNum(1);
+    c.arg = w.fieldNum(2);
+    c.script = w.fieldNum(3);
+    c.text = w.field(4);
+    c.sub = w.field(5);
+    c.count = w.field(6);
+    c.label = w.field(7);
+    return c;
   }
 
   static final class Row {
     String kind = "", title = "", detail = "", icon = "", acc = "", flags = "", options = "",
-        label = "", trailing = "", hint = "";
-    int action, arg, value, lo, hi, deleteAction, custom, lines, circle, circleAction;
-    // Places in the detail to stress: pairs of UTF-16 offsets.
-    int[] marks = new int[0];
+        label = "", trailing = "", hint = "", suffix = "", iconColor = "", note = "", lead = "",
+        side = "", sideNote = "";
+    int action, arg, value, lo, hi, deleteAction, custom, lines, circle, circleAction, infoAction,
+        titleLines, fieldKind, leadStyle;
+    // Places in the detail to stress: pairs of UTF-16 offsets; the runs of
+    // its detail, title and side words (END, STYLE pairs).
+    int[] marks = new int[0], runs = new int[0], truns = new int[0], sruns = new int[0];
+    final ArrayList<Action> actions = new ArrayList<>();
+    final ArrayList<Cell> cells = new ArrayList<>();
 
     boolean flag(char c) {
       return flags.indexOf(c) >= 0;
     }
   }
 
-  // A row line: row KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS VALUE OPTIONS LO HI.
+  // A row line: row KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS VALUE OPTIONS
+  // LO HI LABEL TRAILING DELETE CUSTOM HINT MARKS LINES CIRCLE CIRCLE_ACTION
+  // SUFFIX ICON_COLOR NOTE INFO ACTIONS RUNS TRUNS TITLE_LINES FIELD_KIND LEAD
+  // LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS.
   static Row row(Wire w) {
     Row r = new Row();
     r.kind = w.field(1);
@@ -71,22 +159,80 @@ final class Screen {
     r.deleteAction = w.fieldNum(15);
     r.custom = w.fieldNum(16);
     r.hint = w.field(17);
+    r.marks = nums(w.field(18), ' ');
     r.lines = w.fieldNum(19);
     r.circle = w.fieldNum(20);
     r.circleAction = w.fieldNum(21);
-    String m = w.field(18).trim();
-    if (!m.isEmpty()) {
-      String[] parts = m.split(" ");
-      r.marks = new int[parts.length];
-      for (int i = 0; i < parts.length; i++) {
+    r.suffix = w.field(22);
+    r.iconColor = w.field(23);
+    r.note = w.field(24);
+    r.infoAction = w.fieldNum(25);
+    String acts = w.field(26);
+    if (!acts.isEmpty()) {
+      for (String a : acts.split("\\|", -1)) {
+        int colon = a.indexOf(':');
+        if (colon < 0) continue;
+        Action x = new Action();
         try {
-          r.marks[i] = Integer.parseInt(parts[i]);
+          x.action = Integer.parseInt(a.substring(0, colon));
         } catch (NumberFormatException e) {
-          r.marks = new int[0];
-          break;
+          continue;
         }
+        x.title = a.substring(colon + 1);
+        r.actions.add(x);
       }
     }
+    r.runs = runs(w.field(27));
+    r.truns = runs(w.field(28));
+    r.titleLines = w.fieldNum(29);
+    r.fieldKind = w.fieldNum(30);
+    r.lead = w.field(31);
+    r.leadStyle = w.fieldNum(32);
+    r.side = w.field(33);
+    r.sruns = runs(w.field(34));
+    r.sideNote = w.field(35);
+    String[] icons = w.field(36).split("\\|", -1);
+    for (int i = 0; i < r.actions.size() && i < icons.length; i++) r.actions.get(i).icon = icons[i];
     return r;
+  }
+
+  // Words split by |; none from nothing.
+  static String[] split(String s) {
+    return s.isEmpty() ? new String[0] : s.split("\\|", -1);
+  }
+
+  // Numbers split by a character (none if one isn't a number).
+  static int[] nums(String s, char by) {
+    s = s.trim();
+    if (s.isEmpty()) return new int[0];
+    String[] parts = s.split(by == ' ' ? " " : String.valueOf(by));
+    int[] n = new int[parts.length];
+    for (int i = 0; i < parts.length; i++) {
+      try {
+        n[i] = Integer.parseInt(parts[i]);
+      } catch (NumberFormatException e) {
+        return new int[0];
+      }
+    }
+    return n;
+  }
+
+  // Runs: END:STYLE pairs split by spaces, as END, STYLE, END, STYLE.
+  static int[] runs(String s) {
+    s = s.trim();
+    if (s.isEmpty()) return new int[0];
+    String[] parts = s.split(" ");
+    int[] n = new int[parts.length * 2];
+    for (int i = 0; i < parts.length; i++) {
+      int colon = parts[i].indexOf(':');
+      if (colon < 0) return new int[0];
+      try {
+        n[i * 2] = Integer.parseInt(parts[i].substring(0, colon));
+        n[i * 2 + 1] = Integer.parseInt(parts[i].substring(colon + 1));
+      } catch (NumberFormatException e) {
+        return new int[0];
+      }
+    }
+    return n;
   }
 }
