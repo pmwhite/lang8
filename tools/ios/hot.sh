@@ -46,8 +46,9 @@ d = plistlib.load(open(p, "rb"))
 d["NSLocalNetworkUsageDescription"] = "Hot reload fetches the app's builds from the development server on this network."
 ats = d.setdefault("NSAppTransportSecurity", {})
 # (Plain HTTP to the server wherever it is: a LAN or a tailnet address. A
-# development build only.)
-ats["NSAllowsLocalNetworking"] = True
+# development build only. Not NSAllowsLocalNetworking beside it: with that
+# key present, iOS ignores NSAllowsArbitraryLoads.)
+ats.pop("NSAllowsLocalNetworking", None)
 ats["NSAllowsArbitraryLoads"] = True
 plistlib.dump(d, open(p, "wb"))
 PY
