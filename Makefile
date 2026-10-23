@@ -59,7 +59,7 @@ all:
 
 check: $(OK)/stage1-tests l8 $(BUILD)/block-game $(BUILD)/skate $(BUILD)/race $(BUILD)/cad $(BUILD)/recipes \
 	$(BUILD)/profile-explorer \
-	$(BUILD)/better $(BUILD)/better-ios.s $(BUILD)/ios-check.s $(BUILD)/better-ios-sim $(BUILD)/better-android.s $(OK)/bible-web $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim \
+	$(BUILD)/better $(BUILD)/better-ios.s $(BUILD)/ios-check.s $(BUILD)/better-ios-sim $(BUILD)/better-android.s $(OK)/bible-web $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim $(BUILD)/hot-ios-sim \
 	$(BUILD)/bible-android.s $(BUILD)/skin-text $(BUILD)/smooth-bible
 
 # ---- compiler stages ----
@@ -254,6 +254,12 @@ $(BUILD)/bible-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 $(BUILD)/bible-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt programs/bible/ios/frameworks | $(OK)
 	@$(STEP) 'bible for the simulator' sh -c '$(IOS_LINK) $(foreach f,$(shell cat programs/bible/ios/frameworks),--framework $(f)) programs/bible/ios/app.l8 -o $@.tmp && mv -f $@.tmp $@'
 
+# The hot reload host for an iPhone (RELOAD.md, programs/wasm/ios/host.l8),
+# linked for the simulator with the Bible's frameworks, so it keeps
+# building; tools/ios/hot.sh makes the app.
+$(BUILD)/hot-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt programs/bible/ios/frameworks | $(OK)
+	@$(STEP) 'hot reload host for the simulator' sh -c '$(IOS_LINK) $(foreach f,$(shell cat programs/bible/ios/frameworks),--framework $(f)) programs/wasm/ios/host.l8 -o $@.tmp && mv -f $@.tmp $@'
+
 # A terminal may be running from the previous output; `mv` replaces the
 # directory entry instead of rewriting its live inode.
 $(BUILD)/terminal: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
@@ -350,7 +356,18 @@ $(OK)/wasm-interp-reload: $(BUILD)/wasm-reloadtest $(OK)/wasm-reload programs/wa
 	@$(STEP) 'wasm reload interpreted' sh -c '$(BUILD)/wasm-reloadtest $(BUILD)/reload_v1.wasm $(BUILD)/reload_v2.wasm | cmp - programs/wasm/tests/reload.expected'
 	@touch $@
 
-wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume $(OK)/wasm-reload $(OK)/wasm-interp-tests $(OK)/wasm-interp-fixpoint $(OK)/wasm-interp-reload
+# The proxy: a module's imports answered by native functions by their kinds.
+$(BUILD)/wasm-proxytest: l8c3 $(WASM_INTERP) programs/wasm/tests/proxy.l8 $(STDLIB) | $(OK)
+	@$(STEP) 'wasm proxy test host' sh -c './l8c3 build programs/wasm/tests/proxy.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+$(BUILD)/proxy_mod.wasm: l8c3 programs/wasm/tests/proxy_mod.l8 $(STDLIB) | $(OK)
+	@$(STEP) 'wasm proxy module' sh -c './l8c3 wasm programs/wasm/tests/proxy_mod.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+$(OK)/wasm-interp-proxy: $(BUILD)/wasm-proxytest $(BUILD)/proxy_mod.wasm programs/wasm/tests/proxy.expected | $(OK)
+	@$(STEP) 'wasm proxy interpreted' sh -c '$(BUILD)/wasm-proxytest $(BUILD)/proxy_mod.wasm | cmp - programs/wasm/tests/proxy.expected'
+	@touch $@
+
+wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume $(OK)/wasm-reload $(OK)/wasm-interp-tests $(OK)/wasm-interp-fixpoint $(OK)/wasm-interp-reload $(OK)/wasm-interp-proxy
 
 # The playground: a static site in .build/web with the compiler as a module.
 # Serve it with `python3 -m http.server -d .build/web`.

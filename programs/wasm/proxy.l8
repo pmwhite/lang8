@@ -1,0 +1,276 @@
+tag wasm;
+
+use_tag std;
+
+// A host that answers a module's imports with native code: each import is
+// bound, by its link name, to a native function (one the host registered,
+// `proxy_bind`, or one the host's resolver finds: dlsym on an iPhone) and
+// called with the module's arguments as the module's `l8imports` section
+// says they are (src2/persist.l8): numbers as they are, floats in float
+// registers, a pointer into the module's memory made native by the
+// memory's address, a function value as the address of a trampoline that
+// enters the module's function of that name, so native code can call it
+// back, through a reload too. Imports the standard host knows (sys.l8)
+// go there unless bound.
+import "sys.l8";
+
+extern wasm_native_call(
+    fp: int,
+    ints: []int,
+    nints: int,
+    floats: []f64,
+    nfloats: int,
+    ret_float: int
+): int;
+
+extern wasm_native_set_callback(f: fn(k: int, a0: int, a1: int, a2: int, a3: int, a4: int): int): int;
+
+extern wasm_trampoline(k: int): int;
+
+extern wasm_memory_address(m: []i8): int = l8_as_int;
+
+IK_INT: int = 0;
+
+IK_FLOAT: int = 1;
+
+IK_PTR: int = 2;
+
+IK_FN: int = 3;
+
+// ---- bindings ----
+type ProxySymbol = {
+    name: []i8;
+    address: int;
+    next: ?*ProxySymbol
+}
+
+proxy_symbols: ?*ProxySymbol = null;
+
+// A native address for an import name (dlsym), 0 for none.
+proxy_resolver: ?fn(name: str): int = null;
+
+// Bind import name to a native function's address (an L8 function's, by
+// `l8_as_int` of its value, or a library's).
+proxy_bind(name: str, address: int) noregion {
+    proxy_symbols = new ProxySymbol { name: bytes(name), address: address, next: proxy_symbols }
+}
+
+proxy_set_resolver(r: fn(name: str): int) {
+    proxy_resolver = r
+}
+
+proxy_find(name: []i8): int {
+    s: ?*ProxySymbol = proxy_symbols;
+    while (s != null) {
+        if (streq(s.name, name)) return s.address;
+        s = s.next
+    }
+    0
+}
+
+// ---- the instance's imports ----
+// (Room for 4096 imports of 16 parameters, filled in place: binding
+// allocates nothing, so a callback may bind a reload's instance.)
+PX_MAX: int = 4096;
+
+PX_PARAMS: int = 16;
+
+pi_address: []int = new int[4096](0);
+
+pi_sys: []bool = new bool[4096](false);
+
+pi_result: []int = new int[4096](0);
+
+pi_kinds: []i8 = new i8[4096 * 16](0i8);
+
+proxy_bound: int = 0 - 1;
+
+proxy_base: int = 0;
+
+proxy_max: int = 0;
+
+proxy_ints: []int = new int[32](0);
+
+proxy_floats: []f64 = new f64[16](0.0f64);
+
+// The l8imports section: the kinds of import i's parameters and result,
+// matched by name and count, into the tables.
+proxy_kinds(
+    m: *WasmModule@new,
+    i: int,
+    name: []i8,
+    nparams: int
+) raises WasmFormat {
+    for k in 0..PX_PARAMS pi_kinds[i * PX_PARAMS + k] = IK_INT trunc i8;
+    pi_result[i] = IK_INT;
+    at: int = wasm_custom(m, "l8imports");
+    if (at < 0) return;
+    r: *WasmReader = new WasmReader { b: m.bytes, at: at, end: wasm_custom_end(m,
+        "l8imports") };
+    if (wr_uleb(r) != 1) return;
+    n: int = wr_uleb(r);
+    for _i in 0..n {
+        iname: []i8 = wr_name(r);
+        np: int = wr_uleb(r);
+        same: bool = np == nparams && streq(iname, name);
+        for k in 0..np {
+            kind: int = wr_byte(r);
+            if (same && k < PX_PARAMS) pi_kinds[i * PX_PARAMS + k] = kind trunc i8
+        }
+        res: int = wr_byte(r);
+        if (same) {
+            pi_result[i] = res;
+            return
+        }
+    }
+}
+
+// Bind inst's imports: before it runs, and again for each instance that
+// runs (a reload's). The standard imports are bound too, and callbacks go
+// to inst.
+wasm_proxy_bind(inst: *WasmInstance@new) raises WasmFormat {
+    if (!proxy_callbacks_on) {
+        _s: int = wasm_native_set_callback(&proxy_callback);
+        proxy_callbacks_on = true
+    }
+    wasm_sys_bind(inst);
+    proxy_current = instance_address(inst);
+    m: *WasmModule = inst.m;
+    n: int = len(m.imports);
+    if (n > PX_MAX) wr_fail("too many imports for the proxy");
+    for i in 0..n {
+        name: []i8 = m.imports[i].name;
+        np: int = len(m.sigs[m.imports[i].sig].params);
+        pi_address[i] = proxy_find(name);
+        pi_sys[i] = false;
+        if (pi_address[i] == 0 && wasm_sys_knows(inst, i)) pi_sys[i] = true else if (pi_address[i] == 0) {
+            resolver: ?fn(name: str): int = proxy_resolver;
+            if (resolver != null) pi_address[i] = resolver(cstr(name))
+        }
+        proxy_kinds(m, i, name, np)
+    }
+    proxy_base = wasm_memory_address(inst.mem8);
+    proxy_max = len(inst.mem8);
+    proxy_bound = inst.id
+}
+
+// ---- callbacks ----
+// Trampoline k enters the function named tramp_names[k] of the instance
+// callbacks go to (proxy_current): the same native address through a
+// reload, since the name is what is kept.
+// (Names in a pool, so no call allocates: a C callback may not.)
+tramp_pool: []i8 = new i8[64 * 128](0i8);
+
+tramp_len: []int = new int[64](0);
+
+tramp_count: int = 0;
+
+tramp_fidx: []int = new int[64](0 - 1);
+
+tramp_inst: []int = new int[64](0 - 1);
+
+// The instance callbacks enter, as an address (so a callback may set it:
+// a pointer in a global would need the allocation marked immortal).
+proxy_current: int = 0;
+
+extern instance_address(inst: *WasmInstance): int = l8_as_int;
+
+extern instance_at(p: int): *WasmInstance = l8_as_int;
+
+// The trampoline for the module's function value (a table index).
+tramp_name_is(k: int, name: []i8): bool {
+    if (tramp_len[k] != len(name)) return false;
+    for i in 0..len(name) {
+        if (tramp_pool[k * 128 + i] != name[i]) return false
+    }
+    true
+}
+
+proxy_trampoline_for(inst: *WasmInstance, ti: int): int {
+    if (ti < 0 || ti >= len(inst.table)) return 0;
+    f: int = inst.table[ti];
+    name: []i8 = wasm_function_name(inst.m, f);
+    for k in 0..tramp_count {
+        if (tramp_name_is(k, name)) return wasm_trampoline(k)
+    }
+    if (tramp_count >= len(tramp_len) || len(name) > 127) return 0;
+    k2: int = tramp_count;
+    for i in 0..len(name) tramp_pool[k2 * 128 + i] = name[i];
+    tramp_len[k2] = len(name);
+    tramp_count = tramp_count + 1;
+    wasm_trampoline(k2)
+}
+
+proxy_callback(
+    k: int,
+    a0: int,
+    a1: int,
+    a2: int,
+    a3: int,
+    a4: int
+): int {
+    if (proxy_current == 0) return 0;
+    inst: *WasmInstance = instance_at(proxy_current);
+    if (tramp_inst[k] != inst.id) {
+        m: *WasmModule = inst.m;
+        ni: int = len(m.imports);
+        tramp_fidx[k] = 0 - 1;
+        for i in 0..len(m.funcs) {
+            if (tramp_fidx[k] < 0 && tramp_name_is(k, m.funcs[i].name)) tramp_fidx[k] = ni + i
+        }
+        tramp_inst[k] = inst.id
+    }
+    f: int = tramp_fidx[k];
+    if (f < 0) return 0;
+    args: []int = [a0, a1, a2, a3, a4];
+    np: int = 0;
+    try {
+        sig: *WasmSig = wasm_sig_of(inst.m, f);
+        np = len(sig.params);
+        if (np > 5) np = 5;
+        wasm_call(inst, f, args, np)
+    } with WasmFormat _e -> {
+        0
+    }
+}
+
+proxy_callbacks_on: bool = false;
+
+// ---- the host function ----
+wasm_proxy_host(
+    inst: *WasmInstance,
+    imp: int,
+    args: []int,
+    n: int
+): int {
+    if (proxy_bound != inst.id) {
+        wi_trap(inst, "the imports are not bound (wasm_proxy_bind)");
+        return 0 - 38
+    }
+    if (pi_sys[imp]) return wasm_sys_host(inst, imp, args, n);
+    address: int = pi_address[imp];
+    if (address == 0) {
+        wi_trap(inst, "an import no native function answers");
+        return 0 - 38
+    }
+    sig: *WasmSig = inst.m.sigs[inst.m.imports[imp].sig];
+    nints: int = 0;
+    nfloats: int = 0;
+    for i in 0..n {
+        kind: int = if (i < PX_PARAMS) pi_kinds[imp * PX_PARAMS + i] as int else IK_INT;
+        v: int = args[i];
+        if (kind == IK_FLOAT) {
+            if (nfloats < 8) proxy_floats[nfloats] = l8_bits_f64(v);
+            nfloats = nfloats + 1
+        } else {
+            if (kind == IK_PTR && v > 0 && v < proxy_max) v = proxy_base + v;
+            if (kind == IK_FN) v = proxy_trampoline_for(inst, v & M32);
+            if (nints < len(proxy_ints)) proxy_ints[nints] = v;
+            nints = nints + 1
+        }
+    }
+    ret_float: int = if (pi_result[imp] == IK_FLOAT) 1 else 0;
+    r: int = wasm_native_call(address, proxy_ints, nints, proxy_floats, nfloats, ret_float);
+    if (ret_float == 1 && len(sig.results) > 0 && sig.results[0] as int == WT_F32) r = r & M32;
+    r
+}

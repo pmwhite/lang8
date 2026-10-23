@@ -1,0 +1,486 @@
+tag wasm_ios_host;
+
+use_tag std, wasm, ios;
+
+// The hot reload host for an iPhone (RELOAD.md): an app whose executable is
+// this program and whose module is another L8 program built with `l8
+// wasm`, run in the interpreter (programs/wasm) with every import proxied
+// to the platform (dlsym), the few the runtime gives bound to wrappers
+// here. The module comes from the development server (web/dev.mjs) named
+// in dev-server.txt beside the executable, or else app.wasm beside it;
+// then each build the server makes is fetched (a long poll on
+// /wait?since=N, through NSURLSession on the main queue, so a build
+// arrives between the module's callbacks) and run as a reload: a new
+// instance, the persistent globals carried over, l8_init_globals, then
+// the program's reload() (its UI made again over the old instance's
+// UIKit objects, whose callbacks now enter the new instance). Built into
+// the app's own bundle: tools/ios/hot.sh.
+import "../proxy.l8";
+
+import "../persist.l8";
+
+import "../../ios/objc.l8";
+
+extern exit(code: int): noreturn;
+
+extern l8_msg_hfa_super(
+    out: []f64,
+    receiver: int,
+    selector: int,
+    a: int,
+    b: int,
+    c: int
+): int;
+
+extern as_f64s(p: int): []f64 = l8_as_int;
+
+extern as_str(p: int): str = l8_as_int;
+
+extern addr_i(f: fn(a: int): int): int = l8_as_int;
+
+extern addr_0(f: fn(): int): int = l8_as_int;
+
+extern addr_6(f: fn(a: int, b: int, c: int, d: int, e: int, f: int): int): int = l8_as_int;
+
+// ---- what the runtime gives a native program, for the module ----
+w_exit(code: int): int {
+    exit(code)
+}
+
+w_argc(): int {
+    l8rt_argc()
+}
+
+w_argv(): int {
+    l8rt_argv()
+}
+
+w_common_modes(): int {
+    l8_run_loop_common_modes()
+}
+
+w_as_int(x: int): int {
+    x
+}
+
+w_msg_hfa(
+    out: int,
+    receiver: int,
+    selector: int,
+    a: int,
+    b: int,
+    c: int
+): int {
+    l8_msg_hfa(as_f64s(out), receiver, selector, a, b, c)
+}
+
+w_msg_hfa_super(
+    out: int,
+    receiver: int,
+    selector: int,
+    a: int,
+    b: int,
+    c: int
+): int {
+    l8_msg_hfa_super(as_f64s(out), receiver, selector, a, b, c)
+}
+
+resolve(name: str): int {
+    dlsym(0 - 2, name)
+}
+
+// ---- the module ----
+// The instance running, as an address (a callback sets it at a reload).
+host_inst: int = 0;
+
+say(s: str) {
+    try {
+        write(2, "hot: ");
+        write(2, s);
+        write(2, "\n")
+    } with IoError _e -> { }
+}
+
+say_int(s: str, n: int) {
+    try {
+        write(2, "hot: ");
+        write(2, s);
+        write(2, " ");
+        buf: []i8 = new i8[24](0i8);
+        k: int = 0;
+        v: int = if (n < 0) 0 - n else n;
+        if (v == 0) {
+            buf[0] = '0';
+            k = 1
+        }
+        while (v > 0) {
+            buf[k] = ('0' as int + v % 10) trunc i8;
+            v = v / 10;
+            k = k + 1
+        }
+        if (n < 0) {
+            buf[k] = '-';
+            k = k + 1
+        }
+        out: []i8 = new i8[k](0i8);
+        for i in 0..k out[i] = buf[k - 1 - i];
+        write_bytes_n(2, out, k);
+        write(2, "\n")
+    } with IoError _e -> { }
+}
+
+// An instance of the module in bytes, bound.
+host_instantiate(bytes: []i8@new) raises WasmFormat, WasmNoMemory: *WasmInstance@new {
+    inst: *WasmInstance = wasm_instantiate(wasm_decode(bytes), 512, &wasm_proxy_host);
+    wasm_proxy_bind(inst);
+    inst
+}
+
+// The first run: main, which on an iPhone calls UIApplicationMain and
+// never returns.
+host_run(bytes: []i8@new) {
+    try {
+        inst: *WasmInstance = host_instantiate(bytes);
+        host_inst = instance_address(inst);
+        say("running");
+        status: int = wasm_start(inst);
+        if (wasm_trapped(inst)) {
+            say("trap:");
+            say(wasm_trap_message(inst))
+        }
+        say_int("the module ended with status", status)
+    } with WasmFormat e -> {
+        say("the module cannot be read:");
+        say(e.msg)
+    } with WasmNoMemory -> {
+        say("no memory for the module")
+    }
+}
+
+// A reload: the new build's instance takes the persistent globals, its
+// ordinary globals are initialized, and its reload() makes the app again.
+host_reload(bytes: []i8@new) {
+    if (host_inst == 0) return;
+    old: *WasmInstance = instance_at(host_inst);
+    try {
+        inst: *WasmInstance = host_instantiate(bytes);
+        t: *Transfer = wasm_transfer(old, inst);
+        for i in 0..t.nlines say(t.lines[i]);
+        say_int("persistent globals carried:", t.carried + t.migrated);
+        host_inst = instance_address(inst);
+        _g: int = wasm_call_export(inst, "l8_init_globals", 0, 0, 0, 0, 0);
+        if (wasm_export_function(inst.m, "reload") >= 0) {
+            _r: int = wasm_call_export(inst, "reload", 0, 0, 0, 0, 0);
+            if (wasm_trapped(inst)) {
+                say("reload trapped:");
+                say(wasm_trap_message(inst))
+            } else say("reloaded")
+        } else say("the module has no reload(): its state is carried, but nothing is shown again until the app restarts")
+    } with WasmFormat e -> {
+        say("the build cannot be read:");
+        say(e.msg)
+    } with WasmNoMemory -> {
+        say("no memory for the build")
+    }
+}
+
+// ---- the development server ----
+server: []i8 = new i8[0](0i8);
+
+session: int = 0;
+
+// The task under way: 1 a wait, 2 a build; what it has sent.
+task_kind: int = 0;
+
+task_got: []i8 = new i8[16777216](0i8);
+
+task_got_n: int = 0;
+
+since: int = 0;
+
+// The directory of the executable (the app's bundle), from argv[0].
+bundle_dir(argv0: str): []i8@new {
+    slash: int = 0;
+    for i in 0..len(argv0) {
+        if (argv0[i] == '/') slash = i
+    }
+    out: []i8 = new i8[slash + 1](0i8);
+    for i in 0..slash + 1 out[i] = argv0[i];
+    out
+}
+
+path_in(dir: []i8, name: str): str@new {
+    b: []i8 = new i8[len(dir) + len(name)](0i8);
+    memcpy(b, 0, dir, 0, len(dir));
+    memcpy(b, len(dir), bytes(name), 0, len(name));
+    cstr(b)
+}
+
+url(path: str): int {
+    b: []i8 = new i8[7 + len(server) + len(path)](0i8);
+    memcpy(b, 0, bytes("http://"), 0, 7);
+    memcpy(b, 7, server, 0, len(server));
+    memcpy(b, 7 + len(server), bytes(path), 0, len(path));
+    msg1(cls("NSURL"), sel("URLWithString:"), nsstring(cstr(b)))
+}
+
+start_task(kind: int, path: str) {
+    if (session == 0) return;
+    task_kind = kind;
+    task_got_n = 0;
+    request: int = msg1(cls("NSURLRequest"), sel("requestWithURL:"), url(path));
+    task: int = msg1(session, sel("dataTaskWithRequest:"), request);
+    msg(task, sel("resume"))
+}
+
+wait_for_build() {
+    b: []i8 = new i8[40](0i8);
+    n: int = 0;
+    for c in "/wait?since=" {
+        b[n] = c;
+        n = n + 1
+    }
+    digits: []i8 = new i8[20](0i8);
+    k: int = 0;
+    v: int = since;
+    if (v == 0) {
+        digits[0] = '0';
+        k = 1
+    }
+    while (v > 0) {
+        digits[k] = ('0' as int + v % 10) trunc i8;
+        v = v / 10;
+        k = k + 1
+    }
+    for i in 0..k {
+        b[n] = digits[k - 1 - i];
+        n = n + 1
+    }
+    out: []i8 = new i8[n](0i8);
+    memcpy(out, 0, b, 0, n);
+    start_task(1, cstr(out))
+}
+
+// A number after a key in the answer's JSON (`"build":N`), -1 if none.
+json_int(key: str): int {
+    kl: int = len(key);
+    for i in 0..task_got_n - kl {
+        same: bool = true;
+        for j in 0..kl {
+            if (task_got[i + j] != key[j]) same = false
+        }
+        if (same) {
+            p: int = i + kl;
+            while (p < task_got_n && task_got[p] == ' ') p = p + 1;
+            v: int = 0;
+            any: bool = false;
+            while (p < task_got_n && task_got[p] >= '0' && task_got[p] <= '9') {
+                v = v * 10 + (task_got[p] - '0') as int;
+                p = p + 1;
+                any = true
+            }
+            return if (any) v else 0 - 1
+        }
+    }
+    0 - 1
+}
+
+json_true(key: str): bool {
+    kl: int = len(key);
+    for i in 0..task_got_n - kl - 4 {
+        same: bool = true;
+        for j in 0..kl {
+            if (task_got[i + j] != key[j]) same = false
+        }
+        if (same) return task_got[i + kl] == 't' && task_got[i + kl + 1] == 'r'
+    }
+    false
+}
+
+host_data(
+    _self: int,
+    _cmd: int,
+    _session: int,
+    _task: int,
+    data: int
+): int {
+    n: int = msg(data, sel("length"));
+    if (task_got_n + n <= len(task_got)) {
+        msg2(data, sel("getBytes:length:"), bytes_address(task_got) + task_got_n,
+            n);
+        task_got_n = task_got_n + n
+    }
+    0
+}
+
+host_done(
+    _self: int,
+    _cmd: int,
+    _session: int,
+    task: int,
+    error: int
+): int {
+    status: int = 0;
+    response: int = msg(task, sel("response"));
+    if (error == 0 && response != 0) status = msg(response, sel("statusCode"));
+    kind: int = task_kind;
+    task_kind = 0;
+    if (kind == 1) {
+        if (status == 200) {
+            build: int = json_int("\"build\":");
+            if (build > since) {
+                since = build;
+                if (json_true("\"ok\":")) {
+                    say_int("build", build);
+                    start_task(2, "/build.wasm");
+                    return 0
+                }
+                say_int("build failed on the server:", build)
+            }
+            wait_for_build()
+        } else {
+            say_int("the server did not answer; status", status);
+            // (Again in a while: the run loop's next turn is too soon.)
+            msg2(cls("NSThread"), sel("sleepForTimeInterval:"), 0, 0);
+            wait_for_build()
+        }
+    } else if (kind == 2) {
+        if (status == 200 && task_got_n > 8) {
+            module: []i8 = new i8[task_got_n](0i8);
+            memcpy(module, 0, task_got, 0, task_got_n);
+            host_reload(module)
+        } else say_int("the build could not be fetched; status", status);
+        wait_for_build()
+    }
+    0
+}
+
+// A GET of path before the app runs (NSURLSession needs no run loop for a
+// completion block on its own queue): the status, the body in task_got.
+sync_fetch(path: str): int {
+    if (len(server) == 0) return 0;
+    task_got_n = 0;
+    first_status = 0;
+    request: int = msg1(cls("NSURLRequest"), sel("requestWithURL:"), url(path));
+    sem: int = dispatch_semaphore_create(0);
+    first_sem = sem;
+    task: int = msg2(session_sync, sel("dataTaskWithRequest:completionHandler:"),
+        request, first_block);
+    if (task == 0) return 0;
+    msg(task, sel("resume"));
+    _w: int = dispatch_semaphore_wait(sem, 8000000000);
+    first_status
+}
+
+// The server's current module, and its build number into since.
+first_build(): []i8@new {
+    none: []i8 = new i8[0](0i8);
+    if (sync_fetch("/build.wasm") != 200 || task_got_n <= 8) return none;
+    out: []i8 = new i8[task_got_n](0i8);
+    memcpy(out, 0, task_got, 0, task_got_n);
+    if (sync_fetch("/build") == 200) {
+        b: int = json_int("\"build\":");
+        if (b > 0) since = b
+    }
+    out
+}
+
+extern dispatch_semaphore_create(value: int): int;
+
+extern dispatch_semaphore_wait(sem: int, timeout: int): int;
+
+extern dispatch_semaphore_signal(sem: int): int;
+
+session_sync: int = 0;
+
+first_sem: int = 0;
+
+first_status: int = 0;
+
+first_block: int = 0;
+
+// The completion of the first fetch (data, response, error), on a session
+// queue: the bytes kept, the semaphore signaled.
+first_completed(
+    _block: int,
+    data: int,
+    response: int,
+    _error: int
+): int {
+    if (response != 0) first_status = msg(response, sel("statusCode"));
+    if (data != 0) {
+        n: int = msg(data, sel("length"));
+        if (n <= len(task_got)) {
+            msg2(data, sel("getBytes:length:"), bytes_address(task_got), n);
+            task_got_n = n
+        }
+    }
+    _s: int = dispatch_semaphore_signal(first_sem);
+    0
+}
+
+extern fn_address4(f: fn(block: int, a: int, b: int, c: int): int): int = l8_as_int;
+
+// A global block of three arguments (block.l8's, with one more).
+block_words: []int = new int[4](0);
+
+block_descriptor: []int = [0, 32];
+
+block3_of(invoke: int): int {
+    block_words[0] = dlsym(0 - 2, "_NSConcreteGlobalBlock");
+    block_words[1] = 268435456;
+    block_words[2] = invoke;
+    block_words[3] = ints_address(block_descriptor);
+    ints_address(block_words)
+}
+
+main(argc: int, argv: []str) noregion: int {
+    dir: []i8 = bundle_dir(if (argc > 0) argv[0] else "./");
+    conf: []i8 = wasm_read_file(path_in(dir, "dev-server.txt"));
+    n: int = len(conf);
+    while (n > 0 && (conf[n - 1] == '\n' || conf[n - 1] == ' ' || conf[n - 1] == '\r')) n = n - 1;
+    server = new i8[n](0i8);
+    memcpy(server, 0, conf, 0, n);
+    if (n > 0) {
+        say("the development server:");
+        say(cstr(server))
+    } else say("no dev-server.txt: the module beside the executable, no reloads");
+    // The runtime's own imports, bound.
+    proxy_bind("exit", addr_i(&w_exit));
+    proxy_bind("l8_exit", addr_i(&w_exit));
+    proxy_bind("l8rt_argc", addr_0(&w_argc));
+    proxy_bind("l8rt_argv", addr_0(&w_argv));
+    proxy_bind("l8_run_loop_common_modes", addr_0(&w_common_modes));
+    proxy_bind("l8_as_int", addr_i(&w_as_int));
+    proxy_bind("l8_msg_hfa", addr_6(&w_msg_hfa));
+    proxy_bind("l8_msg_hfa_super", addr_6(&w_msg_hfa_super));
+    proxy_set_resolver(&resolve);
+    // The server's client: a delegate on the main queue for the builds to
+    // come, and a plain session for the first module.
+    delegate_class: int = objc_allocateClassPair(cls("NSObject"), "L8HotHost", 0);
+    add_method3(delegate_class, sel("URLSession:dataTask:didReceiveData:"), &host_data,
+        "v@:@@@");
+    add_method3(delegate_class, sel("URLSession:task:didCompleteWithError:"), &host_done,
+        "v@:@@@");
+    add_protocol(delegate_class, "NSURLSessionDataDelegate");
+    objc_registerClassPair(delegate_class);
+    delegate: int = make("L8HotHost");
+    config: int = msg(cls("NSURLSessionConfiguration"), sel("defaultSessionConfiguration"));
+    msg_set_f(config, sel("setTimeoutIntervalForRequest:"), 40.0f64);
+    session = msg3(cls("NSURLSession"), sel("sessionWithConfiguration:delegate:delegateQueue:"),
+        config, delegate, msg(cls("NSOperationQueue"), sel("mainQueue")));
+    session_sync = msg1(cls("NSURLSession"), sel("sessionWithConfiguration:"), config);
+    first_block = block3_of(fn_address4(&first_completed));
+    module: []i8 = first_build();
+    if (len(module) == 0) {
+        say("the module beside the executable");
+        module = wasm_read_file(path_in(dir, "app.wasm"))
+    } else say_int("the server's build", since);
+    if (len(module) == 0) {
+        say("no module to run");
+        return 1
+    }
+    if (len(server) > 0) wait_for_build();
+    host_run(module);
+    0
+}

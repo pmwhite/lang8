@@ -23,8 +23,6 @@ type Timespec = {
 
 extern clock_gettime(clk: int, ts: *Timespec): int;
 
-extern rdtsc(): int;
-
 extern l8_time(): int;
 
 extern l8_getrandom(buf: *i8, n: int): int;
@@ -84,7 +82,8 @@ SYS_SQRT: int = 19;
 // The import kinds of the instance bound last.
 sys_bound: int = 0 - 1;
 
-sys_kinds: []int = new int[0](0);
+// (Room for 4096 imports, filled in place: binding allocates nothing.)
+sys_kinds: []int = new int[4096](0);
 
 sys_heap_base: int = 0;
 
@@ -102,24 +101,27 @@ sys_kind_of(name: []i8): int {
         "sqrt")) SYS_SQRT else SYS_NONE
 }
 
-sys_bind(inst: *WasmInstance) noregion {
+// Bind the standard imports to inst: before it runs (a host function
+// allocates nothing that outlives the call).
+wasm_sys_bind(inst: *WasmInstance) {
     m: *WasmModule = inst.m;
-    sys_kinds = new int[len(m.imports)](0);
-    for i in 0..len(m.imports) sys_kinds[i] = sys_kind_of(m.imports[i].name);
+    for i in 0..len(m.imports) {
+        if (i < len(sys_kinds)) sys_kinds[i] = sys_kind_of(m.imports[i].name)
+    }
     heap: int = wasm_global_index(inst, "l8_heap");
     sys_heap_base = (if (heap >= 0) m.global_inits[heap] else 0);
     sys_bound = inst.id
 }
 
 // Whether wasm_sys_host answers import imp.
-wasm_sys_knows(inst: *WasmInstance, imp: int) noregion: bool {
-    if (sys_bound != inst.id) sys_bind(inst);
+wasm_sys_knows(inst: *WasmInstance, imp: int): bool {
+    if (sys_bound != inst.id || imp >= len(sys_kinds)) return false;
     sys_kinds[imp] != SYS_NONE
 }
 
 // ---- memory helpers for hosts ----
 // Memory from the module's own allocator.
-wasm_alloc(inst: *WasmInstance, n: int) noregion: int {
+wasm_alloc(inst: *WasmInstance, n: int): int {
     try {
         wasm_call_export(inst, "l8_malloc", n, 0, 0, 0, 1)
     } with WasmFormat _e -> {
@@ -129,7 +131,7 @@ wasm_alloc(inst: *WasmInstance, n: int) noregion: int {
 
 // A new []i8 or str in the module (its length before it, a NUL after)
 // holding the bytes.
-wasm_new_bytes(inst: *WasmInstance, data: []i8, n: int) noregion: int {
+wasm_new_bytes(inst: *WasmInstance, data: []i8, n: int): int {
     p: int = wasm_alloc(inst, 8 + n + 1);
     if (p == 0) return 0;
     wi_store64(inst, p, n);
@@ -139,7 +141,7 @@ wasm_new_bytes(inst: *WasmInstance, data: []i8, n: int) noregion: int {
 }
 
 // A new []str in the module.
-wasm_new_strings(inst: *WasmInstance, list: []str) noregion: int {
+wasm_new_strings(inst: *WasmInstance, list: []str): int {
     n: int = len(list);
     outer: int = wasm_alloc(inst, 8 + 8 * n);
     if (outer == 0) return 0;
@@ -182,7 +184,7 @@ sys_qsort(
     count: int,
     width: int,
     compare: int
-) noregion {
+) {
     if (count < 2) return;
     f: int = inst.table[compare & M32];
     if (f < 0) return;
@@ -247,8 +249,11 @@ wasm_sys_host(
     imp: int,
     args: []int,
     n: int
-) noregion: int {
-    if (sys_bound != inst.id) sys_bind(inst);
+): int {
+    if (sys_bound != inst.id || imp >= len(sys_kinds)) {
+        wi_trap(inst, "the standard imports are not bound (wasm_sys_bind)");
+        return 0 - 38
+    }
     kind: int = sys_kinds[imp];
     mem: []i8 = inst.mem8;
     if (kind == SYS_EXIT) {
@@ -276,7 +281,12 @@ wasm_sys_host(
         wi_store64(inst, args[1], ts.sec);
         wi_store64(inst, args[1] + 8, ts.nsec);
         r2
-    } else if (kind == SYS_RDTSC) rdtsc() else if (kind == SYS_TIME) {
+    } else if (kind == SYS_RDTSC) {
+        // (Nanoseconds of the monotonic clock: rdtsc is x86's.)
+        ts2: Timespec = Timespec { sec: 0, nsec: 0 };
+        _r3: int = clock_gettime(1, &ts2);
+        ts2.sec * 1000000000 + ts2.nsec
+    } else if (kind == SYS_TIME) {
         t: int = l8_time();
         if (n > 0 && args[0] != 0) wi_store64(inst, args[0], t);
         t

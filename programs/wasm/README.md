@@ -13,8 +13,11 @@ instances, calls, memory and the transfer of persistent state.
 | `sys.l8` | The standard imports (`web/README.md`, "Host interface"), natively: files, output, clocks, the environment, `qsort` through the module's comparator, the `l8 test` protocol on fd 3; helpers for a host's own imports (`wasm_str_at`, `wasm_new_bytes`, `wasm_alloc`) |
 | `persist.l8` | Persistent globals across instances: the manifest, which old value a new type can take, and the copy (`wasm_transfer`), as `web/reload.js` does it |
 | `native.s` | What L8 cannot say: memory that never moves (mmap), float bit casts, a call of a native function by address with integer and float arguments, and 64 callback trampolines (x86-64 Linux; `native.arm64-darwin.s` for iOS) |
+| `proxy.l8` | A host that answers imports with native code by the module's `l8imports` section: numbers, floats, pointers into the module's memory made native, function values as trampolines (by name, so they outlive a reload); registered functions first, then the standard imports, then a resolver (dlsym) |
 | `run.l8` | `wasmrun module.wasm [args...]`: a module run from the command line, as `node web/run.mjs` runs one |
+| `ios/host.l8` | The hot reload host for an iPhone (RELOAD.md): the app's program as a module from the development server, run with its imports proxied, each build a reload |
 | `tests/reload.l8` | The reload check: `web/tests/reload_v1.l8` carried into `reload_v2.l8` natively; its output is `tests/reload.expected`, the same text the JavaScript check expects |
+| `tests/proxy.l8` | The proxy check: `tests/proxy_mod.l8`'s imports answered by L8 functions of every argument kind; its output is `tests/proxy.expected` |
 
 ## Using it
 
@@ -29,8 +32,15 @@ host(inst: *WasmInstance, imp: int, args: []int, n: int) noregion: int {
 
 m: *WasmModule = wasm_decode(wasm_read_file("app.wasm"));
 inst: *WasmInstance = wasm_instantiate(m, 256, &host);   // 256 MB reserved
+wasm_sys_bind(inst);                                     // or wasm_proxy_bind
 status: int = wasm_start(inst);                          // _start; or wasm_call_export
 ```
+
+Binding is explicit and allocates nothing, and the interpreter's run path
+needs no `noregion`, so that an instance can be made, bound and run from
+a C callback (UIKit's): a host keeps the instance it runs as an address
+(`instance_address`, `instance_at` in proxy.l8), since a pointer in a
+global would need the allocation marked immortal.
 
 A host import gets the arguments as ints, and a str or slice argument is
 an address in `inst.mem8` with its length 8 bytes before it. `wasm_exit`
@@ -47,6 +57,11 @@ Every compiler fixture runs through it (`l8 test --wasm --runner
 .build/wasmrun`), the compiler built as a module rebuilds itself under it
 byte for byte (7 s, against a quarter of a second under Node's JIT and a
 fifth natively), and `tests/reload.l8` carries the reload fixture.
+
+## On an iPhone
+
+`tools/ios/hot.sh` builds an app's bundle with `ios/host.l8` as its
+executable and the app's module beside it; RELOAD.md, "The iPhone".
 
 ## Limits
 

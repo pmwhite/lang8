@@ -133,8 +133,46 @@ same modules: a decoder, an interpreter, the standard imports, and the
 transfer of persistent globals in L8 (`wasm_transfer`), agreeing with
 `web/reload.js` line for line on the reload fixture. `make wasm-test` runs
 every compiler fixture through it (`l8 test --wasm --runner`) and has the
-compiler, as a module, rebuild itself under it. A native app (the
-iPhone's) holds the contract by importing it: its externs proxied to the
-platform by the module's `l8imports` section (each argument a number, a
-float, a pointer into the module's memory or a function value), and the
-same reload over its instances' memories.
+compiler, as a module, rebuild itself under it.
+
+A native app holds the contract by importing it. `programs/wasm/proxy.l8`
+answers a module's imports with native code by the module's `l8imports`
+section (each argument a number, a float, a pointer into the module's
+memory, or a function value, which becomes a trampoline into the module's
+function of that name, so native code can keep calling it through a
+reload); `make wasm-test` checks it on Linux with L8 functions standing in
+for a platform's.
+
+## The iPhone
+
+`programs/wasm/ios/host.l8` is the hot reload host for an iPhone: an app
+whose executable is the host and whose program is the app built with `l8
+wasm` (the whole Bible app compiles so, UIKit and all), run in the
+interpreter with every import proxied to the platform (dlsym). At launch
+it fetches the module from the development server named in
+`dev-server.txt` beside it (`app.wasm` beside it otherwise), then waits
+on `/wait?since=N` through NSURLSession on the main queue, so a build
+arrives between the module's callbacks; a build is run as a reload: a new
+instance, the persistent globals carried, `l8_init_globals`, then the
+program's `reload()`. A program that lives in UIKit's run loop cannot run
+`main` again (UIApplicationMain never returns), so it defines
+`reload()`: what it must do again in the window the old build made, whose
+callbacks (methods added with the old build's function values) now enter
+the new build's functions of the same names. The Bible's keeps its
+window, delegate and scene as persistent globals and builds its views
+again (`programs/bible/ios/app.l8`); a method a build adds to a class is
+not there until the app is launched again.
+
+```sh
+tools/ios/hot.sh device programs/bible/ios/app.l8 programs/bible/ios .build/hot 192.168.0.231:8777
+node web/dev.mjs -- programs/bible/ios/app.l8 -o .build/dev/bible-ios.wasm
+```
+
+The first builds the app's bundle with the host as its executable, the
+module and the server's address beside it (`tools/ios/build-linux.sh` does
+the rest, the IPA included); the second serves builds of the app. This
+host is built on every `make` for the simulator (`.build/hot-ios-sim`)
+but has not run on a device or simulator yet: the interpreter, the
+transfer and the proxy are checked on Linux, and the arm64 helpers
+(`programs/wasm/native.arm64-darwin.s`) assemble and link with the
+compiler's own tools.
