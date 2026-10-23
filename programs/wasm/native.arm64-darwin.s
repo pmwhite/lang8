@@ -3287,7 +3287,35 @@ Lwasm_tramp_1023:
     mov x16, #1023
     b Lwasm_tramp_common
 
+// The common entry saves the callee-saved registers and the stack in a
+// callback slot (one per nested callback) before the L8 callback runs, so
+// that wasm_callback_abandon, from a signal's handler, can return to the
+// native caller as if the callback had returned 0.
 Lwasm_tramp_common:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    adrp x8, wasm_cb_depth@PAGE
+    ldr x9, [x8, wasm_cb_depth@PAGEOFF]
+    add x10, x9, #1
+    str x10, [x8, wasm_cb_depth@PAGEOFF]
+    lsl x9, x9, #8
+    adrp x10, wasm_cb_slots@PAGE
+    add x10, x10, wasm_cb_slots@PAGEOFF
+    add x10, x10, x9
+    stp x19, x20, [x10]
+    stp x21, x22, [x10, #16]
+    stp x23, x24, [x10, #32]
+    stp x25, x26, [x10, #48]
+    stp x27, x28, [x10, #64]
+    mov x11, sp
+    stp x29, x11, [x10, #80]
+    stp d8, d9, [x10, #96]
+    stp d10, d11, [x10, #112]
+    stp d12, d13, [x10, #128]
+    stp d14, d15, [x10, #144]
+    adrp x8, wasm_slot_depth@PAGE
+    ldr x11, [x8, wasm_slot_depth@PAGEOFF]
+    str x11, [x10, #160]
     mov x5, x4
     mov x4, x3
     mov x3, x2
@@ -3296,7 +3324,57 @@ Lwasm_tramp_common:
     mov x0, x16
     adrp x8, wasm_callback_fn@PAGE
     ldr x8, [x8, wasm_callback_fn@PAGEOFF]
-    br x8
+    blr x8
+Lcb_done:
+    adrp x8, wasm_cb_depth@PAGE
+    ldr x9, [x8, wasm_cb_depth@PAGEOFF]
+    sub x9, x9, #1
+    str x9, [x8, wasm_cb_depth@PAGEOFF]
+    mov sp, x29
+    ldp x29, x30, [sp], #16
+    ret
+
+// wasm_callback_abandon(): back to the native caller of the innermost
+// callback, which returns 0; the native calls made within it are
+// forgotten. Nothing between is unwound.
+    .globl _wasm_callback_abandon
+_wasm_callback_abandon:
+    adrp x8, wasm_cb_depth@PAGE
+    ldr x9, [x8, wasm_cb_depth@PAGEOFF]
+    cbz x9, Lcb_none
+    sub x9, x9, #1
+    str x9, [x8, wasm_cb_depth@PAGEOFF]
+    lsl x9, x9, #8
+    adrp x10, wasm_cb_slots@PAGE
+    add x10, x10, wasm_cb_slots@PAGEOFF
+    add x10, x10, x9
+    ldp x19, x20, [x10]
+    ldp x21, x22, [x10, #16]
+    ldp x23, x24, [x10, #32]
+    ldp x25, x26, [x10, #48]
+    ldp x27, x28, [x10, #64]
+    ldp x29, x11, [x10, #80]
+    mov sp, x11
+    ldp d8, d9, [x10, #96]
+    ldp d10, d11, [x10, #112]
+    ldp d12, d13, [x10, #128]
+    ldp d14, d15, [x10, #144]
+    ldr x11, [x10, #160]
+    adrp x8, wasm_slot_depth@PAGE
+    str x11, [x8, wasm_slot_depth@PAGEOFF]
+    mov x0, #0
+    mov sp, x29
+    ldp x29, x30, [sp], #16
+    ret
+Lcb_none:
+    ret
+
+// wasm_callback_depth(): how many callbacks are under way.
+    .globl _wasm_callback_depth
+_wasm_callback_depth:
+    adrp x8, wasm_cb_depth@PAGE
+    ldr x0, [x8, wasm_cb_depth@PAGEOFF]
+    ret
 
     .section __DATA,__data
     .p2align 3
@@ -3308,4 +3386,9 @@ wasm_abandoned_flag:
     .quad 0
     .p2align 4
 wasm_slots:
+    .skip 16384
+wasm_cb_depth:
+    .quad 0
+    .p2align 4
+wasm_cb_slots:
     .skip 16384

@@ -34,6 +34,12 @@ extern wasm_native_abandon(): int;
 
 extern wasm_abandoned(): int;
 
+// A callback abandoned from a signal's handler: back to its native caller
+// as if it had returned 0 (wasm_proxy_recover).
+extern wasm_callback_abandon(): int;
+
+extern wasm_callback_depth(): int;
+
 extern wasm_memory_address(m: []i8): int = l8_as_int;
 
 IK_INT: int = 0;
@@ -264,6 +270,16 @@ proxy_callback(
     // (Each callback the first time, and the first 400 calls.)
     telling: bool = proxy_told < 400 || tramp_inst_told[k] != inst.id;
     if (telling) tramp_inst_told[k] = inst.id;
+    // The instance as it is at entry, for a recovery.
+    d: int = cb_under_way;
+    if (d < 64) {
+        cb_k[d] = k;
+        cb_frames[d] = inst.nframes;
+        cb_sp[d] = inst.sp;
+        cb_handlers[d] = inst.nhandlers;
+        cb_depth[d] = inst.depth
+    }
+    cb_under_way = d + 1;
     t0: int = 0;
     if (telling) {
         proxy_told = proxy_told + 1;
@@ -284,6 +300,7 @@ proxy_callback(
     } with WasmFormat _e -> {
         r = 0
     }
+    cb_under_way = cb_under_way - 1;
     if (telling) proxy_tell("done in ms ", k, proxy_now() - t0);
     // A trap in a callback was told (wasm_on_trap), and which callback;
     // the next one runs, so that an app keeps going, as far as it can.
@@ -301,6 +318,46 @@ proxy_callback(
 
 proxy_unmap(v: int): int {
     if (proxy_base != 0 && v >= proxy_base && v < proxy_base + proxy_max) v - proxy_base else v
+}
+
+// The callbacks under way: for each, its trampoline and the instance's
+// frames, stack, handlers and depth at entry.
+cb_under_way: int = 0;
+
+cb_k: []int = new int[64](0);
+
+cb_frames: []int = new int[64](0);
+
+cb_sp: []int = new int[64](0);
+
+cb_handlers: []int = new int[64](0);
+
+cb_depth: []int = new int[64](0);
+
+// From a signal's handler (a fault in the module's callback, or in
+// native code it called): tell what and where, put the instance back as
+// it was when the callback began, and abandon the callback, which returns
+// 0 to its native caller. Does not return when a callback is under way;
+// returns false when none is (the fault is the host's or main's).
+wasm_proxy_recover(what: str): bool {
+    d: int = cb_under_way;
+    if (d <= 0 || d > 64 || proxy_current == 0 || wasm_callback_depth() <= 0) return false;
+    inst: *WasmInstance = instance_at(proxy_current);
+    hook: ?fn(msg: str): int = wasm_on_trap;
+    if (hook != null) {
+        _w: int = hook(what);
+        proxy_tell("in callback ", cb_k[d - 1], 0);
+        wasm_tell_frames(inst)
+    }
+    inst.nframes = cb_frames[d - 1];
+    inst.sp = cb_sp[d - 1];
+    inst.nhandlers = cb_handlers[d - 1];
+    inst.depth = cb_depth[d - 1];
+    inst.trapped = false;
+    inst.exiting = false;
+    cb_under_way = d - 1;
+    _a: int = wasm_callback_abandon();
+    false
 }
 
 proxy_callbacks_on: bool = false;

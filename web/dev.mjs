@@ -16,6 +16,11 @@
 //   GET /build.wasm        the latest successful build's module
 //   POST /log              a line from a device (the hot reload host's own,
 //                          and its module's stderr): printed, kept for GET /log
+//   POST /control          a command for the device (web/devctl.mjs): shot,
+//                          notify NAME, reload, exit; GET /next?since=N is the
+//                          device's long poll for commands after N
+//   POST /shot             a screenshot (PNG) from the device, saved under
+//                          .build/dev/shots/; GET /shots/latest says which
 //   GET /<path>            a file under --serve DIR, if given
 //
 // web/reload.js's watchBuilds() is the client.
@@ -177,6 +182,10 @@ const types = {
 const info = () => ({ build: state.build, ok: state.ok, log: state.log, ms: state.ms, time: state.time, source });
 
 const deviceLog = [];
+const commands = [];
+const commandWaiters = new Set();
+const shotsDir = path.join(".build", "dev", "shots");
+let shots = 0;
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://x");
@@ -205,6 +214,53 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { ...headers, "Content-Type": "text/plain; charset=utf-8" });
     return res.end(deviceLog.join("\n") + "\n");
   }
+  if (url.pathname === "/control" && req.method === "POST") {
+    const parts = [];
+    req.on("data", (d) => parts.push(d));
+    req.on("end", () => {
+      const cmd = Buffer.concat(parts).toString("utf8").trim();
+      commands.push({ id: commands.length + 1, cmd });
+      console.log(`${new Date().toLocaleTimeString()}  command ${commands.length}: ${cmd}`);
+      for (const w of commandWaiters) w();
+      commandWaiters.clear();
+      json({ id: commands.length });
+    });
+    return;
+  }
+  if (url.pathname === "/next") {
+    const since = Number(url.searchParams.get("since") || 0);
+    const answer = () => {
+      res.writeHead(200, { ...headers, "Content-Type": "text/plain; charset=utf-8" });
+      res.end(commands.filter((c) => c.id > since).map((c) => `${c.id}\t${c.cmd}\n`).join(""));
+    };
+    if (commands.length > since) return answer();
+    const done = () => {
+      clearTimeout(timer);
+      commandWaiters.delete(done);
+      answer();
+    };
+    const timer = setTimeout(done, 25000);
+    commandWaiters.add(done);
+    req.on("close", () => {
+      clearTimeout(timer);
+      commandWaiters.delete(done);
+    });
+    return;
+  }
+  if (url.pathname === "/shot" && req.method === "POST") {
+    const parts = [];
+    req.on("data", (d) => parts.push(d));
+    req.on("end", () => {
+      fs.mkdirSync(shotsDir, { recursive: true });
+      shots++;
+      const file = path.join(shotsDir, `${shots}.png`);
+      fs.writeFileSync(file, Buffer.concat(parts));
+      console.log(`${new Date().toLocaleTimeString()}  screenshot ${shots}: ${file}`);
+      json({ shot: shots, file });
+    });
+    return;
+  }
+  if (url.pathname === "/shots/latest") return json({ shot: shots, file: shots ? path.join(shotsDir, `${shots}.png`) : null });
   if (url.pathname === "/build") return json(info());
   if (url.pathname === "/wait") {
     const since = Number(url.searchParams.get("since") || 0);

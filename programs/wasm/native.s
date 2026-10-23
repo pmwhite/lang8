@@ -3295,7 +3295,34 @@ wasm_tramp_1023:
     mov $1023, %rax
     jmp wasm_tramp_common
 
+# The common entry saves the callee-saved registers and the stack in a
+# callback slot (one per nested callback) before the L8 callback runs, so
+# that wasm_callback_abandon, from a signal's handler, can return to the
+# native caller as if the callback had returned 0.
 wasm_tramp_common:
+    push %rbp
+    mov %rsp, %rbp
+    push %rbx
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+    push %rax
+    mov wasm_cb_depth(%rip), %r10
+    mov %r10, %r11
+    shl $6, %r11
+    lea wasm_cb_slots(%rip), %r15
+    add %r11, %r15
+    mov %rbx, 0(%r15)
+    mov %rbp, 8(%r15)
+    mov %r12, 16(%r15)
+    mov %r13, 24(%r15)
+    mov %r14, 32(%r15)
+    mov %rsp, 40(%r15)
+    mov wasm_slot_depth(%rip), %r11
+    mov %r11, 48(%r15)
+    add $1, %r10
+    mov %r10, wasm_cb_depth(%rip)
     mov %r8, %r9
     mov %rcx, %r8
     mov %rdx, %rcx
@@ -3303,7 +3330,61 @@ wasm_tramp_common:
     mov %rdi, %rsi
     mov %rax, %rdi
     mov wasm_callback_fn(%rip), %r11
-    jmp *%r11
+    call *%r11
+.Lcb_done:
+    mov wasm_cb_depth(%rip), %r10
+    sub $1, %r10
+    mov %r10, wasm_cb_depth(%rip)
+    lea -48(%rbp), %rsp
+    pop %r11
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %rbx
+    pop %rbp
+    ret
+
+# wasm_callback_abandon(): back to the native caller of the innermost
+# callback, which returns 0; the native calls made within it are
+# forgotten. Nothing between is unwound.
+.globl wasm_callback_abandon
+wasm_callback_abandon:
+    mov wasm_cb_depth(%rip), %r10
+    test %r10, %r10
+    jz .Lcb_none
+    sub $1, %r10
+    mov %r10, wasm_cb_depth(%rip)
+    mov %r10, %r15
+    shl $6, %r15
+    lea wasm_cb_slots(%rip), %r11
+    add %r11, %r15
+    mov 0(%r15), %rbx
+    mov 8(%r15), %rbp
+    mov 16(%r15), %r12
+    mov 24(%r15), %r13
+    mov 32(%r15), %r14
+    mov 40(%r15), %rsp
+    mov 48(%r15), %r11
+    mov %r11, wasm_slot_depth(%rip)
+    mov $0, %rax
+    lea -48(%rbp), %rsp
+    pop %r11
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %rbx
+    pop %rbp
+    ret
+.Lcb_none:
+    ret
+
+# wasm_callback_depth(): how many callbacks are under way.
+.globl wasm_callback_depth
+wasm_callback_depth:
+    mov wasm_cb_depth(%rip), %rax
+    ret
 
 .section .data
 .align 8
@@ -3314,4 +3395,8 @@ wasm_slot_depth:
 wasm_abandoned_flag:
     .quad 0
 wasm_slots:
+    .skip 4096
+wasm_cb_depth:
+    .quad 0
+wasm_cb_slots:
     .skip 4096

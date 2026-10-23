@@ -251,6 +251,32 @@ host_reload(bytes: []i8@new) {
     }
 }
 
+// ---- faults as traps ----
+// A fatal signal (a bad pointer in native code the module called, an
+// abort) while a callback is under way: told with the interpreter's
+// frames, the callback abandoned (wasm_proxy_recover), UIKit goes on.
+// With no callback under way the handler returns and the process ends.
+extern sigaction(sig: int, act: []i8, old: int): int;
+
+extern addr_sig(f: fn(sig: int): int): int = l8_as_int;
+
+on_signal(sig: int): int {
+    say_int("fault: signal", sig);
+    if (!wasm_proxy_recover("fault")) say("(no callback to abandon: the process ends)");
+    0
+}
+
+catch_faults() {
+    // Darwin's struct sigaction: the handler, the mask (4 bytes), the flags
+    // (4 bytes: SA_NODEFER, so the signal stays deliverable after the
+    // handler is left by abandoning).
+    act: []i8 = new i8[16](0i8);
+    h: int = addr_sig(&on_signal);
+    for k in 0..8 act[k] = (h >> 8 * k) trunc i8;
+    act[12] = 16i8;
+    for sig in [11, 10, 4, 6, 8, 5] _r: int = sigaction(sig, act, 0)
+}
+
 // ---- the development server ----
 // Its address, host:port: the Settings app's (the Settings.bundle
 // tools/ios/hot.sh puts in the app, the key hot_server in the user
@@ -291,7 +317,7 @@ server_trim(b: []i8): int {
 
 session: int = 0;
 
-// The task under way: 1 a wait, 2 a build; what it has sent.
+// The task under way for builds: 1 a wait, 2 a build; what it has sent.
 task_kind: int = 0;
 
 task_got: []i8 = new i8[16777216](0i8);
@@ -299,6 +325,15 @@ task_got: []i8 = new i8[16777216](0i8);
 task_got_n: int = 0;
 
 since: int = 0;
+
+// The task for commands (the server's /next), and what it has sent.
+ctl_task: int = 0;
+
+ctl_got: []i8 = new i8[65536](0i8);
+
+ctl_got_n: int = 0;
+
+ctl_since: int = 0;
 
 // The directory of the executable (the app's bundle), from argv[0].
 bundle_dir(argv0: str): []i8@new {
@@ -333,6 +368,155 @@ start_task(kind: int, path: str) {
     request: int = msg1(cls("NSURLRequest"), sel("requestWithURL:"), url(path));
     task: int = msg1(session, sel("dataTaskWithRequest:"), request);
     msg(task, sel("resume"))
+}
+
+// ---- commands from the development machine (web/devctl.mjs) ----
+wait_for_command() {
+    if (session == 0) return;
+    ctl_got_n = 0;
+    request: int = msg1(cls("NSURLRequest"), sel("requestWithURL:"), url(path_num("/next?since=",
+        ctl_since)));
+    ctl_task = msg1(session, sel("dataTaskWithRequest:"), request);
+    msg(ctl_task, sel("resume"))
+}
+
+// "PATH" + the number, as a str.
+path_num(path: str, n: int): str@new {
+    b: []i8 = new i8[len(path) + 24](0i8);
+    k: int = 0;
+    for c in path {
+        b[k] = c;
+        k = k + 1
+    }
+    digits: []i8 = new i8[20](0i8);
+    nd: int = 0;
+    v: int = n;
+    if (v == 0) {
+        digits[0] = '0';
+        nd = 1
+    }
+    while (v > 0) {
+        digits[nd] = ('0' as int + v % 10) trunc i8;
+        v = v / 10;
+        nd = nd + 1
+    }
+    for i in 0..nd {
+        b[k] = digits[nd - 1 - i];
+        k = k + 1
+    }
+    out: []i8 = new i8[k](0i8);
+    memcpy(out, 0, b, 0, k);
+    cstr(out)
+}
+
+// The commands that came (lines of "ID<TAB>COMMAND"), each run.
+run_commands() {
+    at: int = 0;
+    while (at < ctl_got_n) {
+        end: int = at;
+        while (end < ctl_got_n && ctl_got[end] != '\n') end = end + 1;
+        tab: int = at;
+        while (tab < end && ctl_got[tab] != '\t') tab = tab + 1;
+        if (tab < end) {
+            id: int = 0;
+            for i in at..tab id = id * 10 + (ctl_got[i] - '0') as int;
+            if (id > ctl_since) ctl_since = id;
+            n: int = end - tab - 1;
+            cmd: []i8 = new i8[n](0i8);
+            memcpy(cmd, 0, ctl_got, tab + 1, n);
+            run_command(cmd)
+        }
+        at = end + 1
+    }
+}
+
+starts_with(b: []i8, word: str): bool {
+    if (len(b) < len(word)) return false;
+    for i in 0..len(word) {
+        if (b[i] != word[i]) return false
+    }
+    true
+}
+
+after_word(b: []i8, word: str): str@new {
+    n: int = len(b) - len(word) - 1;
+    if (n <= 0) return "";
+    out: []i8 = new i8[n](0i8);
+    memcpy(out, 0, b, len(word) + 1, n);
+    cstr(out)
+}
+
+extern notify_post(name: str): int;
+
+extern exit(code: int): noreturn;
+
+run_command(cmd: []i8) {
+    say("command:");
+    post_log(cmd, len(cmd));
+    if (starts_with(cmd, "shot")) screenshot() else if (starts_with(cmd, "notify ")) _n: int = notify_post(after_word(cmd,
+        "notify")) else if (starts_with(cmd, "reload")) start_task(2, "/build.wasm") else if (starts_with(cmd,
+        "exit")) exit(0) else if (starts_with(cmd, "say ")) say(after_word(cmd, "say")) else say("(unknown command)")
+}
+
+// ---- a screenshot, to the server ----
+extern begin_image(
+    w: f64,
+    h: f64,
+    opaque: int,
+    scale: f64
+): int = UIGraphicsBeginImageContextWithOptions;
+
+extern UIGraphicsGetImageFromCurrentImageContext(): int;
+
+extern UIGraphicsEndImageContext(): int;
+
+extern UIImagePNGRepresentation(image: int): int;
+
+extern msg_rect_bool(
+    receiver: int,
+    selector: int,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    after: int
+): int = objc_msgSend;
+
+screenshot() {
+    app: int = msg(cls("UIApplication"), sel("sharedApplication"));
+    windows: int = msg(app, sel("windows"));
+    if (windows == 0 || msg(windows, sel("count")) == 0) {
+        say("no window to shoot");
+        return
+    }
+    window: int = msg1(windows, sel("objectAtIndex:"), 0);
+    bounds: []f64 = msg_hfa(window, sel("bounds"), 0);
+    scale: f64 = msg_f(msg(cls("UIScreen"), sel("mainScreen")), sel("scale"));
+    _b: int = begin_image(bounds[2], bounds[3], 1, scale);
+    _d: int = msg_rect_bool(window, sel("drawViewHierarchyInRect:afterScreenUpdates:"),
+        0.0f64, 0.0f64, bounds[2], bounds[3], 1);
+    image: int = UIGraphicsGetImageFromCurrentImageContext();
+    _e: int = UIGraphicsEndImageContext();
+    png: int = if (image != 0) UIImagePNGRepresentation(image) else 0;
+    if (png == 0) {
+        say("no image");
+        return
+    }
+    n: int = msg(png, sel("length"));
+    if (n > len(task_got)) {
+        say("the screenshot is too big");
+        return
+    }
+    msg2(png, sel("getBytes:length:"), bytes_address(task_got), n);
+    request: int = msg1(cls("NSMutableURLRequest"), sel("requestWithURL:"), url("/shot"));
+    msg1(request, sel("setHTTPMethod:"), nsstring("POST"));
+    data: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(task_got),
+        n);
+    msg1(request, sel("setHTTPBody:"), data);
+    task: int = msg2(session_sync, sel("dataTaskWithRequest:completionHandler:"),
+        request, log_block);
+    if (task != 0) msg(task, sel("resume"));
+    say_int("screenshot sent, bytes", n)
 }
 
 wait_for_build() {
@@ -407,6 +591,14 @@ host_data(
     data: int
 ): int {
     n: int = msg(data, sel("length"));
+    if (_task == ctl_task && ctl_task != 0) {
+        if (ctl_got_n + n <= len(ctl_got)) {
+            msg2(data, sel("getBytes:length:"), bytes_address(ctl_got) + ctl_got_n,
+                n);
+            ctl_got_n = ctl_got_n + n
+        }
+        return 0
+    }
     if (task_got_n + n <= len(task_got)) {
         msg2(data, sel("getBytes:length:"), bytes_address(task_got) + task_got_n,
             n);
@@ -440,6 +632,17 @@ host_retry(_self: int, _cmd: int, _timer: int): int {
     0
 }
 
+retry_commands_later() {
+    if (delegate == 0) return;
+    _t: int = msg_timer(cls("NSTimer"), sel("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
+        2.0f64, delegate, sel("hotRetryCommands:"), 0, 0)
+}
+
+host_retry_commands(_self: int, _cmd: int, _timer: int): int {
+    wait_for_command();
+    0
+}
+
 host_done(
     _self: int,
     _cmd: int,
@@ -450,6 +653,14 @@ host_done(
     status: int = 0;
     response: int = msg(task, sel("response"));
     if (error == 0 && response != 0) status = msg(response, sel("statusCode"));
+    if (task == ctl_task && ctl_task != 0) {
+        ctl_task = 0;
+        if (status == 200) {
+            run_commands();
+            wait_for_command()
+        } else retry_commands_later();
+        return 0
+    }
     kind: int = task_kind;
     task_kind = 0;
     if (kind == 1) {
@@ -574,6 +785,7 @@ main(argc: int, argv: []str) noregion: int {
     add_method3(delegate_class, sel("URLSession:task:didCompleteWithError:"), &host_done,
         "v@:@@@");
     add_method1(delegate_class, sel("hotRetry:"), &host_retry, "v@:@");
+    add_method1(delegate_class, sel("hotRetryCommands:"), &host_retry_commands, "v@:@");
     add_protocol(delegate_class, "NSURLSessionDataDelegate");
     objc_registerClassPair(delegate_class);
     delegate = make("L8HotHost");
@@ -613,7 +825,11 @@ main(argc: int, argv: []str) noregion: int {
         say("no module to run");
         return 1
     }
-    if (server_n > 0) wait_for_build();
+    catch_faults();
+    if (server_n > 0) {
+        wait_for_build();
+        wait_for_command()
+    }
     host_run(module);
     0
 }
