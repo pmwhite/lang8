@@ -1,0 +1,544 @@
+tag wasm;
+
+use_tag std;
+
+// Persistent globals across instances (RELOAD.md), as web/reload.js does
+// it in JavaScript: read a module's `l8persist` section, decide how each
+// global of the new build takes the old one's value (the same type, a
+// changed one its fields and variants matched by name, or not at all), and
+// copy the values from the old instance's memory into the new one's before
+// it starts, what they point to once each, so sharing and cycles survive.
+import "sys.l8";
+
+PK_INT: int = 1;
+
+PK_UINT: int = 2;
+
+PK_FLOAT: int = 3;
+
+PK_BOOL: int = 4;
+
+PK_STR: int = 5;
+
+PK_OPTSTR: int = 6;
+
+PK_PTR: int = 7;
+
+PK_OPTPTR: int = 8;
+
+PK_SLICE: int = 9;
+
+PK_OPTSLICE: int = 10;
+
+PK_ARRAY: int = 11;
+
+PK_RECORD: int = 12;
+
+PK_ENUM: int = 13;
+
+type PField = {
+    name: []i8;
+    offset: int;
+    ty: int
+}
+
+type PVariant = {
+    name: []i8;
+    tag: int;
+    offset: int;
+    fields: []*PField
+}
+
+type PType = {
+    kind: int;
+    size: int;
+    // A pointer's, slice's or array's element type.
+    elem: int;
+    // An array's length.
+    n: int;
+    name: []i8;
+    tag_size: int;
+    fields: []*PField;
+    variants: []*PVariant
+}
+
+type PGlobal = {
+    name: []i8;
+    address: int;
+    flag: int;
+    ty: int
+}
+
+type Manifest = {
+    types: []*PType;
+    globals: []*PGlobal
+}
+
+p_no_field: *PField = new PField { name: "", offset: 0, ty: 0 };
+
+p_no_variant: *PVariant = new PVariant {
+    name: "",
+    tag: 0,
+    offset: 0,
+    fields: new *PField[0](p_no_field)
+};
+
+p_no_type: *PType = new PType {
+    kind: 0,
+    size: 0,
+    elem: 0,
+    n: 0,
+    name: "",
+    tag_size: 0,
+    fields: new *PField[0](p_no_field),
+    variants: new *PVariant[0](p_no_variant)
+};
+
+p_no_global: *PGlobal = new PGlobal {
+    name: "",
+    address: 0,
+    flag: 0,
+    ty: 0
+};
+
+pm_fields(r: *WasmReader) raises WasmFormat: []*PField@new {
+    n: int = wr_uleb(r);
+    fs: []*PField = new *PField[n](p_no_field);
+    for i in 0..n {
+        name: []i8 = wr_name(r);
+        off: int = wr_uleb(r);
+        fs[i] = new PField { name: name, offset: off, ty: wr_uleb(r) }
+    }
+    fs
+}
+
+// The manifest of a module; one with no globals for a module without the
+// section.
+wasm_manifest(m: *WasmModule@new) raises WasmFormat: *Manifest@new {
+    empty: *Manifest = new Manifest { types: new *PType[0](p_no_type), globals: new *PGlobal[0](p_no_global) };
+    if (m.persist == 0) return empty;
+    r: *WasmReader = new WasmReader { b: m.bytes, at: m.persist, end: m.persist_end };
+    if (wr_uleb(r) != 1) wr_fail("l8persist: unknown version");
+    ntypes: int = wr_uleb(r);
+    types: []*PType = new *PType[ntypes](p_no_type);
+    for i in 0..ntypes {
+        kind: int = wr_byte(r);
+        t: *PType = new PType {
+            kind: kind,
+            size: 0,
+            elem: 0,
+            n: 0,
+            name: "",
+            tag_size: 0,
+            fields: new *PField[0](p_no_field),
+            variants: new *PVariant[0](p_no_variant)
+        };
+        if (kind <= PK_OPTSTR) t.size = wr_uleb(r) else if (kind <= PK_OPTSLICE) {
+            t.elem = wr_uleb(r);
+            t.size = 8
+        } else if (kind == PK_ARRAY) {
+            t.elem = wr_uleb(r);
+            t.n = wr_uleb(r);
+            t.size = t.n * types[t.elem].size
+        } else if (kind == PK_RECORD) {
+            t.name = wr_name(r);
+            t.size = wr_uleb(r);
+            t.fields = pm_fields(r)
+        } else if (kind == PK_ENUM) {
+            t.name = wr_name(r);
+            t.size = wr_uleb(r);
+            t.tag_size = wr_uleb(r);
+            nv: int = wr_uleb(r);
+            t.variants = new *PVariant[nv](p_no_variant);
+            for k in 0..nv {
+                vname: []i8 = wr_name(r);
+                tag: int = wr_sleb(r);
+                off: int = wr_uleb(r);
+                t.variants[k] = new PVariant {
+                    name: vname,
+                    tag: tag,
+                    offset: off,
+                    fields: pm_fields(r)
+                }
+            }
+        } else wr_fail("l8persist: unknown type kind");
+        types[i] = t
+    }
+    ng: int = wr_uleb(r);
+    globals: []*PGlobal = new *PGlobal[ng](p_no_global);
+    for i in 0..ng {
+        gname: []i8 = wr_name(r);
+        addr: int = wr_uleb(r);
+        flag: int = wr_uleb(r);
+        globals[i] = new PGlobal {
+            name: gname,
+            address: addr,
+            flag: flag,
+            ty: wr_uleb(r)
+        }
+    }
+    new Manifest { types: types, globals: globals }
+}
+
+// ---- types across versions ----
+// A new field can be given a value of t without the old program's help:
+// zero, "" or [], null, or such fields; not a `*T`.
+p_defaultable(m: *Manifest, ti: int, seen: []bool): bool {
+    t: *PType = m.types[ti];
+    if (t.kind == PK_PTR) return false;
+    if (t.kind == PK_ARRAY) return p_defaultable(m, t.elem, seen);
+    if (t.kind == PK_RECORD || t.kind == PK_ENUM) {
+        if (seen[ti]) return true;
+        seen[ti] = true;
+        fs: []*PField = if (t.kind == PK_RECORD) t.fields else t.variants[0].fields;
+        for f in fs {
+            if (!p_defaultable(m, f.ty, seen)) return false
+        }
+        return true
+    }
+    true
+}
+
+// How a value of the old type oi can be the new type ni's: 1 the same, 2
+// carried into a changed type, 0 not at all. Recursive types are assumed
+// the same while being compared.
+C_SAME: int = 1;
+
+C_MIGRATE: int = 2;
+
+C_NONE: int = 0;
+
+C_UNKNOWN: int = 0 - 1;
+
+p_find_field(fs: []*PField, name: []i8): ?*PField {
+    for f in fs {
+        if (streq(f.name, name)) return f
+    }
+    null
+}
+
+p_find_variant(vs: []*PVariant, name: []i8): ?*PVariant {
+    for v in vs {
+        if (streq(v.name, name)) return v
+    }
+    null
+}
+
+p_compat_fields(
+    om: *Manifest,
+    ofs: []*PField,
+    nm: *Manifest,
+    nfs: []*PField,
+    memo: []int
+): int {
+    r: int = C_SAME;
+    for f in nfs {
+        g: ?*PField = p_find_field(ofs, f.name);
+        if (g == null) {
+            if (!p_defaultable(nm, f.ty, new bool[len(nm.types)](false))) return C_NONE;
+            r = C_MIGRATE
+        } else {
+            c: int = p_compat(om, g.ty, nm, f.ty, memo);
+            if (c == C_NONE) return C_NONE;
+            if (c == C_MIGRATE || g.offset != f.offset) r = C_MIGRATE
+        }
+    }
+    for g2 in ofs {
+        if (p_find_field(nfs, g2.name) == null) r = C_MIGRATE
+    }
+    r
+}
+
+p_compat(
+    om: *Manifest,
+    oi: int,
+    nm: *Manifest,
+    ni: int,
+    memo: []int
+): int {
+    key: int = oi * len(nm.types) + ni;
+    if (memo[key] != C_UNKNOWN) return memo[key];
+    memo[key] = C_SAME;
+    o: *PType = om.types[oi];
+    n: *PType = nm.types[ni];
+    r: int = C_NONE;
+    if (o.kind == n.kind) {
+        k: int = n.kind;
+        if (k <= PK_BOOL) r = (if (o.size == n.size) C_SAME else C_NONE) else if (k <= PK_OPTSTR) r = C_SAME else if (k <= PK_OPTSLICE) r = p_compat(om,
+            o.elem, nm, n.elem, memo) else if (k == PK_ARRAY) r = (if (o.n == n.n) p_compat(om,
+            o.elem, nm, n.elem, memo) else C_NONE) else if (k == PK_RECORD) r = p_compat_fields(om,
+            o.fields, nm, n.fields, memo) else {
+            r = (if (o.tag_size == n.tag_size) C_SAME else C_MIGRATE);
+            for ov in o.variants {
+                if (r != C_NONE) {
+                    nv: ?*PVariant = p_find_variant(n.variants, ov.name);
+                    if (nv == null) r = C_NONE else {
+                        f: int = p_compat_fields(om, ov.fields, nm, nv.fields, memo);
+                        if (f == C_NONE) r = C_NONE else if (f == C_MIGRATE || nv.tag != ov.tag || nv.offset != ov.offset) r = C_MIGRATE
+                    }
+                }
+            }
+        }
+    } else if (o.kind == PK_STR && n.kind == PK_OPTSTR) r = C_MIGRATE else if (o.kind == PK_PTR && n.kind == PK_OPTPTR || o.kind == PK_SLICE && n.kind == PK_OPTSLICE) {
+        // A value may become optional, never the reverse.
+        r = (if (p_compat(om, o.elem, nm, n.elem, memo) == C_NONE) C_NONE else C_MIGRATE)
+    }
+    memo[key] = r;
+    r
+}
+
+// ---- the transfer ----
+type Transfer = {
+    old: *WasmInstance;
+    om: *Manifest;
+    neu: *WasmInstance;
+    nm: *Manifest;
+    // Old address and new type to new address: open addressing.
+    keys: []int;
+    vals: []int;
+    used: int;
+    // What happened to each global, as lines.
+    lines: []str;
+    nlines: int;
+    carried: int;
+    migrated: int;
+    initialized: int;
+    dropped: int
+}
+
+t_key(addr: int, ti: int): int {
+    addr * 1048576 + ti + 1
+}
+
+t_find(t: *Transfer, key: int): int {
+    mask: int = len(t.keys) - 1;
+    i: int = key * -7046029254386353131 >> 40 & mask;
+    while (t.keys[i] != 0) {
+        if (t.keys[i] == key) return t.vals[i];
+        i = i + 1 & mask
+    }
+    0 - 1
+}
+
+t_put(t: *Transfer@new, key: int, v: int) {
+    if ((t.used + 1) * 2 > len(t.keys)) {
+        okeys: []int = t.keys;
+        ovals: []int = t.vals;
+        t.keys = new int[len(okeys) * 2](0);
+        t.vals = new int[len(okeys) * 2](0);
+        t.used = 0;
+        for i in 0..len(okeys) {
+            if (okeys[i] != 0) t_put(t, okeys[i], ovals[i])
+        }
+    }
+    mask: int = len(t.keys) - 1;
+    i: int = key * -7046029254386353131 >> 40 & mask;
+    while (t.keys[i] != 0 && t.keys[i] != key) i = i + 1 & mask;
+    if (t.keys[i] == 0) t.used = t.used + 1;
+    t.keys[i] = key;
+    t.vals[i] = v
+}
+
+t_say(t: *Transfer@new, name: []i8, what: str) {
+    if (t.nlines >= len(t.lines)) return;
+    b: []i8 = new i8[len(name) + 2 + len(what)](0i8);
+    memcpy(b, 0, name, 0, len(name));
+    b[len(name)] = ':';
+    b[len(name) + 1] = ' ';
+    memcpy(b, len(name) + 2, bytes(what), 0, len(what));
+    t.lines[t.nlines] = cstr(b);
+    t.nlines = t.nlines + 1
+}
+
+// A new field's value: zero, "" or [] where zero is no value.
+t_default(t: *Transfer@new, ni: int, na: int) noregion {
+    n: *PType = t.nm.types[ni];
+    neu: *WasmInstance = t.neu;
+    for i in 0..n.size neu.mem8[na + i] = 0i8;
+    if (n.kind == PK_STR || n.kind == PK_SLICE) {
+        key: int = t_key(0, ni);
+        np: int = t_find(t, key);
+        if (np < 0) {
+            np = wasm_alloc(neu, 9) + 8;
+            t_put(t, key, np)
+        }
+        wi_store64(neu, na, np)
+    } else if (n.kind == PK_ARRAY) {
+        es: int = t.nm.types[n.elem].size;
+        for k in 0..n.n t_default(t, n.elem, na + k * es)
+    } else if (n.kind == PK_RECORD) {
+        for f in n.fields t_default(t, f.ty, na + f.offset)
+    } else if (n.kind == PK_ENUM) {
+        v: *PVariant = n.variants[0];
+        wi_store_int(neu, na, n.tag_size, v.tag);
+        for f in v.fields t_default(t, f.ty, na + v.offset + f.offset)
+    }
+}
+
+wi_store_int(
+    inst: *WasmInstance,
+    a: int,
+    size: int,
+    v: int
+) {
+    if (size == 1) inst.mem8[a] = v trunc i8 else if (size == 4) wi_store32(inst,
+        a, v) else wi_store64(inst, a, v)
+}
+
+wi_load_int(inst: *WasmInstance, a: int, size: int): int {
+    if (size == 1) inst.mem8[a] as int else if (size == 4) sx32(wi_load32u(inst, a)) else wi_load64(inst,
+        a)
+}
+
+t_copy_fields(
+    t: *Transfer@new,
+    ofs: []*PField,
+    oa: int,
+    nfs: []*PField,
+    na: int
+) noregion {
+    for f in nfs {
+        g: ?*PField = p_find_field(ofs, f.name);
+        if (g != null) t_copy(t, g.ty, oa + g.offset, f.ty, na + f.offset) else t_default(t,
+            f.ty, na + f.offset)
+    }
+}
+
+// Copy the old value of type oi at oa into the new instance as type ni at na.
+t_copy(
+    t: *Transfer@new,
+    oi: int,
+    oa: int,
+    ni: int,
+    na: int
+) noregion {
+    o: *PType = t.om.types[oi];
+    n: *PType = t.nm.types[ni];
+    old: *WasmInstance = t.old;
+    neu: *WasmInstance = t.neu;
+    k: int = n.kind;
+    if (k <= PK_BOOL) memcpy(neu.mem8, na, old.mem8, oa, n.size) else if (k <= PK_OPTSTR) {
+        p: int = wi_load64(old, oa);
+        if (p == 0) {
+            wi_store64(neu, na, 0);
+            return
+        }
+        key: int = t_key(p, ni);
+        np: int = t_find(t, key);
+        if (np < 0) {
+            n2: int = wi_load64(old, p - 8);
+            np = wasm_alloc(neu, 8 + n2 + 1);
+            wi_store64(neu, np, n2);
+            np = np + 8;
+            memcpy(neu.mem8, np, old.mem8, p, n2);
+            neu.mem8[np + n2] = 0i8;
+            t_put(t, key, np)
+        }
+        wi_store64(neu, na, np)
+    } else if (k == PK_PTR || k == PK_OPTPTR) {
+        p2: int = wi_load64(old, oa);
+        if (p2 == 0) {
+            wi_store64(neu, na, 0);
+            return
+        }
+        key2: int = t_key(p2, ni);
+        np2: int = t_find(t, key2);
+        if (np2 < 0) {
+            es: int = t.nm.types[n.elem].size;
+            np2 = wasm_alloc(neu, if (es < 8) 8 else es);
+            t_put(t, key2, np2);
+            t_copy(t, o.elem, p2, n.elem, np2)
+        }
+        wi_store64(neu, na, np2)
+    } else if (k == PK_SLICE || k == PK_OPTSLICE) {
+        p3: int = wi_load64(old, oa);
+        if (p3 == 0) {
+            wi_store64(neu, na, 0);
+            return
+        }
+        key3: int = t_key(p3, ni);
+        np3: int = t_find(t, key3);
+        if (np3 < 0) {
+            cnt: int = wi_load64(old, p3 - 8);
+            oes: int = t.om.types[o.elem].size;
+            nes: int = t.nm.types[n.elem].size;
+            np3 = wasm_alloc(neu, 8 + cnt * nes);
+            wi_store64(neu, np3, cnt);
+            np3 = np3 + 8;
+            t_put(t, key3, np3);
+            for i in 0..cnt t_copy(t, o.elem, p3 + i * oes, n.elem, np3 + i * nes)
+        }
+        wi_store64(neu, na, np3)
+    } else if (k == PK_ARRAY) {
+        oes2: int = t.om.types[o.elem].size;
+        nes2: int = t.nm.types[n.elem].size;
+        for i in 0..n.n t_copy(t, o.elem, oa + i * oes2, n.elem, na + i * nes2)
+    } else if (k == PK_RECORD) t_copy_fields(t, o.fields, oa, n.fields, na) else {
+        tag: int = wi_load_int(old, oa, o.tag_size);
+        ov: ?*PVariant = null;
+        for v in o.variants {
+            if (v.tag == tag) ov = v
+        }
+        if (ov == null) return;
+        nv: ?*PVariant = p_find_variant(n.variants, ov.name);
+        if (nv == null) return;
+        wi_store_int(neu, na, n.tag_size, nv.tag);
+        t_copy_fields(t, ov.fields, oa + ov.offset, nv.fields, na + nv.offset)
+    }
+}
+
+// Carry old's persistent globals into neu (an instance that has not run:
+// its heap empty, its initializers to come), each by the table in
+// RELOAD.md. The report says what happened to each global.
+wasm_transfer(old: *WasmInstance@new, neu: *WasmInstance@new) noregion raises WasmFormat: *Transfer@new {
+    t: *Transfer = new Transfer {
+        old: old,
+        om: wasm_manifest(old.m),
+        neu: neu,
+        nm: wasm_manifest(neu.m),
+        keys: new int[65536](0),
+        vals: new int[65536](0),
+        used: 0,
+        lines: new str[1024](""),
+        nlines: 0,
+        carried: 0,
+        migrated: 0,
+        initialized: 0,
+        dropped: 0
+    };
+    memo: []int = new int[len(t.om.types) * len(t.nm.types) + 1](C_UNKNOWN);
+    for g in t.nm.globals {
+        o: ?*PGlobal = null;
+        for og in t.om.globals {
+            if (streq(og.name, g.name)) o = og
+        }
+        if (o == null) {
+            t.initialized = t.initialized + 1;
+            t_say(t, g.name, "new; its initializer runs")
+        } else {
+            c: int = p_compat(t.om, o.ty, t.nm, g.ty, memo);
+            if (c == C_NONE) {
+                t.initialized = t.initialized + 1;
+                t_say(t, g.name, "its type changed so that the value cannot follow; its initializer runs")
+            } else {
+                t_copy(t, o.ty, o.address, g.ty, g.address);
+                if (g.flag != 0) wi_store64(neu, g.flag, 1);
+                if (c == C_SAME) t.carried = t.carried + 1 else {
+                    t.migrated = t.migrated + 1;
+                    t_say(t, g.name, "carried into its changed type")
+                }
+            }
+        }
+    }
+    for og2 in t.om.globals {
+        found: bool = false;
+        for g2 in t.nm.globals {
+            if (streq(g2.name, og2.name)) found = true
+        }
+        if (!found) {
+            t.dropped = t.dropped + 1;
+            t_say(t, og2.name, "gone; dropped")
+        }
+    }
+    t
+}

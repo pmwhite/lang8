@@ -1,0 +1,350 @@
+tag wasm;
+
+use_tag std;
+
+// A WebAssembly module as `l8 wasm` writes one (web/README.md, "Modules"),
+// decoded from its bytes: its function types, imports (all functions, from
+// "env"), functions (their type, locals and body), one table of function
+// indices, one memory, globals, exports, one data segment, its tags, and
+// the custom sections the interpreter and the reloader read (`name`,
+// `l8persist`). The bytes are kept; bodies are decoded by the interpreter
+// as they are first called (interp.l8).
+import "../../stdlib/print.l8";
+
+exception WasmFormat {
+    msg: str
+}
+
+// A function type: parameter and result value types (WT_* bytes).
+type WasmSig = {
+    params: []i8;
+    results: []i8
+}
+
+type WasmImport = {
+    name: []i8;
+    sig: int
+}
+
+type WasmFunc = {
+    sig: int;
+    // Declared locals (past the parameters).
+    nlocals: int;
+    // The body's expression bytes in the module.
+    body: int;
+    body_end: int;
+    // Decoded code (interp.l8), once called.
+    code: []int;
+    name: []i8
+}
+
+type WasmExport = {
+    name: []i8;
+    kind: int;
+    index: int
+}
+
+type WasmModule = {
+    bytes: []i8;
+    sigs: []*WasmSig;
+    imports: []*WasmImport;
+    // Defined functions: function index nimports + i.
+    funcs: []*WasmFunc;
+    table: []int;
+    // Initial pages.
+    pages: int;
+    // Each global's type (WT_*) and initial value.
+    global_types: []i8;
+    global_inits: []int;
+    exports: []*WasmExport;
+    // The one data segment: where it goes, and its bytes in the module.
+    data_at: int;
+    data: int;
+    data_len: int;
+    ntags: int;
+    // Custom sections, as byte ranges (0, 0 when absent).
+    persist: int;
+    persist_end: int;
+    names: int;
+    names_end: int
+}
+
+WT_I32: int = 127;
+
+WT_I64: int = 126;
+
+WT_F32: int = 125;
+
+WT_F64: int = 124;
+
+WT_VOID: int = 64;
+
+// ---- reading ----
+type WasmReader = {
+    b: []i8;
+    at: int;
+    end: int
+}
+
+wr_fail(msg: str@immortal) raises WasmFormat: noreturn {
+    raise WasmFormat { msg: msg }
+}
+
+wr_byte(r: *WasmReader) raises WasmFormat: int {
+    if (r.at >= r.end) wr_fail("truncated module");
+    v: int = r.b[r.at] as int & 255;
+    r.at = r.at + 1;
+    v
+}
+
+wr_uleb(r: *WasmReader) raises WasmFormat: int {
+    v: int = 0;
+    shift: int = 0;
+    done: bool = false;
+    while (!done) {
+        c: int = wr_byte(r);
+        v = v | (c & 127) << shift;
+        shift = shift + 7;
+        if ((c & 128) == 0) done = true
+    }
+    v
+}
+
+wr_sleb(r: *WasmReader) raises WasmFormat: int {
+    v: int = 0;
+    shift: int = 0;
+    done: bool = false;
+    c: int = 0;
+    while (!done) {
+        c = wr_byte(r);
+        v = v | (c & 127) << shift;
+        shift = shift + 7;
+        if ((c & 128) == 0) done = true
+    }
+    if (shift < 64 && (c & 64) != 0) v = v | 0 - (1 << shift);
+    v
+}
+
+wr_name(r: *WasmReader) raises WasmFormat: []i8@new {
+    n: int = wr_uleb(r);
+    if (r.at + n > r.end) wr_fail("truncated name");
+    s: []i8 = new i8[n](0i8);
+    for i in 0..n s[i] = r.b[r.at + i];
+    r.at = r.at + n;
+    s
+}
+
+// A constant expression: one i32.const or i64.const, then end.
+wr_const(r: *WasmReader) raises WasmFormat: int {
+    op: int = wr_byte(r);
+    v: int = 0;
+    if (op == 65 || op == 66) v = wr_sleb(r) else wr_fail("unsupported constant expression");
+    if (wr_byte(r) != 11) wr_fail("constant expression without end");
+    if (op == 65) v & 4294967295 else v
+}
+
+// ---- the module ----
+wasm_decode(bytes: []i8@new) raises WasmFormat: *WasmModule@new {
+    m: *WasmModule = new WasmModule {
+        bytes: bytes,
+        sigs: new *WasmSig[0](new WasmSig { params: "", results: "" }),
+        imports: new *WasmImport[0](new WasmImport { name: "", sig: 0 }),
+        funcs: new *WasmFunc[0](new WasmFunc {
+            sig: 0,
+            nlocals: 0,
+            body: 0,
+            body_end: 0,
+            code: new int[0](0),
+            name: ""
+        }),
+        table: new int[0](0),
+        pages: 0,
+        global_types: new i8[0](0i8),
+        global_inits: new int[0](0),
+        exports: new *WasmExport[0](new WasmExport { name: "", kind: 0, index: 0 }),
+        data_at: 0,
+        data: 0,
+        data_len: 0,
+        ntags: 0,
+        persist: 0,
+        persist_end: 0,
+        names: 0,
+        names_end: 0
+    };
+    r: *WasmReader = new WasmReader { b: bytes, at: 0, end: len(bytes) };
+    if (len(bytes) < 8 || bytes[0] != 0i8 || bytes[1] != 'a' || bytes[2] != 's' || bytes[3] != 'm') wr_fail("not a wasm module");
+    r.at = 8;
+    func_sigs: []int = new int[0](0);
+    while (r.at < r.end) {
+        id: int = wr_byte(r);
+        size: int = wr_uleb(r);
+        start: int = r.at;
+        send: int = start + size;
+        if (send > r.end) wr_fail("truncated section");
+        if (id == 0) {
+            name: []i8 = wr_name(r);
+            if (streq(name, "l8persist")) {
+                m.persist = r.at;
+                m.persist_end = send
+            } else if (streq(name, "name")) {
+                m.names = r.at;
+                m.names_end = send
+            }
+        } else if (id == 1) {
+            n: int = wr_uleb(r);
+            m.sigs = new *WasmSig[n](new WasmSig { params: "", results: "" });
+            for i in 0..n {
+                if (wr_byte(r) != 96) wr_fail("expected a function type");
+                np: int = wr_uleb(r);
+                ps: []i8 = new i8[np](0i8);
+                for k in 0..np ps[k] = wr_byte(r) trunc i8;
+                nr: int = wr_uleb(r);
+                rs: []i8 = new i8[nr](0i8);
+                for k in 0..nr rs[k] = wr_byte(r) trunc i8;
+                m.sigs[i] = new WasmSig { params: ps, results: rs }
+            }
+        } else if (id == 2) {
+            n2: int = wr_uleb(r);
+            m.imports = new *WasmImport[n2](new WasmImport { name: "", sig: 0 });
+            for i in 0..n2 {
+                _module: []i8 = wr_name(r);
+                iname: []i8 = wr_name(r);
+                kind: int = wr_byte(r);
+                if (kind != 0) wr_fail("only function imports are supported");
+                m.imports[i] = new WasmImport { name: iname, sig: wr_uleb(r) }
+            }
+        } else if (id == 3) {
+            n3: int = wr_uleb(r);
+            func_sigs = new int[n3](0);
+            for i in 0..n3 func_sigs[i] = wr_uleb(r)
+        } else if (id == 4) {
+            if (wr_uleb(r) != 1) wr_fail("one table expected");
+            if (wr_byte(r) != 112) wr_fail("a table of functions expected");
+            flags: int = wr_byte(r);
+            tn: int = wr_uleb(r);
+            if ((flags & 1) != 0) _max: int = wr_uleb(r);
+            m.table = new int[tn](0 - 1)
+        } else if (id == 5) {
+            if (wr_uleb(r) != 1) wr_fail("one memory expected");
+            mflags: int = wr_byte(r);
+            m.pages = wr_uleb(r);
+            if ((mflags & 1) != 0) _mmax: int = wr_uleb(r)
+        } else if (id == 6) {
+            ng: int = wr_uleb(r);
+            m.global_types = new i8[ng](0i8);
+            m.global_inits = new int[ng](0);
+            for i in 0..ng {
+                m.global_types[i] = wr_byte(r) trunc i8;
+                _mut: int = wr_byte(r);
+                m.global_inits[i] = wr_const(r)
+            }
+        } else if (id == 7) {
+            ne: int = wr_uleb(r);
+            m.exports = new *WasmExport[ne](new WasmExport { name: "", kind: 0, index: 0 });
+            for i in 0..ne {
+                ename: []i8 = wr_name(r);
+                ekind: int = wr_byte(r);
+                m.exports[i] = new WasmExport { name: ename, kind: ekind, index: wr_uleb(r) }
+            }
+        } else if (id == 9) {
+            nseg: int = wr_uleb(r);
+            for _s in 0..nseg {
+                if (wr_byte(r) != 0) wr_fail("an active element segment expected");
+                at: int = wr_const(r);
+                cnt: int = wr_uleb(r);
+                for k in 0..cnt {
+                    f: int = wr_uleb(r);
+                    if (at + k < len(m.table)) m.table[at + k] = f
+                }
+            }
+        } else if (id == 10) {
+            nb: int = wr_uleb(r);
+            if (nb != len(func_sigs)) wr_fail("function and code counts differ");
+            m.funcs = new *WasmFunc[nb](new WasmFunc {
+                sig: 0,
+                nlocals: 0,
+                body: 0,
+                body_end: 0,
+                code: new int[0](0),
+                name: ""
+            });
+            for i in 0..nb {
+                bsize: int = wr_uleb(r);
+                bend: int = r.at + bsize;
+                nl: int = 0;
+                ngroups: int = wr_uleb(r);
+                for _g in 0..ngroups {
+                    cnt2: int = wr_uleb(r);
+                    _ty: int = wr_byte(r);
+                    nl = nl + cnt2
+                }
+                m.funcs[i] = new WasmFunc {
+                    sig: func_sigs[i],
+                    nlocals: nl,
+                    body: r.at,
+                    body_end: bend,
+                    code: new int[0](0),
+                    name: ""
+                };
+                r.at = bend
+            }
+        } else if (id == 11) {
+            nd: int = wr_uleb(r);
+            if (nd != 1) wr_fail("one data segment expected");
+            if (wr_byte(r) != 0) wr_fail("an active data segment expected");
+            m.data_at = wr_const(r);
+            m.data_len = wr_uleb(r);
+            m.data = r.at
+        } else if (id == 13) m.ntags = wr_uleb(r);
+        r.at = send
+    }
+    wasm_read_names(m);
+    m
+}
+
+// The name section's function names, for messages and for the reloader's
+// callbacks.
+wasm_read_names(m: *WasmModule@new) raises WasmFormat {
+    if (m.names == 0) return;
+    r: *WasmReader = new WasmReader { b: m.bytes, at: m.names, end: m.names_end };
+    ni: int = len(m.imports);
+    while (r.at < r.end) {
+        kind: int = wr_byte(r);
+        size: int = wr_uleb(r);
+        send: int = r.at + size;
+        if (kind == 1) {
+            n: int = wr_uleb(r);
+            for _i in 0..n {
+                idx: int = wr_uleb(r);
+                name: []i8 = wr_name(r);
+                if (idx >= ni && idx - ni < len(m.funcs)) m.funcs[idx - ni].name = name
+            }
+        }
+        r.at = send
+    }
+}
+
+wasm_export(m: *WasmModule, name: str, kind: int): int {
+    for e in m.exports {
+        if (e.kind == kind && streq(e.name, bytes(name))) return e.index
+    }
+    0 - 1
+}
+
+// The function index of an export, -1 if there is none.
+wasm_export_function(m: *WasmModule, name: str): int {
+    wasm_export(m, name, 0)
+}
+
+wasm_function_name(m: *WasmModule, f: int): []i8@m {
+    ni: int = len(m.imports);
+    if (f < ni) m.imports[f].name else if (f - ni < len(m.funcs)) m.funcs[f - ni].name else ""
+}
+
+streq(a: []i8, b: []i8): bool {
+    if (len(a) != len(b)) return false;
+    for i in 0..len(a) {
+        if (a[i] != b[i]) return false
+    }
+    true
+}

@@ -1,0 +1,1281 @@
+tag wasm;
+
+use_tag std;
+
+// An interpreter for the modules `l8 wasm` writes (README.md). A function's
+// body is decoded once, when first called, into words (an operation, then
+// its immediates), every branch resolved to its target and the operand
+// stack height it lands at, so running it is a loop over those words. All
+// values are 64-bit ints: an i32 is kept as its unsigned value, a float as
+// its bits. Memory is one mapped region that never moves, read as bytes
+// and, 8 bytes in, as words (native.s). Frames, operands and exception
+// handlers live in the instance; a host import is an L8 function the host
+// gives, called with the arguments as ints (floats as their bits).
+import "module.l8";
+
+native "native.s";
+
+extern wasm_mem_map(size: int): []i8;
+
+extern wasm_mem_words(m: []i8): []int;
+
+extern l8_f64_bits(x: f64): int;
+
+extern l8_bits_f64(x: int): f64;
+
+extern l8_f32_bits(x: f32): int;
+
+extern l8_bits_f32(x: int): f32;
+
+exception WasmTrap {
+    msg: str
+}
+
+// WASMTRACE=1 in the environment: every call and import, on stderr.
+wi_trace: bool = false;
+
+extern wi_trace_write(fd: int, data: []i8, n: int): int = l8_std_write;
+
+tr_text(s: str) {
+    b: []i8 = bytes(s);
+    _w: int = wi_trace_write(2, b, len(b))
+}
+
+tr_bytes(b: []i8) {
+    _w: int = wi_trace_write(2, b, len(b))
+}
+
+tr_int(v: int) {
+    b: []i8 = new i8[24](0i8);
+    n: int = 0;
+    neg: bool = v < 0;
+    u: int = if (neg) 0 - v else v;
+    if (u == 0) {
+        b[0] = '0';
+        n = 1
+    }
+    while (u > 0) {
+        b[n] = ('0' as int + u % 10) trunc i8;
+        u = u / 10;
+        n = n + 1
+    }
+    if (neg) {
+        b[n] = '-';
+        n = n + 1
+    }
+    out: []i8 = new i8[n](0i8);
+    for i in 0..n out[i] = b[n - 1 - i];
+    tr_bytes(out)
+}
+
+// ---- the decoded operations ----
+OP_UNREACHABLE: int = 0;
+
+// if ELSE_PC: pop a condition; zero goes to ELSE_PC.
+OP_IF: int = 1;
+
+OP_JMP: int = 2;
+
+// br PC HEIGHT ARITY HPOP: keep ARITY values, the stack at HEIGHT (over the
+// frame's operand base), HPOP handlers let go, then PC.
+OP_BR: int = 3;
+
+OP_BRIF: int = 4;
+
+// br_table N, then N + 1 targets of four words.
+OP_BRTABLE: int = 5;
+
+OP_RET: int = 6;
+
+OP_CALL: int = 7;
+
+OP_CALLI: int = 8;
+
+// try PC HEIGHT ARITY HPOP: a handler, to the label at PC as a branch.
+OP_TRY: int = 9;
+
+OP_HPOP: int = 10;
+
+OP_THROW: int = 11;
+
+OP_DROP: int = 12;
+
+OP_SELECT: int = 13;
+
+OP_LGET: int = 16;
+
+OP_LSET: int = 17;
+
+OP_LTEE: int = 18;
+
+OP_GGET: int = 19;
+
+OP_GSET: int = 20;
+
+OP_CONST: int = 21;
+
+OP_MEMSIZE: int = 22;
+
+OP_MEMGROW: int = 23;
+
+OP_MEMCOPY: int = 24;
+
+OP_MEMFILL: int = 25;
+
+OP_LOAD64: int = 32;
+
+OP_LOAD8U: int = 33;
+
+OP_LOAD16U: int = 34;
+
+OP_LOAD32S: int = 35;
+
+OP_LOAD32U: int = 36;
+
+OP_STORE64: int = 37;
+
+OP_STORE8: int = 38;
+
+OP_STORE16: int = 39;
+
+OP_STORE32: int = 40;
+
+OP_LOAD8S: int = 41;
+
+OP_LOAD16S: int = 42;
+
+// i32.load8_s and i32.load16_s: sign-extended to 32 bits.
+OP_LOAD8S32: int = 43;
+
+OP_LOAD16S32: int = 44;
+
+// Numeric operations keep wasm's order within each group: i32 (48 eqz, 49
+// to 58 comparisons, 59 to 76 clz..rotr), i64 (80..108 likewise), floats
+// (112..123 comparisons, 124..137 f32 abs..copysign, 138..151 f64),
+// conversions (152..181 as 0xA7..0xC4), saturating truncations (182..189).
+OP_I32_EQZ: int = 48;
+
+OP_I32_CLZ: int = 59;
+
+OP_I64_EQZ: int = 80;
+
+OP_I64_CLZ: int = 91;
+
+OP_F32_EQ: int = 112;
+
+OP_F64_EQ: int = 118;
+
+OP_F32_ABS: int = 124;
+
+OP_F64_ABS: int = 138;
+
+OP_CONVERT: int = 152;
+
+OP_SAT: int = 182;
+
+M32: int = 4294967295;
+
+// ---- the instance ----
+WI_FRAME: int = 6;
+
+WI_HANDLER: int = 4;
+
+type WasmInstance = {
+    m: *WasmModule;
+    mem8: []i8;
+    mem64: []int;
+    pages: int;
+    max_pages: int;
+    globals: []int;
+    table: []int;
+    // Operands and locals.
+    vals: []int;
+    sp: int;
+    // Frames: function, return pc, caller's fp, caller's operand base,
+    // handler count at entry, caller's function.
+    frames: []int;
+    nframes: int;
+    // Handlers: frame, target pc, height, handlers to let go besides.
+    handlers: []int;
+    nhandlers: int;
+    host: fn(inst: *WasmInstance, imp: int, args: []int, n: int) noregion: int;
+    // Arguments to a host call.
+    args: []int;
+    // Set by a host's exit: the run unwinds to the host with the code.
+    exiting: bool;
+    exit_code: int;
+    // Set by a trap (an unreachable, a bad call, division by zero, an
+    // exception with no handler): the run unwinds with its message.
+    trapped: bool;
+    trap: str;
+    // Nested runs under way (a host calling back in).
+    depth: int;
+    // The host's own: a pointer it keeps beside the instance.
+    host_data: int;
+    // Distinguishes instances (a host binding its imports once each).
+    id: int
+}
+
+wi_next_id: int = 1;
+
+exception WasmNoMemory;
+
+// An instance of m, its memory of max_mb megabytes reserved, the data
+// segment placed and the table filled; nothing has run. host answers every
+// import.
+wasm_instantiate(m: *WasmModule@new, max_mb: int, host: fn(inst: *WasmInstance, imp: int, args: []int, n: int) noregion: int) noregion raises WasmNoMemory, WasmFormat: *WasmInstance@new {
+    size: int = max_mb * 1048576;
+    mem8: []i8 = wasm_mem_map(size);
+    if (len(mem8) == 0) raise WasmNoMemory;
+    inst: *WasmInstance = new WasmInstance {
+        m: m,
+        mem8: mem8,
+        mem64: wasm_mem_words(mem8),
+        pages: m.pages,
+        max_pages: size / 65536,
+        globals: new int[len(m.global_inits)](0),
+        table: new int[len(m.table)](0),
+        vals: new int[1048576](0),
+        sp: 0,
+        frames: new int[65536 * WI_FRAME](0),
+        nframes: 0,
+        handlers: new int[8192 * WI_HANDLER](0),
+        nhandlers: 0,
+        host: host,
+        args: new int[64](0),
+        exiting: false,
+        exit_code: 0,
+        trapped: false,
+        trap: "",
+        depth: 0,
+        host_data: 0,
+        id: wi_next_id
+    };
+    wi_next_id = wi_next_id + 1;
+    for i in 0..len(m.global_inits) inst.globals[i] = m.global_inits[i];
+    for i in 0..len(m.table) inst.table[i] = m.table[i];
+    memcpy(mem8, m.data_at, m.bytes, m.data, m.data_len);
+    for i in 0..len(m.funcs) {
+        if (len(m.funcs[i].code) == 0) wasm_decode_function(m, i)
+    }
+    inst
+}
+
+wasm_global_index(inst: *WasmInstance, name: str): int {
+    wasm_export(inst.m, name, 3)
+}
+
+// ---- memory ----
+wi_load64(inst: *WasmInstance, a: int): int {
+    if ((a & 7) == 0) return inst.mem64[(a >> 3) - 1];
+    b: []i8 = inst.mem8;
+    b[a] as int & 255 | (b[a + 1] as int & 255) << 8 | (b[a + 2] as int & 255) << 16 | (b[a + 3] as int & 255) << 24 | (b[a + 4] as int & 255) << 32 | (b[a + 5] as int & 255) << 40 | (b[a + 6] as int & 255) << 48 | b[a + 7] as int << 56
+}
+
+wi_load32u(inst: *WasmInstance, a: int): int {
+    if ((a & 3) == 0) {
+        w: int = inst.mem64[(a >> 3) - 1];
+        return if ((a & 4) == 0) w & M32 else w >> 32 & M32
+    }
+    b: []i8 = inst.mem8;
+    b[a] as int & 255 | (b[a + 1] as int & 255) << 8 | (b[a + 2] as int & 255) << 16 | (b[a + 3] as int & 255) << 24
+}
+
+wi_load16u(inst: *WasmInstance, a: int): int {
+    b: []i8 = inst.mem8;
+    b[a] as int & 255 | (b[a + 1] as int & 255) << 8
+}
+
+wi_store64(inst: *WasmInstance, a: int, v: int) {
+    if ((a & 7) == 0) {
+        inst.mem64[(a >> 3) - 1] = v;
+        return
+    }
+    b: []i8 = inst.mem8;
+    for k in 0..8 b[a + k] = (v >> 8 * k) trunc i8
+}
+
+wi_store32(inst: *WasmInstance, a: int, v: int) {
+    if ((a & 3) == 0) {
+        i: int = (a >> 3) - 1;
+        w: int = inst.mem64[i];
+        if ((a & 4) == 0) inst.mem64[i] = w & M32 << 32 | v & M32 else inst.mem64[i] = w & M32 | v << 32;
+        return
+    }
+    b: []i8 = inst.mem8;
+    for k in 0..4 b[a + k] = (v >> 8 * k) trunc i8
+}
+
+wi_store16(inst: *WasmInstance, a: int, v: int) {
+    b: []i8 = inst.mem8;
+    b[a] = v trunc i8;
+    b[a + 1] = (v >> 8) trunc i8
+}
+
+// The byte view of the instance's memory and its size in bytes.
+wasm_memory(inst: *WasmInstance): []i8@inst {
+    inst.mem8
+}
+
+wasm_memory_size(inst: *WasmInstance): int {
+    inst.pages * 65536
+}
+
+// ---- decoding a function ----
+// The words being written.
+dc_code: []int = new int[1024](0);
+
+dc_n: int = 0;
+
+// The control stack: kind (0 block, 1 loop, 2 if, 3 try), entry height,
+// results, a loop's start, the head of its forward references, an if's
+// else word, whether the code outside was unreachable.
+DC_BLOCK: int = 0;
+
+DC_LOOP: int = 1;
+
+DC_IF: int = 2;
+
+DC_TRY: int = 3;
+
+dc_kind: []int = new int[256](0);
+
+dc_height: []int = new int[256](0);
+
+dc_arity: []int = new int[256](0);
+
+dc_start: []int = new int[256](0);
+
+dc_patch: []int = new int[256](0);
+
+dc_else: []int = new int[256](0);
+
+dc_outer_unreach: []bool = new bool[256](false);
+
+dc_top: int = 0;
+
+// Forward references: the word to patch, the next in the list.
+dc_ref_pos: []int = new int[4096](0);
+
+dc_ref_next: []int = new int[4096](0);
+
+dc_nrefs: int = 0;
+
+dc_height_now: int = 0;
+
+dc_unreach: bool = false;
+
+dc_emit(v: int) noregion {
+    if (dc_n >= len(dc_code)) {
+        bigger: []int = new int[len(dc_code) * 2](0);
+        for i in 0..dc_n bigger[i] = dc_code[i];
+        dc_code = bigger
+    }
+    dc_code[dc_n] = v;
+    dc_n = dc_n + 1
+}
+
+dc_pop(n: int) {
+    dc_height_now = dc_height_now - n;
+    if (dc_height_now < dc_height[dc_top - 1]) dc_height_now = dc_height[dc_top - 1]
+}
+
+dc_push(n: int) {
+    dc_height_now = dc_height_now + n
+}
+
+dc_open(kind: int, bt: int) raises WasmFormat {
+    if (dc_top >= len(dc_kind)) wr_fail("blocks nested too deeply");
+    dc_kind[dc_top] = kind;
+    dc_height[dc_top] = dc_height_now;
+    dc_arity[dc_top] = (if (bt == WT_VOID) 0 else 1);
+    dc_start[dc_top] = dc_n;
+    dc_patch[dc_top] = 0 - 1;
+    dc_else[dc_top] = 0 - 1;
+    dc_outer_unreach[dc_top] = dc_unreach;
+    dc_top = dc_top + 1
+}
+
+// A word that will hold the pc of label d's end.
+dc_forward(d: int) noregion raises WasmFormat {
+    if (dc_nrefs >= len(dc_ref_pos)) wr_fail("too many branches");
+    dc_ref_pos[dc_nrefs] = dc_n;
+    dc_ref_next[dc_nrefs] = dc_patch[d];
+    dc_patch[d] = dc_nrefs;
+    dc_nrefs = dc_nrefs + 1;
+    dc_emit(0)
+}
+
+// Handlers let go by a branch from the innermost block to label l.
+dc_hpop(l: int): int {
+    d: int = dc_top - 1 - l;
+    n: int = 0;
+    first: int = if (dc_kind[d] == DC_LOOP) d + 1 else d;
+    for k in first..dc_top {
+        if (dc_kind[k] == DC_TRY) n = n + 1
+    }
+    n
+}
+
+// The four words of a branch to label l: pc, height, arity, handlers.
+dc_target(l: int) noregion raises WasmFormat {
+    if (l >= dc_top) wr_fail("branch to a label that is not there");
+    d: int = dc_top - 1 - l;
+    hpop: int = dc_hpop(l);
+    if (dc_kind[d] == DC_LOOP) {
+        dc_emit(dc_start[d]);
+        dc_emit(dc_height[d]);
+        dc_emit(0)
+    } else {
+        dc_forward(d);
+        dc_emit(dc_height[d]);
+        dc_emit(dc_arity[d])
+    }
+    dc_emit(hpop)
+}
+
+// Close the block on top: resolve the branches to its end.
+dc_close() {
+    d: int = dc_top - 1;
+    p: int = dc_patch[d];
+    while (p >= 0) {
+        dc_code[dc_ref_pos[p]] = dc_n;
+        p = dc_ref_next[p]
+    }
+    if (dc_kind[d] == DC_IF && dc_else[d] >= 0) dc_code[dc_else[d]] = dc_n;
+    dc_height_now = dc_height[d] + dc_arity[d];
+    dc_unreach = dc_outer_unreach[d];
+    dc_top = d
+}
+
+// The internal operation of a numeric opcode, -1 for none; and whether
+// it takes one operand (else two).
+dc_numeric(op: int): int {
+    if (op >= 69 && op <= 79) return OP_I32_EQZ + op - 69;
+    if (op >= 103 && op <= 120) return OP_I32_CLZ + op - 103;
+    if (op >= 80 && op <= 90) return OP_I64_EQZ + op - 80;
+    if (op >= 121 && op <= 138) return OP_I64_CLZ + op - 121;
+    if (op >= 91 && op <= 96) return OP_F32_EQ + op - 91;
+    if (op >= 97 && op <= 102) return OP_F64_EQ + op - 97;
+    if (op >= 139 && op <= 152) return OP_F32_ABS + op - 139;
+    if (op >= 153 && op <= 166) return OP_F64_ABS + op - 153;
+    if (op >= 167 && op <= 196) return OP_CONVERT + op - 167;
+    0 - 1
+}
+
+dc_unary(iop: int): bool {
+    iop == OP_I32_EQZ || iop >= OP_I32_CLZ && iop <= OP_I32_CLZ + 2 || iop == OP_I64_EQZ || iop >= OP_I64_CLZ && iop <= OP_I64_CLZ + 2 || iop >= OP_F32_ABS && iop <= OP_F32_ABS + 6 || iop >= OP_F64_ABS && iop <= OP_F64_ABS + 6 || iop >= OP_CONVERT
+}
+
+// Decode function fi's body into words, kept on the function (at
+// instantiation, so that running needs no allocation).
+wasm_decode_function(m: *WasmModule@new, fi: int) noregion raises WasmFormat {
+    f: *WasmFunc = m.funcs[fi];
+    r: *WasmReader = new WasmReader { b: m.bytes, at: f.body, end: f.body_end };
+    sig: *WasmSig = m.sigs[f.sig];
+    dc_n = 0;
+    dc_top = 0;
+    dc_nrefs = 0;
+    dc_height_now = 0;
+    dc_unreach = false;
+    // The body is a block with the function's results.
+    dc_open(DC_BLOCK, if (len(sig.results) == 0) WT_VOID else WT_I64);
+    while (r.at < r.end) {
+        op: int = wr_byte(r);
+        if (op == 0) {
+            dc_emit(OP_UNREACHABLE);
+            dc_unreach = true
+        } else if (op == 1) { } else if (op == 2 || op == 3) dc_open(if (op == 2) DC_BLOCK else DC_LOOP,
+            wr_byte(r)) else if (op == 4) {
+            bt: int = wr_byte(r);
+            dc_pop(1);
+            dc_open(DC_IF, bt);
+            dc_emit(OP_IF);
+            dc_else[dc_top - 1] = dc_n;
+            dc_emit(0)
+        } else if (op == 5) {
+            d: int = dc_top - 1;
+            if (dc_kind[d] != DC_IF) wr_fail("else without if");
+            dc_emit(OP_JMP);
+            dc_forward(d);
+            dc_code[dc_else[d]] = dc_n;
+            dc_else[d] = 0 - 1;
+            dc_height_now = dc_height[d];
+            dc_unreach = false
+        } else if (op == 11) {
+            if (dc_top == 1) {
+                dc_emit(OP_RET);
+                dc_close()
+            } else {
+                if (dc_kind[dc_top - 1] == DC_TRY) dc_emit(OP_HPOP);
+                dc_close()
+            }
+        } else if (op == 12 || op == 13) {
+            l: int = wr_uleb(r);
+            if (op == 13) dc_pop(1);
+            dc_emit(if (op == 12) OP_BR else OP_BRIF);
+            dc_target(l);
+            if (op == 12) dc_unreach = true
+        } else if (op == 14) {
+            n: int = wr_uleb(r);
+            dc_pop(1);
+            dc_emit(OP_BRTABLE);
+            dc_emit(n);
+            for _k in 0..n + 1 dc_target(wr_uleb(r));
+            dc_unreach = true
+        } else if (op == 15) {
+            dc_emit(OP_RET);
+            dc_unreach = true
+        } else if (op == 16) {
+            callee: int = wr_uleb(r);
+            csig: *WasmSig = wasm_sig_of(m, callee);
+            dc_pop(len(csig.params));
+            dc_push(len(csig.results));
+            dc_emit(OP_CALL);
+            dc_emit(callee)
+        } else if (op == 17) {
+            tsig: int = wr_uleb(r);
+            _table: int = wr_uleb(r);
+            isig: *WasmSig = m.sigs[tsig];
+            dc_pop(1 + len(isig.params));
+            dc_push(len(isig.results));
+            dc_emit(OP_CALLI);
+            dc_emit(tsig)
+        } else if (op == 31) {
+            bt2: int = wr_byte(r);
+            ncatch: int = wr_uleb(r);
+            if (ncatch != 1) wr_fail("try_table with other than one catch");
+            ckind: int = wr_byte(r);
+            if (ckind == 0 || ckind == 1) _tag: int = wr_uleb(r);
+            if (ckind == 1 || ckind == 3) wr_fail("catch_ref is not supported");
+            label: int = wr_uleb(r);
+            dc_emit(OP_TRY);
+            dc_target(label);
+            dc_open(DC_TRY, bt2)
+        } else if (op == 8) {
+            _tag2: int = wr_uleb(r);
+            dc_emit(OP_THROW);
+            dc_unreach = true
+        } else if (op == 26) {
+            dc_pop(1);
+            dc_emit(OP_DROP)
+        } else if (op == 27) {
+            dc_pop(2);
+            dc_emit(OP_SELECT)
+        } else if (op >= 32 && op <= 36) {
+            idx: int = wr_uleb(r);
+            if (op == 32 || op == 35) dc_push(1);
+            if (op == 33 || op == 36) dc_pop(1);
+            dc_emit(OP_LGET + op - 32);
+            dc_emit(idx)
+        } else if (op >= 40 && op <= 62) {
+            _align: int = wr_uleb(r);
+            off: int = wr_uleb(r);
+            iop: int = 0 - 1;
+            if (op == 41 || op == 43) iop = OP_LOAD64 else if (op == 40 || op == 42 || op == 53) iop = OP_LOAD32U else if (op == 52) iop = OP_LOAD32S else if (op == 45 || op == 49) iop = OP_LOAD8U else if (op == 47 || op == 51) iop = OP_LOAD16U else if (op == 48) iop = OP_LOAD8S else if (op == 50) iop = OP_LOAD16S else if (op == 44) iop = OP_LOAD8S32 else if (op == 46) iop = OP_LOAD16S32 else if (op == 55 || op == 57) iop = OP_STORE64 else if (op == 54 || op == 56 || op == 62) iop = OP_STORE32 else if (op == 58 || op == 60) iop = OP_STORE8 else if (op == 59 || op == 61) iop = OP_STORE16;
+            if (iop < 0) wr_fail("unsupported memory instruction");
+            if (iop >= OP_STORE64 && iop <= OP_STORE32) dc_pop(2);
+            dc_emit(iop);
+            dc_emit(off)
+        } else if (op == 63) {
+            _z: int = wr_byte(r);
+            dc_push(1);
+            dc_emit(OP_MEMSIZE)
+        } else if (op == 64) {
+            _z2: int = wr_byte(r);
+            dc_emit(OP_MEMGROW)
+        } else if (op == 65 || op == 66) {
+            v: int = wr_sleb(r);
+            dc_push(1);
+            dc_emit(OP_CONST);
+            dc_emit(if (op == 65) v & M32 else v)
+        } else if (op == 67) {
+            dc_push(1);
+            dc_emit(OP_CONST);
+            lo: int = 0;
+            for k in 0..4 lo = lo | wr_byte(r) << 8 * k;
+            dc_emit(lo)
+        } else if (op == 68) {
+            dc_push(1);
+            dc_emit(OP_CONST);
+            v64: int = 0;
+            for k in 0..8 v64 = v64 | wr_byte(r) << 8 * k;
+            dc_emit(v64)
+        } else if (op == 252) {
+            sub: int = wr_uleb(r);
+            if (sub <= 7) dc_emit(OP_SAT + sub) else if (sub == 10) {
+                _d: int = wr_byte(r);
+                _s: int = wr_byte(r);
+                dc_pop(3);
+                dc_emit(OP_MEMCOPY)
+            } else if (sub == 11) {
+                _m: int = wr_byte(r);
+                dc_pop(3);
+                dc_emit(OP_MEMFILL)
+            } else wr_fail("unsupported 0xfc instruction")
+        } else {
+            iop2: int = dc_numeric(op);
+            if (iop2 < 0) wr_fail("unsupported instruction");
+            if (!dc_unary(iop2)) dc_pop(1);
+            dc_emit(iop2)
+        }
+    }
+    if (dc_top != 0) wr_fail("function body without its end");
+    code: []int = new int[dc_n](0);
+    for i in 0..dc_n code[i] = dc_code[i];
+    f.code = code
+}
+
+wasm_sig_of(m: *WasmModule, f: int) raises WasmFormat: *WasmSig@m {
+    ni: int = len(m.imports);
+    if (f < ni) m.sigs[m.imports[f].sig] else if (f - ni < len(m.funcs)) m.sigs[m.funcs[f - ni].sig] else wr_fail("call of a function that is not there")
+}
+
+// ---- running ----
+wi_trap(inst: *WasmInstance, msg: str@inst) {
+    if (wi_trace) {
+        tr_text("trap: ");
+        tr_text(msg);
+        tr_text("\n")
+    }
+    if (!inst.trapped) {
+        inst.trapped = true;
+        inst.trap = msg
+    }
+}
+
+// Unsigned comparison of ints.
+wi_ult(a: int, b: int): bool {
+    (a ^ 1 << 63) < (b ^ 1 << 63)
+}
+
+wi_shr_u(a: int, n: int): int {
+    if (n == 0) a else a >> n & (1 << 64 - n) - 1
+}
+
+// Unsigned 64-bit division and remainder.
+wi_div_u(a: int, b: int): int {
+    if (a >= 0 && b > 0) return a / b;
+    if (wi_ult(a, b)) return 0;
+    // b is huge or a is: at most one or a few quotient bits.
+    if (b < 0) return 1;
+    q: int = wi_shr_u(a, 1) / b << 1;
+    r: int = a - q * b;
+    if (!wi_ult(r, b)) q + 1 else q
+}
+
+wi_rem_u(a: int, b: int): int {
+    a - wi_div_u(a, b) * b
+}
+
+wi_clz(v: int, bits: int): int {
+    n: int = 0;
+    for i in 0..bits {
+        if ((v >> bits - 1 - i & 1) != 0) return n;
+        n = n + 1
+    }
+    n
+}
+
+wi_ctz(v: int, bits: int): int {
+    for i in 0..bits {
+        if ((v >> i & 1) != 0) return i
+    }
+    bits
+}
+
+wi_popcnt(v: int, bits: int): int {
+    n: int = 0;
+    for i in 0..bits {
+        if ((v >> i & 1) != 0) n = n + 1
+    }
+    n
+}
+
+sx32(v: int): int {
+    v << 32 >> 32
+}
+
+// Float helpers on f64 values.
+wf_trunc(x: f64): f64 {
+    if (x != x || x >= 9223372036854775807.0f64 || x <= -9223372036854775808.0f64) return x;
+    x as int as f64
+}
+
+wf_floor(x: f64): f64 {
+    t: f64 = wf_trunc(x);
+    if (t > x) t - 1.0f64 else t
+}
+
+wf_ceil(x: f64): f64 {
+    t: f64 = wf_trunc(x);
+    if (t < x) t + 1.0f64 else t
+}
+
+// Round half to even.
+wf_nearest(x: f64): f64 {
+    f: f64 = wf_floor(x);
+    d: f64 = x - f;
+    if (d < 0.5f64) return f;
+    if (d > 0.5f64) return f + 1.0f64;
+    half: f64 = wf_floor(f / 2.0f64) * 2.0f64;
+    if (half == f) f else f + 1.0f64
+}
+
+wf_sqrt(x: f64): f64 {
+    if (x != x || x < 0.0f64) return 0.0f64 / 0.0f64;
+    if (x == 0.0f64) return x;
+    // Newton from a guess by the exponent.
+    bits: int = l8_f64_bits(x);
+    g: f64 = l8_bits_f64((bits >> 1) + 2305843009213693952);
+    for _i in 0..8 g = 0.5f64 * (g + x / g);
+    g
+}
+
+// Saturating truncation of a float to a signed 64-bit int.
+wf_sat64(x: f64): int {
+    if (x != x) return 0;
+    if (x >= 9223372036854775807.0f64) return 9223372036854775807;
+    if (x <= -9223372036854775808.0f64) return 0 - 9223372036854775807 - 1;
+    x as int
+}
+
+wf_sat32(x: f64): int {
+    if (x != x) return 0;
+    if (x >= 2147483647.0f64) return 2147483647;
+    if (x <= -2147483648.0f64) return 0 - 2147483648;
+    x as int
+}
+
+wf_sat32u(x: f64): int {
+    if (x != x || x <= 0.0f64) return 0;
+    if (x >= 4294967295.0f64) return M32;
+    x as int
+}
+
+wf_sat64u(x: f64): int {
+    if (x != x || x <= 0.0f64) return 0;
+    if (x >= 18446744073709551615.0f64) return 0 - 1;
+    if (x >= 9223372036854775808.0f64) return (x - 9223372036854775808.0f64) as int | 1 << 63;
+    x as int
+}
+
+// An unsigned 64-bit int as a float.
+wf_u64(v: int): f64 {
+    if (v >= 0) v as f64 else (wi_shr_u(v, 1) | v & 1) as f64 * 2.0f64
+}
+
+// A float bit pattern of f32 (32 bits) widened to an f64 value.
+wf_f32(bits: int): f64 {
+    l8_bits_f32(bits & M32) as f64
+}
+
+wf_f32_bits(x: f64): int {
+    l8_f32_bits(x as f32)
+}
+
+// Call function f with args (nargs of them) and return its result (0 if
+// none). The host's imports may call back in through this. A trap or an
+// exit ends the run: see wasm_trapped and wasm_exited.
+wasm_call(
+    inst: *WasmInstance,
+    f: int,
+    args: []int,
+    nargs: int
+) noregion raises WasmFormat: int {
+    m: *WasmModule = inst.m;
+    ni: int = len(m.imports);
+    sp: int = inst.sp;
+    for i in 0..nargs {
+        inst.vals[sp] = args[i];
+        sp = sp + 1
+    }
+    inst.sp = sp;
+    sig: *WasmSig = wasm_sig_of(m, f);
+    if (f < ni) {
+        r: int = wi_host(inst, f, len(sig.params));
+        inst.sp = inst.sp - len(sig.results);
+        return r
+    }
+    base: int = inst.nframes;
+    wi_push_frame(inst, f, 0, 0 - 1);
+    inst.depth = inst.depth + 1;
+    result: int = wi_execute(inst, base);
+    inst.depth = inst.depth - 1;
+    // The result was left on the stack too; the caller has it.
+    if (!inst.trapped && !inst.exiting) inst.sp = inst.sp - len(sig.results);
+    result
+}
+
+// Pop n arguments to the host, call it, push its result if the import has
+// one. Returns the result.
+wi_host(inst: *WasmInstance, f: int, n: int) noregion: int {
+    m: *WasmModule = inst.m;
+    sp: int = inst.sp - n;
+    for i in 0..n inst.args[i] = inst.vals[sp + i];
+    inst.sp = sp;
+    if (wi_trace) {
+        tr_text("  import ");
+        tr_bytes(m.imports[f].name);
+        for i in 0..n {
+            tr_text(" ");
+            tr_int(inst.args[i])
+        }
+        tr_text("\n")
+    }
+    r: int = inst.host(inst, f, inst.args, n);
+    if (wi_trace) {
+        tr_text("  -> ");
+        tr_int(r);
+        tr_text("\n")
+    }
+    if (len(m.sigs[m.imports[f].sig].results) > 0) {
+        inst.vals[inst.sp] = r;
+        inst.sp = inst.sp + 1
+    }
+    r
+}
+
+// Enter function f (defined): its parameters are the top of the stack.
+wi_push_frame(
+    inst: *WasmInstance,
+    f: int,
+    ret_pc: int,
+    caller: int
+) raises WasmFormat {
+    m: *WasmModule = inst.m;
+    ni: int = len(m.imports);
+    fn: *WasmFunc = m.funcs[f - ni];
+    sig: *WasmSig = m.sigs[fn.sig];
+    np: int = len(sig.params);
+    if (wi_trace) {
+        tr_text("call ");
+        tr_bytes(fn.name);
+        for i in 0..np {
+            tr_text(" ");
+            tr_int(inst.vals[inst.sp - np + i])
+        }
+        tr_text("\n")
+    }
+    fp: int = inst.sp - np;
+    sp: int = inst.sp;
+    if (sp + fn.nlocals + 4096 > len(inst.vals)) wr_fail("the value stack is full");
+    for _i in 0..fn.nlocals {
+        inst.vals[sp] = 0;
+        sp = sp + 1
+    }
+    nf: int = inst.nframes * WI_FRAME;
+    if (nf + WI_FRAME > len(inst.frames)) wr_fail("too many frames");
+    inst.frames[nf] = f;
+    inst.frames[nf + 1] = ret_pc;
+    inst.frames[nf + 2] = fp;
+    inst.frames[nf + 3] = sp;
+    inst.frames[nf + 4] = inst.nhandlers;
+    inst.frames[nf + 5] = caller;
+    inst.nframes = inst.nframes + 1;
+    inst.sp = sp
+}
+
+// Run from the frame on top until frames are back to base. Returns the
+// result left by the last return (0 if none).
+wi_execute(inst: *WasmInstance, base: int) noregion raises WasmFormat: int {
+    m: *WasmModule = inst.m;
+    ni: int = len(m.imports);
+    vals: []int = inst.vals;
+    globals: []int = inst.globals;
+    nf: int = (inst.nframes - 1) * WI_FRAME;
+    f: int = inst.frames[nf];
+    code: []int = m.funcs[f - ni].code;
+    pc: int = 0;
+    fp: int = inst.frames[nf + 2];
+    ob: int = inst.frames[nf + 3];
+    sp: int = inst.sp;
+    result: int = 0;
+    running: bool = true;
+    while (running) {
+        op: int = code[pc];
+        pc = pc + 1;
+        if (op >= 48) {
+            // Numeric operations (the most frequent after locals).
+            if (op < 80) {
+                // i32
+                if (op == OP_I32_EQZ) vals[sp - 1] = (if (vals[sp - 1] == 0) 1 else 0) else if (op <= 58) {
+                    b: int = vals[sp - 1];
+                    a: int = vals[sp - 2];
+                    sp = sp - 1;
+                    k: int = op - 49;
+                    r: bool = if (k == 0) a == b else if (k == 1) a != b else if (k == 2) sx32(a) < sx32(b) else if (k == 3) a < b else if (k == 4) sx32(a) > sx32(b) else if (k == 5) a > b else if (k == 6) sx32(a) <= sx32(b) else if (k == 7) a <= b else if (k == 8) sx32(a) >= sx32(b) else a >= b;
+                    vals[sp - 1] = (if (r) 1 else 0)
+                } else if (op <= 61) {
+                    v: int = vals[sp - 1];
+                    vals[sp - 1] = (if (op == 59) wi_clz(v, 32) else if (op == 60) wi_ctz(v,
+                        32) else wi_popcnt(v, 32))
+                } else {
+                    b2: int = vals[sp - 1];
+                    a2: int = vals[sp - 2];
+                    sp = sp - 1;
+                    k2: int = op - 62;
+                    r2: int = 0;
+                    if (k2 == 0) r2 = a2 + b2 else if (k2 == 1) r2 = a2 - b2 else if (k2 == 2) r2 = a2 * b2 else if (k2 == 3) {
+                        if (b2 == 0) wi_trap(inst, "integer divide by zero") else if (sx32(a2) == 0 - 2147483648 && sx32(b2) == 0 - 1) wi_trap(inst,
+                            "integer overflow") else r2 = sx32(a2) / sx32(b2)
+                    } else if (k2 == 4) {
+                        if (b2 == 0) wi_trap(inst, "integer divide by zero") else r2 = a2 / b2
+                    } else if (k2 == 5) {
+                        if (b2 == 0) wi_trap(inst, "integer divide by zero") else if (sx32(b2) == 0 - 1) r2 = 0 else r2 = sx32(a2) % sx32(b2)
+                    } else if (k2 == 6) {
+                        if (b2 == 0) wi_trap(inst, "integer divide by zero") else r2 = a2 % b2
+                    } else if (k2 == 7) r2 = a2 & b2 else if (k2 == 8) r2 = a2 | b2 else if (k2 == 9) r2 = a2 ^ b2 else if (k2 == 10) r2 = a2 << (b2 & 31) else if (k2 == 11) r2 = sx32(a2) >> (b2 & 31) else if (k2 == 12) r2 = a2 >> (b2 & 31) else if (k2 == 13) {
+                        s: int = b2 & 31;
+                        r2 = a2 << s | a2 >> 32 - s
+                    } else {
+                        s2: int = b2 & 31;
+                        r2 = a2 >> s2 | a2 << 32 - s2
+                    }
+                    vals[sp - 1] = r2 & M32
+                }
+            } else if (op < 112) {
+                // i64
+                if (op == OP_I64_EQZ) vals[sp - 1] = (if (vals[sp - 1] == 0) 1 else 0) else if (op <= 90) {
+                    b3: int = vals[sp - 1];
+                    a3: int = vals[sp - 2];
+                    sp = sp - 1;
+                    k3: int = op - 81;
+                    r3: bool = if (k3 == 0) a3 == b3 else if (k3 == 1) a3 != b3 else if (k3 == 2) a3 < b3 else if (k3 == 3) wi_ult(a3,
+                        b3) else if (k3 == 4) a3 > b3 else if (k3 == 5) wi_ult(b3,
+                        a3) else if (k3 == 6) a3 <= b3 else if (k3 == 7) !wi_ult(b3,
+                        a3) else if (k3 == 8) a3 >= b3 else !wi_ult(a3, b3);
+                    vals[sp - 1] = (if (r3) 1 else 0)
+                } else if (op <= 93) {
+                    v2: int = vals[sp - 1];
+                    vals[sp - 1] = (if (op == 91) wi_clz(v2, 64) else if (op == 92) wi_ctz(v2,
+                        64) else wi_popcnt(v2, 64))
+                } else {
+                    b4: int = vals[sp - 1];
+                    a4: int = vals[sp - 2];
+                    sp = sp - 1;
+                    k4: int = op - 94;
+                    r4: int = 0;
+                    if (k4 == 0) r4 = a4 + b4 else if (k4 == 1) r4 = a4 - b4 else if (k4 == 2) r4 = a4 * b4 else if (k4 == 3) {
+                        if (b4 == 0) wi_trap(inst, "integer divide by zero") else if (b4 == 0 - 1 && a4 == 0 - 9223372036854775807 - 1) wi_trap(inst,
+                            "integer overflow") else r4 = a4 / b4
+                    } else if (k4 == 4) {
+                        if (b4 == 0) wi_trap(inst, "integer divide by zero") else r4 = wi_div_u(a4,
+                            b4)
+                    } else if (k4 == 5) {
+                        if (b4 == 0) wi_trap(inst, "integer divide by zero") else if (b4 == 0 - 1) r4 = 0 else r4 = a4 % b4
+                    } else if (k4 == 6) {
+                        if (b4 == 0) wi_trap(inst, "integer divide by zero") else r4 = wi_rem_u(a4,
+                            b4)
+                    } else if (k4 == 7) r4 = a4 & b4 else if (k4 == 8) r4 = a4 | b4 else if (k4 == 9) r4 = a4 ^ b4 else if (k4 == 10) r4 = a4 << (b4 & 63) else if (k4 == 11) r4 = a4 >> (b4 & 63) else if (k4 == 12) r4 = wi_shr_u(a4,
+                        b4 & 63) else if (k4 == 13) {
+                        s3: int = b4 & 63;
+                        r4 = (if (s3 == 0) a4 else a4 << s3 | wi_shr_u(a4, 64 - s3))
+                    } else {
+                        s4: int = b4 & 63;
+                        r4 = (if (s4 == 0) a4 else wi_shr_u(a4, s4) | a4 << 64 - s4)
+                    }
+                    vals[sp - 1] = r4
+                }
+            } else if (op < 152) {
+                // floats
+                if (op < 124) {
+                    wide: bool = op >= OP_F64_EQ;
+                    xb: int = vals[sp - 1];
+                    xa: int = vals[sp - 2];
+                    sp = sp - 1;
+                    fa: f64 = if (wide) l8_bits_f64(xa) else wf_f32(xa);
+                    fb: f64 = if (wide) l8_bits_f64(xb) else wf_f32(xb);
+                    k5: int = if (wide) op - OP_F64_EQ else op - OP_F32_EQ;
+                    r5: bool = if (k5 == 0) fa == fb else if (k5 == 1) fa != fb else if (k5 == 2) fa < fb else if (k5 == 3) fa > fb else if (k5 == 4) fa <= fb else fa >= fb;
+                    vals[sp - 1] = (if (r5) 1 else 0)
+                } else {
+                    wide2: bool = op >= OP_F64_ABS;
+                    k6: int = if (wide2) op - OP_F64_ABS else op - OP_F32_ABS;
+                    if (k6 <= 6) {
+                        xv: int = vals[sp - 1];
+                        if (k6 == 0) vals[sp - 1] = xv & (if (wide2) 9223372036854775807 else 2147483647) else if (k6 == 1) vals[sp - 1] = xv ^ (if (wide2) 1 << 63 else 1 << 31) else {
+                            fx: f64 = if (wide2) l8_bits_f64(xv) else wf_f32(xv);
+                            fr: f64 = if (k6 == 2) wf_ceil(fx) else if (k6 == 3) wf_floor(fx) else if (k6 == 4) wf_trunc(fx) else if (k6 == 5) wf_nearest(fx) else wf_sqrt(fx);
+                            vals[sp - 1] = (if (wide2) l8_f64_bits(fr) else wf_f32_bits(fr))
+                        }
+                    } else {
+                        yb: int = vals[sp - 1];
+                        ya: int = vals[sp - 2];
+                        sp = sp - 1;
+                        ga: f64 = if (wide2) l8_bits_f64(ya) else wf_f32(ya);
+                        gb: f64 = if (wide2) l8_bits_f64(yb) else wf_f32(yb);
+                        gr: f64 = 0.0f64;
+                        if (k6 == 7) gr = ga + gb else if (k6 == 8) gr = ga - gb else if (k6 == 9) gr = ga * gb else if (k6 == 10) gr = ga / gb else if (k6 == 11) gr = (if (ga < gb) ga else gb) else if (k6 == 12) gr = (if (ga > gb) ga else gb) else {
+                            // copysign: the sign of b on a.
+                            if (wide2) vals[sp - 1] = ya & 9223372036854775807 | yb & 1 << 63 else vals[sp - 1] = ya & 2147483647 | yb & 1 << 31;
+                            gr = l8_bits_f64(0)
+                        }
+                        if (k6 != 13) vals[sp - 1] = (if (wide2) l8_f64_bits(gr) else wf_f32_bits(gr))
+                    }
+                }
+            } else if (op < OP_SAT) {
+                // conversions, as 0xA7..0xC4
+                k7: int = op - OP_CONVERT;
+                cv: int = vals[sp - 1];
+                cr: int = 0;
+                if (k7 == 0) cr = cv & M32 else if (k7 == 1) cr = wf_sat32(wf_f32(cv)) & M32 else if (k7 == 2) cr = wf_sat32u(wf_f32(cv)) else if (k7 == 3) cr = wf_sat32(l8_bits_f64(cv)) & M32 else if (k7 == 4) cr = wf_sat32u(l8_bits_f64(cv)) else if (k7 == 5) cr = sx32(cv) else if (k7 == 6) cr = cv & M32 else if (k7 == 7) cr = wf_sat64(wf_f32(cv)) else if (k7 == 8) cr = wf_sat64u(wf_f32(cv)) else if (k7 == 9) cr = wf_sat64(l8_bits_f64(cv)) else if (k7 == 10) cr = wf_sat64u(l8_bits_f64(cv)) else if (k7 == 11) cr = wf_f32_bits(sx32(cv) as f64) else if (k7 == 12) cr = wf_f32_bits((cv & M32) as f64) else if (k7 == 13) cr = wf_f32_bits(cv as f64) else if (k7 == 14) cr = wf_f32_bits(wf_u64(cv)) else if (k7 == 15) cr = wf_f32_bits(l8_bits_f64(cv)) else if (k7 == 16) cr = l8_f64_bits(sx32(cv) as f64) else if (k7 == 17) cr = l8_f64_bits((cv & M32) as f64) else if (k7 == 18) cr = l8_f64_bits(cv as f64) else if (k7 == 19) cr = l8_f64_bits(wf_u64(cv)) else if (k7 == 20) cr = l8_f64_bits(wf_f32(cv)) else if (k7 == 21) cr = cv & M32 else if (k7 == 22) cr = cv else if (k7 == 23) cr = cv & M32 else if (k7 == 24) cr = cv else if (k7 == 25) cr = cv << 56 >> 56 & M32 else if (k7 == 26) cr = cv << 48 >> 48 & M32 else if (k7 == 27) cr = cv << 56 >> 56 else if (k7 == 28) cr = cv << 48 >> 48 else cr = cv << 32 >> 32;
+                vals[sp - 1] = cr
+            } else {
+                k8: int = op - OP_SAT;
+                sv: int = vals[sp - 1];
+                sr: int = 0;
+                if (k8 == 0) sr = wf_sat32(wf_f32(sv)) & M32 else if (k8 == 1) sr = wf_sat32u(wf_f32(sv)) else if (k8 == 2) sr = wf_sat32(l8_bits_f64(sv)) & M32 else if (k8 == 3) sr = wf_sat32u(l8_bits_f64(sv)) else if (k8 == 4) sr = wf_sat64(wf_f32(sv)) else if (k8 == 5) sr = wf_sat64u(wf_f32(sv)) else if (k8 == 6) sr = wf_sat64(l8_bits_f64(sv)) else sr = wf_sat64u(l8_bits_f64(sv));
+                vals[sp - 1] = sr
+            }
+        } else if (op >= 32) {
+            // memory
+            off: int = code[pc];
+            pc = pc + 1;
+            if (op <= 36 || op >= 41) {
+                a: int = (vals[sp - 1] & M32) + off;
+                if (a + 8 > inst.pages * 65536) {
+                    wi_trap(inst, "memory access out of bounds");
+                    a = 65536
+                }
+                lv: int = 0;
+                if (op == OP_LOAD64) lv = wi_load64(inst, a) else if (op == OP_LOAD8U) lv = inst.mem8[a] as int & 255 else if (op == OP_LOAD16U) lv = wi_load16u(inst,
+                    a) else if (op == OP_LOAD32S) lv = sx32(wi_load32u(inst, a)) else if (op == OP_LOAD32U) lv = wi_load32u(inst,
+                    a) else if (op == OP_LOAD8S) lv = inst.mem8[a] as int else if (op == OP_LOAD16S) lv = wi_load16u(inst,
+                    a) << 48 >> 48 else if (op == OP_LOAD8S32) lv = inst.mem8[a] as int & M32 else lv = wi_load16u(inst,
+                    a) << 48 >> 48 & M32;
+                vals[sp - 1] = lv
+            } else {
+                sv2: int = vals[sp - 1];
+                a2: int = (vals[sp - 2] & M32) + off;
+                sp = sp - 2;
+                if (a2 + 8 > inst.pages * 65536) {
+                    wi_trap(inst, "memory access out of bounds");
+                    a2 = 65536
+                }
+                if (op == OP_STORE64) wi_store64(inst, a2, sv2) else if (op == OP_STORE8) inst.mem8[a2] = sv2 trunc i8 else if (op == OP_STORE16) wi_store16(inst,
+                    a2, sv2) else wi_store32(inst, a2, sv2)
+            }
+        } else if (op >= 16) {
+            if (op == OP_LGET) {
+                vals[sp] = vals[fp + code[pc]];
+                sp = sp + 1;
+                pc = pc + 1
+            } else if (op == OP_LSET) {
+                sp = sp - 1;
+                vals[fp + code[pc]] = vals[sp];
+                pc = pc + 1
+            } else if (op == OP_LTEE) {
+                vals[fp + code[pc]] = vals[sp - 1];
+                pc = pc + 1
+            } else if (op == OP_GGET) {
+                vals[sp] = globals[code[pc]];
+                sp = sp + 1;
+                pc = pc + 1
+            } else if (op == OP_GSET) {
+                sp = sp - 1;
+                globals[code[pc]] = vals[sp];
+                pc = pc + 1
+            } else if (op == OP_CONST) {
+                vals[sp] = code[pc];
+                sp = sp + 1;
+                pc = pc + 1
+            } else if (op == OP_MEMSIZE) {
+                vals[sp] = inst.pages;
+                sp = sp + 1
+            } else if (op == OP_MEMGROW) {
+                want: int = vals[sp - 1] & M32;
+                if (inst.pages + want <= inst.max_pages) {
+                    vals[sp - 1] = inst.pages;
+                    inst.pages = inst.pages + want
+                } else vals[sp - 1] = M32
+            } else if (op == OP_MEMCOPY) {
+                n: int = vals[sp - 1] & M32;
+                src: int = vals[sp - 2] & M32;
+                dst: int = vals[sp - 3] & M32;
+                sp = sp - 3;
+                limit: int = inst.pages * 65536;
+                if (src + n > limit || dst + n > limit) wi_trap(inst, "memory copy out of bounds") else memcpy(inst.mem8,
+                    dst, inst.mem8, src, n)
+            } else {
+                n2: int = vals[sp - 1] & M32;
+                byte: int = vals[sp - 2] & 255;
+                dst2: int = vals[sp - 3] & M32;
+                sp = sp - 3;
+                if (dst2 + n2 > inst.pages * 65536) wi_trap(inst, "memory fill out of bounds") else {
+                    b8: i8 = byte trunc i8;
+                    mem: []i8 = inst.mem8;
+                    for i in dst2..dst2 + n2 mem[i] = b8
+                }
+            }
+        } else if (op == OP_BR || op == OP_BRIF) {
+            taken: bool = true;
+            if (op == OP_BRIF) {
+                sp = sp - 1;
+                taken = vals[sp] != 0
+            }
+            if (taken) {
+                target: int = code[pc];
+                height: int = ob + code[pc + 1];
+                arity: int = code[pc + 2];
+                hpop: int = code[pc + 3];
+                if (arity > 0) vals[height] = vals[sp - 1];
+                sp = height + arity;
+                inst.nhandlers = inst.nhandlers - hpop;
+                pc = target
+            } else pc = pc + 4
+        } else if (op == OP_IF) {
+            sp = sp - 1;
+            if (vals[sp] == 0) pc = code[pc] else pc = pc + 1
+        } else if (op == OP_JMP) pc = code[pc] else if (op == OP_CALL || op == OP_CALLI) {
+            callee: int = 0;
+            if (op == OP_CALL) {
+                callee = code[pc];
+                pc = pc + 1
+            } else {
+                sp = sp - 1;
+                ti: int = vals[sp] & M32;
+                pc = pc + 1;
+                if (ti >= len(inst.table)) {
+                    wi_trap(inst, "call_indirect out of the table");
+                    callee = 0 - 1
+                } else callee = inst.table[ti];
+                if (callee < 0) wi_trap(inst, "call_indirect of an empty table entry")
+            }
+            if (callee >= 0) {
+                if (callee < ni) {
+                    inst.sp = sp;
+                    _r: int = wi_host(inst, callee, len(m.sigs[m.imports[callee].sig].params));
+                    sp = inst.sp
+                } else {
+                    inst.sp = sp;
+                    wi_push_frame(inst, callee, pc, f);
+                    f = callee;
+                    code = m.funcs[f - ni].code;
+                    pc = 0;
+                    nf = (inst.nframes - 1) * WI_FRAME;
+                    fp = inst.frames[nf + 2];
+                    ob = inst.frames[nf + 3];
+                    sp = inst.sp
+                }
+            }
+        } else if (op == OP_RET) {
+            nres: int = len(m.sigs[m.funcs[f - ni].sig].results);
+            nf = (inst.nframes - 1) * WI_FRAME;
+            inst.nhandlers = inst.frames[nf + 4];
+            ret_pc: int = inst.frames[nf + 1];
+            caller: int = inst.frames[nf + 5];
+            result = (if (nres > 0) vals[sp - 1] else 0);
+            sp = fp;
+            if (nres > 0) {
+                vals[sp] = result;
+                sp = sp + 1
+            }
+            inst.nframes = inst.nframes - 1;
+            if (inst.nframes <= base) running = false else {
+                f = caller;
+                code = m.funcs[f - ni].code;
+                pc = ret_pc;
+                nf = (inst.nframes - 1) * WI_FRAME;
+                fp = inst.frames[nf + 2];
+                ob = inst.frames[nf + 3]
+            }
+        } else if (op == OP_DROP) sp = sp - 1 else if (op == OP_SELECT) {
+            sp = sp - 2;
+            if (vals[sp + 1] == 0) vals[sp - 1] = vals[sp]
+        } else if (op == OP_BRTABLE) {
+            n3: int = code[pc];
+            sp = sp - 1;
+            idx: int = vals[sp] & M32;
+            if (idx > n3) idx = n3;
+            e: int = pc + 1 + idx * 4;
+            height2: int = ob + code[e + 1];
+            arity2: int = code[e + 2];
+            if (arity2 > 0) vals[height2] = vals[sp - 1];
+            sp = height2 + arity2;
+            inst.nhandlers = inst.nhandlers - code[e + 3];
+            pc = code[e]
+        } else if (op == OP_TRY) {
+            nh: int = inst.nhandlers * WI_HANDLER;
+            if (nh + WI_HANDLER > len(inst.handlers)) wr_fail("too many handlers");
+            inst.handlers[nh] = inst.nframes - 1;
+            inst.handlers[nh + 1] = code[pc];
+            inst.handlers[nh + 2] = code[pc + 1];
+            inst.handlers[nh + 3] = code[pc + 3];
+            inst.nhandlers = inst.nhandlers + 1;
+            pc = pc + 4
+        } else if (op == OP_HPOP) inst.nhandlers = inst.nhandlers - 1 else if (op == OP_THROW) {
+            // The innermost handler of this run takes it.
+            nhb: int = inst.frames[base * WI_FRAME + 4];
+            if (inst.nhandlers <= nhb) wi_trap(inst, "uncaught exception") else {
+                nh2: int = (inst.nhandlers - 1) * WI_HANDLER;
+                hframe: int = inst.handlers[nh2];
+                inst.nhandlers = inst.nhandlers - 1 - inst.handlers[nh2 + 3];
+                inst.nframes = hframe + 1;
+                nf = hframe * WI_FRAME;
+                f = inst.frames[nf];
+                code = m.funcs[f - ni].code;
+                fp = inst.frames[nf + 2];
+                ob = inst.frames[nf + 3];
+                sp = ob + inst.handlers[nh2 + 2];
+                pc = inst.handlers[nh2 + 1]
+            }
+        } else wi_trap(inst, "unreachable");
+        if (inst.trapped || inst.exiting) {
+            inst.nframes = base;
+            running = false
+        }
+    }
+    inst.sp = sp;
+    result
+}
+
+// Whether the last run ended in a trap or an exit, and what it said.
+wasm_trapped(inst: *WasmInstance): bool {
+    inst.trapped
+}
+
+wasm_trap_message(inst: *WasmInstance): str@inst {
+    inst.trap
+}
+
+wasm_exited(inst: *WasmInstance): bool {
+    inst.exiting
+}
+
+// A host's exit: the run unwinds to the host with code.
+wasm_exit(inst: *WasmInstance, code: int) {
+    inst.exiting = true;
+    inst.exit_code = code
+}
+
+// Run _start; its exit status (l8_exit_status, or the host's exit).
+wasm_start(inst: *WasmInstance) noregion raises WasmFormat: int {
+    f: int = wasm_export_function(inst.m, "_start");
+    if (f < 0) wr_fail("no _start export");
+    inst.sp = 0;
+    inst.nframes = 0;
+    inst.nhandlers = 0;
+    none: []int = new int[1](0);
+    _r: int = wasm_call(inst, f, none, 0);
+    if (inst.exiting) return inst.exit_code;
+    if (inst.trapped) return 0 - 1;
+    status: int = wasm_global_index(inst, "l8_exit_status");
+    if (status < 0) 0 else sx32(inst.globals[status])
+}
+
+// Call an exported function with up to four arguments.
+wasm_call_export(
+    inst: *WasmInstance,
+    name: str,
+    a: int,
+    b: int,
+    c: int,
+    d: int,
+    n: int
+) noregion raises WasmFormat: int {
+    f: int = wasm_export_function(inst.m, name);
+    if (f < 0) wr_fail("export not found");
+    args: []int = [a, b, c, d];
+    wasm_call(inst, f, args, n)
+}

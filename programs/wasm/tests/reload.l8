@@ -1,0 +1,85 @@
+tag wasm_reload_test;
+
+use_tag std, wasm;
+
+// The reload check, natively: run web/tests/reload_v1.l8 (built with
+// `--async l8_pause`) to its pause, carry its persistent globals into
+// reload_v2.l8's instance, run that to its pause and on to its end, and
+// print what both said with the transfer's report: Make compares it with
+// reload.expected, the same v2 text web/tests/reload.mjs expects.
+//   wasm-reloadtest v1.wasm v2.wasm
+import "../persist.l8";
+
+// The pausing import, as l8-runtime.js's pausing(): the first call sets
+// the module unwinding and returns; the rewound call clears the state.
+WA_UNWINDING: int = 1;
+
+WA_REWINDING: int = 2;
+
+pause_host(
+    inst: *WasmInstance,
+    imp: int,
+    args: []int,
+    n: int
+) noregion: int {
+    if (streq(inst.m.imports[imp].name, "l8_pause")) {
+        state: int = wasm_global_index(inst, "l8_async_state");
+        if (inst.globals[state] == WA_REWINDING) inst.globals[state] = 0 else inst.globals[state] = WA_UNWINDING;
+        return 0
+    }
+    wasm_sys_host(inst, imp, args, n)
+}
+
+load(path: str) noregion raises WasmFormat, WasmNoMemory: *WasmInstance@new {
+    bytes: []i8 = wasm_read_file(path);
+    if (len(bytes) == 0) wr_fail("cannot read the module");
+    wasm_instantiate(wasm_decode(bytes), 64, &pause_host)
+}
+
+main(argc: int, argv: []str) noregion raises IoError: int {
+    if (argc < 3) {
+        eprint("usage: wasm-reloadtest v1.wasm v2.wasm");
+        return 2
+    }
+    args: []str = new str[1]("reload");
+    sys_set_args(args);
+    try {
+        v1: *WasmInstance = load(argv[1]);
+        _s1: int = wasm_start(v1);
+        state1: int = wasm_global_index(v1, "l8_async_state");
+        print(if (v1.globals[state1] == WA_UNWINDING) "v1 paused" else "v1 did not pause");
+        v2: *WasmInstance = load(argv[2]);
+        t: *Transfer = wasm_transfer(v1, v2);
+        for i in 0..t.nlines print(t.lines[i]);
+        write(1, "carried ");
+        print_int(t.carried);
+        write(1, "migrated ");
+        print_int(t.migrated);
+        write(1, "initialized ");
+        print_int(t.initialized);
+        write(1, "dropped ");
+        print_int(t.dropped);
+        _s2: int = wasm_start(v2);
+        state2: int = wasm_global_index(v2, "l8_async_state");
+        print(if (v2.globals[state2] == WA_UNWINDING) "v2 paused" else "v2 did not pause");
+        v2.globals[state2] = WA_REWINDING;
+        status: int = wasm_start(v2);
+        write(1, "v2 status ");
+        print_int(status);
+        if (wasm_trapped(v2)) {
+            write(2, "trap: ");
+            write(2, wasm_trap_message(v2));
+            write(2, "\n");
+            return 1
+        }
+        0
+    } with WasmFormat e -> {
+        write(2, "reloadtest: ");
+        write(2, e.msg);
+        write(2, "\n");
+        2
+    } with WasmNoMemory -> {
+        eprint("reloadtest: no memory");
+        2
+    }
+}

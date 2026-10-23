@@ -327,7 +327,30 @@ $(OK)/wasm-reload: l8c3 web/tests/reload_v1.l8 web/tests/reload_v2.l8 web/tests/
 		node web/tests/reload.mjs $(BUILD)/reload_v1.wasm $(BUILD)/reload_v2.wasm'
 	@touch $@
 
-wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume $(OK)/wasm-reload
+# The interpreter (programs/wasm, RELOAD.md): a runner that stands in for
+# Node, every fixture run through it, the compiler as a module rebuilding
+# itself under it, and the reload check carried out in L8.
+WASM_INTERP := $(wildcard programs/wasm/*.l8 programs/wasm/*.s)
+
+$(BUILD)/wasmrun: l8c3 $(WASM_INTERP) $(STDLIB) | $(OK)
+	@$(STEP) 'wasm interpreter' sh -c './l8c3 build programs/wasm/run.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+$(BUILD)/wasm-reloadtest: l8c3 $(WASM_INTERP) programs/wasm/tests/reload.l8 $(STDLIB) | $(OK)
+	@$(STEP) 'wasm reload test host' sh -c './l8c3 build programs/wasm/tests/reload.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+$(OK)/wasm-interp-tests: l8c3 $(BUILD)/wasmrun $(TESTS) $(STDLIB) | $(OK)
+	+@$(STEP) 'wasm tests interpreted' ./l8c3 test --wasm --runner $(CURDIR)/$(BUILD)/wasmrun $(WASM_TESTS)
+	@touch $@
+
+$(OK)/wasm-interp-fixpoint: $(BUILD)/wasmrun $(BUILD)/l8.wasm | $(OK)
+	@$(STEP) 'wasm fixpoint interpreted' sh -c '$(BUILD)/wasmrun $(BUILD)/l8.wasm wasm src2/main.l8 -o $(BUILD)/l8-interp.wasm && cmp $(BUILD)/l8.wasm $(BUILD)/l8-interp.wasm'
+	@touch $@
+
+$(OK)/wasm-interp-reload: $(BUILD)/wasm-reloadtest $(OK)/wasm-reload programs/wasm/tests/reload.expected | $(OK)
+	@$(STEP) 'wasm reload interpreted' sh -c '$(BUILD)/wasm-reloadtest $(BUILD)/reload_v1.wasm $(BUILD)/reload_v2.wasm | cmp - programs/wasm/tests/reload.expected'
+	@touch $@
+
+wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume $(OK)/wasm-reload $(OK)/wasm-interp-tests $(OK)/wasm-interp-fixpoint $(OK)/wasm-interp-reload
 
 # The playground: a static site in .build/web with the compiler as a module.
 # Serve it with `python3 -m http.server -d .build/web`.
@@ -404,7 +427,7 @@ help:
 	@echo '  better, bible-web, bible-tui'
 	@echo '  terminal, callback-test'
 	@echo '  http, websocket, profile-explorer'
-	@echo '  wasm-test       run the tests as WebAssembly under Node; check the wasm compiler fixpoint'
+	@echo '  wasm-test       run the tests as WebAssembly under Node and under the L8 interpreter; check the wasm compiler fixpoints'
 	@echo '  web             build the playground site in .build/web'
 	@echo '  cad-boards      make the CAD board files again from their generators, routed'
 	@echo '  promote, promote-bin1, promote-bin2, promote-source   (FORCE=1 skips the prompt)'

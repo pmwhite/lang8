@@ -126,10 +126,15 @@ site with `SB_DEV=1 node programs/bible/web/page/serve.mjs` (which lets the
 page reach any `http:` address) and open
 `http://127.0.0.1:8470/read/?dev=http://127.0.0.1:8777`.
 
-## Other hosts
+## Native hosts: the interpreter in L8
 
-The web is the first host. A native app (the iPhone's) would hold the same
-contract with a WebAssembly interpreter of its own, its externs proxied to
-the platform, and the same transfer over its instance's memory; the
-`l8persist` section and the server's protocol are designed to be read from
-L8 (LEB128 and plain HTTP). That host is not built.
+Where there is no JavaScript engine, `programs/wasm/` (its README) runs the
+same modules: a decoder, an interpreter, the standard imports, and the
+transfer of persistent globals in L8 (`wasm_transfer`), agreeing with
+`web/reload.js` line for line on the reload fixture. `make wasm-test` runs
+every compiler fixture through it (`l8 test --wasm --runner`) and has the
+compiler, as a module, rebuild itself under it. A native app (the
+iPhone's) holds the contract by importing it: its externs proxied to the
+platform by the module's `l8imports` section (each argument a number, a
+float, a pointer into the module's memory or a function value), and the
+same reload over its instances' memories.

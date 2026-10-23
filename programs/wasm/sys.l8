@@ -1,0 +1,333 @@
+tag wasm;
+
+use_tag std;
+
+// The imports every L8 module may make of its host (web/README.md, "Host
+// interface"), answered natively: files and output through the process's
+// own descriptors, the clocks, the environment, memory helpers, qsort
+// through the module's comparator, and the `l8 test` protocol on fd 3.
+// wasm_sys_host is the host function for wasm_instantiate; a host with
+// imports of its own answers them first and gives the rest to it.
+import "interp.l8";
+
+extern open(path: str, flags: int, mode: int): int;
+
+extern close(fd: int): int;
+
+extern sys_write_at(fd: int, data: *i8, n: int): int = l8_std_write;
+
+type Timespec = {
+    sec: int;
+    nsec: int
+}
+
+extern clock_gettime(clk: int, ts: *Timespec): int;
+
+extern rdtsc(): int;
+
+extern l8_time(): int;
+
+extern l8_getrandom(buf: *i8, n: int): int;
+
+extern l8_environment(): []str@new;
+
+// The program's arguments, as l8_argv gives them to main.
+sys_args: []str = new str[0]("");
+
+sys_set_args(args: []str@immortal) {
+    sys_args = args
+}
+
+// Output written to fds 1 and 2, for the test protocol's offsets.
+sys_output: int = 0;
+
+SYS_NONE: int = 0;
+
+SYS_EXIT: int = 1;
+
+SYS_ARGV: int = 2;
+
+SYS_ENV: int = 3;
+
+SYS_OPEN: int = 4;
+
+SYS_CLOSE: int = 5;
+
+SYS_READ: int = 6;
+
+SYS_WRITE: int = 7;
+
+SYS_CLOCK: int = 8;
+
+SYS_RDTSC: int = 9;
+
+SYS_TIME: int = 10;
+
+SYS_RUSAGE: int = 11;
+
+SYS_MEMCPY: int = 12;
+
+SYS_HEAP_USED: int = 13;
+
+SYS_GETRANDOM: int = 14;
+
+SYS_QSORT: int = 15;
+
+SYS_TEST_INDEX: int = 16;
+
+SYS_TEST_RECORD: int = 17;
+
+SYS_TEST_EXPECT: int = 18;
+
+SYS_SQRT: int = 19;
+
+// The import kinds of the instance bound last.
+sys_bound: int = 0 - 1;
+
+sys_kinds: []int = new int[0](0);
+
+sys_heap_base: int = 0;
+
+sys_kind_of(name: []i8): int {
+    if (streq(name, "exit") || streq(name, "l8_exit")) SYS_EXIT else if (streq(name,
+        "l8_argv")) SYS_ARGV else if (streq(name, "l8_environment")) SYS_ENV else if (streq(name,
+        "open")) SYS_OPEN else if (streq(name, "close")) SYS_CLOSE else if (streq(name,
+        "read")) SYS_READ else if (streq(name, "l8_std_write") || streq(name, "l8_os_write")) SYS_WRITE else if (streq(name,
+        "clock_gettime") || streq(name, "l8_clock_gettime")) SYS_CLOCK else if (streq(name,
+        "rdtsc")) SYS_RDTSC else if (streq(name, "l8_time") || streq(name, "time")) SYS_TIME else if (streq(name,
+        "getrusage")) SYS_RUSAGE else if (streq(name, "l8_memcpy")) SYS_MEMCPY else if (streq(name,
+        "l8_heap_used")) SYS_HEAP_USED else if (streq(name, "l8_getrandom")) SYS_GETRANDOM else if (streq(name,
+        "qsort")) SYS_QSORT else if (streq(name, "l8_test_index")) SYS_TEST_INDEX else if (streq(name,
+        "l8_test_record")) SYS_TEST_RECORD else if (streq(name, "l8_test_expect")) SYS_TEST_EXPECT else if (streq(name,
+        "sqrt")) SYS_SQRT else SYS_NONE
+}
+
+sys_bind(inst: *WasmInstance) noregion {
+    m: *WasmModule = inst.m;
+    sys_kinds = new int[len(m.imports)](0);
+    for i in 0..len(m.imports) sys_kinds[i] = sys_kind_of(m.imports[i].name);
+    heap: int = wasm_global_index(inst, "l8_heap");
+    sys_heap_base = (if (heap >= 0) m.global_inits[heap] else 0);
+    sys_bound = inst.id
+}
+
+// Whether wasm_sys_host answers import imp.
+wasm_sys_knows(inst: *WasmInstance, imp: int) noregion: bool {
+    if (sys_bound != inst.id) sys_bind(inst);
+    sys_kinds[imp] != SYS_NONE
+}
+
+// ---- memory helpers for hosts ----
+// Memory from the module's own allocator.
+wasm_alloc(inst: *WasmInstance, n: int) noregion: int {
+    try {
+        wasm_call_export(inst, "l8_malloc", n, 0, 0, 0, 1)
+    } with WasmFormat _e -> {
+        0
+    }
+}
+
+// A new []i8 or str in the module (its length before it, a NUL after)
+// holding the bytes.
+wasm_new_bytes(inst: *WasmInstance, data: []i8, n: int) noregion: int {
+    p: int = wasm_alloc(inst, 8 + n + 1);
+    if (p == 0) return 0;
+    wi_store64(inst, p, n);
+    memcpy(inst.mem8, p + 8, data, 0, n);
+    inst.mem8[p + 8 + n] = 0i8;
+    p + 8
+}
+
+// A new []str in the module.
+wasm_new_strings(inst: *WasmInstance, list: []str) noregion: int {
+    n: int = len(list);
+    outer: int = wasm_alloc(inst, 8 + 8 * n);
+    if (outer == 0) return 0;
+    wi_store64(inst, outer, n);
+    for i in 0..n {
+        s: str = list[i];
+        wi_store64(inst, outer + 8 + 8 * i, wasm_new_bytes(inst, bytes(s), len(s)))
+    }
+    outer + 8
+}
+
+// A module's str or []i8 at p, copied out.
+wasm_bytes_at(inst: *WasmInstance, p: int): []i8@new {
+    n: int = wi_load64(inst, p - 8);
+    out: []i8 = new i8[n](0i8);
+    memcpy(out, 0, inst.mem8, p, n);
+    out
+}
+
+wasm_str_at(inst: *WasmInstance, p: int): str@new {
+    n: int = wi_load64(inst, p - 8);
+    out: []i8 = new i8[n](0i8);
+    memcpy(out, 0, inst.mem8, p, n);
+    cstr(out)
+}
+
+// ---- the imports ----
+sys_record(a: int, b: int) {
+    buf: []i8 = new i8[16](0i8);
+    for k in 0..8 buf[k] = (a >> 8 * k) trunc i8;
+    for k in 0..8 buf[8 + k] = (b >> 8 * k) trunc i8;
+    _w: int = sys_write_at(3, &buf[0], 16)
+}
+
+// Merge sort of count elements of width bytes at base, by the module's
+// comparator (a table index), as qsort.
+sys_qsort(
+    inst: *WasmInstance,
+    base: int,
+    count: int,
+    width: int,
+    compare: int
+) noregion {
+    if (count < 2) return;
+    f: int = inst.table[compare & M32];
+    if (f < 0) return;
+    mem: []i8 = inst.mem8;
+    tmp: []i8 = new i8[count * width](0i8);
+    args: []int = new int[2](0);
+    w: int = 1;
+    while (w < count) {
+        lo: int = 0;
+        while (lo < count) {
+            mid: int = lo + w;
+            hi: int = lo + 2 * w;
+            if (mid > count) mid = count;
+            if (hi > count) hi = count;
+            i: int = lo;
+            j: int = mid;
+            k: int = lo;
+            while (i < mid || j < hi) {
+                take_i: bool = j >= hi;
+                if (!take_i && i < mid) {
+                    args[0] = base + i * width;
+                    args[1] = base + j * width;
+                    c: int = 0;
+                    try {
+                        c = wasm_call(inst, f, args, 2)
+                    } with WasmFormat _e -> {
+                        c = 0
+                    }
+                    take_i = sx32(c) <= 0
+                }
+                if (take_i) {
+                    memcpy(tmp, k * width, mem, base + i * width, width);
+                    i = i + 1
+                } else {
+                    memcpy(tmp, k * width, mem, base + j * width, width);
+                    j = j + 1
+                }
+                k = k + 1
+            }
+            lo = hi
+        }
+        memcpy(mem, base, tmp, 0, count * width);
+        w = w * 2
+    }
+}
+
+sys_arg_number(i: int): int {
+    if (i >= len(sys_args)) return 0 - 1;
+    s: str = sys_args[i];
+    if (len(s) == 0) return 0 - 1;
+    v: int = 0;
+    for c in s {
+        if (c < '0' || c > '9') return 0 - 1;
+        v = v * 10 + (c - '0') as int
+    }
+    v
+}
+
+// The host function: every standard import; -ENOSYS for the rest.
+wasm_sys_host(
+    inst: *WasmInstance,
+    imp: int,
+    args: []int,
+    n: int
+) noregion: int {
+    if (sys_bound != inst.id) sys_bind(inst);
+    kind: int = sys_kinds[imp];
+    mem: []i8 = inst.mem8;
+    if (kind == SYS_EXIT) {
+        wasm_exit(inst, sx32(args[0]));
+        0
+    } else if (kind == SYS_ARGV) wasm_new_strings(inst, sys_args) else if (kind == SYS_ENV) wasm_new_strings(inst,
+        l8_environment()) else if (kind == SYS_OPEN) {
+        path: str = wasm_str_at(inst, args[0]);
+        open(path, args[1], args[2])
+    } else if (kind == SYS_CLOSE) close(args[0]) else if (kind == SYS_READ) {
+        want: int = args[2];
+        if (args[1] + want > inst.pages * 65536) want = inst.pages * 65536 - args[1];
+        r: int = read(args[0], mem, args[1], want);
+        r
+    } else if (kind == SYS_WRITE) {
+        fd: int = args[0];
+        cnt: int = args[2];
+        if (cnt <= 0) return 0;
+        wrote: int = sys_write_at(fd, &mem[args[1]], cnt);
+        if (wrote > 0 && (fd == 1 || fd == 2)) sys_output = sys_output + wrote;
+        wrote
+    } else if (kind == SYS_CLOCK) {
+        ts: Timespec = Timespec { sec: 0, nsec: 0 };
+        r2: int = clock_gettime(args[0], &ts);
+        wi_store64(inst, args[1], ts.sec);
+        wi_store64(inst, args[1] + 8, ts.nsec);
+        r2
+    } else if (kind == SYS_RDTSC) rdtsc() else if (kind == SYS_TIME) {
+        t: int = l8_time();
+        if (n > 0 && args[0] != 0) wi_store64(inst, args[0], t);
+        t
+    } else if (kind == SYS_RUSAGE) {
+        for i in 0..144 mem[args[0] + i] = 0i8;
+        0
+    } else if (kind == SYS_MEMCPY) {
+        dst: int = args[0];
+        src: int = args[1];
+        cnt2: int = args[2];
+        if (dst < src || dst >= src + cnt2) memcpy(mem, dst, mem, src, cnt2) else {
+            // Overlapping, destination after: copy backwards.
+            for i in 0..cnt2 mem[dst + cnt2 - 1 - i] = mem[src + cnt2 - 1 - i]
+        }
+        dst
+    } else if (kind == SYS_HEAP_USED) {
+        heap: int = wasm_global_index(inst, "l8_heap");
+        if (heap >= 0) inst.globals[heap] - sys_heap_base else 0
+    } else if (kind == SYS_GETRANDOM) l8_getrandom(&mem[args[0]], args[1]) else if (kind == SYS_QSORT) {
+        sys_qsort(inst, args[0], args[1], args[2], args[3]);
+        0
+    } else if (kind == SYS_TEST_INDEX) sys_arg_number(1) else if (kind == SYS_TEST_RECORD) {
+        sys_record(args[0], args[1]);
+        0
+    } else if (kind == SYS_TEST_EXPECT) {
+        sys_record(args[0], sys_output);
+        0
+    } else if (kind == SYS_SQRT) l8_f64_bits(wf_sqrt(l8_bits_f64(args[0]))) else 0 - 38
+}
+
+// A whole file's bytes (none when it cannot be read).
+wasm_read_file(path: str): []i8@new {
+    fd: int = open(path, 0, 0);
+    if (fd < 0) return new i8[0](0i8);
+    cap: int = 1048576;
+    buf: []i8 = new i8[cap](0i8);
+    n: int = 0;
+    done: bool = false;
+    while (!done) {
+        if (cap - n < 65536) {
+            cap = cap * 2;
+            tmp: []i8 = new i8[cap](0i8);
+            memcpy(tmp, 0, buf, 0, n);
+            buf = tmp
+        }
+        r: int = read(fd, buf, n, cap - n);
+        if (r == 0 || r < 0 && r != -4) done = true;
+        if (r > 0) n = n + r
+    }
+    close(fd);
+    out: []i8 = new i8[n](0i8);
+    memcpy(out, 0, buf, 0, n);
+    out
+}

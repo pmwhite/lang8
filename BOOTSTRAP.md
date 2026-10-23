@@ -64,7 +64,7 @@ l8 elfpack file.o -o file
 l8 build [--profile|-p] [--unchecked-index] file.l8 -o file
 l8 wasm [--profile|-p] [--unchecked-index] [--async import]... file.l8 -o file.wasm
 l8 arm64 [--target linux|ios|ios-sim|android] [--unchecked-index] [--exe [--framework NAME]... [--imports FILE] [--sdk X.Y]] file.l8 -o file
-l8 test [--accept] [--wasm] [--arm64] [--unchecked-index] [-j N] file.l8|file.t ...
+l8 test [--accept] [--wasm [--runner PROGRAM]] [--arm64] [--unchecked-index] [-j N] file.l8|file.t ...
 ```
 
 `test` builds each file with its `test` declarations, runs them, and compares
@@ -81,7 +81,8 @@ that builder state; generated
 assembly and ET_REL are never serialized or reparsed.
 
 `wasm` compiles a program to a WebAssembly module instead (see
-[`web/README.md`](web/README.md)). The module keeps every type's layout and
+[`web/README.md`](web/README.md)); `test --wasm --runner PROGRAM` runs the
+modules with PROGRAM (`programs/wasm`'s interpreter) instead of Node. The module keeps every type's layout and
 imports each `extern` from the host by its link name; `native` assembly is not
 included. `--async import` lets that import pause the module and resume it
 later, so a blocking program loop can run in a browser. `node web/run.mjs
