@@ -103,6 +103,162 @@ a64_sym_addr(sym: *A64Sym): int {
     a64_sec_addr[sym.sec] + sym.off
 }
 
+// ---- the exports trie ----
+// A trie of the exported names, as dyld reads it: a node is its terminal
+// information's size (ULEB128) and, when a name ends there, flags (0, a
+// regular symbol) and the symbol's offset in the image (ULEB128s); then
+// its children's count (a byte) and, for each, the edge's string (NUL
+// ended) and the child's offset in the trie (ULEB128). Edges share no
+// first byte, so a lookup follows one. The offsets settle over a few
+// passes of the layout, since an offset's ULEB128 grows with it.
+type A64Trie = {
+    edge: []i8;
+    terminal: bool;
+    image_off: int;
+    children: ?*A64Trie;
+    next: ?*A64Trie;
+    at: int;
+    size: int
+}
+
+a64_trie_node(edge: []i8@new): *A64Trie@new {
+    new A64Trie {
+        edge: edge,
+        terminal: false,
+        image_off: 0,
+        children: null,
+        next: null,
+        at: 0,
+        size: 0
+    }
+}
+
+a64_trie_slice(b: []i8, from: int, to: int): []i8@new {
+    out: []i8 = new i8[to - from](0i8);
+    for i in from..to out[i - from] = b[i];
+    out
+}
+
+a64_trie_insert(
+    node: *A64Trie@new,
+    name: []i8,
+    from: int,
+    image_off: int
+) noregion {
+    if (from >= len(name)) {
+        node.terminal = true;
+        node.image_off = image_off;
+        return
+    }
+    c: ?*A64Trie = node.children;
+    prev: ?*A64Trie = null;
+    while (c != null) {
+        if (c.edge[0] == name[from]) {
+            // The common prefix of the edge and what is left of the name.
+            p: int = 0;
+            while (p < len(c.edge) && from + p < len(name) && c.edge[p] == name[from + p]) p = p + 1;
+            if (p == len(c.edge)) {
+                a64_trie_insert(c, name, from + p, image_off);
+                return
+            }
+            // Split the edge at p: a node for the prefix, c under it.
+            mid: *A64Trie = a64_trie_node(a64_trie_slice(c.edge, 0, p));
+            c.edge = a64_trie_slice(c.edge, p, len(c.edge));
+            mid.children = c;
+            mid.next = c.next;
+            c.next = null;
+            if (prev == null) node.children = mid else prev.next = mid;
+            a64_trie_insert(mid, name, from + p, image_off);
+            return
+        }
+        prev = c;
+        c = c.next
+    }
+    leaf: *A64Trie = a64_trie_node(a64_trie_slice(name, from, len(name)));
+    leaf.terminal = true;
+    leaf.image_off = image_off;
+    leaf.next = node.children;
+    node.children = leaf
+}
+
+a64_uleb_size(v: int): int {
+    n: int = 1;
+    while (v >= 128) {
+        v = v >> 7;
+        n = n + 1
+    }
+    n
+}
+
+a64_wuleb(sb: *StrBuf@new, v: int) raises Error {
+    while (v >= 128) {
+        sb_putc(sb, (v & 127 | 128) trunc i8);
+        v = v >> 7
+    }
+    sb_putc(sb, v trunc i8)
+}
+
+a64_trie_term_size(node: *A64Trie): int {
+    if (node.terminal) 1 + a64_uleb_size(node.image_off) else 0
+}
+
+// A node's size from its children's offsets; whether any changed.
+a64_trie_measure(node: *A64Trie, at: int): int {
+    term: int = a64_trie_term_size(node);
+    size: int = a64_uleb_size(term) + term + 1;
+    c: ?*A64Trie = node.children;
+    while (c != null) {
+        size = size + len(c.edge) + 1 + a64_uleb_size(c.at);
+        c = c.next
+    }
+    node.at = at;
+    node.size = size;
+    at = at + size;
+    c = node.children;
+    while (c != null) {
+        at = a64_trie_measure(c, at);
+        c = c.next
+    }
+    at
+}
+
+a64_trie_layout(root: *A64Trie) {
+    before: int = 0 - 1;
+    total: int = a64_trie_measure(root, 0);
+    while (total != before) {
+        before = total;
+        total = a64_trie_measure(root, 0)
+    }
+}
+
+a64_trie_write(sb: *StrBuf@new, node: *A64Trie) raises Error {
+    term: int = a64_trie_term_size(node);
+    a64_wuleb(sb, term);
+    if (node.terminal) {
+        sb_putc(sb, 0i8);
+        a64_wuleb(sb, node.image_off)
+    }
+    n: int = 0;
+    c: ?*A64Trie = node.children;
+    while (c != null) {
+        n = n + 1;
+        c = c.next
+    }
+    sb_putc(sb, n trunc i8);
+    c = node.children;
+    while (c != null) {
+        sb_puts(sb, c.edge);
+        sb_putc(sb, 0i8);
+        a64_wuleb(sb, c.at);
+        c = c.next
+    }
+    c = node.children;
+    while (c != null) {
+        a64_trie_write(sb, c);
+        c = c.next
+    }
+}
+
 // Patch the instruction at rel for a target address (and the GOT slot's
 // address for GOT relocations, already in target).
 a64_patch(rel: *A64Rel, target: int) {
@@ -1046,17 +1202,20 @@ a64_write_macho(
     a64_wappend(fixups, import_words);
     a64_wappend(fixups, names);
     a64_pad(fixups, 8);
-    // The exports trie: __mh_execute_header, at offset 0.
+    // The exports trie: __mh_execute_header (at offset 0) and every defined
+    // global, so dlsym finds the program's own functions (a module run in
+    // programs/wasm's interpreter has its imports answered by them).
     trie: *StrBuf = sb_new();
-    sb_putc(trie, 0i8);
-    sb_putc(trie, 1i8);
-    sb_puts(trie, "__mh_execute_header");
-    sb_putc(trie, 0i8);
-    sb_putc(trie, (trie.used + 1) trunc i8);
-    sb_putc(trie, 2i8);
-    sb_putc(trie, 0i8);
-    sb_putc(trie, 0i8);
-    sb_putc(trie, 0i8);
+    root: *A64Trie = a64_trie_node("");
+    a64_trie_insert(root, "__mh_execute_header", 0, 0);
+    s = a64_syms;
+    while (s != null) {
+        if (s.sec >= 0 && !s.temp && s.global && len(s.name) > 0) a64_trie_insert(root,
+            s.name, 0, a64_sym_addr(s) - A64_BASE);
+        s = s.next
+    }
+    a64_trie_layout(root);
+    a64_trie_write(trie, root);
     a64_pad(trie, 8);
     // Function starts (for debuggers and crash reports): each function's
     // address in __text, as ULEB128 steps from __TEXT's.

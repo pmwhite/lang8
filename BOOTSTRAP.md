@@ -107,8 +107,9 @@ compiler assembles and links that text itself (`src2/a64asm.l8`,
 executable; for iOS (`ios`, an iPhone's) or its simulator (`ios-sim`), a
 Mach-O executable linked to each `--framework`, to libobjc and to
 libSystem, its imports bound to the libraries `--imports
-tools/ios/imports.txt` names, chained fixups and an ad hoc code signature
-as Apple's linker writes them. `tools/ios/build.sh` uses Xcode's toolchain
+tools/ios/imports.txt` names, chained fixups, an exports trie of every
+global (so `dlsym` finds a program's own functions) and an ad hoc code
+signature as Apple's linker writes them. `tools/ios/build.sh` uses Xcode's toolchain
 on a Mac instead, and `tools/android/build.sh` links Android's library with
 the NDK's (see `programs/better/README.md`).
 `tools/arm64/check.py` compares the encoder with LLVM's: Linux executables

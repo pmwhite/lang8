@@ -148,7 +148,13 @@ for a platform's.
 `programs/wasm/ios/host.l8` is the hot reload host for an iPhone: an app
 whose executable is the host and whose program is the app built with `l8
 wasm` (the whole Bible app compiles so, UIKit and all), run in the
-interpreter with every import proxied to the platform (dlsym). At launch
+interpreter with every import proxied to the platform by dlsym, as if the
+module were native: the compiler's linker now exports every global of an
+executable, so the runtime's own functions (`l8_msg_hfa`, `l8rt_argv`...)
+and the host's are found like UIKit's, and the host anticipates nothing.
+Only the imports that are the module's runtime's (`l8_argv`, the test
+protocol) are answered by the host, since they build values in the
+module's memory. At launch
 it fetches the module from the development server named in
 `dev-server.txt` beside it (`app.wasm` beside it otherwise), then waits
 on `/wait?since=N` through NSURLSession on the main queue, so a build
