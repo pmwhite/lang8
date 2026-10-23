@@ -3369,6 +3369,31 @@ _wasm_callback_abandon:
 Lcb_none:
     ret
 
+// wasm_native_depth(): how many native calls are under way.
+    .globl _wasm_native_depth
+_wasm_native_depth:
+    adrp x8, wasm_slot_depth@PAGE
+    ldr x0, [x8, wasm_slot_depth@PAGEOFF]
+    ret
+
+// wasm_callback_native_depth(): the native calls under way when the
+// innermost callback began (0 when none is under way).
+    .globl _wasm_callback_native_depth
+_wasm_callback_native_depth:
+    adrp x8, wasm_cb_depth@PAGE
+    ldr x9, [x8, wasm_cb_depth@PAGEOFF]
+    cbz x9, Lcnd_none
+    sub x9, x9, #1
+    lsl x9, x9, #8
+    adrp x10, wasm_cb_slots@PAGE
+    add x10, x10, wasm_cb_slots@PAGEOFF
+    add x10, x10, x9
+    ldr x0, [x10, #160]
+    ret
+Lcnd_none:
+    mov x0, #0
+    ret
+
 // wasm_callback_depth(): how many callbacks are under way.
     .globl _wasm_callback_depth
 _wasm_callback_depth:

@@ -3380,6 +3380,29 @@ wasm_callback_abandon:
 .Lcb_none:
     ret
 
+# wasm_native_depth(): how many native calls are under way.
+.globl wasm_native_depth
+wasm_native_depth:
+    mov wasm_slot_depth(%rip), %rax
+    ret
+
+# wasm_callback_native_depth(): the native calls under way when the
+# innermost callback began (0 when none is under way).
+.globl wasm_callback_native_depth
+wasm_callback_native_depth:
+    mov wasm_cb_depth(%rip), %rax
+    test %rax, %rax
+    jz .Lcnd_none
+    sub $1, %rax
+    shl $6, %rax
+    lea wasm_cb_slots(%rip), %r10
+    add %r10, %rax
+    mov 48(%rax), %rax
+    ret
+.Lcnd_none:
+    mov $0, %rax
+    ret
+
 # wasm_callback_depth(): how many callbacks are under way.
 .globl wasm_callback_depth
 wasm_callback_depth:

@@ -48,21 +48,30 @@ on_exception(exc: int): int {
     main_thread: int = msg(cls("NSThread"), sel("isMainThread")) & 255;
     reason: int = msg(exc, sel("reason"));
     say("native exception:");
-    if (reason != 0) {
-        try {
-            b: []i8 = nsstring_bytes(reason);
-            write(2, "hot: ");
-            write_bytes_n(2, b, len(b));
-            write(2, "\n");
-            post_log(b, len(b))
-        } with IoError _e -> { }
-    }
-    if (main_thread == 0) {
-        say("(on another thread: the process ends)");
+    if (reason != 0) say_ns(reason);
+    if (main_thread != 0 && wasm_native_call_in_callback()) {
+        _a: int = wasm_native_abandon();
         return 0
     }
-    _a: int = wasm_native_abandon();
+    // Not from a native call the module made in a callback (UIKit's own
+    // work between callbacks, or another thread): nothing to abandon; the
+    // process ends, with where it was.
+    say(if (main_thread == 0) "(on another thread: the process ends)" else "(between the module's calls: the process ends)");
+    syms: int = msg(exc, sel("callStackSymbols"));
+    if (syms != 0) say_ns(msg1(syms, sel("componentsJoinedByString:"), nsstring("\n")));
     0
+}
+
+// An NSString, said.
+say_ns(ns: int) {
+    if (ns == 0) return;
+    b: []i8 = nsstring_bytes(ns);
+    try {
+        write(2, "hot: ");
+        write_bytes_n(2, b, len(b));
+        write(2, "\n")
+    } with IoError _e -> { }
+    post_log(b, len(b))
 }
 
 // ---- Objective-C's classes across reloads ----
@@ -128,7 +137,56 @@ extern addr_write(f: fn(fd: int, p: int, n: int): int): int = l8_as_int;
 
 extern sys_write_raw(fd: int, p: int, n: int): int = l8_std_write;
 
+// ---- the log kept on the phone ----
+// Every line is also written to Documents/hot-last.log as it is said
+// (synchronously: a dying process's last lines are there), and the
+// previous run's file is posted to the server at launch, so a run that
+// ended is seen afterwards without anyone fetching a crash report.
+log_fd: int = 0 - 1;
+
+extern sys_open(path: str, flags: int, mode: int): int = open;
+
+extern sys_close(fd: int): int = close;
+
+log_path(): str@new {
+    home: []i8 = nsstring_bytes(NSHomeDirectory());
+    tail: str = "/Documents/hot-last.log";
+    b: []i8 = new i8[len(home) + len(tail)](0i8);
+    memcpy(b, 0, home, 0, len(home));
+    memcpy(b, len(home), bytes(tail), 0, len(tail));
+    cstr(b)
+}
+
+durable(line: []i8, n: int) {
+    if (log_fd < 0 || n <= 0) return;
+    _w: int = sys_write_raw(log_fd, bytes_address(line), n);
+    if (line[n - 1] != '\n') {
+        nl: []i8 = [10i8];
+        _x: int = sys_write_raw(log_fd, bytes_address(nl), 1)
+    }
+}
+
+// The previous run's lines (its last 64 KB) to the server, then a new file.
+log_begin() {
+    path: str = log_path();
+    old: []i8 = wasm_read_file(path);
+    if (len(old) > 0) {
+        start: int = if (len(old) > 65536) len(old) - 65536 else 0;
+        head: str = "--- the previous run's last lines ---";
+        post_log(bytes(head), len(head));
+        rest: []i8 = new i8[len(old) - start](0i8);
+        memcpy(rest, 0, old, start, len(old) - start);
+        post_log(rest, len(rest));
+        tail: str = "--- (this run) ---";
+        post_log(bytes(tail), len(tail))
+    }
+    // O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, as Linux numbers them (the
+    // runtime's open makes them Apple's).
+    log_fd = sys_open(path, 1 + 64 + 512 + 1024, 420)
+}
+
 post_log(line: []i8, n: int) {
+    durable(line, n);
     if (server_n == 0 || session_sync == 0 || log_block == 0 || n <= 0) return;
     request: int = msg1(cls("NSMutableURLRequest"), sel("requestWithURL:"), url("/log"));
     msg1(request, sel("setHTTPMethod:"), nsstring("POST"));
@@ -262,7 +320,15 @@ extern addr_sig(f: fn(sig: int): int): int = l8_as_int;
 
 on_signal(sig: int): int {
     say_int("fault: signal", sig);
-    if (!wasm_proxy_recover("fault")) say("(no callback to abandon: the process ends)");
+    if (!wasm_proxy_recover("fault")) {
+        say("(no callback to abandon: the process ends)");
+        syms: int = msg(cls("NSThread"), sel("callStackSymbols"));
+        if (syms != 0) say_ns(msg1(syms, sel("componentsJoinedByString:"), nsstring("\n")));
+        // The default action, so the fault ends the process as it would
+        // have (returning re-runs the faulting instruction).
+        dfl: []i8 = new i8[16](0i8);
+        _r: int = sigaction(sig, dfl, 0)
+    }
     0
 }
 
@@ -825,6 +891,7 @@ main(argc: int, argv: []str) noregion: int {
         say("no module to run");
         return 1
     }
+    log_begin();
     catch_faults();
     if (server_n > 0) {
         wait_for_build();
