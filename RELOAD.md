@@ -155,8 +155,10 @@ and the host's are found like UIKit's, and the host anticipates nothing.
 Only the imports that are the module's runtime's (`l8_argv`, the test
 protocol) are answered by the host, since they build values in the
 module's memory. At launch
-it fetches the module from the development server named in
-`dev-server.txt` beside it (`app.wasm` beside it otherwise), then waits
+it fetches the module from the development server set on the phone (the
+Settings app, under the app: Hot reload, Server, as host:port; read again
+whenever the server stops answering) or else named in `dev-server.txt`
+beside it (`app.wasm` beside it otherwise), then waits
 on `/wait?since=N` through NSURLSession on the main queue, so a build
 arrives between the module's callbacks; a build is run as a reload: a new
 instance, the persistent globals carried, `l8_init_globals`, then the

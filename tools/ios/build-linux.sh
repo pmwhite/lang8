@@ -49,7 +49,10 @@ lap "compile and link"
 python3 -I "$here/macho.py" check "$app/$name"
 python3 -I "$here/assets.py" plist "$dir" "$sdk" "$app/Info.plist" "$dir/Info.plist" "${BUILD_NUMBER:-}"
 if [ -f "$dir/resources" ]; then
-  while read -r f; do [ -n "$f" ] && cp "$top/$f" "$app/"; done < "$dir/resources"
+  while read -r f; do
+    [ -n "$f" ] || continue
+    if [ -d "$top/$f" ]; then cp -R "$top/$f" "$app/"; else cp "$top/$f" "$app/"; fi
+  done < "$dir/resources"
 fi
 for f in "$dir/assets/$sdk"/*; do
   case "$(basename "$f")" in icon.plist|build.plist) ;; *) cp "$f" "$app/" ;; esac

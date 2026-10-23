@@ -131,7 +131,42 @@ host_reload(bytes: []i8@new) {
 }
 
 // ---- the development server ----
-server: []i8 = new i8[0](0i8);
+// Its address, host:port: the Settings app's (the Settings.bundle
+// tools/ios/hot.sh puts in the app, the key hot_server in the user
+// defaults), else dev-server.txt beside the executable.
+server: []i8 = new i8[256](0i8);
+
+server_n: int = 0;
+
+server_file: []i8 = new i8[0](0i8);
+
+// Read the setting again (it may be changed while the app runs; into a
+// buffer, since a callback allocates nothing it keeps).
+read_server() {
+    defaults: int = msg(cls("NSUserDefaults"), sel("standardUserDefaults"));
+    ns: int = msg1(defaults, sel("stringForKey:"), nsstring("hot_server"));
+    b: []i8 = if (ns != 0) nsstring_bytes(ns) else server_file;
+    if (server_trim(b) == 0) b = server_file;
+    n: int = server_trim(b);
+    if (n > len(server)) n = len(server);
+    memcpy(server, 0, b, 0, n);
+    server_n = n
+}
+
+say_server() {
+    try {
+        write(2, "hot: ");
+        write_bytes_n(2, server, server_n);
+        write(2, "\n")
+    } with IoError _e -> { }
+}
+
+// The length of b without trailing blanks.
+server_trim(b: []i8): int {
+    n: int = len(b);
+    while (n > 0 && (b[n - 1] == '\n' || b[n - 1] == ' ' || b[n - 1] == '\r')) n = n - 1;
+    n
+}
 
 session: int = 0;
 
@@ -163,10 +198,10 @@ path_in(dir: []i8, name: str): str@new {
 }
 
 url(path: str): int {
-    b: []i8 = new i8[7 + len(server) + len(path)](0i8);
+    b: []i8 = new i8[7 + server_n + len(path)](0i8);
     memcpy(b, 0, bytes("http://"), 0, 7);
-    memcpy(b, 7, server, 0, len(server));
-    memcpy(b, 7 + len(server), bytes(path), 0, len(path));
+    memcpy(b, 7, server, 0, server_n);
+    memcpy(b, 7 + server_n, bytes(path), 0, len(path));
     msg1(cls("NSURL"), sel("URLWithString:"), nsstring(cstr(b)))
 }
 
@@ -286,8 +321,10 @@ host_done(
             wait_for_build()
         } else {
             say_int("the server did not answer; status", status);
-            // (Again in a while: the run loop's next turn is too soon.)
-            msg2(cls("NSThread"), sel("sleepForTimeInterval:"), 0, 0);
+            // (The setting may have changed; again in a while: the run
+            // loop's next turn is too soon.)
+            read_server();
+            msg_set_f(cls("NSThread"), sel("sleepForTimeInterval:"), 2.0f64);
             wait_for_build()
         }
     } else if (kind == 2) {
@@ -304,7 +341,7 @@ host_done(
 // A GET of path before the app runs (NSURLSession needs no run loop for a
 // completion block on its own queue): the status, the body in task_got.
 sync_fetch(path: str): int {
-    if (len(server) == 0) return 0;
+    if (server_n == 0) return 0;
     task_got_n = 0;
     first_status = 0;
     request: int = msg1(cls("NSURLRequest"), sel("requestWithURL:"), url(path));
@@ -382,15 +419,12 @@ block3_of(invoke: int): int {
 
 main(argc: int, argv: []str) noregion: int {
     dir: []i8 = bundle_dir(if (argc > 0) argv[0] else "./");
-    conf: []i8 = wasm_read_file(path_in(dir, "dev-server.txt"));
-    n: int = len(conf);
-    while (n > 0 && (conf[n - 1] == '\n' || conf[n - 1] == ' ' || conf[n - 1] == '\r')) n = n - 1;
-    server = new i8[n](0i8);
-    memcpy(server, 0, conf, 0, n);
-    if (n > 0) {
+    server_file = wasm_read_file(path_in(dir, "dev-server.txt"));
+    read_server();
+    if (server_n > 0) {
         say("the development server:");
-        say(cstr(server))
-    } else say("no dev-server.txt: the module beside the executable, no reloads");
+        say_server()
+    } else say("no server set (Settings, or dev-server.txt): the module beside the executable, no reloads");
     // Every import is native, as the module would be: dlsym finds the
     // platform's functions and this program's own (the runtime's too: the
     // compiler's linker exports every global).
@@ -420,7 +454,7 @@ main(argc: int, argv: []str) noregion: int {
         say("no module to run");
         return 1
     }
-    if (len(server) > 0) wait_for_build();
+    if (server_n > 0) wait_for_build();
     host_run(module);
     0
 }

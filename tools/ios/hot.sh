@@ -4,7 +4,9 @@
 # the hot reload host (programs/wasm/ios/host.l8), and beside it app.wasm,
 # APP.l8 built as a module, and dev-server.txt naming the development
 # server (web/dev.mjs) the host fetches builds from:
-#   tools/ios/hot.sh device|sim APP.l8 DIR OUT HOST:PORT
+#   tools/ios/hot.sh device|sim APP.l8 DIR OUT [HOST:PORT]
+# The server can also be set on the phone, in the Settings app under the
+# app (Hot reload: Server), which wins over HOST:PORT.
 #   tools/ios/hot.sh device programs/bible/ios/app.l8 programs/bible/ios .build/hot LAPTOP:8777
 # then, on the development machine:
 #   node web/dev.mjs -- programs/bible/ios/app.l8 -o .build/dev/bible-ios.wasm
@@ -36,7 +38,7 @@ for f in "$dir"/AppIcon*.png "$dir"/AppIcon.svg; do [ -e "$f" ] && cp "$f" "$wor
 printf '%s\n' "$server" > "$out/dev-server.txt"
 rel=$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$out" "$top")
 touch "$work/resources"
-printf '%s/app.wasm\n%s/dev-server.txt\n' "$rel" "$rel" >> "$work/resources"
+printf '%s/app.wasm\n%s/dev-server.txt\ntools/ios/hot-settings/Settings.bundle\n' "$rel" "$rel" >> "$work/resources"
 python3 -I - "$work/Info.plist" <<'PY'
 import plistlib, sys
 p = sys.argv[1]
