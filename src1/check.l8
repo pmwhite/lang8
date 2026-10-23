@@ -1,5 +1,9 @@
 tag compiler_internal;
 
+// Keep the old analysis reachable to the saved bootstrap while disabling it
+// for successor stages. Stage 2 deletes this compatibility implementation.
+lifetime_analysis_enabled: bool = false;
+
 // Lifetimes, typing, and post-parse checks (unused, raises, definite assignment).
 life_reset_imm() {
     life_arrays.n = 3;
@@ -118,6 +122,7 @@ life_is_self_bound(p: *Obj): bool {
 }
 
 resolve_fn_bounds(fn: *Function) raises Error {
+    if (!lifetime_analysis_enabled) return;
     p: ?*Obj = fn.params;
     while (p != null) {
         if (type_is_ref(p.ty) || type_has_pointers(p.ty)) p.life = life_alloc_frame(0 - 1,
@@ -608,6 +613,7 @@ is_stack_addr_stmt(s: ?*Stmt): bool {
 is_stack_addr(n: ?*Expr): bool {
     if (n == null) return false;
     match n.kind {
+        Funcall k -> streq(k.funcname, "l8_fixed_buffer");
         Addr k -> is_stack_object(k.lhs);
         As k -> is_stack_addr(k.lhs);
         Trunc k -> is_stack_addr(k.lhs);
@@ -675,6 +681,7 @@ taint_from_inner(n: *Expr, inner: ?*Expr): bool {
 }
 
 is_tainted_expr(n: ?*Expr): bool {
+    if (!lifetime_analysis_enabled) return false;
     if (n == null) return false;
     if (is_stack_addr(n)) return true;
     match n.kind {
@@ -848,6 +855,7 @@ expr_life(n: ?*Expr) raises Error: int {
             l
         }
         Funcall k -> {
+            if (streq(k.funcname, "l8_fixed_buffer")) return LIFE_SELF;
             if (io_allows_stack(k.funcname)) return LIFE_IMM;
             if (streq(k.funcname, "len") || streq(k.funcname, "memcpy")) return LIFE_IMM;
             if (streq(k.funcname, "l8_cstr") || streq(k.funcname, "l8_bytes")) return life_heap;
@@ -1156,6 +1164,7 @@ note_sig_return(src: ?*Expr) raises Error {
 }
 
 check_store(src: ?*Expr, dest: int) noregion raises Error {
+    if (!lifetime_analysis_enabled) return;
     if (src == null) return;
     if (!type_has_pointers(src.ty) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
     sl: int = expr_life(src);
@@ -1183,6 +1192,7 @@ return_needs_new() noregion raises Error {
 
 // (Reported at the value returned.)
 check_return(src: ?*Expr) noregion raises Error {
+    if (!lifetime_analysis_enabled) return;
     if (src == null) return;
     outer_pos: int = diag_expr_pos;
     outer_file: int = diag_expr_file;
@@ -1209,6 +1219,7 @@ check_return_value(src: *Expr) noregion raises Error {
 }
 
 check_exc_payload(src: ?*Expr) raises Error {
+    if (!lifetime_analysis_enabled) return;
     if (src == null) return;
     if (!type_has_pointers(src.ty) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
     sl: int = expr_life(src);
@@ -1224,6 +1235,7 @@ check_exc_payload(src: ?*Expr) raises Error {
 }
 
 check_call_lifetimes(fno: *Function@immortal, args: ?*Expr) noregion raises Error {
+    if (!lifetime_analysis_enabled) return;
     a: ?*Expr = args;
     po: ?*Obj = fno.params;
     cfn: ?*Function = current_fn;
@@ -2011,7 +2023,18 @@ typecheck_global_inits() noregion raises Error {
             add_type(init);
             if (!assignable(g.ty, init)) error_have_expr_want("global initializer type mismatch",
                 init, g.ty);
-            check_store(init, LIFE_IMM)
+            check_store(init, LIFE_IMM);
+            ity: ?*Type = init.ty;
+            if (ity != null && is_slice(ity))
+                match init.kind {
+                    ArrayLit k -> {
+                        base: *Type = type_base(ity);
+                        count: int = array_literal_count(k.elems);
+                        if (!fixed_storage_valid(base) || count > 536870912 / type_size(base)) error("global slice literal is too large");
+                        init.static_data = 0 - 1
+                    }
+                    _ -> { }
+                }
         }
         g = g.next
     }
@@ -2773,6 +2796,7 @@ check_region_calls_stmt_list(s: ?*Stmt) raises Error {
 }
 
 check_region_calls_all() raises Error {
+    if (!lifetime_analysis_enabled) return;
     fn: ?*Function = functions;
     while (fn != null) {
         if (!fn.is_extern) {
@@ -2867,6 +2891,7 @@ mark_print_at(file: int, pos: int, msg: []i8) {
 }
 
 check_imm_heap_functions() raises Error {
+    if (!lifetime_analysis_enabled) return;
     fn: ?*Function = functions;
     while (fn != null) {
         // Test bodies cannot declare noregion; only the test entry calls them.
@@ -3054,6 +3079,7 @@ propagate_param_bounds() {
 }
 
 check_written_bounds() raises Error {
+    if (!lifetime_analysis_enabled) return;
     fn: ?*Function = functions;
     while (fn != null) {
         if (!fn.is_extern) {

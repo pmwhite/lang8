@@ -1365,6 +1365,67 @@ wg_indirect_call(target: *Expr, fn: *Function, args: ?*Expr) noregion raises Err
     wt_put(t)
 }
 
+// The destination data address is on the wasm stack; leave it there as
+// the result after filling the declared slots from one evaluated value.
+wg_fixed_buffer_fill(bt: *Type, fill: *Expr) noregion raises Error {
+    base: *Type = type_base(bt);
+    ptr: int = wt_get();
+    w_lset(ptr);
+    value: int = wt_get();
+    wg_expr(fill);
+    w_lset(value);
+    index: int = wt_get();
+    w_i64(0);
+    w_lset(index);
+    done: int = w_block();
+    top: int = w_loop();
+    w_lget(index);
+    w_i64(array_len(bt));
+    w_op(89);
+    w_br_if(done);
+    w_lget(ptr);
+    w_lget(index);
+    w_i64(type_size(base));
+    w_op(126);
+    w_op(124);
+    w_wrap();
+    w_lget(value);
+    if (passes_by_ref(base)) {
+        w_wrap();
+        w_i32(type_size(base));
+        w_memory_copy()
+    } else if (wasm_small_record(base) && type_size(base) != 1 && type_size(base) != 2 && type_size(base) != 4 && type_size(base) != 8) {
+        packed: int = wt_get();
+        address: int = wt_get();
+        w_lset(packed);
+        w_extend();
+        w_lset(address);
+        for byte in 0..type_size(base) {
+            w_lget(address);
+            w_wrap();
+            w_lget(packed);
+            if (byte > 0) {
+                w_i64(byte * 8);
+                w_op(136)
+            }
+            w_mem(60, byte)
+        }
+        wt_put(address);
+        wt_put(packed)
+    } else wg_store_op(base, 0);
+    w_lget(index);
+    w_i64(1);
+    w_op(124);
+    w_lset(index);
+    w_br(top);
+    w_end();
+    w_end();
+    w_lget(ptr);
+    wt_put(index);
+    wt_put(value);
+    wt_put(ptr)
+}
+
 wg_call(
     n: *Expr,
     funcname: []i8,
@@ -1377,6 +1438,50 @@ wg_call(
         return
     }
     if (fno == null) {
+        if (streq(funcname, "l8_static_buffer")) {
+            bt: *Type = fixed_buffer_type(args);
+            w_i32(n.cg_temp);
+            w_i64(array_len(bt));
+            w_mem(55, 0);
+            w_i64(n.cg_temp + 8);
+            metadata: *Expr = args or error("missing static buffer type");
+            fill: ?*Expr = metadata.next;
+            if (fill != null && !fixed_buffer_zero_fill(fill)) wg_fixed_buffer_fill(bt,
+                fill);
+            return
+        }
+        if (streq(funcname, "l8_fixed_buffer")) {
+            bt: *Type = fixed_buffer_type(args);
+            slot: int = wl_rbp + cg_temp_offset(n);
+            wg_frame_addr(slot);
+            w_wrap();
+            w_i64(array_len(bt));
+            w_mem(55, 0);
+            metadata: *Expr = args or error("missing fixed buffer type");
+            fill: ?*Expr = metadata.next;
+            if (fill != null && !fixed_buffer_zero_fill(fill)) {
+                wg_frame_addr(slot + 8);
+                wg_fixed_buffer_fill(bt, fill)
+            } else {
+                wg_frame_addr(slot + 8);
+                w_wrap();
+                w_i32(0);
+                w_i32(type_size(bt));
+                w_memory_fill();
+                wg_frame_addr(slot + 8)
+            }
+            return
+        }
+        if (streq(funcname, "l8_zeroed_array")) {
+            slot: int = wl_rbp + cg_temp_offset(n);
+            wg_frame_addr(slot);
+            w_wrap();
+            w_i32(0);
+            w_i32(type_size(n.ty or error("missing zeroed array type")));
+            w_memory_fill();
+            wg_frame_addr(slot);
+            return
+        }
         if (streq(funcname, "len")) {
             argument: *Expr = args or error("missing len argument");
             wg_expr(argument);
@@ -1566,6 +1671,18 @@ wg_expr(n: *Expr) noregion raises Error {
                 disp3: int = wl_rbp + cg_temp_offset(n);
                 wg_fill_list(k.elems, base, 0 - 1, disp3);
                 wg_frame_addr(disp3);
+                return
+            }
+            if (n.static_data > 0) {
+                w_i32(n.static_data);
+                w_i64(array_literal_count(k.elems));
+                w_mem(55, 0);
+                tp: int = wt_get();
+                w_i64(n.static_data + 8);
+                w_lset(tp);
+                wg_fill_list(k.elems, base, tp, 0);
+                w_lget(tp);
+                wt_put(tp);
                 return
             }
             esz: int = type_size(base);
@@ -3306,6 +3423,27 @@ wasm_layout() noregion raises Error {
             addr = wasm_pad(addr + sz)
         }
         g = g.next
+    }
+    bg: ?*Obj = globals;
+    while (bg != null) {
+        bi: ?*Expr = bg.init;
+        if (bi != null)
+            match bi.kind {
+                Funcall bk -> {
+                    if (streq(bk.funcname, "l8_static_buffer")) {
+                        bi.cg_temp = addr;
+                        addr = wasm_pad(addr + type_size(fixed_buffer_type(bk.args)) + 8)
+                    }
+                }
+                ArrayLit bk -> {
+                    if (bi.static_data != 0) {
+                        bi.static_data = addr;
+                        addr = wasm_pad(addr + array_literal_count(bk.elems) * type_size(type_base(bi.ty or error("missing literal type"))) + 8)
+                    }
+                }
+                _ -> { }
+            }
+        bg = bg.next
     }
     wasm_region_marks = addr;
     addr = addr + 8 * WASM_REGION_CAP;

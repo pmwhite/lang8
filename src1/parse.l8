@@ -973,7 +973,8 @@ mk_expr(k: ExprKind@new): *Expr@new {
         pos: 0,
         file: 0,
         toklen: 0,
-        cg_temp: 0
+        cg_temp: 0,
+        static_data: 0
     }
 }
 
@@ -1602,6 +1603,82 @@ parse_variant_field_inits(v: *Variant@new) noregion raises Error: ?*FieldInit@ne
 
 parse_primary() noregion raises Error: *Expr@new {
     n: *Expr;
+    if (tok.kind == TokKind.Ident && len(tok.qualifier) == 0 && tok.next.kind == TokKind.LParen && (streq(cur_tokstr(),
+        "zeroed") || streq(cur_tokstr(), "buffer") || streq(cur_tokstr(), "static_buffer"))) {
+        buffer_pos: int = tok.pos;
+        buffer_file: int = current_file_id;
+        buffer_len: int = tok.len;
+        static_counted: bool = streq(cur_tokstr(), "static_buffer");
+        counted: bool = streq(cur_tokstr(), "buffer") || static_counted;
+        tok = tok.next.next;
+        if (counted && tok.kind != TokKind.LBrack) {
+            capacity: *Expr = parse_expr();
+            skip(TokKind.Comma);
+            initial: *Expr = parse_expr();
+            capacity.next = initial;
+            skip(TokKind.RParen);
+            n = mk_expr(ExprKind.Funcall {
+                funcname: "l8_fixed_buffer",
+                args: capacity,
+                fn: null,
+                target: null
+            });
+            if (static_counted) n.kind = ExprKind.Funcall {
+                funcname: "l8_static_buffer",
+                args: capacity,
+                fn: null,
+                target: null
+            };
+            n.pos = buffer_pos;
+            n.file = buffer_file;
+            n.toklen = buffer_len;
+            return n
+        }
+        zty: *Type = parse_type();
+        explicit_fill: ?*Expr = null;
+        if (counted && tok.kind == TokKind.Comma) {
+            tok = tok.next;
+            explicit_fill = parse_expr()
+        }
+        skip(TokKind.RParen);
+        if (!is_array(zty)) error("zeroed requires a fixed array of zero-initializable values");
+        if (parse_resolve) {
+            if (explicit_fill == null && !zero_initializable(zty)) error("zeroed requires a fixed array of zero-initializable values");
+            if (!fixed_storage_valid(zty)) error("zeroed array is too large")
+        }
+        n = mk_expr(ExprKind.Funcall {
+            funcname: "l8_zeroed_array",
+            args: null,
+            fn: null,
+            target: null
+        });
+        if (counted) n.kind = ExprKind.Funcall {
+            funcname: "l8_fixed_buffer",
+            args: new_sizeof_ty(zty),
+            fn: null,
+            target: null
+        };
+        if (static_counted) n.kind = ExprKind.Funcall {
+            funcname: "l8_static_buffer",
+            args: new_sizeof_ty(zty),
+            fn: null,
+            target: null
+        };
+        if (explicit_fill != null) {
+            match n.kind {
+                Funcall k -> {
+                    metadata: *Expr = k.args or error("missing buffer type");
+                    metadata.next = explicit_fill
+                }
+                _ -> { }
+            }
+        }
+        n.ty = (if (counted) slice_of(type_base(zty)) else zty);
+        n.pos = buffer_pos;
+        n.file = buffer_file;
+        n.toklen = buffer_len;
+        return n
+    }
     if (tok.kind == TokKind.New) {
         new_pos: int = tok.pos;
         new_file: int = current_file_id;
@@ -3290,6 +3367,70 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             return
         }
         Funcall q -> {
+            if ((streq(q.funcname, "l8_fixed_buffer") || streq(q.funcname, "l8_static_buffer")) && p.ty == null) {
+                capacity: *Expr = q.args or error("buffer requires a capacity and zero value");
+                initial: *Expr = capacity.next or error("buffer requires a capacity and zero value");
+                if (initial.next != null) error("buffer takes two arguments");
+                add_type(capacity);
+                if (!is_int_ty(capacity.ty) || !is_const_init(capacity)) error("buffer capacity must be a compile-time int");
+                count: int = const_value(capacity);
+                add_type(initial);
+                element: ?*Type = initial.ty;
+                if (streq(q.funcname, "l8_static_buffer")) {
+                    global: ?*Obj = globals;
+                    while (global != null) {
+                        gt: ?*Type = global.ty;
+                        if (global.init == p && gt != null && is_slice(gt)) element = type_base(gt);
+                        global = global.next
+                    }
+                }
+                base: *Type = element or error("buffer fill value has no type");
+                if (!assignable(base, initial)) error("buffer fill type mismatch");
+                if (is_noreturn_ty(base)) error("buffer elements must be values");
+                check_store(initial, LIFE_IMM);
+                size: int = type_size(base);
+                if (!fixed_storage_valid(base) || count <= 0 || count > 536870912 / size) error("buffer capacity is out of range");
+                metadata: *Expr = new_sizeof_ty(array_of(base, count));
+                metadata.next = initial;
+                p.kind = ExprKind.Funcall {
+                    funcname: q.funcname,
+                    args: metadata,
+                    fn: null,
+                    target: null
+                };
+                p.ty = slice_of(base);
+                // Re-enter with the normalized typed arguments to check where
+                // the backing storage is allowed to live.
+                add_type(p);
+                return
+            }
+            if (streq(q.funcname, "l8_zeroed_array") && p.ty != null) return;
+            if (streq(q.funcname, "l8_static_buffer") && p.ty != null) {
+                metadata: *Expr = q.args or error("missing buffer type");
+                fill: ?*Expr = metadata.next;
+                if (fill != null) {
+                    add_type(fill);
+                    if (!assignable(type_base(fixed_buffer_type(q.args)), fill)) error("buffer fill type mismatch");
+                    check_store(fill, LIFE_IMM)
+                }
+                global: ?*Obj = globals;
+                while (global != null) {
+                    if (global.init == p) return;
+                    global = global.next
+                }
+                error("static_buffer must directly initialize a global slice")
+            }
+            if (streq(q.funcname, "l8_fixed_buffer") && p.ty != null) {
+                metadata: *Expr = q.args or error("missing buffer type");
+                fill: ?*Expr = metadata.next;
+                if (fill != null) {
+                    add_type(fill);
+                    if (!assignable(type_base(fixed_buffer_type(q.args)), fill)) error("buffer fill type mismatch");
+                    check_store(fill, LIFE_IMM)
+                }
+                if (current_fn == null) error("buffer requires a function frame; use a fixed global array");
+                return
+            }
             if (q.target != null) {
                 type_indirect_call(p);
                 return
@@ -4799,7 +4940,8 @@ expect_string_value(src: []i8, from: int, to: int) raises Error: []i8@new {
 
 is_builtin_fname(name: []i8): bool {
     streq(name, "len") || streq(name, "memcpy") || streq(name, "read") || streq(name,
-        "cstr") || streq(name, "bytes")
+        "cstr") || streq(name, "bytes") || streq(name, "zeroed") || streq(name, "buffer") || streq(name,
+        "static_buffer")
 }
 
 bind_function(name: []i8@new, fn: *Function@immortal) noregion raises Error {

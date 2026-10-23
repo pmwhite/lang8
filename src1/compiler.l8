@@ -456,7 +456,10 @@ type Expr = {
     file: int;
     toklen: int;
     // Frame offset of this expression's aggregate temporary, or 0.
-    cg_temp: int
+    cg_temp: int;
+    // Static backing for a slice literal that directly initializes a global.
+    // -1 after typing, then a native label id or wasm address.
+    static_data: int
 }
 
 type StmtKind =
@@ -2064,6 +2067,107 @@ opt_slice_of(base: *Type@immortal) noregion: *Type@new {
     t: *Type = new Type.OptSlice { base: base };
     opt_slice_cache = new TyEnt { base: base, ty: t, next: opt_slice_cache };
     t
+}
+
+// Zero bytes are valid for these values. Non-null references, strings,
+// function values, refinements and tagged unions need explicit construction.
+// Check multiplication before trusting an inline array's computed byte size.
+// Pointer element layouts stop here; pointee graphs need not be finite.
+fixed_storage_valid(t: *Type): bool {
+    size: int = type_size(t);
+    if (size <= 0 || size > 536870912) return false;
+    match t.* {
+        Array k -> {
+            if (!fixed_storage_valid(k.base)) return false;
+            k.n > 0 && k.n <= 536870912 / type_size(k.base)
+        }
+        Record k -> {
+            m: ?*Member = k.def.members;
+            while (m != null) {
+                if (!fixed_storage_valid(m.ty)) return false;
+                if (m.offset < 0 || m.offset > size - type_size(m.ty)) return false;
+                m = m.next
+            }
+            true
+        }
+        Enum k -> {
+            variant: ?*Variant = k.def.variants;
+            while (variant != null) {
+                field: ?*Member = variant.fields;
+                while (field != null) {
+                    if (!fixed_storage_valid(field.ty)) return false;
+                    if (field.offset < 0 || variant.payload_offset < 0 || variant.payload_offset > size - type_size(field.ty)) return false;
+                    if (field.offset > size - variant.payload_offset - type_size(field.ty)) return false;
+                    field = field.next
+                }
+                variant = variant.next
+            }
+            true
+        }
+        Refined k -> fixed_storage_valid(k.base);
+        _ -> true
+    }
+}
+
+array_literal_count(head: ?*Expr): int {
+    count: int = 0;
+    e: ?*Expr = head;
+    while (e != null) {
+        count = count + 1;
+        e = e.next
+    }
+    count
+}
+
+fixed_buffer_zero_fill(fill: ?*Expr) raises Error: bool {
+    if (fill == null) return true;
+    ty: ?*Type = fill.ty;
+    if (ty == null || !zero_initializable(ty)) return false;
+    is_const_init(fill) && const_value(fill) == 0
+}
+
+fixed_buffer_has_type(args: ?*Expr): bool {
+    if (args == null) return false;
+    match args.kind {
+        Sizeof k -> k.ty != null;
+        _ -> false
+    }
+}
+
+fixed_buffer_type(args: ?*Expr) raises Error: *Type {
+    arg: *Expr = args or error("missing fixed buffer type");
+    match arg.kind {
+        Sizeof k -> k.ty or error("missing fixed buffer type");
+        _ -> error("invalid fixed buffer type")
+    }
+}
+
+zero_initializable(t: *Type): bool {
+    match t.* {
+        Int -> true;
+        I8 -> true;
+        I32 -> true;
+        U32 -> true;
+        F32 -> true;
+        F64 -> true;
+        Bool -> true;
+        Array k -> {
+            if (!zero_initializable(k.base)) return false;
+            size: int = type_size(k.base);
+            size > 0 && k.n > 0 && k.n <= 536870912 / size
+        }
+        Record k -> {
+            m: ?*Member = k.def.members;
+            while (m != null) {
+                if (!zero_initializable(m.ty)) return false;
+                if (m.offset < 0 || m.offset > 536870912 - type_size(m.ty)) return false;
+                if (m.offset + type_size(m.ty) > k.def.size) return false;
+                m = m.next
+            }
+            k.def.size > 0 && k.def.size <= 536870912
+        }
+        _ -> false
+    }
 }
 
 array_of(base: *Type@immortal, n: int) noregion: *Type@new {

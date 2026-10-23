@@ -29,9 +29,8 @@ Use `&name` for a top-level L8 function. Function values occupy one machine
 pointer and can be stored in globals, arrays, and C-layout listener structs,
 passed to `extern` functions, returned, and called through expressions. There
 are no closures or captured locals. `?fn(...)` permits null; narrow it with a
-null check or `or` before calling. Signatures compare parameter types and lifetime
-bounds, with parameter names matched by position. They also compare the
-`noregion` requirement and the set of declared exceptions.
+null check or `or` before calling. Signatures compare parameter/result types and the set of declared exceptions.
+Parameter names and legacy lifetime annotations do not affect compatibility.
 
 Ordinary function values support L8 records, enums, fixed arrays, slices,
 strings, lifetime bounds (including `@new`), and `noreturn`. For example:
@@ -43,8 +42,7 @@ action: fn() raises Error = &try_action;
 save: fn() noregion = &store;
 ```
 
-Indirect calls enforce the same argument, lifetime, exception, and region checks
-as direct calls. There is no separate `cfn` type or calling-convention annotation.
+Indirect calls enforce the same argument and exception checks as direct calls. There is no separate `cfn` type or calling-convention annotation.
 See `native.l8` and `effects.l8` for runnable examples.
 
 C compatibility is checked in `extern` declarations, recursively through callback
@@ -65,18 +63,15 @@ callback signatures using aggregates by value, counted strings/slices, or
 to C-layout structs for aggregate data. `i8` is unsigned;
 use `i32` for C `int` and `int` for C `long`/`size_t` on this platform.
 
-Function signatures preserve L8 lifetime contracts. An unannotated pointer
-parameter is borrowed for the call; named bounds and `@immortal` have their usual
-meaning. As with all foreign declarations, the binding must accurately describe
-the foreign API's ownership promises. The callback address lives for the process,
-but its userdata and listener storage must remain alive until the foreign library
-has stopped using them. C callbacks must run on the L8 thread; the runtime heap
-and exception machinery are not thread-safe, and callbacks are not async-signal-safe.
+Lifetime annotations and `noregion` are retained as inert source syntax. The
+callback address lives for the process, but userdata and listener storage must
+remain alive until the foreign library has stopped using them. Keep retained
+objects in permanent storage or explicitly managed pool slots. C callbacks must
+run on the L8 thread; the runtime heap and exception machinery are not thread-safe,
+and callbacks are not async-signal-safe.
 
-Exceptions must be caught inside C callbacks. Functions declaring `raises` or
-requiring `noregion` cannot be passed as foreign callbacks: a foreign library may
-invoke them while an L8 region is active. Parameters/results using `@new` are also
-unsupported at this boundary. Taking the address of an `extern` function is not
+Exceptions must be caught inside C callbacks. Functions declaring `raises` cannot
+be passed as foreign callbacks. Taking the address of an `extern` function is not
 yet supported; an L8 wrapper with a compatible signature can call it instead.
 
 Typed aliases let a C entry point have multiple L8 declarations with concrete
@@ -87,7 +82,7 @@ extern compare_strings(a: str, b: str): i32 = strcmp;
 extern compare_bytes(a: *i8, b: *i8): i32 = strcmp;
 ```
 
-The normal argument, lifetime, and foreign callback checks apply to each alias.
+The normal argument and foreign callback checks apply to each alias.
 `aliases.l8` tests both direct binaries and textual assembly. The Wayland binding
 uses this for the different listener tables and argument layouts accepted by
 `wl_proxy_add_listener` and `wl_proxy_marshal_array_flags`.

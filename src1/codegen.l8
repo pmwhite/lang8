@@ -89,6 +89,11 @@ store_value(ty: *Type) noregion raises Error {
     if (passes_by_ref(ty)) {
         cg_mov_rr(0, 6);
         emit_memcpy(type_size(ty))
+    } else if ((is_struct_ty(ty) || is_exn_ty(ty)) && type_size(ty) < 8) {
+        for byte in 0..type_size(ty) {
+            cg_movb_rm(0, 7, byte);
+            if (byte + 1 < type_size(ty)) cg_shift_imm(5, 8, 0)
+        }
     } else store_mem(ty)
 }
 
@@ -1357,6 +1362,41 @@ cg_emit_constant(n: *Expr) noregion raises Error: bool {
     true
 }
 
+// A counted buffer's data address is in rax. Evaluate its fill once, then
+// initialize the statically reserved slots, preserving surrounding operands.
+gen_fixed_buffer_fill(bt: *Type, fill: *Expr) noregion raises Error {
+    base: *Type = type_base(bt);
+    size: int = type_size(base);
+    cg_push(3);
+    cg_push(12);
+    cg_push(13);
+    cg_mov_rr(0, 3);
+    gen_expr(fill);
+    cg_mov_rr(0, 13);
+    cg_mov_imm(array_len(bt), 12);
+    loop: int = new_label();
+    cg_label_id(loop);
+    cg_mov_rr(3, 7);
+    cg_mov_rr(13, 0);
+    if ((is_struct_ty(base) || is_exn_ty(base)) && size < 8) {
+        // Small records are returned as packed bits. Write their actual
+        // width, including layouts of 2, 3, 5, 6 and 7 bytes.
+        for byte in 0..size {
+            cg_movb_rm(0, 7, byte);
+            if (byte + 1 < size) cg_shift_imm(5, 8, 0)
+        }
+    } else store_value(base);
+    cg_alu_imm(0, size, 3);
+    cg_alu_imm(5, 1, 12);
+    cg_alu_imm(7, 0, 12);
+    cg_jump_id(5, loop);
+    cg_mov_rr(3, 0);
+    cg_alu_imm(5, type_size(bt), 0);
+    cg_pop(13);
+    cg_pop(12);
+    cg_pop(3)
+}
+
 gen_expr(n: *Expr) noregion raises Error {
     match n.kind {
         Num k -> {
@@ -1681,6 +1721,48 @@ gen_expr(n: *Expr) noregion raises Error {
             return
         }
         Funcall k -> {
+            if (k.fn == null && streq(k.funcname, "l8_static_buffer")) {
+                bt: *Type = fixed_buffer_type(k.args);
+                cg_mov_imm(array_len(bt), 0);
+                cg_mov_r_rip(0, cg_name_num(".L.static_buffer", n.cg_temp), 0);
+                cg_lea_rip(cg_name_num(".L.static_buffer", n.cg_temp), 8, 0);
+                metadata: *Expr = k.args or error("missing static buffer type");
+                fill: ?*Expr = metadata.next;
+                // BSS already provides zeroes before the global initializer.
+                if (fill != null && !fixed_buffer_zero_fill(fill)) gen_fixed_buffer_fill(bt,
+                    fill);
+                return
+            }
+            if (k.fn == null && streq(k.funcname, "l8_fixed_buffer")) {
+                bt: *Type = fixed_buffer_type(k.args);
+                slot: int = cg_temp_offset(n);
+                cg_mov_imm(array_len(bt), 0);
+                cg_mov_rm(0, 5, slot);
+                metadata: *Expr = k.args or error("missing fixed buffer type");
+                fill: ?*Expr = metadata.next;
+                if (fill != null && !fixed_buffer_zero_fill(fill)) {
+                    cg_lea_mr(5, slot + 8, 0);
+                    gen_fixed_buffer_fill(bt, fill)
+                } else {
+                    cg_lea_mr(5, slot + 8, 7);
+                    cg_mov_imm(type_size(bt), 1);
+                    cg_mov_imm(0, 0);
+                    cg_cld();
+                    cg_rep_stosb();
+                    cg_lea_mr(5, slot + 8, 0)
+                }
+                return
+            }
+            if (k.fn == null && streq(k.funcname, "l8_zeroed_array")) {
+                cg_lea_mr(5, cg_temp_offset(n), 7);
+                cg_mov_imm(type_size(n.ty or error("missing zeroed array type")),
+                    1);
+                cg_mov_imm(0, 0);
+                cg_cld();
+                cg_rep_stosb();
+                cg_lea_mr(5, cg_temp_offset(n), 0);
+                return
+            }
             if (k.target != null) {
                 gen_indirect_call(n);
                 return
@@ -1926,6 +2008,13 @@ gen_expr(n: *Expr) noregion raises Error {
                 return
             }
             base: *Type = type_base(nty);
+            if (n.static_data > 0) {
+                cg_mov_imm(array_literal_count(k.elems), 0);
+                cg_mov_r_rip(0, cg_name_num(".L.static_literal", n.static_data), 0);
+                cg_lea_rip(cg_name_num(".L.static_literal", n.static_data), 8, 0);
+                gen_fill_array(k.elems, base, cg_array_save_offset(n));
+                return
+            }
             esz: int = type_size(base);
             if (esz <= 0) esz = 8;
             cnt: int = 0;
@@ -2482,6 +2571,10 @@ cg_temps_expr(e: ?*Expr, off: int) raises Error: int {
             off));
         Funcall k -> {
             o: int = cg_temps_list(k.args, cg_temps_expr(k.target, off));
+            if (k.fn == null && streq(k.funcname, "l8_fixed_buffer")) return cg_temp_slot(n,
+                type_size(fixed_buffer_type(k.args)) + 8, o);
+            if (k.fn == null && streq(k.funcname, "l8_zeroed_array")) return cg_temp_slot(n,
+                type_size(n.ty or error("missing zeroed array type")), o);
             callee: ?*Function = k.fn;
             if (callee == null) return o;
             if (callee.sret == null) return o;
@@ -2614,6 +2707,36 @@ emit_data() noregion raises Error {
     if (!any_bss) {
         cg_section(as_SEC_BSS);
         cg_align(8)
+    }
+    // A static counted buffer reserves its length header and typed elements
+    // in BSS. Its global initializer writes only the header and pointer.
+    buffer_id: int = 1;
+    bg: ?*Obj = globals;
+    while (bg != null) {
+        bi: ?*Expr = bg.init;
+        if (bi != null)
+            match bi.kind {
+                Funcall bk -> {
+                    if (streq(bk.funcname, "l8_static_buffer")) {
+                        cg_align(8);
+                        bi.cg_temp = buffer_id;
+                        cg_label(cg_name_num(".L.static_buffer", buffer_id));
+                        cg_skip(type_size(fixed_buffer_type(bk.args)) + 8);
+                        buffer_id = buffer_id + 1
+                    }
+                }
+                ArrayLit bk -> {
+                    if (bi.static_data != 0) {
+                        cg_align(8);
+                        bi.static_data = buffer_id;
+                        cg_label(cg_name_num(".L.static_literal", buffer_id));
+                        cg_skip(array_literal_count(bk.elems) * type_size(type_base(bi.ty or error("missing literal type"))) + 8);
+                        buffer_id = buffer_id + 1
+                    }
+                }
+                _ -> { }
+            }
+        bg = bg.next
     }
     cg_global("l8_init_done");
     cg_label("l8_init_done");

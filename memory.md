@@ -1,5 +1,8 @@
-The L8 language aims to be completely memory safe. It has a few facilities for
-allocating values to be used in the program:
+The allocation model below describes the current language. The incremental
+migration toward fixed-capacity storage is specified in
+[STATIC_ALLOCATION.md](STATIC_ALLOCATION.md).
+
+L8 is migrating to bounded static storage. It has these storage facilities:
 
 1. Global declarations introduce names for values that are allocated at the
    beginning of the process and freed at the end of the process.
@@ -13,7 +16,14 @@ allocating values to be used in the program:
    scopes its iteration variable. These scopes limit name visibility; only a
    `region` block resets the dynamic heap.
 
-3. The "new" keyword allocates memory on the heap for the specified type. We
+3. `static_buffer` reserves a fixed counted backing array for a global slice;
+   `buffer` reserves a counted backing array in a function's frame; `zeroed`
+   initializes an inline fixed-array value. Their capacities are compile-time
+   constants. A slice literal directly initializing a global also uses static
+   storage. See [STATIC_ALLOCATION.md](STATIC_ALLOCATION.md) for syntax, fill
+   evaluation, storage duration and the `--static` compiler mode.
+
+4. The legacy "new" keyword allocates memory on the heap for the specified type. We
    call this a "dynamic" allocation. Each dynamic allocation extends the end heap
    by the appropriate amount of memory. Alongside the "new" keyword is the
    "region" keyword, which precedes a block inside which all allocations are
@@ -22,35 +32,24 @@ allocating values to be used in the program:
    effectively freeing all the dynamic allocations that occurred within that
    block.
 
-The language assumes the responsibility of ensuring that values are not used
-beyond their lifetime. To ensure this, each function is analyzed in isolation
-to determine the "signature" of the function with respect to input and output
-lifetimes. The signatures are consulted at callsites, since the signature of a
-function being called impacts the signature of the function calling it.
+## Storage duration and compatibility annotations
 
-A "lifetime" is the name we give to the duration during which a variable is
-active. The longest lifetime is "immortal", which is what global variables and
-dynamic allocations outside of any region are given. "new" is another lifetime
-that may show up sometimes, which refers to the lifetime of the enclosing scope
-(which means it is context-dependent). There is no name for the enclosing
-function because there is no constraint that would ever need to reference it.
+Source-built compilers no longer perform lifetime analysis. `@name`, `@new`,
+`@immortal`, and `noregion` still parse and format for source compatibility, but
+have no effect on stores, returns, calls, or function type compatibility.
+Function types still compare parameter/result types and declared exceptions.
+Null narrowing, definite assignment, bounds checks, and foreign ABI checks remain.
+The checked-in bootstrap retains the previous lifetime rules; `src1` keeps its
+old annotations and a disabled compatibility implementation so it can still be
+built by that executable. `src2` removes the analysis and its inferred metadata.
 
-For the signature of a function, the aim is to compute a set of inequality
-constraints on the parameters and return type. Each parameter name is also a
-variable name in the constraint set, and is also a variable that might be used
-in the return lifetime as well.
-
-After constraints are collected, they can be concisely notated by expressing
-the lifetime of each parameter as an expression for the minimum lifetime a
-parameter must have. And the return type is annotated with an expression for
-the longest lifetime it may be relied upon to have.
-
-In addition to lifetimes, we also have to know whether a function is a
-"noregion" function, which means that it cannot be used in a context inside a
-region. The main reason for this is if it does a dynamic allocation and then
-uses that value in an immortal context. This may not be exposed in any way by
-parameters or the return type, so we have it as an piece of information that
-analysis of a function must determine.
+Storage duration remains a runtime property. Frame-backed `buffer` values and
+addresses of locals expire on return; region allocations expire when rewound.
+The compiler now accepts references that outlive this storage, so programs must
+keep retained values in permanent storage or explicitly managed pools. A reused
+pool slot can invalidate an older reference; use indices with generation checks
+when stale handles are possible. Static allocation alone does not prevent stale
+references or use after return.
 
 ## Strings and byte slices
 

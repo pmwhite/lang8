@@ -23,24 +23,10 @@ tag compiler_internal;
 // for int, i8, i32, u32, bool, f32, and f64. Literal-initialized mutable globals go in .data;
 // other inits run once before main.
 // read takes []i8 (optional off/n, checked) or *i8 (exactly one byte).
-// Each function is analyzed in isolation to a lifetime signature: the
-// minimum each parameter must last, and the longest the return may be
-// relied upon. `@` marks document that signature and must match it.
-// A parameter with no `@` need only last the call. `@immortal` is process lifetime. `@new` is the
-// heap generation at the call. A name `@q` means the parameter outlives `q`.
-// An omitted return bound means immortal. Address of a local cannot be
-// stored, returned, or passed except to write/read or a self-bound parameter.
-// `region { }` saves the bump pointer and restores it on exit, return, and
-// exception unwind. `new` inside is in that heap generation. Nested regions nest.
-// Exception payloads are allocated off the rewindable heap. A payload may hold
-// immortal pointers, or heaptop pointers. A function that stashes `new` into
-// immortal storage (a global, exception payload, or immortal parameter) must be
-// marked `noregion` after `)`. Returning `new` is not a stash: the return type
-// must say `@new`. Writing `noregion` is exact and transitive: a caller of a
-// `noregion` function must be `noregion` too. Those functions cannot be
-// called from a region.
-// Region pointers and `&local` cannot be raised.
-// Long-lived storage cannot hold a shorter pointer.
+// Lifetime annotations and noregion are parsed for compatibility but are inert.
+// `region { }` still saves/restores the heap pointer until allocation migration
+// retires it. Retained pointers require permanent storage or managed pool slots.
+// Exception payloads transfer through fixed storage, copied into catch binders.
 // Unknown names are an error. OS functions are `extern name(params): T` backed by runtime.s.
 // Shared libraries: top-level `need "libfoo.so";` plus `extern` names not defined in runtime.s.
 // Bitwise: `~ & ^ | << >>` on int/i8/i32/u32 (same type; >> is arithmetic except u32; shift count is int).
@@ -456,7 +442,10 @@ type Expr = {
     file: int;
     toklen: int;
     // Frame offset of this expression's aggregate temporary, or 0.
-    cg_temp: int
+    cg_temp: int;
+    // Static backing for a slice literal that directly initializes a global.
+    // -1 after typing, then a native label id or wasm address.
+    static_data: int
 }
 
 type StmtKind =
@@ -485,7 +474,8 @@ type StmtKind =
         name: []i8,
         exn: ?*ExnDef,
         inits: ?*FieldInit,
-        has: bool
+        has: bool,
+        temp: int
     }
     | Try { body: *Stmt, arms: ?*CatchArm, buf: *Obj }
     | Region { body: *Stmt, mark: *Obj }
@@ -521,13 +511,8 @@ type Obj = {
     next: ?*Obj;
     param_next: ?*Obj;
     hash_next: ?*Obj;
-    life: int;
-    storage_life: int;
     life_bound: []i8;
     // Declaration position fits the padding before the last-use boundary.
-    bound_need_imm: bool;
-    bound_need_new: bool;
-    bound_named: ?*Obj;
     browse_id: int;
     browse_pos: int;
     browse_file: int;
@@ -537,12 +522,6 @@ type Obj = {
     // WebAssembly: a local's wasm local index plus one (0: frame slot), or
     // a global's linear-memory address.
     wasm_slot: int
-}
-
-type BoundCall = {
-    caller_param: *Obj;
-    callee_param: *Obj;
-    next: ?*BoundCall
 }
 
 type CallEdge = {
@@ -568,12 +547,7 @@ type Function = {
     next: ?*Function;
     hash_next: ?*Function;
     ret_bound: []i8;
-    ret_life: int;
-    need_imm_heap: int;
     decl_imm_heap: int;
-    bound_ret_need_new: bool;
-    bound_ret_param: ?*Obj;
-    bound_calls: ?*BoundCall;
     callees: ?*CallEdge;
     browse_id: int;
     browse_pos: int;
@@ -730,25 +704,19 @@ expect_sites_tail: ?*ExpectSite = null;
 
 expect_count: int = 0;
 
-token_eof: *Token = new Token {
+token_eof_value: Token = Token {
     kind: TokKind.Eof,
     val: 0,
     text: null,
     len: 0,
     pos: 0,
     qualifier: "",
-    next: token_eof
+    next: &token_eof_value
 };
 
-tok: *Token = new Token {
-    kind: TokKind.Eof,
-    val: 0,
-    text: null,
-    len: 0,
-    pos: 0,
-    qualifier: "",
-    next: token_eof
-};
+token_eof: *Token = &token_eof_value;
+
+tok: *Token = &token_eof_value;
 
 parse_follow_imports: bool = true;
 
@@ -760,7 +728,9 @@ tag_local: ?*TagSet = null;
 
 tag_refs: ?*TagRef = null;
 
-tag_buckets: TagBucketTable = TagBucketTable { buckets: new TagBucket[4096](TagBucket { head: null }) };
+compiler_tag_buckets: []TagBucket = static_buffer(4096, TagBucket { head: null });
+
+tag_buckets: TagBucketTable = TagBucketTable { buckets: compiler_tag_buckets };
 
 file_items: ?*Item = null;
 
@@ -820,42 +790,6 @@ unused_function_tail: ?*UnusedFunction = null;
 
 checking_unused_functions: bool = false;
 
-LIFE_IMM: int = 0;
-
-LIFE_HEAPTOP: int = 1;
-
-LIFE_SELF: int = 2;
-
-const LIFE_MAX: int = 256;
-
-LIFE_KIND_PARAM: int = 3;
-
-type LifeArrays = {
-    parent: []int;
-    kind: []int;
-    depth_frames: []int;
-    edge_long: []int;
-    edge_short: []int;
-    n: int;
-    edge_n: int
-}
-
-life_arrays: LifeArrays = LifeArrays {
-    parent: new int[256](0 - 1),
-    kind: new int[256](0),
-    depth_frames: new int[256](0),
-    edge_long: new int[256](0),
-    edge_short: new int[256](0),
-    n: 3,
-    edge_n: 0
-};
-
-life_heap: int = 0;
-
-life_cur: int = 2;
-
-life_region_tc: int = 1;
-
 function_tail: ?*Function = null;
 
 imported_files: ?*ImportedFile = null;
@@ -872,7 +806,9 @@ browse_tok_len: int = 0;
 
 browse_tok_file: int = 0;
 
-browse_buckets: BrowseBucketTable = BrowseBucketTable { buckets: new BrowseBucket[4096](BrowseBucket { head: null }) };
+compiler_browse_buckets: []BrowseBucket = static_buffer(4096, BrowseBucket { head: null });
+
+browse_buckets: BrowseBucketTable = BrowseBucketTable { buckets: compiler_browse_buckets };
 
 BROWSE_VAR: int = 0;
 
@@ -896,15 +832,27 @@ type SymbolBuckets = {
     exceptions: []ExnBucket
 }
 
+compiler_function_buckets: []FnBucket = static_buffer(1024, FnBucket { head: null });
+
+compiler_global_buckets: []ObjBucket = static_buffer(1024, ObjBucket { head: null });
+
+compiler_struct_buckets: []StructBucket = static_buffer(1024, StructBucket { head: null });
+
+compiler_enum_buckets: []EnumBucket = static_buffer(1024, EnumBucket { head: null });
+
+compiler_exception_buckets: []ExnBucket = static_buffer(1024, ExnBucket { head: null });
+
 symbol_buckets: SymbolBuckets = SymbolBuckets {
-    functions: new FnBucket[1024](FnBucket { head: null }),
-    globals: new ObjBucket[1024](ObjBucket { head: null }),
-    structs: new StructBucket[1024](StructBucket { head: null }),
-    enums: new EnumBucket[1024](EnumBucket { head: null }),
-    exceptions: new ExnBucket[1024](ExnBucket { head: null })
+    functions: compiler_function_buckets,
+    globals: compiler_global_buckets,
+    structs: compiler_struct_buckets,
+    enums: compiler_enum_buckets,
+    exceptions: compiler_exception_buckets
 };
 
-intern_table: InternTable = InternTable { buckets: new InternBucket[4096](InternBucket { head: null }) };
+compiler_intern_buckets: []InternBucket = static_buffer(4096, InternBucket { head: null });
+
+intern_table: InternTable = InternTable { buckets: compiler_intern_buckets };
 
 ptr_cache: ?*TyEnt = null;
 
@@ -922,27 +870,49 @@ next_exn_tag: int = 0;
 
 field_list_size: int = 0;
 
-ty_int: *Type = new Type.Int;
+ty_int_value: Type = Type.Int;
 
-ty_i8: *Type = new Type.I8;
+ty_int: *Type = &ty_int_value;
 
-ty_i32: *Type = new Type.I32;
+ty_i8_value: Type = Type.I8;
 
-ty_u32: *Type = new Type.U32;
+ty_i8: *Type = &ty_i8_value;
 
-ty_f32: *Type = new Type.F32;
+ty_i32_value: Type = Type.I32;
 
-ty_f64: *Type = new Type.F64;
+ty_i32: *Type = &ty_i32_value;
 
-ty_bool: *Type = new Type.Bool;
+ty_u32_value: Type = Type.U32;
 
-ty_noreturn: *Type = new Type.Noreturn;
+ty_u32: *Type = &ty_u32_value;
 
-ty_str: *Type = new Type.Str;
+ty_f32_value: Type = Type.F32;
 
-ty_opt_str: *Type = new Type.OptStr;
+ty_f32: *Type = &ty_f32_value;
 
-ty_jmpbuf: *Type = new Type.Int;
+ty_f64_value: Type = Type.F64;
+
+ty_f64: *Type = &ty_f64_value;
+
+ty_bool_value: Type = Type.Bool;
+
+ty_bool: *Type = &ty_bool_value;
+
+ty_noreturn_value: Type = Type.Noreturn;
+
+ty_noreturn: *Type = &ty_noreturn_value;
+
+ty_str_value: Type = Type.Str;
+
+ty_str: *Type = &ty_str_value;
+
+ty_opt_str_value: Type = Type.OptStr;
+
+ty_opt_str: *Type = &ty_opt_str_value;
+
+ty_jmpbuf_value: Type = Type.Int;
+
+ty_jmpbuf: *Type = &ty_jmpbuf_value;
 
 str_lits: ?*StrLit = null;
 
@@ -959,19 +929,19 @@ type StrBuf = {
     used: int
 }
 
-emit_state: StrBuf = StrBuf { data: new i8[65536](0i8), used: 0 };
+compiler_emit_bytes: []i8 = static_buffer([65536]i8);
+
+emit_state: StrBuf = StrBuf { data: compiler_emit_bytes, used: 0 };
 
 // Text already written by emit_flush or the large-string path.
 emit_written: int = 0;
 
-emit_cap: int = 65536;
+const emit_cap: int = 65536;
 
 do_profile: bool = false;
 
 // Whether a[i] checks its index at run time (`--unchecked-index` clears it).
 check_index_mode: bool = true;
-
-mark_nerr: int = 0;
 
 current_fn_name: []i8 = "";
 
@@ -1014,8 +984,6 @@ type InitFrame = {
 
 init_top: ?*InitFrame = null;
 
-taint_top: ?*InitFrame = null;
-
 addr_top: ?*InitFrame = null;
 
 L8_JMP_BUF_SIZE: int = 72;
@@ -1051,7 +1019,7 @@ add_need(name: []i8@new) noregion {
         if (streq(p.name, name)) return;
         p = p.next
     }
-    n: *NeedLib = new NeedLib { name: name, next: null };
+    n: *NeedLib = compiler_take_need_lib(NeedLib { name: name, next: null });
     t: ?*NeedLib = g_need_tail;
     if (t != null) t.next = n else g_need = n;
     g_need_tail = n
@@ -1063,7 +1031,7 @@ add_native(path: []i8@new) noregion {
         if (streq(p.name, path)) return;
         p = p.next
     }
-    n: *NeedLib = new NeedLib { name: path, next: null };
+    n: *NeedLib = compiler_take_need_lib(NeedLib { name: path, next: null });
     t: ?*NeedLib = g_native_tail;
     if (t != null) t.next = n else g_native = n;
     g_native_tail = n
@@ -1107,7 +1075,7 @@ clear_sym_tables() {
 }
 
 strdup_n(s: []i8, off: int, n: int): []i8@new {
-    p: []i8 = new i8[n](0i8);
+    p: []i8 = compiler_take_bytes(n);
     memcpy(p, 0, s, off, n);
     p
 }
@@ -1233,8 +1201,24 @@ error_at_file(file: int, p: int, msg: []i8@immortal) raises Error: noreturn {
 }
 
 // `l8 test` reports paths relative to the tested file's directory, so
-// expectations do not depend on where the runner started.
+// expectations do not depend on where the runner started. The prefix lives
+// outside the compiler byte pools: those pools reset when compilation starts.
+type DiagStripSlot = {
+    count: int;
+    data: [4096]i8
+}
+
+diag_strip_slot: DiagStripSlot = DiagStripSlot { count: 0, data: zeroed([4096]i8) };
+
 diag_strip: []i8 = "";
+
+set_diag_strip(path: []i8) {
+    n: int = len(path);
+    if (n > len(diag_strip_slot.data)) n = len(diag_strip_slot.data);
+    for i in 0..n diag_strip_slot.data[i] = path[i];
+    diag_strip_slot.count = n;
+    diag_strip = compiler_counted_bytes(&diag_strip_slot.data[0])
+}
 
 // path relative to the directory diag_strip (which ends with `/`), climbing
 // with `../` when path is outside it.
@@ -1390,7 +1374,7 @@ ignore_unused_local_name(name: []i8): bool {
 }
 
 sb_new(): *StrBuf@new {
-    new StrBuf { data: new i8[64](0i8), used: 0 }
+    compiler_take_strbuf(StrBuf { data: compiler_take_bytes(32), used: 0 })
 }
 
 sb_grow(sb: *StrBuf@new, target: int): []i8@new {
@@ -1401,8 +1385,12 @@ sb_grow(sb: *StrBuf@new, target: int): []i8@new {
         doubled: int = ncap * 2;
         if (doubled <= ncap) ncap = target else ncap = doubled
     }
+    // One slot covers every size in its class, so growth inside the class
+    // does not abandon another buffer.
+    ncap = compiler_byte_capacity(ncap);
+    if (ncap < target) compiler_pool_exhausted("byte object exceeds 67108864 bytes");
     old_used: int = sb.used;
-    nd: []i8 = new i8[ncap](0i8);
+    nd: []i8 = compiler_take_bytes(ncap);
     memcpy(nd, 0, sb.data, 0, old_used);
     sb.* = StrBuf { data: nd, used: old_used };
     nd
@@ -1481,7 +1469,7 @@ browse_add(
     if (n <= 0) return;
     if (browse_find(file, pos) != null) return;
     b: int = browse_hash(file, pos);
-    o: *BrowseOcc = new BrowseOcc {
+    o: *BrowseOcc = compiler_take_browse_occ(BrowseOcc {
         file: file,
         pos: pos,
         sym: sym,
@@ -1489,7 +1477,7 @@ browse_add(
         cls: cls,
         typ: typ,
         hash_next: browse_buckets.buckets[b].head
-    };
+    });
     browse_buckets.buckets[b].head = o
 }
 
@@ -1530,7 +1518,7 @@ browse_reset() noregion {
     browse_tok_pos = 0;
     browse_tok_len = 0;
     browse_tok_file = 0;
-    browse_buckets.buckets = new BrowseBucket[4096](BrowseBucket { head: null })
+    for i in 0..len(browse_buckets.buckets) browse_buckets.buckets[i].head = null
 }
 
 append_type(sb: *StrBuf@immortal, t: ?*Type) raises Error {
@@ -1750,7 +1738,8 @@ emit_num_fd(fd: int, n: int) {
 }
 
 init_dummies() noregion {
-    token_eof = new Token {
+    token_eof = &token_eof_value;
+    token_eof_value = Token {
         kind: TokKind.Eof,
         val: 0,
         text: null,
@@ -1758,20 +1747,20 @@ init_dummies() noregion {
         pos: 0,
         qualifier: "",
         next: token_eof
-    };
-    token_eof.next = token_eof
+    }
 }
 
 init_runtime() noregion {
-    ty_int = new Type.Int;
-    ty_i8 = new Type.I8;
-    ty_i32 = new Type.I32;
-    ty_u32 = new Type.U32;
-    ty_f32 = new Type.F32;
-    ty_f64 = new Type.F64;
-    ty_bool = new Type.Bool;
-    ty_noreturn = new Type.Noreturn;
-    jd: *StructDef = new StructDef {
+    compiler_reset_pools();
+    ty_int = &ty_int_value;
+    ty_i8 = &ty_i8_value;
+    ty_i32 = &ty_i32_value;
+    ty_u32 = &ty_u32_value;
+    ty_f32 = &ty_f32_value;
+    ty_f64 = &ty_f64_value;
+    ty_bool = &ty_bool_value;
+    ty_noreturn = &ty_noreturn_value;
+    jd: *StructDef = compiler_take_struct_def(StructDef {
         name: ".jmpbuf",
         members: null,
         size: L8_JMP_BUF_SIZE,
@@ -1783,36 +1772,20 @@ init_runtime() noregion {
         browse_pos: 0,
         browse_file: 0,
         browse_len: 0
-    };
+    });
     ty_jmpbuf = struct_type(jd);
     exn_defs = null;
     next_exn_tag = 1;
     catch_top = null;
     current_fn = null;
-    emit_state = StrBuf { data: new i8[emit_cap](0i8), used: 0 };
-    symbol_buckets = SymbolBuckets {
-        functions: new FnBucket[1024](FnBucket { head: null }),
-        globals: new ObjBucket[1024](ObjBucket { head: null }),
-        structs: new StructBucket[1024](StructBucket { head: null }),
-        enums: new EnumBucket[1024](EnumBucket { head: null }),
-        exceptions: new ExnBucket[1024](ExnBucket { head: null })
-    };
+    emit_state = StrBuf { data: compiler_emit_bytes, used: 0 };
+    clear_sym_tables();
     for i in 0..len(intern_table.buckets) intern_table.buckets[i].head = null;
-    life_arrays = LifeArrays {
-        parent: new int[256](0 - 1),
-        kind: new int[256](0),
-        depth_frames: new int[256](0),
-        edge_long: new int[256](0),
-        edge_short: new int[256](0),
-        n: 3,
-        edge_n: 0
-    };
     ptr_cache = null;
     opt_ptr_cache = null;
     slice_cache = null;
     opt_slice_cache = null;
     array_cache = null;
-    cg_labbuf = new i8[64](0i8);
     str_lits = null;
     str_lit_tail = null;
     str_count = 0
@@ -1821,14 +1794,16 @@ init_runtime() noregion {
 read_file(path: []i8) raises Error: *SourceText@new {
     fd: int = open_path(path, 0, 0);
     if (fd < 0) error("cannot open file");
-    cap: int = 524288;
-    buf: []i8 = new i8[cap](0i8);
+    cap: int = compiler_byte_capacity(4096);
+    buf: []i8 = compiler_take_bytes(cap);
     n: int = 0;
     while (true) {
         room: int = cap - n;
         if (room <= 1) {
-            cap = cap * 2;
-            tmp: []i8 = new i8[cap](0i8);
+            next_cap: int = compiler_byte_capacity(cap + 1);
+            if (next_cap <= cap) compiler_pool_exhausted("byte object exceeds 67108864 bytes");
+            cap = next_cap;
+            tmp: []i8 = compiler_take_bytes(cap);
             memcpy(tmp, 0, buf, 0, n);
             buf = tmp;
             room = cap - n
@@ -1841,7 +1816,7 @@ read_file(path: []i8) raises Error: *SourceText@new {
         if (r == 0) {
             buf[n] = 0i8;
             close(fd);
-            return new SourceText { data: buf, used: n }
+            return compiler_take_source_text(SourceText { data: buf, used: n })
         }
         // Retry EINTR without advancing the source buffer.
         if (r > 0) n = n + r
@@ -1898,7 +1873,7 @@ resolve_import_path(base: []i8, imported: []i8) raises Error: []i8@new {
     ilen: int = len(imported);
     joined_len: int = slash + 1 + ilen;
     if (joined_len <= slash) error("import path exceeds addressable size");
-    joined: []i8 = new i8[joined_len](0i8);
+    joined: []i8 = compiler_take_bytes(joined_len);
     j: int = 0;
     while (j <= slash) {
         joined[j] = base[j];
@@ -1914,13 +1889,13 @@ mark_imported(path: []i8@immortal) noregion: bool {
         if (streq(f.path, path)) return false;
         f = f.next
     }
-    imported_files = new ImportedFile {
+    imported_files = compiler_take_imported_file(ImportedFile {
         path: path,
-        src: new i8[1](0i8),
+        src: compiler_take_bytes(1),
         src_len: 0,
         id: browse_file_n,
         next: imported_files
-    };
+    });
     browse_file_n = browse_file_n + 1;
     true
 }
@@ -2028,8 +2003,8 @@ ptr_to(base: *Type@immortal) noregion: *Type@new {
     value: *Obj = new_obj(".refinement-value", true);
     value.ty = raw;
     predicate: *Expr = new_binary(BinOp.Ne, new_var_node(value), new_null_expr());
-    t: *Type = new Type.Refined { base: raw, invariant: new TypeInvariant { value: value, predicate: predicate } };
-    ptr_cache = new TyEnt { base: base, ty: t, next: ptr_cache };
+    t: *Type = compiler_take_type(Type.Refined { base: raw, invariant: compiler_take_type_invariant(TypeInvariant { value: value, predicate: predicate }) });
+    ptr_cache = compiler_take_ty_ent(TyEnt { base: base, ty: t, next: ptr_cache });
     t
 }
 
@@ -2039,8 +2014,8 @@ opt_ptr_to(base: *Type@immortal) noregion: *Type@new {
         if (e.base == base) return e.ty;
         e = e.next
     }
-    t: *Type = new Type.Ptr { base: base };
-    opt_ptr_cache = new TyEnt { base: base, ty: t, next: opt_ptr_cache };
+    t: *Type = compiler_take_type(Type.Ptr { base: base });
+    opt_ptr_cache = compiler_take_ty_ent(TyEnt { base: base, ty: t, next: opt_ptr_cache });
     t
 }
 
@@ -2050,8 +2025,8 @@ slice_of(base: *Type@immortal) noregion: *Type@new {
         if (e.base == base) return e.ty;
         e = e.next
     }
-    t: *Type = new Type.Slice { base: base };
-    slice_cache = new TyEnt { base: base, ty: t, next: slice_cache };
+    t: *Type = compiler_take_type(Type.Slice { base: base });
+    slice_cache = compiler_take_ty_ent(TyEnt { base: base, ty: t, next: slice_cache });
     t
 }
 
@@ -2061,9 +2036,110 @@ opt_slice_of(base: *Type@immortal) noregion: *Type@new {
         if (e.base == base) return e.ty;
         e = e.next
     }
-    t: *Type = new Type.OptSlice { base: base };
-    opt_slice_cache = new TyEnt { base: base, ty: t, next: opt_slice_cache };
+    t: *Type = compiler_take_type(Type.OptSlice { base: base });
+    opt_slice_cache = compiler_take_ty_ent(TyEnt { base: base, ty: t, next: opt_slice_cache });
     t
+}
+
+// Zero bytes are valid for these values. Non-null references, strings,
+// function values, refinements and tagged unions need explicit construction.
+// Check multiplication before trusting an inline array's computed byte size.
+// Pointer element layouts stop here; pointee graphs need not be finite.
+fixed_storage_valid(t: *Type): bool {
+    size: int = type_size(t);
+    if (size <= 0 || size > 536870912) return false;
+    match t.* {
+        Array k -> {
+            if (!fixed_storage_valid(k.base)) return false;
+            k.n > 0 && k.n <= 536870912 / type_size(k.base)
+        }
+        Record k -> {
+            m: ?*Member = k.def.members;
+            while (m != null) {
+                if (!fixed_storage_valid(m.ty)) return false;
+                if (m.offset < 0 || m.offset > size - type_size(m.ty)) return false;
+                m = m.next
+            }
+            true
+        }
+        Enum k -> {
+            variant: ?*Variant = k.def.variants;
+            while (variant != null) {
+                field: ?*Member = variant.fields;
+                while (field != null) {
+                    if (!fixed_storage_valid(field.ty)) return false;
+                    if (field.offset < 0 || variant.payload_offset < 0 || variant.payload_offset > size - type_size(field.ty)) return false;
+                    if (field.offset > size - variant.payload_offset - type_size(field.ty)) return false;
+                    field = field.next
+                }
+                variant = variant.next
+            }
+            true
+        }
+        Refined k -> fixed_storage_valid(k.base);
+        _ -> true
+    }
+}
+
+array_literal_count(head: ?*Expr): int {
+    count: int = 0;
+    e: ?*Expr = head;
+    while (e != null) {
+        count = count + 1;
+        e = e.next
+    }
+    count
+}
+
+fixed_buffer_zero_fill(fill: ?*Expr) raises Error: bool {
+    if (fill == null) return true;
+    ty: ?*Type = fill.ty;
+    if (ty == null || !zero_initializable(ty)) return false;
+    is_const_init(fill) && const_value(fill) == 0
+}
+
+fixed_buffer_has_type(args: ?*Expr): bool {
+    if (args == null) return false;
+    match args.kind {
+        Sizeof k -> k.ty != null;
+        _ -> false
+    }
+}
+
+fixed_buffer_type(args: ?*Expr) raises Error: *Type {
+    arg: *Expr = args or error("missing fixed buffer type");
+    match arg.kind {
+        Sizeof k -> k.ty or error("missing fixed buffer type");
+        _ -> error("invalid fixed buffer type")
+    }
+}
+
+zero_initializable(t: *Type): bool {
+    match t.* {
+        Int -> true;
+        I8 -> true;
+        I32 -> true;
+        U32 -> true;
+        F32 -> true;
+        F64 -> true;
+        Bool -> true;
+        Array k -> {
+            if (!zero_initializable(k.base)) return false;
+            size: int = type_size(k.base);
+            size > 0 && k.n > 0 && k.n <= 536870912 / size
+        }
+        Record k -> {
+            m: ?*Member = k.def.members;
+            while (m != null) {
+                if (!zero_initializable(m.ty)) return false;
+                if (m.offset < 0 || m.offset > 536870912 - type_size(m.ty)) return false;
+                if (m.offset + type_size(m.ty) > k.def.size) return false;
+                m = m.next
+            }
+            k.def.size > 0 && k.def.size <= 536870912
+        }
+        _ -> false
+    }
 }
 
 array_of(base: *Type@immortal, n: int) noregion: *Type@new {
@@ -2072,20 +2148,20 @@ array_of(base: *Type@immortal, n: int) noregion: *Type@new {
         if (e.base == base && e.n == n) return e.ty;
         e = e.next
     }
-    t: *Type = new Type.Array { base: base, n: n };
-    array_cache = new ArrEnt {
+    t: *Type = compiler_take_type(Type.Array { base: base, n: n });
+    array_cache = compiler_take_arr_ent(ArrEnt {
         base: base,
         n: n,
         ty: t,
         next: array_cache
-    };
+    });
     t
 }
 
 struct_type(sd: *StructDef@new): *Type@new {
     existing: ?*Type = sd.ty;
     if (existing != null) existing else {
-        p: *Type = new Type.Record { def: sd };
+        p: *Type = compiler_take_type(Type.Record { def: sd });
         sd.ty = p;
         p
     }
@@ -2094,7 +2170,7 @@ struct_type(sd: *StructDef@new): *Type@new {
 enum_type(ed: *EnumDef@new): *Type@new {
     existing: ?*Type = ed.ty;
     if (existing != null) existing else {
-        p: *Type = new Type.Enum { def: ed };
+        p: *Type = compiler_take_type(Type.Enum { def: ed });
         ed.ty = p;
         p
     }
@@ -2103,7 +2179,7 @@ enum_type(ed: *EnumDef@new): *Type@new {
 exn_type(ed: *ExnDef@new): *Type@new {
     existing: ?*Type = ed.ty;
     if (existing != null) existing else {
-        p: *Type = new Type.Exn { def: ed };
+        p: *Type = compiler_take_type(Type.Exn { def: ed });
         ed.ty = p;
         p
     }
@@ -2212,7 +2288,7 @@ remove_struct(name: []i8) {
 get_or_create_struct(name: []i8@new) noregion: *StructDef@new {
     sd: ?*StructDef = find_struct(name);
     if (sd != null) return sd;
-    created: *StructDef = new StructDef {
+    created: *StructDef = compiler_take_struct_def(StructDef {
         name: name,
         members: null,
         size: 0,
@@ -2224,7 +2300,7 @@ get_or_create_struct(name: []i8@new) noregion: *StructDef@new {
         browse_pos: 0,
         browse_file: 0,
         browse_len: 0
-    };
+    });
     struct_defs = created;
     hash_put_struct(created);
     created
@@ -2233,7 +2309,7 @@ get_or_create_struct(name: []i8@new) noregion: *StructDef@new {
 get_or_create_enum(name: []i8@new) noregion: *EnumDef@new {
     ed: ?*EnumDef = find_enum(name);
     if (ed != null) return ed;
-    created: *EnumDef = new EnumDef {
+    created: *EnumDef = compiler_take_enum_def(EnumDef {
         name: name,
         variants: null,
         size: 0,
@@ -2248,7 +2324,7 @@ get_or_create_enum(name: []i8@new) noregion: *EnumDef@new {
         browse_pos: 0,
         browse_file: 0,
         browse_len: 0
-    };
+    });
     enum_defs = created;
     hash_put_enum(created);
     created
@@ -2276,7 +2352,7 @@ variant_payload_name(enum_name: []i8, var_name: []i8) raises Error: []i8@new {
     va: int = len(var_name);
     n: int = ea + 1 + va;
     if (n <= ea) error("variant name exceeds addressable size");
-    raw: []i8 = new i8[n](0i8);
+    raw: []i8 = compiler_take_bytes(n);
     memcpy(raw, 0, enum_name, 0, ea);
     raw[ea] = '.';
     memcpy(raw, ea + 1, var_name, 0, va);
@@ -2326,7 +2402,7 @@ syntax_fields_after_brace(inner: *Token): bool {
 }
 
 exn_stub(name: []i8@new): *ExnDef@new {
-    new ExnDef {
+    compiler_take_exn_def(ExnDef {
         name: name,
         tag: 0,
         members: null,
@@ -2338,7 +2414,7 @@ exn_stub(name: []i8@new): *ExnDef@new {
         browse_pos: 0,
         browse_file: 0,
         browse_len: 0
-    }
+    })
 }
 
 starts_type(): bool {
@@ -2446,7 +2522,7 @@ check_exn_allowed(ed: *ExnDef, _what: []i8) noregion raises Error {
 }
 
 catch_push(ed: *ExnDef@new) noregion {
-    f: *CatchFrame = new CatchFrame { exn: ed, next: catch_top };
+    f: *CatchFrame = compiler_take_catch_frame(CatchFrame { exn: ed, next: catch_top });
     catch_top = f
 }
 
@@ -2580,7 +2656,7 @@ is_optional(t: *Type): bool {
 
 unwrap_optional(t: *Type) noregion raises Error: *Type@new {
     match t.* {
-        FnPtr k -> return new Type.FnPtr { fn: k.fn, optional: false };
+        FnPtr k -> return compiler_take_type(Type.FnPtr { fn: k.fn, optional: false });
         _ -> { }
     }
     if (is_opt_str(t)) return ty_str;
@@ -3056,22 +3132,22 @@ profile_flt0: int = 0;
 profile_flt_prev: int = 0;
 
 type ProfileUsage = {
-    data: []i8
+    data: [256]i8
 }
 
-profile_usage: ProfileUsage = ProfileUsage { data: new i8[256](0i8) };
+profile_usage: ProfileUsage = ProfileUsage { data: zeroed([256]i8) };
 
-rd_u64(b: []i8, o: int): int {
-    (b[o] as int & 255) + ((b[o + 1] as int & 255) << 8) + ((b[o + 2] as int & 255) << 16) + ((b[o + 3] as int & 255) << 24) + ((b[o + 4] as int & 255) << 32) + ((b[o + 5] as int & 255) << 40) + ((b[o + 6] as int & 255) << 48) + ((b[o + 7] as int & 255) << 56)
+rd_u64(b: *[256]i8, o: int): int {
+    (b.*[o] as int & 255) + ((b.*[o + 1] as int & 255) << 8) + ((b.*[o + 2] as int & 255) << 16) + ((b.*[o + 3] as int & 255) << 24) + ((b.*[o + 4] as int & 255) << 32) + ((b.*[o + 5] as int & 255) << 40) + ((b.*[o + 6] as int & 255) << 48) + ((b.*[o + 7] as int & 255) << 56)
 }
 
 profile_faults(): int {
-    getrusage(profile_usage.data);
-    rd_u64(profile_usage.data, 64)
+    getrusage(&profile_usage.data[0]);
+    rd_u64(&profile_usage.data, 64)
 }
 
 profile_rss_kb(): int {
-    rd_u64(profile_usage.data, 32)
+    rd_u64(&profile_usage.data, 32)
 }
 
 profile_print(
@@ -3097,9 +3173,9 @@ profile_print(
     raw::raw_write(2, " flt\n")
 }
 
-profile_start() noregion {
+profile_start() {
     if (!do_profile) return;
-    profile_usage = ProfileUsage { data: new i8[256](0i8) };
+    profile_usage = ProfileUsage { data: zeroed([256]i8) };
     profile_t0 = mono_ns();
     profile_prev = profile_t0;
     profile_cyc0 = rdtsc();
@@ -3123,7 +3199,8 @@ profile_end() {
         profile_flt_prev - profile_flt0);
     raw::raw_write(2, "profile: rss ");
     emit_num_fd(2, profile_rss_kb());
-    raw::raw_write(2, " kb\n")
+    raw::raw_write(2, " kb\n");
+    compiler_pool_report()
 }
 
 // `--unchecked-index` omits the run-time check of each a[i].
@@ -3137,7 +3214,6 @@ is_profile_flag(s: str): bool {
 
 compiler_analyze(src_path: []i8@immortal) noregion raises Error {
     profile_start();
-    as_init();
     init_runtime();
     init_dummies();
     profile_mark("init");
@@ -3157,12 +3233,11 @@ compiler_analyze(src_path: []i8@immortal) noregion raises Error {
         profile_mark("unused_locals");
         check_return_style()
     }
-    check_imm_heap_functions();
-    check_written_bounds();
     check_raises_functions();
     profile_mark("raises");
     check_noreturn_functions();
-    profile_mark("noreturn")
+    profile_mark("noreturn");
+    check_static_storage()
 }
 
 compiler_frontend(src_path: []i8@immortal) noregion raises Error {
@@ -3185,7 +3260,7 @@ runtime_source_path() raises Error: []i8@new {
         close(fd);
         return strdup_n("runtime.s", 0, 9)
     }
-    buffer: []i8 = new i8[4096](0i8);
+    buffer: []i8 = buffer([4096]i8);
     n: int = runtime_readlink(89, "/proc/self/exe", buffer, len(buffer));
     if (n <= 0) return strdup_n("runtime.s", 0, 9);
     slash: int = 0;
@@ -3224,6 +3299,8 @@ compiler_unused_main(argc: int, argv: []str) noregion: int {
     try {
         do_profile = false;
         checking_unused_functions = true;
+        compiler_reset_byte_pools();
+        compiler_unused_function_used = 0;
         unused_functions = null;
         unused_function_tail = null;
         for ai in 1..argc {
@@ -3243,17 +3320,18 @@ compiler_main(argc: int, argv: []str) noregion: int {
         cg_direct_mode = false;
         do_profile = false;
         check_index_mode = true;
+        static_storage_mode = false;
         have: bool = false;
         if (argc < 1) {
-            raw::raw_write(2, "error: usage: l8 compile [--profile|-p] [--unchecked-index] <file.l8>\n");
+            raw::raw_write(2, "error: usage: l8 compile [--profile|-p] [--unchecked-index] [--static] <file.l8>\n");
             return 1
         }
         path: str = argv[0];
         for ai in 1..argc {
             arg: str = argv[ai];
-            if (is_profile_flag(arg)) do_profile = true else if (is_unchecked_flag(arg)) check_index_mode = false else {
+            if (is_profile_flag(arg)) do_profile = true else if (is_unchecked_flag(arg)) check_index_mode = false else if (is_static_flag(arg)) static_storage_mode = true else {
                 if (have) {
-                    raw::raw_write(2, "error: usage: l8 compile [--profile|-p] [--unchecked-index] <file.l8>\n");
+                    raw::raw_write(2, "error: usage: l8 compile [--profile|-p] [--unchecked-index] [--static] <file.l8>\n");
                     return 1
                 }
                 path = arg;
@@ -3261,7 +3339,7 @@ compiler_main(argc: int, argv: []str) noregion: int {
             }
         }
         if (!have) {
-            raw::raw_write(2, "error: usage: l8 compile [--profile|-p] [--unchecked-index] <file.l8>\n");
+            raw::raw_write(2, "error: usage: l8 compile [--profile|-p] [--unchecked-index] [--static] <file.l8>\n");
             return 1
         }
         compiler_frontend(bytes(path));
@@ -3276,9 +3354,13 @@ compiler_main(argc: int, argv: []str) noregion: int {
 // Parsed after this file's types so TokKind and the AST are already in scope.
 import "tags.l8";
 
+import "storage.l8";
+
 import "parse.l8";
 
 import "check.l8";
+
+import "staticalloc.l8";
 
 import "callbacks.l8";
 

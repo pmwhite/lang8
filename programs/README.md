@@ -67,3 +67,12 @@ examples are `programs/examples/http-client.l8` and `programs/examples/http-serv
 remains `.build/http/client` and `.build/http/server`. WebSocket follows the
 same layout with `programs/examples/websocket-{client,server}.l8` and
 `.build/websocket/{client,server}`; see [`websocket/README.md`](websocket/README.md).
+
+## Static storage migration
+
+Fixed-capacity globals are moving to `static_buffer`, and temporary buffers to
+function-frame storage, with their existing limits preserved. Global slice
+literals also have static backing. The default build keeps legacy allocations
+available until every entry point is migrated; see
+[STATIC_ALLOCATION.md](../STATIC_ALLOCATION.md) for the inventory commands,
+compiler enforcement, target coverage and outstanding runtime/host work.

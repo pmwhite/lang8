@@ -62,6 +62,16 @@ check: $(OK)/stage1-tests l8 $(BUILD)/block-game $(BUILD)/skate $(BUILD)/race $(
 	$(BUILD)/better $(BUILD)/better-ios.s $(BUILD)/ios-check.s $(BUILD)/better-ios-sim $(BUILD)/better-android.s $(OK)/bible-web $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim $(BUILD)/hot-ios-sim \
 	$(BUILD)/bible-android.s $(BUILD)/skin-text $(BUILD)/smooth-bible
 
+# Source inventory is a migration ratchet, not a semantic no-allocation proof.
+.PHONY: allocation-report allocation-check
+allocation-report:
+	python3 tools/static_allocation.py
+
+allocation-check:
+	python3 tools/static_allocation.py --check
+
+check: allocation-check
+
 # ---- compiler stages ----
 
 install-bootstrap: l8c0
@@ -437,6 +447,7 @@ help:
 	@echo 'make [-jN] [V=1] [target]'
 	@echo '  all (default)   format src2, then build apps and test the compiler'
 	@echo '  check           build apps and test the compiler without formatting'
+	@echo '  allocation-report, allocation-check   static allocation migration inventory/ratchet'
 	@echo '  fmt             format src2 with the stage-2 compiler'
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'

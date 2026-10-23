@@ -46,7 +46,7 @@ Typical evolution for a breaking language change:
 Function values, indirect calls, and C callbacks are supported by both source
 stages. See
 [`tests/callbacks/README.md`](tests/callbacks/README.md) for `fn` syntax,
-ABI restrictions, and lifetime contracts. `make callback-test` builds the
+ABI restrictions, and storage duration. `make callback-test` builds the
 stage-1 compiler and runs language, rejection, and C interoperability tests;
 the test fixture needs a host C compiler and GNU assembler. Building L8 programs
 with callbacks does not require a host compiler or adapter library.
@@ -73,6 +73,14 @@ commands. See [`TESTING.md`](TESTING.md).
 
 `a[i]` checks its index at run time and exits with status 1 when it is out of
 range; `--unchecked-index` leaves the checks out. See [`BOUNDS.md`](BOUNDS.md).
+
+The stage-2 `compile`, `build`, `wasm` and `arm64` commands also accept
+`--static`, which rejects dynamic source storage and unaudited foreign boundaries.
+Static Linux executables and fixed-memory Wasm modules currently require a
+parameterless `main(): int`. See [STATIC_ALLOCATION.md](STATIC_ALLOCATION.md)
+for supported targets and the ongoing migration. Both source stages implement
+`buffer`, `static_buffer` and `zeroed`; the saved bootstrap has not been promoted.
+
 
 `build` sends typed compiler operations directly to the assembler's in-memory
 section, symbol, relocation, and instruction encoders. It parses only the static
