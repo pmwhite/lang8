@@ -14,6 +14,8 @@
 //   GET /wait?since=N      the same, once there is a build after N (or after
 //                          25 s, the latest); a client's long poll
 //   GET /build.wasm        the latest successful build's module
+//   POST /log              a line from a device (the hot reload host's own,
+//                          and its module's stderr): printed, kept for GET /log
 //   GET /<path>            a file under --serve DIR, if given
 //
 // web/reload.js's watchBuilds() is the client.
@@ -174,6 +176,8 @@ const types = {
 
 const info = () => ({ build: state.build, ok: state.ok, log: state.log, ms: state.ms, time: state.time, source });
 
+const deviceLog = [];
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://x");
   const headers = { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" };
@@ -181,6 +185,25 @@ const server = http.createServer((req, res) => {
     res.writeHead(status, { ...headers, "Content-Type": "application/json" });
     res.end(JSON.stringify(body));
   };
+  if (url.pathname === "/log" && req.method === "POST") {
+    const parts = [];
+    req.on("data", (d) => parts.push(d));
+    req.on("end", () => {
+      const text = Buffer.concat(parts).toString("utf8").replace(/\n+$/, "");
+      const when = new Date().toLocaleTimeString();
+      for (const line of text.split("\n")) {
+        console.log(`${when}  phone: ${line}`);
+        deviceLog.push(`${when}  ${line}`);
+      }
+      if (deviceLog.length > 2000) deviceLog.splice(0, deviceLog.length - 2000);
+      json({ ok: true });
+    });
+    return;
+  }
+  if (url.pathname === "/log") {
+    res.writeHead(200, { ...headers, "Content-Type": "text/plain; charset=utf-8" });
+    return res.end(deviceLog.join("\n") + "\n");
+  }
   if (url.pathname === "/build") return json(info());
   if (url.pathname === "/wait") {
     const since = Number(url.searchParams.get("since") || 0);

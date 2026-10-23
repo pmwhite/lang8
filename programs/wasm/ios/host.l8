@@ -45,6 +45,57 @@ say(s: str) {
         write(2, s);
         write(2, "\n")
     } with IoError _e -> { }
+    post_log(bytes(s), len(s))
+}
+
+// ---- the console, to the server ----
+// Every line of the host's, and what the module writes to fds 1 and 2,
+// goes to the server too (POST /log), so the phone's console is seen on
+// the development machine.
+extern memcpy_into(dst: []i8, src: int, n: int): int = memcpy;
+
+extern addr_write(f: fn(fd: int, p: int, n: int): int): int = l8_as_int;
+
+extern sys_write_raw(fd: int, p: int, n: int): int = l8_std_write;
+
+post_log(line: []i8, n: int) {
+    if (server_n == 0 || session_sync == 0 || log_block == 0 || n <= 0) return;
+    request: int = msg1(cls("NSMutableURLRequest"), sel("requestWithURL:"), url("/log"));
+    msg1(request, sel("setHTTPMethod:"), nsstring("POST"));
+    data: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(line),
+        n);
+    msg1(request, sel("setHTTPBody:"), data);
+    task: int = msg2(session_sync, sel("dataTaskWithRequest:completionHandler:"),
+        request, log_block);
+    if (task != 0) msg(task, sel("resume"))
+}
+
+// The module's l8_std_write: written, and fds 1 and 2 sent on.
+log_write(fd: int, p: int, n: int): int {
+    r: int = sys_write_raw(fd, p, n);
+    if ((fd == 1 || fd == 2) && n > 0 && n < 65536) {
+        b: []i8 = new i8[n](0i8);
+        _m: int = memcpy_into(b, p, n);
+        post_log(b, n)
+    }
+    r
+}
+
+trapped(msg: str): int {
+    say("trap:");
+    say(msg);
+    0
+}
+
+log_block: int = 0;
+
+log_completed(
+    _block: int,
+    _data: int,
+    _response: int,
+    _error: int
+): int {
+    0
 }
 
 say_int(s: str, n: int) {
@@ -407,16 +458,16 @@ first_completed(
 extern fn_address4(f: fn(block: int, a: int, b: int, c: int): int): int = l8_as_int;
 
 // A global block of three arguments (block.l8's, with one more).
-block_words: []int = new int[4](0);
-
 block_descriptor: []int = [0, 32];
 
+// (Each block its own four words, never freed.)
 block3_of(invoke: int): int {
-    block_words[0] = dlsym(0 - 2, "_NSConcreteGlobalBlock");
-    block_words[1] = 268435456;
-    block_words[2] = invoke;
-    block_words[3] = ints_address(block_descriptor);
-    ints_address(block_words)
+    words: []int = new int[4](0);
+    words[0] = dlsym(0 - 2, "_NSConcreteGlobalBlock");
+    words[1] = 268435456;
+    words[2] = invoke;
+    words[3] = ints_address(block_descriptor);
+    ints_address(words)
 }
 
 main(argc: int, argv: []str) noregion: int {
@@ -447,6 +498,10 @@ main(argc: int, argv: []str) noregion: int {
         config, delegate, msg(cls("NSOperationQueue"), sel("mainQueue")));
     session_sync = msg1(cls("NSURLSession"), sel("sessionWithConfiguration:"), config);
     first_block = block3_of(fn_address4(&first_completed));
+    log_block = block3_of(fn_address4(&log_completed));
+    proxy_bind("l8_std_write", addr_write(&log_write));
+    proxy_bind("l8_os_write", addr_write(&log_write));
+    wasm_on_trap = &trapped;
     module: []i8 = first_build();
     if (len(module) == 0) {
         say("the module beside the executable");
