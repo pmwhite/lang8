@@ -5,7 +5,7 @@
 # APP.l8 built as a module, and dev-server.txt naming the development
 # server (web/dev.mjs) the host fetches builds from:
 #   tools/ios/hot.sh device|sim APP.l8 DIR OUT HOST:PORT
-#   tools/ios/hot.sh device programs/bible/ios/app.l8 programs/bible/ios .build/hot 192.168.0.231:8777
+#   tools/ios/hot.sh device programs/bible/ios/app.l8 programs/bible/ios .build/hot LAPTOP:8777
 # then, on the development machine:
 #   node web/dev.mjs -- programs/bible/ios/app.l8 -o .build/dev/bible-ios.wasm
 # Everything else is as tools/ios/build-linux.sh (its variables too). The

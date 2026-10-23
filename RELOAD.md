@@ -170,7 +170,7 @@ again (`programs/bible/ios/app.l8`); a method a build adds to a class is
 not there until the app is launched again.
 
 ```sh
-tools/ios/hot.sh device programs/bible/ios/app.l8 programs/bible/ios .build/hot 192.168.0.231:8777
+tools/ios/hot.sh device programs/bible/ios/app.l8 programs/bible/ios .build/hot LAPTOP:8777
 node web/dev.mjs -- programs/bible/ios/app.l8 -o .build/dev/bible-ios.wasm
 ```
 
