@@ -44,7 +44,8 @@ frameworks="UIKit Foundation CoreLocation QuartzCore OpenGLES AVFoundation"
 links=
 for f in $frameworks; do links="$links --framework $f"; done
 sdkv=${SDK_VERSION:-$(python3 -I "$here/assets.py" get "$dir" iphoneos DTPlatformVersion)}
-"$l8" arm64 --target "$target" --exe --sdk "$sdkv" --imports "$here/imports.txt" $links "$src" -o "$app/$name"
+# ($L8_ARM64_FLAGS: more for the compiler, such as --unchecked-index.)
+"$l8" arm64 --target "$target" ${L8_ARM64_FLAGS:-} --exe --sdk "$sdkv" --imports "$here/imports.txt" $links "$src" -o "$app/$name"
 lap "compile and link"
 python3 -I "$here/macho.py" check "$app/$name"
 python3 -I "$here/assets.py" plist "$dir" "$sdk" "$app/Info.plist" "$dir/Info.plist" "${BUILD_NUMBER:-}"

@@ -52,4 +52,6 @@ ats.pop("NSAllowsLocalNetworking", None)
 ats["NSAllowsArbitraryLoads"] = True
 plistlib.dump(d, open(p, "wb"))
 PY
-"$here/build-linux.sh" "$kind" "$top/programs/wasm/ios/host.l8" "$out" "$work"
+# (The interpreter checks the module's accesses itself; the compiler's
+# checks of its own indexing would only slow its loop.)
+L8_ARM64_FLAGS="--unchecked-index ${L8_ARM64_FLAGS:-}" "$here/build-linux.sh" "$kind" "$top/programs/wasm/ios/host.l8" "$out" "$work"
