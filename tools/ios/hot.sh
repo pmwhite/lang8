@@ -27,6 +27,10 @@ mkdir -p "$work"
 for f in Info.plist frameworks resources PrivacyInfo.xcprivacy; do
   [ -e "$dir/$f" ] && cp "$dir/$f" "$work/"
 done
+# (The icons and colors too: the assets check compares them with the
+# compiled catalog.)
+for f in "$dir"/AppIcon*.png "$dir"/AppIcon.svg; do [ -e "$f" ] && cp "$f" "$work/"; done
+[ -d "$dir/Colors" ] && cp -R "$dir/Colors" "$work/Colors"
 [ -d "$dir/assets" ] && cp -R "$dir/assets" "$work/assets"
 "$l8" wasm "$src" -o "$out/app.wasm"
 printf '%s\n' "$server" > "$out/dev-server.txt"
