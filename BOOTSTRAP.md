@@ -87,6 +87,9 @@ included. `--async import` lets that import pause the module and resume it
 later, so a blocking program loop can run in a browser. `node web/run.mjs
 file.wasm args...` runs a module, and `test --wasm` runs tests that way. `make wasm-test` runs the test suites as modules and checks
 that the compiler, built as a module, rebuilds itself unchanged under Node.
+A module can be hot reloaded: `persistent x: T = e;` declares a global whose
+value the host carries into the program's next build (see
+[`RELOAD.md`](RELOAD.md)).
 
 `arm64` compiles a program to AArch64 assembly text, with its runtime after
 it: for Linux (ELF, `runtime-arm64-linux.s`) or for iOS and its simulator

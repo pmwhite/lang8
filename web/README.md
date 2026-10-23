@@ -161,6 +161,15 @@ compiler rejects other uses. `web/tests/resume.l8` pauses in loops, branches,
 match arms, a region, and a nested function, and `make wasm-test` checks that
 it prints the same as a build without `--async`.
 
+## Hot reload
+
+`web/reload.js` runs a program through its builds: a new module's instance
+takes the old one's `persistent` globals (copied from memory by the type
+table in the module's `l8persist` section) and starts; `web/dev.mjs`
+rebuilds a program when a source changes and serves each build to the
+hosts waiting on it. `make wasm-test` reloads `web/tests/reload_v1.l8` as
+`reload_v2.l8`. See [`RELOAD.md`](../RELOAD.md).
+
 ## Modules
 
 The backend (`src2/wasm.l8`) lowers the same typed AST as the x86 backend

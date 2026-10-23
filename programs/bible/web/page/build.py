@@ -5,7 +5,7 @@
 
 The marketing pages (programs/bible/site/, without DESIGN.md) at the root,
 and read/: the assets under hashed names (read.<hash>.css, bible.<hash>.js,
-l8.<hash>.js, app.<hash>.wasm, icons.<hash>.svg, the fonts); the data under
+l8.<hash>.js, reload.<hash>.js, app.<hash>.wasm, icons.<hash>.svg, the fonts); the data under
 data/<hash of it all>/, each file gzipped (each version whole, <v>.gz; the
 plans, the language data, the cross references, the commentary, the Manual
 and the original, by their names under programs/bible/data); the shell
@@ -129,11 +129,15 @@ def build(wasm, data_manifest, site):
 
     names = {"data": dhash}
     names["runtime"] = put(read, "l8", "js", open(os.path.join(WEB, "l8-runtime.js"), "rb").read())
+    # (The reloader, RELOAD.md: ?dev runs core from a development server.)
+    reload_js = text(os.path.join(WEB, "reload.js")).replace("./l8-runtime.js", "./" + names["runtime"])
+    names["reload"] = put(read, "reload", "js", reload_js.encode())
     names["wasm"] = put(read, "app", "wasm", open(wasm, "rb").read())
     names["icons"] = put(read, "icons", "svg", open(os.path.join(HERE, "icons.svg"), "rb").read())
     names["css"] = put(read, "read", "css", css.encode())
     js = text(os.path.join(HERE, "skin.js"))
     js = js.replace("../../../../web/l8-runtime.js", "./" + names["runtime"])
+    js = js.replace("../../../../web/reload.js", "./" + names["reload"])
     names["js"] = put(read, "bible", "js", js.encode())
 
     # The shell, which the Worker answers every reader's address with (its

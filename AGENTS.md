@@ -1,7 +1,8 @@
 # Working in this repository
 
 L8 is a self-hosted language. Read `BOOTSTRAP.md` for the compiler stages,
-`TESTING.md` for compiler expect/cram tests, and the affected program's README.
+`TESTING.md` for compiler expect/cram tests, `RELOAD.md` for hot reload and
+`persistent` globals, and the affected program's README.
 
 ## Fast feedback
 

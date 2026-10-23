@@ -236,7 +236,7 @@ $(BIBLE_DATA)/files.stamp: $(BIBLE_FILES) programs/bible/web/page/build.py | $(B
 $(BIBLE_DATA)/manifest.json: $(BIBLE_VERSION_GZ) $(BIBLE_DATA)/files.stamp programs/bible/web/page/build.py
 	@$(STEP) 'bible data manifest' python3 -I programs/bible/web/page/build.py manifest $(BIBLE_DATA) $@
 
-$(OK)/bible-web: $(BIBLE_DATA)/manifest.json $(BUILD)/bible.wasm web/l8-runtime.js $(wildcard programs/bible/web/page/* programs/bible/web/page/fonts/* programs/bible/site/* programs/bible/site/*/*) | $(OK)
+$(OK)/bible-web: $(BIBLE_DATA)/manifest.json $(BUILD)/bible.wasm web/l8-runtime.js web/reload.js $(wildcard programs/bible/web/page/* programs/bible/web/page/fonts/* programs/bible/site/* programs/bible/site/*/*) | $(OK)
 	@$(STEP) 'bible web site' python3 -I programs/bible/web/page/build.py site $(BUILD)/bible.wasm $(BIBLE_DATA)/manifest.json $(BUILD)/bible-site
 	@touch $@
 
@@ -319,7 +319,15 @@ $(OK)/wasm-resume: l8c3 web/tests/resume.l8 web/tests/resume.mjs $(WEB) | $(OK)
 		node web/tests/resume.mjs $(BUILD)/resume.wasm $(BUILD)/resume-plain.wasm'
 	@touch $@
 
-wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume
+# A program reloaded as its next build, its persistent globals carried over
+# (RELOAD.md).
+$(OK)/wasm-reload: l8c3 web/tests/reload_v1.l8 web/tests/reload_v2.l8 web/tests/reload.mjs $(WEB) | $(OK)
+	@$(STEP) 'wasm reload' sh -c './l8c3 wasm --async l8_pause web/tests/reload_v1.l8 -o $(BUILD)/reload_v1.wasm && \
+		./l8c3 wasm --async l8_pause web/tests/reload_v2.l8 -o $(BUILD)/reload_v2.wasm && \
+		node web/tests/reload.mjs $(BUILD)/reload_v1.wasm $(BUILD)/reload_v2.wasm'
+	@touch $@
+
+wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume $(OK)/wasm-reload
 
 # The playground: a static site in .build/web with the compiler as a module.
 # Serve it with `python3 -m http.server -d .build/web`.

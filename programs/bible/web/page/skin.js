@@ -5,7 +5,8 @@
 // selection's toolbar, the browser's Back. It decides how things look and
 // move; what is there and what happens are core's. They talk in lines
 // (UTF-8, `\n`-ended, fields split by tabs), as Android's skin does.
-import { instantiate, runResumable, pausing } from "../../../../web/l8-runtime.js";
+import { runResumable, pausing } from "../../../../web/l8-runtime.js";
+import { Reloader, watchBuilds } from "../../../../web/reload.js";
 
 const meta = (n) => document.querySelector(`meta[name="${n}"]`)?.content || "";
 const DATA = "/read/data/" + meta("sb-data");
@@ -2481,9 +2482,51 @@ const sys = {
   open: () => -2,
   close: () => -9,
 };
-const module = await WebAssembly.compileStreaming(window.l8Prefetch?.[WASM] || fetch(WASM));
-const { instance } = await instantiate(module, sys, imports);
-runResumable(instance, () => new Promise((r) => {
-  if (inbox) r();
-  else wakeUp = r;
-})).then((status) => console.warn("smooth bible stopped", status), (e) => console.error("smooth bible failed", e));
+// Core runs through a Reloader (RELOAD.md): once from the site's module;
+// with ?dev (or ?dev=http://host:8777), from the hot reload server's builds,
+// each reload starting core again over its persistent state, the skin's
+// views reset first.
+const DEV = new URLSearchParams(location.search).has("dev") ? new URLSearchParams(location.search).get("dev") || `http://${location.hostname}:8777` : null;
+const core = new Reloader({
+  sys,
+  imports,
+  run: (instance) => runResumable(instance, () => new Promise((r) => {
+    if (inbox) r();
+    else wakeUp = r;
+  })).then((status) => core.isCurrent(instance) && console.warn("smooth bible stopped", status), (e) => console.error("smooth bible failed", e)),
+  log: (m) => console.log("smooth bible reload:", m),
+});
+
+// The skin's own state let go, for core to say it all again.
+function resetSkin() {
+  inbox = "";
+  wakeUp = null;
+  files.clear();
+  building = null;
+  chapter = null;
+  started = false;
+  panel.dismiss();
+  tray.hide();
+  capsule.show("");
+  player.hide();
+  reminders.clear();
+  reader.main.textContent = "";
+  reader.loaded.clear();
+  reader.asked.clear();
+  reader.lo = 0;
+  reader.hi = -1;
+  send(`api ${API}`);
+}
+
+if (DEV) {
+  const first = await fetch(`${DEV}/build.wasm`, { cache: "no-store" });
+  if (!first.ok) throw new Error(`smooth bible: no build at ${DEV} (${first.status})`);
+  await core.load(new Uint8Array(await first.arrayBuffer()));
+  const since = (await (await fetch(`${DEV}/build`, { cache: "no-store" })).json()).build;
+  watchBuilds(DEV, async (bytes, info) => {
+    if (!core.idle()) return console.warn("smooth bible: core busy; not reloaded");
+    resetSkin();
+    await core.load(bytes);
+    console.log(`smooth bible: build ${info.build} running`);
+  }, { since, log: (m) => console.warn("smooth bible dev:", m) });
+} else core.load(await WebAssembly.compileStreaming(window.l8Prefetch?.[WASM] || fetch(WASM))).catch((e) => console.error("smooth bible failed", e));

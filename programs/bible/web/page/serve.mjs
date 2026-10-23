@@ -1,6 +1,7 @@
 // The site as smoothbible.com serves it, for local development:
-//   [SB_API=https://smoothbible.com] node programs/bible/web/page/serve.mjs [SITE] [PORT]
-//   (.build/bible-site, 8470; SB_API: the ESV's requests to that Worker)
+//   [SB_API=https://smoothbible.com] [SB_DEV=1] node programs/bible/web/page/serve.mjs [SITE] [PORT]
+//   (.build/bible-site, 8470; SB_API: the ESV's requests to that Worker;
+//   SB_DEV: the page may reach a hot reload server, ?dev: RELOAD.md)
 // Requests go to the real Worker (programs/bible/worker/worker.js), with
 // ASSETS standing in for Cloudflare's static assets over SITE as
 // wrangler.toml configures them (html_handling "auto-trailing-slash",
@@ -72,6 +73,9 @@ export function serve(site, port) {
     // (Compressed as Cloudflare does text, scripts and wasm, so the budgets
     // see what a phone would be sent; data files are gzip themselves.)
     const headers = Object.fromEntries(r.headers);
+    // (SB_DEV=1: the page may reach a hot reload server, web/dev.mjs, on
+    // any address: RELOAD.md.)
+    if (process.env.SB_DEV && headers["content-security-policy"]) headers["content-security-policy"] = headers["content-security-policy"].replace("connect-src 'self'", "connect-src 'self' http: ws:");
     // (A proxied answer's body is already decoded.)
     if (api) {
       delete headers["content-encoding"];

@@ -324,3 +324,17 @@ Between other statements, the semicolon is required:
   $ l8 compile required.l8
   error: required.l8:2:30: unexpected token
   [1]
+
+A persistent global (RELOAD.md) keeps its word, as a const does:
+
+  $ printf 'tag example;\npersistent   count: int = 0;\nconst LIMIT: int = 4;\nmain(): int { count + LIMIT; }\n' > persistent.l8
+  $ l8 fmt persistent.l8
+  tag example;
+  
+  persistent count: int = 0;
+  
+  const LIMIT: int = 4;
+  
+  main(): int {
+      count + LIMIT
+  }
