@@ -3323,6 +3323,7 @@ wasm_tramp_common:
     mov %r11, 48(%r15)
     add $1, %r10
     mov %r10, wasm_cb_depth(%rip)
+    mov %r9, wasm_extra(%rip)
     mov %r8, %r9
     mov %rcx, %r8
     mov %rdx, %rcx
@@ -3380,6 +3381,18 @@ wasm_callback_abandon:
 .Lcb_none:
     ret
 
+# wasm_callback_extra(i): the callback's argument 5 + i, as the trampoline
+# found it (x86-64: the sixth only; the rest are on the stack, 0 here).
+.globl wasm_callback_extra
+wasm_callback_extra:
+    test %rdi, %rdi
+    jne .Lextra_none
+    mov wasm_extra(%rip), %rax
+    ret
+.Lextra_none:
+    mov $0, %rax
+    ret
+
 # wasm_native_depth(): how many native calls are under way.
 .globl wasm_native_depth
 wasm_native_depth:
@@ -3420,6 +3433,8 @@ wasm_abandoned_flag:
 wasm_slots:
     .skip 4096
 wasm_cb_depth:
+    .quad 0
+wasm_extra:
     .quad 0
 wasm_cb_slots:
     .skip 4096

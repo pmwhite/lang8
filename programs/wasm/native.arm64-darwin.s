@@ -3316,6 +3316,12 @@ Lwasm_tramp_common:
     adrp x8, wasm_slot_depth@PAGE
     ldr x11, [x8, wasm_slot_depth@PAGEOFF]
     str x11, [x10, #160]
+    // (Arguments past the fifth, which the L8 callback cannot take: kept
+    // for wasm_callback_extra, read before anything else runs.)
+    adrp x8, wasm_extra@PAGE
+    add x8, x8, wasm_extra@PAGEOFF
+    stp x5, x6, [x8]
+    str x7, [x8, #16]
     mov x5, x4
     mov x4, x3
     mov x3, x2
@@ -3369,6 +3375,16 @@ _wasm_callback_abandon:
 Lcb_none:
     ret
 
+// wasm_callback_extra(i): the callback's argument 5 + i (i < 3), as the
+// trampoline found it.
+    .globl _wasm_callback_extra
+_wasm_callback_extra:
+    adrp x8, wasm_extra@PAGE
+    add x8, x8, wasm_extra@PAGEOFF
+    lsl x0, x0, #3
+    ldr x0, [x8, x0]
+    ret
+
 // wasm_native_depth(): how many native calls are under way.
     .globl _wasm_native_depth
 _wasm_native_depth:
@@ -3414,6 +3430,8 @@ wasm_slots:
     .skip 16384
 wasm_cb_depth:
     .quad 0
+wasm_extra:
+    .quad 0, 0, 0
     .p2align 4
 wasm_cb_slots:
     .skip 16384
