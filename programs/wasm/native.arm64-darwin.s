@@ -70,6 +70,10 @@ _l8_bits_f32:
 // Call a C function: ints[0..7] in x0-x7 (the slice holds at least 8), the
 // rest on the stack; floats[0..7] in d0-d7; the result from x0, or from d0
 // as bits when ret_float.
+// Before the call, the callee-saved registers and the stack go into a
+// slot (one per nested call), so that wasm_native_abandon, called from
+// deeper native code (an uncaught exception's handler), can come back here
+// as if the call had returned 0, with wasm_abandoned set.
     .globl _wasm_native_call
 _wasm_native_call:
     stp x29, x30, [sp, #-48]!
@@ -80,6 +84,25 @@ _wasm_native_call:
     mov x20, x1
     mov x21, x2
     mov x22, x5
+    adrp x8, wasm_slot_depth@PAGE
+    ldr x9, [x8, wasm_slot_depth@PAGEOFF]
+    add x10, x9, #1
+    str x10, [x8, wasm_slot_depth@PAGEOFF]
+    lsl x9, x9, #8
+    adrp x10, wasm_slots@PAGE
+    add x10, x10, wasm_slots@PAGEOFF
+    add x10, x10, x9
+    stp x19, x20, [x10]
+    stp x21, x22, [x10, #16]
+    stp x23, x24, [x10, #32]
+    stp x25, x26, [x10, #48]
+    stp x27, x28, [x10, #64]
+    mov x11, sp
+    stp x29, x11, [x10, #80]
+    stp d8, d9, [x10, #96]
+    stp d10, d11, [x10, #112]
+    stp d12, d13, [x10, #128]
+    stp d14, d15, [x10, #144]
     ldr d0, [x3]
     ldr d1, [x3, #8]
     ldr d2, [x3, #16]
@@ -118,10 +141,58 @@ Lcall_regs:
     cbz x22, Lcall_done
     fmov x0, d0
 Lcall_done:
+    adrp x8, wasm_slot_depth@PAGE
+    ldr x9, [x8, wasm_slot_depth@PAGEOFF]
+    sub x9, x9, #1
+    str x9, [x8, wasm_slot_depth@PAGEOFF]
     mov sp, x29
     ldp x21, x22, [sp, #32]
     ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #48
+    ret
+
+// wasm_native_abandon(): back to the innermost wasm_native_call, which
+// returns 0 with wasm_abandoned set. Nothing between is unwound.
+    .globl _wasm_native_abandon
+_wasm_native_abandon:
+    adrp x8, wasm_slot_depth@PAGE
+    ldr x9, [x8, wasm_slot_depth@PAGEOFF]
+    cbz x9, Labandon_none
+    sub x9, x9, #1
+    str x9, [x8, wasm_slot_depth@PAGEOFF]
+    lsl x9, x9, #8
+    adrp x10, wasm_slots@PAGE
+    add x10, x10, wasm_slots@PAGEOFF
+    add x10, x10, x9
+    ldp x19, x20, [x10]
+    ldp x21, x22, [x10, #16]
+    ldp x23, x24, [x10, #32]
+    ldp x25, x26, [x10, #48]
+    ldp x27, x28, [x10, #64]
+    ldp x29, x11, [x10, #80]
+    mov sp, x11
+    ldp d8, d9, [x10, #96]
+    ldp d10, d11, [x10, #112]
+    ldp d12, d13, [x10, #128]
+    ldp d14, d15, [x10, #144]
+    adrp x8, wasm_abandoned_flag@PAGE
+    mov x12, #1
+    str x12, [x8, wasm_abandoned_flag@PAGEOFF]
+    mov x0, #0
+    mov sp, x29
+    ldp x21, x22, [sp, #32]
+    ldp x19, x20, [sp, #16]
+    ldp x29, x30, [sp], #48
+    ret
+Labandon_none:
+    ret
+
+// wasm_abandoned(): whether the last native call was abandoned (and clear).
+    .globl _wasm_abandoned
+_wasm_abandoned:
+    adrp x8, wasm_abandoned_flag@PAGE
+    ldr x0, [x8, wasm_abandoned_flag@PAGEOFF]
+    str xzr, [x8, wasm_abandoned_flag@PAGEOFF]
     ret
 
 // Callbacks: native code calls trampoline k with up to five integer
@@ -3231,3 +3302,10 @@ Lwasm_tramp_common:
     .p2align 3
 wasm_callback_fn:
     .quad 0
+wasm_slot_depth:
+    .quad 0
+wasm_abandoned_flag:
+    .quad 0
+    .p2align 4
+wasm_slots:
+    .skip 16384

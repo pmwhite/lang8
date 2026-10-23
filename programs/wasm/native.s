@@ -72,7 +72,11 @@ l8_bits_f32:
 # wasm_native_call(fp, ints: []int, nints, floats: []f64, nfloats, ret_float): int
 # Call a C function: ints[0..5] in the integer argument registers, the rest
 # on the stack; floats[0..7] in xmm0-7 (the slice holds at least 10); the
-# result from rax, or from xmm0 as bits when ret_float.
+# result from rax, or from xmm0 as bits when ret_float. Before the call,
+# the callee-saved registers and the stack go into a slot (one per nested
+# call), so that wasm_native_abandon, called from deeper native code (an
+# uncaught exception's handler), can come back here as if the call had
+# returned 0, with wasm_abandoned set.
 .globl wasm_native_call
 wasm_native_call:
     push %rbp
@@ -81,10 +85,26 @@ wasm_native_call:
     push %r12
     push %r13
     push %r14
+    push %r15
+    push %rdi
     mov %rdi, %r11
     mov %rsi, %r12
     mov %rdx, %r13
     mov %r9, %r14
+    mov wasm_slot_depth(%rip), %rax
+    mov %rax, %r15
+    shl $6, %r15
+    lea wasm_slots(%rip), %r10
+    add %r10, %r15
+    mov %rbx, 0(%r15)
+    mov %rbp, 8(%r15)
+    mov %r12, 16(%r15)
+    mov %r13, 24(%r15)
+    mov %r14, 32(%r15)
+    mov %rsp, 40(%r15)
+    mov %r11, 48(%r15)
+    add $1, %rax
+    mov %rax, wasm_slot_depth(%rip)
     movdqu 0(%rcx), %xmm0
     movdqu 8(%rcx), %xmm1
     movdqu 16(%rcx), %xmm2
@@ -126,12 +146,59 @@ wasm_native_call:
     movdqu %xmm0, -16(%rsp)
     mov -16(%rsp), %rax
 .Lcall_done:
-    lea -32(%rbp), %rsp
+    mov wasm_slot_depth(%rip), %rcx
+    sub $1, %rcx
+    mov %rcx, wasm_slot_depth(%rip)
+    lea -48(%rbp), %rsp
+    pop %rdi
+    pop %r15
     pop %r14
     pop %r13
     pop %r12
     pop %rbx
     pop %rbp
+    ret
+
+# wasm_native_abandon(): back to the innermost wasm_native_call, which
+# returns 0 with wasm_abandoned set. Nothing between is unwound.
+.globl wasm_native_abandon
+wasm_native_abandon:
+    mov wasm_slot_depth(%rip), %rax
+    test %rax, %rax
+    jz .Labandon_none
+    sub $1, %rax
+    mov %rax, wasm_slot_depth(%rip)
+    mov %rax, %r15
+    shl $6, %r15
+    lea wasm_slots(%rip), %r10
+    add %r10, %r15
+    mov 0(%r15), %rbx
+    mov 8(%r15), %rbp
+    mov 16(%r15), %r12
+    mov 24(%r15), %r13
+    mov 32(%r15), %r14
+    mov 40(%r15), %rsp
+    mov $1, %rax
+    mov %rax, wasm_abandoned_flag(%rip)
+    mov $0, %rax
+    lea -48(%rbp), %rsp
+    pop %rdi
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %rbx
+    pop %rbp
+    ret
+.Labandon_none:
+    ret
+
+# wasm_abandoned(): whether the last native call was abandoned (and clear).
+.globl wasm_abandoned
+wasm_abandoned:
+    mov wasm_abandoned_flag(%rip), %rax
+    mov $0, %rcx
+    mov %rcx, wasm_abandoned_flag(%rip)
     ret
 
 # Callbacks: native code calls trampoline k (1024 of them) with up to five
@@ -3242,3 +3309,9 @@ wasm_tramp_common:
 .align 8
 wasm_callback_fn:
     .quad 0
+wasm_slot_depth:
+    .quad 0
+wasm_abandoned_flag:
+    .quad 0
+wasm_slots:
+    .skip 4096
