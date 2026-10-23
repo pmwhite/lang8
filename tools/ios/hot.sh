@@ -11,8 +11,8 @@
 # then, on the development machine:
 #   node web/dev.mjs -- programs/bible/ios/app.l8 -o .build/dev/bible-ios.wasm
 # Everything else is as tools/ios/build-linux.sh (its variables too). The
-# app needs the local network: the plist gets NSLocalNetworkUsageDescription
-# and NSAllowsLocalNetworking.
+# app needs the network to the server (a LAN or tailnet address): the plist
+# gets NSLocalNetworkUsageDescription and lets plain HTTP through.
 set -eu
 kind=$1
 src=$2
@@ -45,7 +45,10 @@ p = sys.argv[1]
 d = plistlib.load(open(p, "rb"))
 d["NSLocalNetworkUsageDescription"] = "Hot reload fetches the app's builds from the development server on this network."
 ats = d.setdefault("NSAppTransportSecurity", {})
+# (Plain HTTP to the server wherever it is: a LAN or a tailnet address. A
+# development build only.)
 ats["NSAllowsLocalNetworking"] = True
+ats["NSAllowsArbitraryLoads"] = True
 plistlib.dump(d, open(p, "wb"))
 PY
 "$here/build-linux.sh" "$kind" "$top/programs/wasm/ios/host.l8" "$out" "$work"
