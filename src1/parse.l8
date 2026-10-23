@@ -1372,6 +1372,7 @@ new_obj(name: []i8@new, is_local: bool) noregion: *Obj@new {
         is_local: is_local,
         is_func: false,
         is_const: false,
+        is_persistent: false,
         cg_register: 0 trunc i8,
         cg_score: 0 trunc u32,
         const_val: 0,
@@ -1648,7 +1649,9 @@ parse_primary() noregion raises Error: *Expr@new {
             tok = tok.next;
             fill: *Expr = parse_expr();
             skip(TokKind.RParen);
-            return new_heap_node(len, 1, null, null, fill, "", slice_of(base))
+            hn1: *Expr = new_heap_node(len, 1, null, null, fill, "", slice_of(base));
+            place_expr(hn1, new_pos, new_file);
+            return hn1
         }
         if (is_pointer(base)) error("new expects a non-pointer type");
         if (tok.kind != TokKind.LBrace) error("expected {, [, or .Variant after new");
@@ -1937,19 +1940,59 @@ parse_primary() noregion raises Error: *Expr@new {
     error("expected expression")
 }
 
+// A loop about to be parsed (tok after while or for): a local it assigns,
+// or takes the address of, keeps no narrowing from before it, since a
+// later turn may come after the assignment. Its tokens are scanned from
+// its condition through its body: a braced block, or a statement up to a
+// ; (or the end of the block, or an else) at its own depth.
+loop_kills() noregion {
+    if (!parse_resolve) return;
+    t: *Token = tok;
+    depth: int = 0;
+    braced: bool = false;
+    prev: TokKind = TokKind.Eof;
+    while (t.kind != TokKind.Eof) {
+        k: TokKind = t.kind;
+        if (k == TokKind.LParen || k == TokKind.LBrack || k == TokKind.LBrace) {
+            if (depth == 0 && k == TokKind.LBrace) braced = true;
+            depth = depth + 1
+        } else if (k == TokKind.RParen || k == TokKind.RBrack || k == TokKind.RBrace) {
+            depth = depth - 1;
+            if (depth < 0 || depth == 0 && braced && k == TokKind.RBrace) return
+        } else if (depth == 0 && (k == TokKind.Semi || k == TokKind.Else)) return;
+        if (k == TokKind.Ident && len(t.qualifier) == 0 && prev != TokKind.Dot) {
+            if (t.next.kind == TokKind.Assign || prev == TokKind.Amp) {
+                v: ?*Obj = find_var(intern(source, t.pos, t.len));
+                if (v != null && v.is_local) kill_var_facts(v)
+            }
+        }
+        prev = k;
+        t = t.next
+    }
+}
+
 parse_if_expr() noregion raises Error: *Expr@new {
     skip(TokKind.If);
     skip(TokKind.LParen);
     cond: *Expr = parse_expr();
     skip(TokKind.RParen);
+    // (Each branch narrowed as it is parsed, as an if statement's is: a
+    // member of a pointer the condition proves non-null is found then.)
+    save: ?*NarrowFrame = narrow_top;
+    narrow_push_ne_nulls(cond);
+    killed: int = kill_n;
     enter_scope();
     then: *Expr = parse_expr();
     leave_scope();
+    narrow_reset(save);
     if (tok.kind != TokKind.Else) error("if expression requires else");
     tok = tok.next;
+    narrow_push_eq_nulls(cond);
     enter_scope();
     els: *Expr = parse_expr();
     leave_scope();
+    narrow_reset(save);
+    kill_again(killed, kill_n);
     new_if_expr(cond, then, els)
 }
 
@@ -1991,6 +2034,8 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
             tok = tok.next;
             vname = intern(source, vpos, vlen)
         } else {
+            // (A ; here follows an arm's block, which ends the arm itself.)
+            if (tok.kind == TokKind.Semi) error("no ; after a match arm's block");
             if (tok.kind != TokKind.Ident) error("expected variant name or integer literal in match arm");
             vname = cur_tokstr();
             vlen = tok.len;
@@ -2163,8 +2208,10 @@ parse_postfix() noregion raises Error: *Expr@new {
                         add_type(n);
                         t: ?*Type = decay(n.ty);
                         sty: *Type = n.ty or error("missing type");
-                        if (t != null && is_opt_pointer(t)) error_ty("member access on optional pointer (use if (p != null) / while (p != null) to narrow)",
-                            t);
+                        // (Through an optional pointer, the member is found
+                        // all the same: checking the body, which knows every
+                        // assignment before it, says whether it is narrowed.)
+                        if (t != null && is_opt_pointer(t)) t = unwrap_optional(t);
                         if (t != null && is_pointer(t) && is_struct_ty(type_base(t))) sty = type_base(t) else {
                             if (t != null && is_pointer(t) && is_exn_ty(type_base(t))) sty = type_base(t) else {
                                 if (!is_struct_ty(sty) && !is_exn_ty(sty)) error_ty("member access on non-struct",
@@ -2185,23 +2232,34 @@ parse_postfix() noregion raises Error: *Expr@new {
             } else {
                 if (tok.kind == TokKind.As || tok.kind == TokKind.Trunc) {
                     is_trunc: bool = tok.kind == TokKind.Trunc;
+                    cast_pos: int = tok.pos;
                     tok = tok.next;
                     ty: *Type = parse_type();
-                    if (is_trunc) n = new_trunc(n, ty) else n = new_as(n, ty)
+                    if (is_trunc) n = new_trunc(n, ty) else n = new_as(n, ty);
+                    place_expr(n, cast_pos, current_file_id)
                 } else return n
             }
         }
     }
 }
 
+// e placed at its operator (or keyword): pos of file.
+place_expr(e: *Expr, pos: int, file: int) {
+    e.pos = pos;
+    e.file = file
+}
+
 parse_unary() noregion raises Error: *Expr@new {
+    op_pos: int = tok.pos;
     if (tok.kind == TokKind.Plus) {
         tok = tok.next;
         return parse_unary()
     }
     if (tok.kind == TokKind.Minus) {
         tok = tok.next;
-        return new_neg(parse_unary())
+        u: *Expr = new_neg(parse_unary());
+        place_expr(u, op_pos, current_file_id);
+        return u
     }
     if (tok.kind == TokKind.Amp) {
         tok = tok.next;
@@ -2220,27 +2278,54 @@ parse_unary() noregion raises Error: *Expr@new {
                 return e
             }
         }
-        return new_addr(parse_unary())
+        u: *Expr = new_addr(parse_unary());
+        place_expr(u, op_pos, current_file_id);
+        return u
     }
     if (tok.kind == TokKind.Not) {
         tok = tok.next;
-        return new_not(parse_unary())
+        u: *Expr = new_not(parse_unary());
+        place_expr(u, op_pos, current_file_id);
+        return u
     }
     if (tok.kind == TokKind.Tilde) {
         tok = tok.next;
-        return new_bitnot(parse_unary())
+        u: *Expr = new_bitnot(parse_unary());
+        place_expr(u, op_pos, current_file_id);
+        return u
     }
     parse_postfix()
 }
 
 add_type(n: ?*Expr@new) noregion raises Error {
     if (!parse_resolve) return;
-    if (n != null) add_type_expr(n)
+    if (n != null) {
+        outer_pos: int = diag_expr_pos;
+        outer_file: int = diag_expr_file;
+        diag_expr_pos = n.pos;
+        diag_expr_file = n.file;
+        add_type_expr(n);
+        // (What a call or a store may change, no field path keeps.)
+        if (writes_memory(n)) narrow_barrier();
+        diag_expr_pos = outer_pos;
+        diag_expr_file = outer_file
+    }
 }
 
 add_type_stmt(s: ?*Stmt) noregion raises Error {
     if (!parse_resolve) return;
-    if (s != null) add_type_stmt_node(s)
+    if (s != null) {
+        outer_expr: int = diag_expr_pos;
+        outer_pos: int = diag_stmt_pos;
+        outer_file: int = diag_stmt_file;
+        diag_expr_pos = 0;
+        diag_stmt_pos = s.pos;
+        diag_stmt_file = current_file_id;
+        add_type_stmt_node(s);
+        diag_expr_pos = outer_expr;
+        diag_stmt_pos = outer_pos;
+        diag_stmt_file = outer_file
+    }
 }
 
 add_type_field_inits(inits: ?*FieldInit@new) noregion raises Error {
@@ -2450,7 +2535,34 @@ type_eq_cmp(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
         p.ty = ty_bool;
         return
     }
+    // (A variable or field narrowed may still be tested against null, or
+    // against another of its declared, optional, type.)
+    // Both are then compared as declared, as the code made for them expects.
+    ld: ?*Type = decay(declared_ty(lhs));
+    rd: ?*Type = decay(declared_ty(rhs));
+    if (bind_null_to_pointer(ld, rhs) || bind_null_to_pointer(rd, lhs) || ld != null && rd != null && types_equal(ld,
+        rd)) {
+        lhs.ty = declared_ty(lhs);
+        rhs.ty = declared_ty(rhs);
+        p.ty = ty_bool;
+        return
+    }
     error_ty_vs_expr(lhs, "comparison type mismatch", lt, rt)
+}
+
+// The type e is declared with, whatever narrowing gives it here.
+declared_ty(e: *Expr): ?*Type@e {
+    match e.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v != null) v.ty else e.ty
+        }
+        MemberAccess k -> {
+            m: ?*Member = k.member;
+            if (m != null) m.ty else e.ty
+        }
+        _ -> e.ty
+    }
 }
 
 type_ord_cmp(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
@@ -2755,8 +2867,22 @@ stmt_result_ty(s: ?*Stmt) noregion raises Error: ?*Type@new {
     }
 }
 
+// (An error in s reported at it, in the function checked.)
 check_stmt_result(s: ?*Stmt, want: *Type@immortal) noregion raises Error: bool {
     if (s == null) return false;
+    fn: ?*Function = current_fn;
+    // (Not an if expression: src1, which builds this, narrows only its
+    // statement.)
+    file: int = current_file_id;
+    if (fn != null) file = fn.browse_file;
+    outer_file: int = diag_stmt_file;
+    outer: int = diag_enter_stmt(s, file);
+    r: bool = check_stmt_result_node(s, want);
+    diag_leave(outer, outer_file);
+    r
+}
+
+check_stmt_result_node(s: *Stmt, want: *Type@immortal) noregion raises Error: bool {
     if (stmt_always_diverges(s)) return true;
     match s.kind {
         Return _p -> true;
@@ -2812,11 +2938,13 @@ type_if_expr(
         ct);
     save: ?*NarrowFrame = narrow_top;
     narrow_push_ne_nulls(cond);
+    killed: int = kill_n;
     add_type(then);
     narrow_reset(save);
     narrow_push_eq_nulls(cond);
     add_type(els);
     narrow_reset(save);
+    kill_again(killed, kill_n);
     tt: ?*Type = decay(then.ty);
     et: ?*Type = decay(els.ty);
     tn: bool = is_null_value_expr(then);
@@ -2940,6 +3068,9 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 t0);
             mem: *Member = q.member or error("internal");
             p.ty = mem.ty;
+            // (Tested against null, with nothing since that may change it.)
+            nt: ?*Type = path_view_ty(p);
+            if (nt != null) p.ty = nt;
             return
         }
         Sizeof k -> {
@@ -3070,6 +3201,15 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                         lt = decay(var.ty)
                     } else lt = decay(q.lhs.ty)
                 }
+                // (A field stored to is its own type, not its narrowing.)
+                MemberAccess mp -> {
+                    mm: ?*Member = mp.member;
+                    if (mm != null) {
+                        storage = mm.ty;
+                        q.lhs.ty = mm.ty
+                    }
+                    lt = decay(storage)
+                }
                 _ -> lt = decay(q.lhs.ty)
             }
             if (!assignable(lt, q.rhs)) error_have_expr_want("assignment type mismatch",
@@ -3100,7 +3240,10 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 _ -> { }
             }
             match q.lhs.kind {
-                Var vp -> kill_var_facts(vp.var);
+                Var vp -> {
+                    kill_var_facts(vp.var);
+                    narrow_after_store(vp.var, q.rhs)
+                }
                 Index ik -> {
                     ilt: ?*Type = ik.lhs.ty;
                     if (ilt != null && is_str(ilt)) error("cannot assign through str index")
@@ -3130,7 +3273,9 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 }
                 _ -> { }
             }
-            aty: ?*Type = q.lhs.ty;
+            // (A variable's or a field's own type: a pointer to it may
+            // store what its narrowing excludes.)
+            aty: ?*Type = declared_ty(q.lhs);
             p.ty = ptr_to(aty or error("missing type"));
             return
         }
@@ -3293,7 +3438,9 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
                 ct);
             save: ?*NarrowFrame = narrow_top;
             narrow_push_ne_nulls(k.cond);
+            killed: int = kill_n;
             add_type_stmt(k.then);
+            then_killed: int = kill_n;
             then_nn: ?*Obj = null;
             els: ?*Stmt = k.els;
             if (els == null && !stmt_always_diverges(k.then)) {
@@ -3303,11 +3450,16 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
                 }
             }
             narrow_reset(save);
+            // (What a branch that falls through assigned holds after the
+            // whole if; the else is checked without the then's.)
             if (els != null) {
                 narrow_push_eq_nulls(k.cond);
                 add_type_stmt(els);
-                narrow_reset(save)
+                narrow_reset(save);
+                if (!stmt_always_diverges(k.then)) kill_again(killed, then_killed);
+                if (!stmt_always_diverges(els)) kill_again(then_killed, kill_n)
             } else {
+                if (!stmt_always_diverges(k.then)) kill_again(killed, then_killed);
                 if (then_nn != null) {
                     dt: ?*Type = decay(then_nn.ty);
                     if (dt != null && is_optional(dt)) narrow_push(then_nn, unwrap_optional(dt))
@@ -3316,6 +3468,9 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             return
         }
         While k -> {
+            kill_assigned_expr(k.cond);
+            kill_assigned_stmt(k.body);
+            narrow_barrier();
             add_type(k.cond);
             ct2: ?*Type = decay(k.cond.ty);
             if (ct2 == null || !is_bool_ty(ct2)) error_ty_expr(k.cond, "condition must be bool",
@@ -3327,6 +3482,8 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             return
         }
         For k -> {
+            kill_assigned_stmt(k.body);
+            narrow_barrier();
             add_type(k.iter);
             hk: ?*Expr = k.hi;
             if (hk != null) {
@@ -3804,26 +3961,36 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         skip(TokKind.RParen);
         save: ?*NarrowFrame = narrow_top;
         narrow_push_ne_nulls(cond);
+        killed: int = kill_n;
         enter_scope();
         then: *Stmt = parse_stmt();
         leave_scope();
         narrow_reset(save);
+        then_killed: int = kill_n;
         els: ?*Stmt = null;
         if (tok.kind == TokKind.Else) {
             tok = tok.next;
             narrow_push_eq_nulls(cond);
             enter_scope();
-            els = parse_stmt();
+            els_stmt: *Stmt = parse_stmt();
+            els = els_stmt;
             leave_scope();
-            narrow_reset(save)
+            narrow_reset(save);
+            // (What a branch that falls through assigned holds after.)
+            if (!stmt_parse_diverges(then)) kill_again(killed, then_killed);
+            if (!stmt_parse_diverges(els_stmt)) kill_again(then_killed, kill_n)
         } else {
             /* if (x == null) { return/error/...; } → x is non-null afterward */
-            if (stmt_parse_diverges(then)) narrow_push_eq_nulls(cond)
+            if (stmt_parse_diverges(then)) narrow_push_eq_nulls(cond) else kill_again(killed,
+                then_killed)
         }
         return new_if(cond, then, els)
     }
     if (tok.kind == TokKind.While) {
         tok = tok.next;
+        loop_kills();
+        narrow_barrier();
+        loop_killed: int = kill_n;
         skip(TokKind.LParen);
         cond2: *Expr = parse_expr();
         skip(TokKind.RParen);
@@ -3833,10 +4000,13 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         body: *Stmt = parse_stmt();
         leave_scope();
         narrow_reset(save2);
+        kill_again(loop_killed, kill_n);
         return new_while(cond2, body)
     }
     if (tok.kind == TokKind.For) {
         tok = tok.next;
+        loop_kills();
+        narrow_barrier();
         if (tok.kind != TokKind.Ident) error("expected name after for");
         iname: []i8 = cur_tokstr();
         ipos: int = tok.pos;
@@ -4849,13 +5019,15 @@ parse_program_unit() noregion raises Error {
             tok.pos, tok.len) && tok.next.kind == TokKind.Str;
         is_const_decl: bool = tok.kind == TokKind.Ident && name_eq_span("const", source,
             tok.pos, tok.len) && tok.next.kind == TokKind.Ident;
+        is_persistent_decl: bool = tok.kind == TokKind.Ident && name_eq_span("persistent",
+            source, tok.pos, tok.len) && tok.next.kind == TokKind.Ident;
         is_test: bool = tok.kind == TokKind.Ident && name_eq_span("test", source,
             tok.pos, tok.len) && tok.next.kind == TokKind.Str;
         if (tok.kind == TokKind.Import || is_need || is_native || is_test) {
             if (prefix) error("declaration tags must precede a definition")
         } else {
             decl: *Token = tok;
-            if (tok.kind == TokKind.TypeKw || tok.kind == TokKind.Exception || tok.kind == TokKind.Extern || is_const_decl) decl = tok.next;
+            if (tok.kind == TokKind.TypeKw || tok.kind == TokKind.Exception || tok.kind == TokKind.Extern || is_const_decl || is_persistent_decl) decl = tok.next;
             tag_register(decl)
         }
         if (tok.kind == TokKind.Import) parse_import() else if (is_test) parse_test() else if (tok.kind == TokKind.TypeKw && tok.next.kind == TokKind.Ident && (tok.next.next.kind == TokKind.Assign || tok.next.next.kind == TokKind.Colon)) parse_type_def() else {
@@ -4871,7 +5043,9 @@ parse_program_unit() noregion raises Error {
                     bind_function(ename, efn);
                     append_item(new_item(ItemKind.Func { fn: efn }, efn.browse_pos))
                 } else {
-                    if (is_const_decl) tok = tok.next;
+                    if (is_const_decl || is_persistent_decl) tok = tok.next;
+                    if (is_persistent_decl && tok.kind == TokKind.Ident && name_eq_span("const",
+                        source, tok.pos, tok.len) && tok.next.kind == TokKind.Ident) error("a const global is never persistent");
                     if (tok.kind != TokKind.Ident) error("expected identifier");
                     name: []i8 = cur_tokstr();
                     browse_note();
@@ -4881,6 +5055,7 @@ parse_program_unit() noregion raises Error {
                     tok = tok.next;
                     if (tok.kind == TokKind.LParen) {
                         if (is_const_decl) error("const requires a global value");
+                        if (is_persistent_decl) error("persistent requires a global value");
                         fn: *Function = parse_function(name, 0);
                         bind_function(name, fn);
                         if (parse_defer_bodies) parse_defer(ParseDeferredKind.FunctionTail,
@@ -4909,6 +5084,7 @@ parse_program_unit() noregion raises Error {
                         o2.browse_len = glen;
                         o2.ty = ty;
                         o2.is_const = is_const_decl;
+                        o2.is_persistent = is_persistent_decl;
                         if (tok.kind != TokKind.Assign) error("global requires an initializer (name: T = e)");
                         tok = tok.next;
                         if (parse_defer_bodies) {

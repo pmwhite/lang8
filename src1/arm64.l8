@@ -1,0 +1,945 @@
+tag compiler_internal;
+
+import "a64asm.l8";
+
+import "a64link.l8";
+
+// AArch64 (arm64) target: `l8 arm64` writes assembly text for Linux (ELF) or
+// for Apple's systems (Mach-O: iOS, and its simulator).
+//
+// The x86-64 code generator drives the cg_* primitives in direct.l8 with x86
+// register numbers. With cg_arm set, each primitive is written as AArch64
+// instead, every x86 register it names standing for one arm64 register:
+//
+//   rax x9   rcx x3   rdx x2   rbx x19  rsp x28  rbp x29  rsi x1   rdi x0
+//   r8  x4   r9  x5   r10 x10  r11 x11  r12 x20  r13 x21  r14 x22  r15 x23
+//   xmm0-7 v0-7
+//
+// so the six SysV argument registers (rdi, rsi, rdx, rcx, r8, r9) are the
+// first six AAPCS64 ones, and the callee-saved registers stay callee-saved.
+// x12-x17 are scratch for the expansions here: x15 forms addresses, x16 and
+// x14 carry data, and x17 holds immediates.
+//
+// The stack: L8 code pushes and pops 8 bytes at a time, and addresses its
+// frame through rbp, as on x86. AArch64 faults on a memory access through a
+// misaligned sp, so L8 code keeps its own stack pointer, x28, within the
+// thread's stack, and keeps sp 16-byte aligned below it: lowered whenever x28
+// drops by a frame, and before every call, so that a callee (or a signal)
+// can use the stack below sp. A function entered by bl pushes its return
+// address (x30) on the x28 stack, so a frame is laid out as on x86, and is
+// also an AAPCS64 frame record: [rbp] the caller's rbp, [rbp + 8] the return
+// address, [rbp + 16] the first stack argument.
+//
+// Calls: an L8 function returns in rax (x9), C in x0; a call copies x0 to
+// x9 after it (except for runtime helpers that keep rax), and an L8 function
+// copies x9 to x0 before it returns, so either can call the other. Integer
+// arguments past the sixth are on the x28 stack, as SysV passes them; a call
+// also puts the seventh and eighth in x6 and x7 and copies the rest to sp,
+// where AAPCS64 passes them.
+//
+// C calling L8: a function whose address is taken is called through a stub
+// (NAME__l8c) that sets x28 to the caller's sp and restores it after, so C
+// can call it as a callback. Such functions take at most six integer and
+// eight float arguments.
+cg_arm: bool = false;
+
+// Mach-O (Apple) rather than ELF (Linux) naming and sections.
+cg_arm_darwin: bool = false;
+
+// Android: ELF, over its C library (bionic) as on Apple's systems, so with
+// Apple's naming of what the program defines (see arm_sym), less the
+// underscore.
+cg_arm_android: bool = false;
+
+// Integer arguments of the call being emitted that are on the x28 stack.
+cg_arm_nstack: int = 0;
+
+// Whether the flags come from a comparison of floats (they read differently).
+cg_arm_fcmp: bool = false;
+
+// The functions called through C-entry stubs, to emit after the code.
+cg_arm_stubs: ?*ArmStub = null;
+
+type ArmStub = {
+    name: []i8;
+    next: ?*ArmStub
+}
+
+arm_reg(r: int): int {
+    if (r == 0) 9 else if (r == 1) 3 else if (r == 2) 2 else if (r == 3) 19 else if (r == 4) 28 else if (r == 5) 29 else if (r == 6) 1 else if (r == 7) 0 else if (r == 8) 4 else if (r == 9) 5 else if (r == 10) 10 else if (r == 11) 11 else if (r == 12) 20 else if (r == 13) 21 else if (r == 14) 22 else 23
+}
+
+// ---- text ----
+arm_x(p: int) raises Error {
+    // (31 is only ever sp here.)
+    if (p == 31) {
+        emit("sp");
+        return
+    }
+    emit("x");
+    emit_num(p)
+}
+
+arm_w(p: int) raises Error {
+    emit("w");
+    emit_num(p)
+}
+
+arm_imm(v: int) raises Error {
+    emit("#");
+    emit_num(v)
+}
+
+// "  op xd, xn, xm" with physical register numbers.
+arm_rrr(
+    op: []i8,
+    d: int,
+    n: int,
+    m: int
+) raises Error {
+    emit("  ");
+    emit(op);
+    emit(" ");
+    arm_x(d);
+    emit(", ");
+    arm_x(n);
+    emit(", ");
+    arm_x(m);
+    emit("\n")
+}
+
+arm_rr(op: []i8, d: int, n: int) raises Error {
+    emit("  ");
+    emit(op);
+    emit(" ");
+    arm_x(d);
+    emit(", ");
+    arm_x(n);
+    emit("\n")
+}
+
+arm_line(s: []i8) raises Error {
+    emit("  ");
+    emit(s);
+    emit("\n")
+}
+
+// A symbol as the object format names it. Mach-O prefixes an underscore and
+// keeps assembler-local names as L.... There, a program shares its names
+// with Apple's libraries (an L8 function named write would stand for C's),
+// so what the program defines is _l8u_NAME, and only what it names as
+// extern, and the runtime's l8_ names, are the C names they say. L8's main
+// is l8_main, beside the runtime's C main; and runtime helpers that share a
+// name with a C library function but not its meaning have names of their
+// own.
+arm_sym(name: []i8) raises Error {
+    if (!cg_arm_darwin && !cg_arm_android) {
+        // (A name that is also a register's, such as v3, is quoted.)
+        if (arm_register_like(name)) {
+            emit("\"");
+            cg_emit_name(name);
+            emit("\"")
+        } else cg_emit_name(name);
+        return
+    }
+    if (len(name) >= 2 && name[0] == '.' && name[1] == 'L' && cg_arm_android) {
+        cg_emit_name(name);
+        return
+    }
+    if (len(name) >= 2 && name[0] == '.' && name[1] == 'L') {
+        emit("L");
+        for i in 2..len(name) {
+            if (name[i] == '.') emit_ch('_') else emit_ch(name[i])
+        }
+        return
+    }
+    if (cg_arm_darwin) emit("_");
+    if (streq(name, "main")) {
+        emit("l8_main");
+        return
+    }
+    if (streq(name, "malloc") || streq(name, "open") || streq(name, "clock_gettime") || streq(name,
+        "getrusage") || streq(name, "syscall") || streq(name, "len") || streq(name,
+        "rdtsc")) emit("l8rt_") else if (!arm_external(name)) emit("l8u_");
+    cg_emit_name(name)
+}
+
+// The names that stand for something outside the program: its externs,
+// the runtime's (l8_...), and C functions the code generator calls.
+arm_externs: [][]i8 = new []i8[8192]("");
+
+arm_hash(name: []i8): int {
+    h: int = 5381;
+    for c in name h = h * 33 + (c as int & 255) & 8191;
+    h
+}
+
+arm_note_extern(name: []i8@immortal) {
+    h: int = arm_hash(name);
+    while (len(arm_externs[h]) > 0) {
+        if (streq(arm_externs[h], name)) return;
+        h = h + 1 & 8191
+    }
+    arm_externs[h] = name
+}
+
+arm_external(name: []i8): bool {
+    if (len(name) > 3 && name[0] == 'l' && name[1] == '8' && name[2] == '_') return true;
+    if (len(name) > 5 && name[0] == 'l' && name[1] == '8' && name[2] == 'r' && name[3] == 't' && name[4] == '_') return true;
+    if (streq(name, "exit") || streq(name, "read")) return true;
+    h: int = arm_hash(name);
+    while (len(arm_externs[h]) > 0) {
+        if (streq(arm_externs[h], name)) return true;
+        h = h + 1 & 8191
+    }
+    false
+}
+
+// Before writing a program for Apple's systems: which names are its externs.
+arm_collect_externs() {
+    f: ?*Function = functions;
+    while (f != null) {
+        if (f.is_extern) arm_note_extern(f.link_name);
+        f = f.next
+    }
+}
+
+// Whether name reads as an arm64 register (x0, w12, v3, d7, sp, lr...).
+arm_register_like(name: []i8): bool {
+    if (streq(name, "sp") || streq(name, "wsp") || streq(name, "lr") || streq(name,
+        "fp") || streq(name, "xzr") || streq(name, "wzr") || streq(name, "ip0") || streq(name,
+        "ip1")) return true;
+    if (len(name) < 2 || len(name) > 3) return false;
+    c: i8 = name[0];
+    if (c != 'x' && c != 'w' && c != 'v' && c != 'b' && c != 'h' && c != 's' && c != 'd' && c != 'q' && c != 'r' && c != 'z' && c != 'p') return false;
+    for i in 1..len(name) {
+        if (name[i] < '0' || name[i] > '9') return false
+    }
+    true
+}
+
+// A branch target label.
+arm_lab(id: int) raises Error {
+    if (cg_arm_darwin) emit("L_l8_") else emit(".L.");
+    emit_num(id)
+}
+
+// ---- immediates ----
+// Load imm into physical register p: movz or movn, then movk for each other
+// 16 bits that need it.
+arm_mov_imm_phys(p: int, imm: int) raises Error {
+    zeros: int = 0;
+    ones: int = 0;
+    for i in 0..4 {
+        c: int = imm >> 16 * i & 65535;
+        if (c == 0) zeros = zeros + 1;
+        if (c == 65535) ones = ones + 1
+    }
+    inverted: bool = ones > zeros;
+    first: bool = true;
+    for k in 0..4 {
+        chunk: int = imm >> 16 * k & 65535;
+        skip: bool = if (inverted) chunk == 65535 else chunk == 0;
+        if (!skip) {
+            emit("  ");
+            if (first) {
+                if (inverted) emit("movn ") else emit("movz ")
+            } else emit("movk ");
+            arm_x(p);
+            emit(", ");
+            if (first && inverted) arm_imm(~chunk & 65535) else arm_imm(chunk);
+            if (k != 0) {
+                emit(", lsl ");
+                arm_imm(16 * k)
+            }
+            emit("\n");
+            first = false
+        }
+    }
+    if (first) {
+        emit("  ");
+        if (inverted) emit("movn ") else emit("movz ");
+        arm_x(p);
+        emit(", #0\n")
+    }
+}
+
+// ---- memory ----
+// Load or store register p (as op names it: ldr x, ldrb w...) at base + disp.
+// unscaled is the -256..255 form of the same op (ldur, ldurb...); size is
+// the access's bytes, for the scaled offset form. An offset neither form
+// reaches is added to the base in x15 first.
+arm_mem(
+    op: []i8,
+    unscaled: []i8,
+    wide: bool,
+    p: int,
+    base: int,
+    disp: int,
+    size: int
+) raises Error {
+    b: int = base;
+    d: int = disp;
+    near: bool = d >= -256 && d <= 255;
+    scaled: bool = d >= 0 && d % size == 0 && d / size < 4096;
+    if (!near && !scaled) {
+        arm_add_imm(15, b, d);
+        b = 15;
+        d = 0
+    }
+    emit("  ");
+    if (d < 0 || d % size != 0) emit(unscaled) else emit(op);
+    emit(" ");
+    if (wide) arm_x(p) else arm_w(p);
+    emit(", [");
+    arm_x(b);
+    if (d != 0) {
+        emit(", ");
+        arm_imm(d)
+    }
+    emit("]\n")
+}
+
+// xd = xn + imm (any imm; xn may be xd).
+arm_add_imm(d: int, n: int, imm: int) raises Error {
+    if (imm >= 0 && imm < 4096) {
+        if (imm == 0 && d == n) return;
+        emit("  add ");
+        arm_x(d);
+        emit(", ");
+        arm_x(n);
+        emit(", ");
+        arm_imm(imm);
+        emit("\n");
+        return
+    }
+    if (imm < 0 && imm > -4096) {
+        emit("  sub ");
+        arm_x(d);
+        emit(", ");
+        arm_x(n);
+        emit(", ");
+        arm_imm(0 - imm);
+        emit("\n");
+        return
+    }
+    arm_mov_imm_phys(17, imm);
+    arm_rrr("add", d, n, 17)
+}
+
+arm_load64(dst: int, base: int, disp: int) raises Error {
+    arm_mem("ldr", "ldur", true, dst, base, disp, 8)
+}
+
+arm_store64(src: int, base: int, disp: int) raises Error {
+    arm_mem("str", "stur", true, src, base, disp, 8)
+}
+
+// Keep sp 16-byte aligned, below x28 by at least room bytes.
+arm_lower_sp(room: int) raises Error {
+    arm_add_imm(16, 28, 0 - room);
+    arm_line("and sp, x16, #-16")
+}
+
+// The address of a symbol (plus extra) in physical register p.
+arm_adr(p: int, name: []i8, extra: int) raises Error {
+    emit("  adrp ");
+    arm_x(p);
+    emit(", ");
+    arm_sym(name);
+    if (cg_arm_darwin) emit("@PAGE");
+    emit("""
+
+  add """);
+    arm_x(p);
+    emit(", ");
+    arm_x(p);
+    emit(", ");
+    if (cg_arm_darwin) {
+        arm_sym(name);
+        emit("@PAGEOFF")
+    } else {
+        emit(":lo12:");
+        arm_sym(name)
+    }
+    emit("\n");
+    if (extra != 0) arm_add_imm(p, p, extra)
+}
+
+// ---- the primitives (see direct.l8) ----
+arm_section(sec: int) raises Error {
+    if (cg_arm_darwin) {
+        if (sec == as_SEC_TEXT) emit(".section __TEXT,__text,regular,pure_instructions\n");
+        if (sec == as_SEC_RODATA) emit(".section __TEXT,__const\n");
+        if (sec == as_SEC_DATA || sec == as_SEC_BSS) emit(".section __DATA,__data\n");
+        return
+    }
+    if (sec == as_SEC_TEXT) emit(".section .text\n");
+    if (sec == as_SEC_RODATA) emit(".section .rodata\n");
+    if (sec == as_SEC_DATA) emit(".section .data\n");
+    if (sec == as_SEC_BSS) emit(".section .bss\n")
+}
+
+arm_align(n: int) raises Error {
+    k: int = 0;
+    while (1 << k < n) k = k + 1;
+    emit(".p2align ");
+    emit_num(k);
+    emit("\n")
+}
+
+arm_global(name: []i8) raises Error {
+    emit(".globl ");
+    arm_sym(name);
+    emit("\n")
+}
+
+arm_label(name: []i8) raises Error {
+    arm_sym(name);
+    emit(":\n")
+}
+
+arm_push(r: int) raises Error {
+    p: int = arm_reg(r);
+    if (p == 28) {
+        arm_line("mov x16, x28");
+        p = 16
+    }
+    emit("  str ");
+    arm_x(p);
+    emit(", [x28, #-8]!\n")
+}
+
+arm_pop(r: int) raises Error {
+    p: int = arm_reg(r);
+    if (p == 28) {
+        arm_line("ldr x28, [x28]");
+        return
+    }
+    emit("  ldr ");
+    arm_x(p);
+    emit(", [x28], #8\n")
+}
+
+// A function's entry: its return address on the x28 stack.
+arm_entry() raises Error {
+    arm_line("str x30, [x28, #-8]!")
+}
+
+arm_ret() raises Error {
+    arm_line("mov x0, x9");
+    arm_line("ldr x30, [x28], #8");
+    arm_line("ret")
+}
+
+arm_mov_rr(src: int, dst: int) raises Error {
+    arm_rr("mov", arm_reg(dst), arm_reg(src))
+}
+
+arm_mov_imm(imm: int, dst: int) raises Error {
+    arm_mov_imm_phys(arm_reg(dst), imm)
+}
+
+arm_test(r: int) raises Error {
+    cg_arm_fcmp = false;
+    emit("  cmp ");
+    arm_x(arm_reg(r));
+    emit(", #0\n")
+}
+
+// op as cg_alu_imm numbers it: 0 add, 1 or, 4 and, 5 sub, 6 xor, 7 cmp.
+arm_alu_imm(op: int, imm: int, dst: int) raises Error {
+    p: int = arm_reg(dst);
+    if (op == 0 || op == 5) {
+        v: int = if (op == 0) imm else 0 - imm;
+        arm_add_imm(p, p, v);
+        // (A frame or temporary below the x28 stack: sp goes below it.)
+        if (p == 28 && v < 0) arm_lower_sp(64);
+        return
+    }
+    if (op == 7) {
+        cg_arm_fcmp = false;
+        if (imm >= 0 && imm < 4096) {
+            emit("  cmp ");
+            arm_x(p);
+            emit(", ");
+            arm_imm(imm);
+            emit("\n");
+            return
+        }
+        if (imm < 0 && imm > -4096) {
+            emit("  cmn ");
+            arm_x(p);
+            emit(", ");
+            arm_imm(0 - imm);
+            emit("\n");
+            return
+        }
+        arm_mov_imm_phys(17, imm);
+        arm_rr("cmp", p, 17);
+        return
+    }
+    arm_mov_imm_phys(17, imm);
+    if (op == 1) arm_rrr("orr", p, p, 17);
+    if (op == 4) arm_rrr("and", p, p, 17);
+    if (op == 6) arm_rrr("eor", p, p, 17)
+}
+
+// opc as cg_alu_rr numbers it: 1 add, 9 or, 33 and, 41 sub, 49 xor, 57 cmp.
+arm_alu_rr(opc: int, src: int, dst: int) raises Error {
+    s: int = arm_reg(src);
+    d: int = arm_reg(dst);
+    if (opc == 57) {
+        cg_arm_fcmp = false;
+        arm_rr("cmp", d, s);
+        return
+    }
+    if (opc == 1) arm_rrr("add", d, d, s);
+    if (opc == 9) arm_rrr("orr", d, d, s);
+    if (opc == 33) arm_rrr("and", d, d, s);
+    if (opc == 41) arm_rrr("sub", d, d, s);
+    if (opc == 49) arm_rrr("eor", d, d, s);
+    if (d == 28 && opc == 41) arm_lower_sp(64)
+}
+
+arm_imul_imm(imm: int, dst: int) raises Error {
+    p: int = arm_reg(dst);
+    arm_mov_imm_phys(17, imm);
+    arm_rrr("mul", p, p, 17)
+}
+
+arm_imul_rr(src: int, dst: int) raises Error {
+    d: int = arm_reg(dst);
+    arm_rrr("mul", d, d, arm_reg(src))
+}
+
+// A condition, as x86 numbers it, after an integer or a float comparison.
+arm_cond(cc: int) raises Error {
+    if (cg_arm_fcmp) {
+        if (cc == 2) emit("lt") else if (cc == 3) emit("ge") else if (cc == 6) emit("le") else if (cc == 7) emit("gt") else if (cc == 4) emit("eq") else emit("ne");
+        return
+    }
+    if (cc == 2) emit("lo") else if (cc == 3) emit("hs") else if (cc == 4) emit("eq") else if (cc == 5) emit("ne") else if (cc == 6) emit("ls") else if (cc == 7) emit("hi") else if (cc == 8) emit("mi") else if (cc == 9) emit("pl") else if (cc == 12) emit("lt") else if (cc == 13) emit("ge") else if (cc == 14) emit("le") else emit("gt")
+}
+
+arm_setcc(cc: int) raises Error {
+    emit("  cset w9, ");
+    arm_cond(cc);
+    emit("\n")
+}
+
+arm_shift_imm(ext: int, imm: int, dst: int) raises Error {
+    p: int = arm_reg(dst);
+    emit("  ");
+    if (ext == 4) emit("lsl ") else if (ext == 5) emit("lsr ") else emit("asr ");
+    arm_x(p);
+    emit(", ");
+    arm_x(p);
+    emit(", ");
+    arm_imm(imm);
+    emit("\n")
+}
+
+arm_shift_cl(ext: int, dst: int) raises Error {
+    p: int = arm_reg(dst);
+    if (ext == 4) arm_rrr("lsl", p, p, 3) else if (ext == 5) arm_rrr("lsr", p, p,
+        3) else arm_rrr("asr", p, p, 3)
+}
+
+// rax / r: the quotient in rax, the remainder in rdx.
+arm_idiv(r: int) raises Error {
+    p: int = arm_reg(r);
+    arm_rrr("sdiv", 16, 9, p);
+    emit("  msub x2, x16, ");
+    arm_x(p);
+    emit(", x9\n");
+    arm_line("mov x9, x16")
+}
+
+// Runtime helpers that leave rax as it was.
+arm_keeps_rax(name: []i8): bool {
+    streq(name, "l8_try_end") || streq(name, "l8_region_pop") || streq(name, "l8_region_push") || streq(name,
+        "l8_heap_reset") || streq(name, "l8_test_expect")
+}
+
+// Before a call: sp below everything on the x28 stack, the seventh and
+// eighth integer arguments in x6 and x7, and the rest on sp.
+arm_call_setup() raises Error {
+    n: int = cg_arm_nstack;
+    rest: int = if (n > 2) n - 2 else 0;
+    arm_lower_sp(64 + 8 * rest);
+    for k in 0..rest {
+        arm_load64(16, 28, 16 + 8 * k);
+        arm_store64(16, 31, 8 * k)
+    }
+    if (n >= 1) arm_load64(6, 28, 0);
+    if (n >= 2) arm_load64(7, 28, 8);
+    cg_arm_nstack = 0
+}
+
+arm_call(name: []i8) raises Error {
+    arm_call_setup();
+    emit("  bl ");
+    arm_sym(name);
+    emit("\n");
+    if (!arm_keeps_rax(name)) arm_line("mov x9, x0")
+}
+
+// A call through the address in r10.
+arm_call_indirect() raises Error {
+    arm_call_setup();
+    arm_line("blr x10");
+    arm_line("mov x9, x0")
+}
+
+arm_label_id(id: int) raises Error {
+    arm_lab(id);
+    emit(":\n")
+}
+
+arm_jump_id(cc: int, id: int) raises Error {
+    if (cc < 0) {
+        emit("  b ");
+        arm_lab(id);
+        emit("\n");
+        return
+    }
+    // The out-of-bounds exit is one label for the whole program, maybe
+    // farther than a conditional branch reaches.
+    if (id == oob_lab) {
+        emit("  b.");
+        arm_cond(cc ^ 1);
+        emit("""
+ 1f
+  b """);
+        arm_lab(id);
+        emit("""
+
+1:
+""");
+        return
+    }
+    emit("  b.");
+    arm_cond(cc);
+    emit(" ");
+    arm_lab(id);
+    emit("\n")
+}
+
+// rep stos: count rcx (x3) items of value rax (x9) from rdi (x0).
+arm_rep_stos(size: int) raises Error {
+    arm_line("cbz x3, 1f");
+    emit("0:\n");
+    if (size == 1) arm_line("strb w9, [x0], #1") else if (size == 4) arm_line("str w9, [x0], #4") else arm_line("str x9, [x0], #8");
+    arm_line("subs x3, x3, #1");
+    arm_line("b.ne 0b");
+    emit("1:\n")
+}
+
+// A float register (s or d) for xmm x.
+arm_v(wide: bool, x: int) raises Error {
+    if (wide) emit("d") else emit("s");
+    emit_num(x)
+}
+
+arm_fop(
+    op: []i8,
+    wide: bool,
+    dst: int,
+    src: int
+) raises Error {
+    emit("  ");
+    emit(op);
+    emit(" ");
+    arm_v(wide, dst);
+    emit(", ");
+    arm_v(wide, dst);
+    emit(", ");
+    arm_v(wide, src);
+    emit("\n")
+}
+
+arm_fcmp(wide: bool, dst: int, src: int) raises Error {
+    cg_arm_fcmp = true;
+    emit("  fcmp ");
+    arm_v(wide, dst);
+    emit(", ");
+    arm_v(wide, src);
+    emit("\n")
+}
+
+// gpr <-> xmm bit moves.
+arm_to_v(wide: bool, src: int, x: int) raises Error {
+    emit("  fmov ");
+    arm_v(wide, x);
+    emit(", ");
+    if (wide) arm_x(arm_reg(src)) else arm_w(arm_reg(src));
+    emit("\n")
+}
+
+arm_from_v(wide: bool, x: int, dst: int) raises Error {
+    emit("  fmov ");
+    if (wide) arm_x(arm_reg(dst)) else arm_w(arm_reg(dst));
+    emit(", ");
+    arm_v(wide, x);
+    emit("\n")
+}
+
+// 16 bytes from [rsi + offset] to [rdi + offset].
+arm_copy16(offset: int) raises Error {
+    arm_load64(16, 1, offset);
+    arm_load64(14, 1, offset + 8);
+    arm_store64(16, 0, offset);
+    arm_store64(14, 0, offset + 8)
+}
+
+// ---- functions called from C ----
+// The name a function's address is taken by: in arm64 code, its C-entry
+// stub, which is emitted after the code.
+cg_callable_name(name: []i8) noregion: []i8@new {
+    if (!cg_arm) return strdup_n(name, 0, len(name));
+    s: ?*ArmStub = cg_arm_stubs;
+    while (s != null) {
+        if (streq(s.name, name)) return arm_stub_name(name);
+        s = s.next
+    }
+    cg_arm_stubs = new ArmStub { name: strdup_n(name, 0, len(name)), next: cg_arm_stubs };
+    arm_stub_name(name)
+}
+
+arm_stub_name(name: []i8): []i8@new {
+    out: []i8 = new i8[len(name) + 5](0i8);
+    for i in 0..len(name) out[i] = name[i];
+    suffix: str = "__l8c";
+    for k in 0..5 out[len(name) + k] = suffix[k];
+    out
+}
+
+arm_emit_stubs() raises Error {
+    s: ?*ArmStub = cg_arm_stubs;
+    while (s != null) {
+        arm_label(arm_stub_name(s.name));
+        arm_line("stp x29, x30, [sp, #-32]!");
+        arm_line("str x28, [sp, #16]");
+        arm_line("mov x29, sp");
+        arm_line("mov x28, sp");
+        emit("  bl ");
+        arm_sym(s.name);
+        emit("\n");
+        arm_line("mov sp, x29");
+        arm_line("ldr x28, [sp, #16]");
+        arm_line("ldp x29, x30, [sp], #32");
+        arm_line("ret");
+        s = s.next
+    }
+}
+
+// ---- the command ----
+// The runtime for the target, from the working directory or beside the
+// compiler, as runtime.s is found.
+arm_runtime_path() raises Error: []i8@new {
+    name: []i8 = bytes(if (cg_arm_darwin) "runtime-arm64-darwin.s" else if (cg_arm_android) "runtime-arm64-android.s" else "runtime-arm64-linux.s");
+    fd: int = open_path(name, 0, 0);
+    if (fd >= 0) {
+        close(fd);
+        return strdup_n(name, 0, len(name))
+    }
+    beside: []i8 = runtime_source_path();
+    slash: int = 0;
+    for i in 0..len(beside) {
+        if (beside[i] == '/') slash = i + 1
+    }
+    path: *StrBuf = sb_new();
+    for k in 0..slash sb_putc(path, beside[k]);
+    sb_puts(path, name);
+    sb_finish(path)
+}
+
+// A file's text, appended to the assembly.
+arm_append_file(path: []i8) raises Error {
+    fd: int = open_path(path, 0, 0);
+    if (fd < 0) error("arm64: cannot read an assembly file");
+    chunk: []i8 = new i8[65536](0i8);
+    more: bool = true;
+    while (more) {
+        n: int = read(fd, chunk, 0, len(chunk));
+        if (n <= 0) more = false else {
+            for i in 0..n emit_ch(chunk[i])
+        }
+    }
+    close(fd);
+    emit("\n")
+}
+
+// A native assembly file's arm64 version, for Linux or Apple's systems:
+// NAME.arm64-linux.s or NAME.arm64-darwin.s for NAME.s.
+arm_native_path(name: []i8) raises Error: []i8@new {
+    path: *StrBuf = sb_new();
+    stem: int = len(name);
+    if (stem > 2 && name[stem - 2] == '.' && name[stem - 1] == 's') stem = stem - 2;
+    for i in 0..stem sb_putc(path, name[i]);
+    if (cg_arm_darwin) sb_puts(path, ".arm64-darwin.s") else if (cg_arm_android) sb_puts(path,
+        ".arm64-android.s") else sb_puts(path, ".arm64-linux.s");
+    sb_finish(path)
+}
+
+// The program as arm64 assembly on fd out, with the runtime after it.
+compiler_build_arm64(src_path: []i8@immortal, out: int) noregion: int {
+    try {
+        cg_direct_mode = false;
+        cg_arm = true;
+        emit_fd = out;
+        compiler_frontend(src_path);
+        emit_flush();
+        arm_append_file(arm_runtime_path());
+        native: ?*NeedLib = g_native;
+        while (native != null) {
+            arm_append_file(arm_native_path(native.name));
+            native = native.next
+        }
+        emit_flush();
+        0
+    } with Error e -> {
+        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        1
+    }
+}
+
+// How `l8 arm64 --exe` links: for Apple's systems, the platform (2 iOS, 7
+// the simulator), the frameworks, and the imports table's path.
+arm_platform: int = 2;
+
+arm_frameworks: [][]i8 = new []i8[64]("");
+
+arm_nframeworks: int = 0;
+
+arm_imports_path: []i8 = "";
+
+// --asm: link the assembly text given rather than an L8 program's (for
+// testing the assembler: tools/arm64/check.py).
+arm_from_assembly: bool = false;
+
+// The SDK the executable says it was built with (LC_BUILD_VERSION; the App
+// Store reads it): --sdk X.Y, 26.2 if not given.
+arm_sdk: int = 1704448;
+
+// The program as an executable at exe: its assembly text (as
+// compiler_build_arm64 writes it), assembled and linked here.
+compiler_link_arm64(src_path: []i8@immortal, exe: []i8) noregion: int {
+    fd: int = a64_memfd();
+    if (fd < 0) {
+        raw::raw_write(2, "error: arm64: cannot keep the assembly text\n");
+        return 1
+    }
+    text: []i8 = "";
+    if (arm_from_assembly) {
+        // (--asm: the source is the assembly text itself.)
+        close(fd);
+        given: ?[]i8 = a64_read_file(src_path);
+        if (given == null) {
+            raw::raw_write(2, "error: cannot read the assembly\n");
+            return 1
+        }
+        text = given or new i8[0](0i8)
+    } else {
+        rc: int = compiler_build_arm64(src_path, fd);
+        if (rc != 0) return rc;
+        text = a64_read_fd(fd);
+        close(fd)
+    }
+    a64_reset(cg_arm_darwin);
+    a64_assemble(text, len(text));
+    if (!cg_arm_darwin) {
+        a64_write_elf(exe);
+        return 0
+    }
+    imports: ?[]i8 = null;
+    if (len(arm_imports_path) > 0) {
+        imports = a64_read_file(arm_imports_path);
+        if (imports == null) {
+            raw::raw_write(2, "error: cannot read the imports table\n");
+            return 1
+        }
+    }
+    // (The signature's identifier: the executable's file name.)
+    slash: int = 0;
+    for i in 0..len(exe) {
+        if (exe[i] == '/') slash = i + 1
+    }
+    try {
+        a64_write_macho(exe, arm_platform, arm_sdk, arm_platform == 2, arm_frameworks,
+            arm_nframeworks, imports, strdup_n(exe, slash, len(exe) - slash))
+    } with Error _e -> {
+        raw::raw_write(2, "error: arm64 linker: out of memory\n");
+        return 1
+    }
+    0
+}
+
+arm64_usage(): int {
+    raw::raw_write(2, "error: usage: l8 arm64 [--target linux|ios|ios-sim|android] [--unchecked-index] [--exe [--framework NAME]... [--imports FILE] [--sdk X.Y]] <source.l8> -o <file>\n");
+    1
+}
+
+// `l8 arm64 [--target linux|ios|ios-sim|android] file.l8 -o file.s`: the
+// program and its runtime as one arm64 assembly file, for Linux (ELF), iOS
+// and the iOS simulator (Mach-O; the same code, linked for either), or
+// Android (ELF, a shared library's code: see runtime-arm64-android.s). With
+// --exe, the executable instead, assembled and linked by the compiler (see
+// a64asm.l8 and a64link.l8): for Linux, static; for iOS (ios: an iPhone's,
+// ios-sim: the simulator's), linked to each --framework, to libobjc and to
+// libSystem, its imports bound as --imports's table says. (Not for Android,
+// whose library is linked by the NDK's tools: see tools/android/build.sh.)
+compiler_arm64_main(argc: int, argv: []str) noregion: int {
+    do_profile = false;
+    check_index_mode = true;
+    source: str = "";
+    output: str = "";
+    have_s: bool = false;
+    have_o: bool = false;
+    exe: bool = false;
+    want: int = 0;
+    for ai in 1..argc {
+        arg: str = argv[ai];
+        if (want == 1) {
+            output = arg;
+            have_o = true;
+            want = 0
+        } else if (want == 2) {
+            if (arg == "ios") {
+                cg_arm_darwin = true;
+                arm_platform = 2
+            } else if (arg == "ios-sim") {
+                cg_arm_darwin = true;
+                arm_platform = 7
+            } else if (arg == "android") cg_arm_android = true else if (arg == "linux") cg_arm_darwin = false else return arm64_usage();
+            want = 0
+        } else if (want == 3) {
+            if (arm_nframeworks >= len(arm_frameworks)) return arm64_usage();
+            arm_frameworks[arm_nframeworks] = bytes(arg);
+            arm_nframeworks = arm_nframeworks + 1;
+            want = 0
+        } else if (want == 4) {
+            arm_imports_path = bytes(arg);
+            want = 0
+        } else if (want == 5) {
+            arm_sdk = a64_version(bytes(arg), 0, len(arg));
+            want = 0
+        } else if (arg == "-o") want = 1 else if (arg == "--target") want = 2 else if (arg == "--framework") want = 3 else if (arg == "--imports") want = 4 else if (arg == "--sdk") want = 5 else if (arg == "--exe") exe = true else if (arg == "--asm") arm_from_assembly = true else if (is_unchecked_flag(arg)) check_index_mode = false else {
+            if (have_s) return arm64_usage();
+            source = arg;
+            have_s = true
+        }
+    }
+    if (!have_s || !have_o || want != 0) return arm64_usage();
+    if (exe && cg_arm_android) return arm64_usage();
+    if (exe) return compiler_link_arm64(bytes(source), bytes(output));
+    fd: int = open(output, 577, 420);
+    if (fd < 0) {
+        raw::raw_write(2, "error: cannot write the output\n");
+        return 1
+    }
+    rc: int = compiler_build_arm64(bytes(source), fd);
+    close(fd);
+    rc
+}

@@ -505,6 +505,8 @@ type Obj = {
     is_local: bool;
     is_func: bool;
     is_const: bool;
+    // A `persistent` global: kept across a hot reload (RELOAD.md).
+    is_persistent: bool;
     // Allocation metadata fits the padding before const_val.
     // 0: candidate, 1: stack only, 14/15: assigned machine register.
     cg_register: i8;
@@ -983,10 +985,17 @@ current_fn: ?*Function = null;
 
 count_var_use: bool = true;
 
+// A variable's type where a test or an assignment has narrowed it (or a
+// kill: its own type again); or, with path set, a field path's (h.p,
+// r.a.b: fields from a local); or, with barrier set, the end of every
+// path's facts (a call, or a store into memory, may change a field).
 type NarrowFrame = {
     var: ?*Obj;
     ty: ?*Type;
-    next: ?*NarrowFrame
+    next: ?*NarrowFrame;
+    path: ?*Expr;
+    barrier: bool;
+    kill: bool
 }
 
 narrow_top: ?*NarrowFrame = null;
@@ -1116,9 +1125,12 @@ emit_retract(position: int): bool {
     true
 }
 
+// Where assembly text goes: standard output, or the file being written.
+emit_fd: int = 1;
+
 emit_flush() {
     if (emit_state.used > 0) {
-        raw::raw_write_bytes_n(1, emit_state.data, emit_state.used);
+        raw::raw_write_bytes_n(emit_fd, emit_state.data, emit_state.used);
         emit_written = emit_written + emit_state.used;
         emit_state.used = 0
     }
@@ -1129,7 +1141,7 @@ emit(s: []i8) raises Error {
     if (n <= 0) return;
     if (n > emit_cap) {
         emit_flush();
-        raw::raw_write_bytes_n(1, s, n);
+        raw::raw_write_bytes_n(emit_fd, s, n);
         emit_written = emit_written + n;
         return
     }
@@ -1154,7 +1166,38 @@ emit_num(n: int) raises Error {
     emit_digits(n)
 }
 
+// What is being checked: an error found there is reported at it, not at
+// the token last read (checking a body may follow its parse).
+// (An expression's place, else its statement's; 0: none.)
+diag_expr_pos: int = 0;
+
+diag_expr_file: int = 0;
+
+diag_stmt_pos: int = 0;
+
+diag_stmt_file: int = 0;
+
+// Statement s (of a function in file) is what is checked, until the
+// returned place is given back to diag_leave.
+diag_enter_stmt(s: *Stmt, file: int): int {
+    outer: int = diag_stmt_pos;
+    diag_stmt_pos = s.pos;
+    diag_stmt_file = file;
+    outer
+}
+
+diag_leave(outer: int, file: int) {
+    diag_stmt_pos = outer;
+    diag_stmt_file = file
+}
+
 error(msg: []i8@immortal) raises Error: noreturn {
+    e: int = diag_expr_pos;
+    s: int = diag_stmt_pos;
+    diag_expr_pos = 0;
+    diag_stmt_pos = 0;
+    if (e > 0) error_at_file(diag_expr_file, e, msg);
+    if (s > 0) error_at_file(diag_stmt_file, s, msg);
     raise Error {
         msg: msg,
         pos: tok.pos,
@@ -1674,7 +1717,7 @@ error_have_expr_want(msg: []i8, have: ?*Expr, want: ?*Type) noregion raises Erro
     append_expr_ty(sb, have);
     sb_puts(sb, ", want ");
     append_type(sb, want);
-    if (have != null) error_at_file(have.file, have.pos, sb_finish(sb));
+    if (have != null && have.pos > 0) error_at_file(have.file, have.pos, sb_finish(sb));
     error(sb_finish(sb))
 }
 
@@ -2985,7 +3028,11 @@ check_trunc(from: ?*Type, to: ?*Type) noregion raises Error {
     to = decay(to);
     if (from == null || to == null) error("invalid trunc conversion");
     if (is_int_ty(from) && (is_i8_ty(to) || is_i32_ty(to) || is_u32_ty(to) || is_bool_ty(to))) return;
-    error_have_want("invalid trunc conversion", from, to)
+    if (types_equal(from, to)) error_ty("trunc to the type the value already has (remove the trunc)",
+        from);
+    if (!is_int_ty(from)) error_have_want("trunc narrows an int (widen with as first)",
+        from, ty_int);
+    error_have_want("trunc narrows an int to i8, i32, u32 or bool", from, to)
 }
 
 decay(t: ?*Type): ?*Type@t {

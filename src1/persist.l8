@@ -1,0 +1,250 @@
+tag compiler_internal;
+
+// Persistent globals (RELOAD.md): `persistent x: T = e;` declares a global
+// whose value a hot reload carries into the next version of the program.
+// The checker admits only data in T (no function values, which name code
+// that changes, and no exception values). The WebAssembly module describes
+// each one in the custom section `l8persist`: its name, its address, the
+// word the host sets once it has restored the value (so l8_init_globals
+// leaves the initializer unrun), and its type's layout, by which the host
+// copies the value from one module instance into the next (web/reload.js).
+// ---- the l8persist section ----
+// A table of types, each an entry: its kind, then
+//   INT, UINT, FLOAT, BOOL, STR, OPTSTR: size
+//   PTR (*T), OPTPTR (?*T), SLICE, OPTSLICE: the element type's index
+//   ARRAY: the element type's index, the length
+//   RECORD: name, size, fields (count, then name, offset, type index)
+//   ENUM: name, size, tag size, variants (count, then name, tag (signed),
+//         payload offset, fields as a record's, at offsets from the payload)
+// then the globals: count, then name, address, the address of its restored
+// word (0 for a constant-initialized global, which has no initializer to
+// skip), type index. Everything is LEB128; names are length-prefixed.
+PK_INT: int = 1;
+
+PK_UINT: int = 2;
+
+PK_FLOAT: int = 3;
+
+PK_BOOL: int = 4;
+
+PK_STR: int = 5;
+
+PK_OPTSTR: int = 6;
+
+PK_PTR: int = 7;
+
+PK_OPTPTR: int = 8;
+
+PK_SLICE: int = 9;
+
+PK_OPTSLICE: int = 10;
+
+PK_ARRAY: int = 11;
+
+PK_RECORD: int = 12;
+
+PK_ENUM: int = 13;
+
+type PersistEntry = {
+    kind: int;
+    // A scalar's size, or the element type's index.
+    base: int;
+    // An array's length.
+    n: int;
+    sdef: ?*StructDef;
+    edef: ?*EnumDef;
+    next: ?*PersistEntry
+}
+
+persist_entries: ?*PersistEntry = null;
+
+persist_tail: ?*PersistEntry = null;
+
+persist_count: int = 0;
+
+persist_find(
+    kind: int,
+    base: int,
+    n: int,
+    sdef: ?*StructDef,
+    edef: ?*EnumDef
+): int {
+    i: int = 0;
+    e: ?*PersistEntry = persist_entries;
+    while (e != null) {
+        if (e.kind == kind && e.base == base && e.n == n && e.sdef == sdef && e.edef == edef) return i;
+        i = i + 1;
+        e = e.next
+    }
+    0 - 1
+}
+
+persist_add(
+    kind: int,
+    base: int,
+    n: int,
+    sdef: ?*StructDef@new,
+    edef: ?*EnumDef@new
+) noregion: int {
+    e: *PersistEntry = new PersistEntry {
+        kind: kind,
+        base: base,
+        n: n,
+        sdef: sdef,
+        edef: edef,
+        next: null
+    };
+    tail: ?*PersistEntry = persist_tail;
+    if (tail == null) persist_entries = e else tail.next = e;
+    persist_tail = e;
+    persist_count = persist_count + 1;
+    persist_count - 1
+}
+
+persist_leaf(kind: int, base: int, n: int) noregion: int {
+    i: int = persist_find(kind, base, n, null, null);
+    if (i >= 0) i else persist_add(kind, base, n, null, null)
+}
+
+persist_members_index(m: ?*Member) noregion raises Error {
+    while (m != null) {
+        _i: int = persist_index(m.ty);
+        m = m.next
+    }
+}
+
+// The table index of t, adding it (and what it refers to) if new. A record
+// or enum is added before its fields, so a recursive type ends.
+persist_index(t: *Type) noregion raises Error: int {
+    match t.* {
+        Int -> persist_leaf(PK_INT, 8, 0);
+        I8 -> persist_leaf(PK_INT, 1, 0);
+        I32 -> persist_leaf(PK_INT, 4, 0);
+        U32 -> persist_leaf(PK_UINT, 4, 0);
+        F32 -> persist_leaf(PK_FLOAT, 4, 0);
+        F64 -> persist_leaf(PK_FLOAT, 8, 0);
+        Bool -> persist_leaf(PK_BOOL, 1, 0);
+        Str -> persist_leaf(PK_STR, 8, 0);
+        OptStr -> persist_leaf(PK_OPTSTR, 8, 0);
+        Refined k -> {
+            if (pointer_shape(t) && pointer_nonnull_invariant(t)) persist_leaf(PK_PTR,
+                persist_index(type_base(t)), 0) else persist_index(k.base)
+        }
+        Ptr k -> persist_leaf(PK_OPTPTR, persist_index(k.base), 0);
+        Slice k -> persist_leaf(PK_SLICE, persist_index(k.base), 0);
+        OptSlice k -> persist_leaf(PK_OPTSLICE, persist_index(k.base), 0);
+        Array k -> persist_leaf(PK_ARRAY, persist_index(k.base), k.n);
+        Record k -> {
+            found: int = persist_find(PK_RECORD, 0, 0, k.def, null);
+            if (found >= 0) return found;
+            added: int = persist_add(PK_RECORD, 0, 0, k.def, null);
+            persist_members_index(k.def.members);
+            added
+        }
+        Enum k -> {
+            found2: int = persist_find(PK_ENUM, 0, 0, null, k.def);
+            if (found2 >= 0) return found2;
+            added2: int = persist_add(PK_ENUM, 0, 0, null, k.def);
+            v: ?*Variant = k.def.variants;
+            while (v != null) {
+                persist_members_index(v.fields);
+                v = v.next
+            }
+            added2
+        }
+        _ -> error("internal: persistent type")
+    }
+}
+
+persist_emit_members(s: *StrBuf@new, m: ?*Member) noregion raises Error {
+    count: int = 0;
+    c: ?*Member = m;
+    while (c != null) {
+        count = count + 1;
+        c = c.next
+    }
+    wb_uleb(s, count);
+    while (m != null) {
+        wb_name(s, m.name);
+        wb_uleb(s, m.offset);
+        wb_uleb(s, persist_index(m.ty));
+        m = m.next
+    }
+}
+
+persist_emit_entry(s: *StrBuf@new, e: *PersistEntry) noregion raises Error {
+    wb_byte(s, e.kind);
+    if (e.kind == PK_RECORD) {
+        sd: *StructDef = e.sdef or error("internal: persistent record");
+        wb_name(s, sd.name);
+        wb_uleb(s, sd.size);
+        persist_emit_members(s, sd.members)
+    } else if (e.kind == PK_ENUM) {
+        ed: *EnumDef = e.edef or error("internal: persistent enum");
+        wb_name(s, ed.name);
+        wb_uleb(s, if (ed.size <= 0) 8 else ed.size);
+        tag_ty: ?*Type = ed.tag_ty;
+        wb_uleb(s, if (tag_ty != null) type_size(tag_ty) else 8);
+        count: int = 0;
+        v: ?*Variant = ed.variants;
+        while (v != null) {
+            count = count + 1;
+            v = v.next
+        }
+        wb_uleb(s, count);
+        v = ed.variants;
+        while (v != null) {
+            wb_name(s, v.name);
+            wb_sleb(s, v.tag);
+            wb_uleb(s, v.payload_offset);
+            persist_emit_members(s, v.fields);
+            v = v.next
+        }
+    } else {
+        wb_uleb(s, e.base);
+        if (e.kind == PK_ARRAY) wb_uleb(s, e.n)
+    }
+}
+
+// The `l8persist` custom section, if the program has persistent globals.
+wasm_persist_section(m: *StrBuf@new) noregion raises Error {
+    any: bool = false;
+    g: ?*Obj = globals;
+    while (g != null) {
+        if (g.is_persistent && !g.is_func) any = true;
+        g = g.next
+    }
+    if (!any) return;
+    persist_entries = null;
+    persist_tail = null;
+    persist_count = 0;
+    vars: *StrBuf = sb_new();
+    nvars: int = 0;
+    g = globals;
+    while (g != null) {
+        if (g.is_persistent && !g.is_func) {
+            ty: *Type = g.ty or error("missing global type");
+            wb_name(vars, g.name);
+            wb_uleb(vars, g.wasm_slot);
+            wb_uleb(vars, if (is_const_init(g.init)) 0 else g.wasm_slot - 8);
+            wb_uleb(vars, persist_index(ty));
+            nvars = nvars + 1
+        }
+        g = g.next
+    }
+    // Every type the globals reach is in the table now; write it.
+    types: *StrBuf = sb_new();
+    e: ?*PersistEntry = persist_entries;
+    while (e != null) {
+        persist_emit_entry(types, e);
+        e = e.next
+    }
+    s: *StrBuf = sb_new();
+    wb_name(s, "l8persist");
+    wb_uleb(s, 1);
+    wb_uleb(s, persist_count);
+    wb_append(s, types);
+    wb_uleb(s, nvars);
+    wb_append(s, vars);
+    wb_section(m, 0, s)
+}
