@@ -180,6 +180,7 @@ const deviceLog = [];
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://x");
+  if (url.pathname !== "/log" || req.method !== "POST") console.log(`${new Date().toLocaleTimeString()}  ${req.socket.remoteAddress} ${req.method} ${req.url}`);
   const headers = { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" };
   const json = (body, status = 200) => {
     res.writeHead(status, { ...headers, "Content-Type": "application/json" });
