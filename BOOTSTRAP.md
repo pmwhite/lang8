@@ -78,8 +78,8 @@ The stage-2 `compile`, `build`, `wasm` and `arm64` commands also accept
 `--static`, which rejects dynamic source storage and unaudited foreign boundaries.
 Static Linux executables and fixed-memory Wasm modules currently require a
 parameterless `main(): int`. See [STATIC_ALLOCATION.md](STATIC_ALLOCATION.md)
-for supported targets and the ongoing migration. Both source stages implement
-`buffer`, `static_buffer` and `zeroed`; the saved bootstrap has not been promoted.
+for supported targets and the ongoing migration. Both source stages and the
+saved bootstrap implement `buffer`, `static_buffer`, and `zeroed`.
 
 
 `build` sends typed compiler operations directly to the assembler's in-memory

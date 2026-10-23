@@ -2362,13 +2362,13 @@ gen_stmt(n: *Stmt) noregion raises Error {
             if (ex.members != null) {
                 esz: int = ex.size;
                 if (esz <= 0) esz = 8;
-                cg_mov_imm(esz, 7);
-                emit_exc_malloc();
-                cg_push(3);
-                cg_mov_rr(0, 3);
-                gen_struct_inits(k.inits);
-                cg_mov_rr(3, 6);
-                cg_pop(3)
+                // Construct in the frame: nested raises in field initializers
+                // must not overwrite fields already evaluated for this raise.
+                gen_field_inits_at(k.inits, 5, k.temp);
+                cg_lea_mr(5, k.temp, 6);
+                cg_lea_rip(".L.exc_payload", 0, 7);
+                emit_memcpy(esz);
+                cg_lea_rip(".L.exc_payload", 0, 6)
             } else cg_mov_imm(0, 6);
             cg_mov_imm(ex.tag, 7);
             cg_call("l8_raise");
@@ -2623,7 +2623,20 @@ cg_temps_stmts(stmts: ?*Stmt, off: int) raises Error: int {
             ExprStmt k -> o = cg_temps_expr(k.lhs, o);
             Decl k -> o = cg_temps_expr(k.init, o);
             Match k -> o = cg_temps_arms(k.arms, cg_temps_expr(k.cond, o));
-            Raise k -> o = cg_temps_inits(k.inits, o);
+            Raise k -> {
+                o = cg_temps_inits(k.inits, o);
+                ex: ?*ExnDef = k.exn;
+                if (ex != null && ex.members != null) {
+                    o = (o + 7) / 8 * 8 + (ex.size + 7) / 8 * 8;
+                    q.kind = StmtKind.Raise {
+                        name: k.name,
+                        exn: k.exn,
+                        inits: k.inits,
+                        has: k.has,
+                        temp: 0 - o
+                    }
+                }
+            }
             Try k -> {
                 o = cg_temps_stmts(k.body, o);
                 arm: ?*CatchArm = k.arms;
@@ -2677,6 +2690,16 @@ emit_bss_global(g: *Obj) noregion raises Error {
     cg_skip(sz)
 }
 
+exception_payload_size(): int {
+    size: int = 8;
+    ex: ?*ExnDef = exn_defs;
+    while (ex != null) {
+        if (ex.size > size) size = ex.size;
+        ex = ex.next
+    }
+    (size + 7) / 8 * 8
+}
+
 emit_data() noregion raises Error {
     g: ?*Obj = globals;
     any_data: bool = false;
@@ -2708,6 +2731,11 @@ emit_data() noregion raises Error {
         cg_section(as_SEC_BSS);
         cg_align(8)
     }
+    // Catch binders copy the transfer payload before running handler code.
+    // No user code runs between the final copy into this slot and l8_raise.
+    cg_align(8);
+    cg_label(".L.exc_payload");
+    cg_skip(exception_payload_size());
     // A static counted buffer reserves its length header and typed elements
     // in BSS. Its global initializer writes only the header and pointer.
     buffer_id: int = 1;
@@ -3038,6 +3066,18 @@ emit_text() noregion raises Error {
     fn: ?*Function = functions;
     cg_section(as_SEC_TEXT);
     oob_lab = new_label();
+    if (static_storage_mode) {
+        // The static ELF entry bypasses the legacy runtime's heap mapping and
+        // argv copies. Static programs currently have a parameterless main.
+        cg_global("__l8_static_start");
+        cg_label("__l8_static_start");
+        // This is an OS entry, not a called L8 function. The arm64 shadow
+        // stack must be initialized before any call can push a frame.
+        if (cg_arm) emit("  mov x28, sp\n");
+        cg_call("main");
+        cg_mov_rr(0, cg_arg_reg(0));
+        cg_call("exit")
+    }
     emit_l8_init_globals_fn();
     while (fn != null) {
         if (!fn.is_extern && (fn.test_id < 0 || compile_test_mode)) {
@@ -3049,7 +3089,7 @@ emit_text() noregion raises Error {
             // also lets allocation use r12/r13 throughout the function. A body
             // that makes no calls can first use r8/r9, which need no saves,
             // once they no longer hold incoming arguments.
-            candidates: []int = new int[8](0);
+            candidates: [8]int = zeroed([8]int);
             ncandidates: int = 0;
             int_args: int = fn.nparams + (if (fn.sret != null) 1 else 0);
             // main calls l8_init_globals after moving its parameters.
@@ -3067,7 +3107,7 @@ emit_text() noregion raises Error {
                 candidates[ncandidates] = (if (extra < 2) 14 + extra else 10 + extra);
                 ncandidates = ncandidates + 1
             }
-            allocated: int = cg_assign_registers(fn, candidates, ncandidates);
+            allocated: int = cg_assign_registers(fn, &candidates, ncandidates);
             saved: int = cg_saved_count(allocated);
             current_fn_name = fn.name;
             current_return_ty = fn.return_ty;
@@ -3084,7 +3124,7 @@ emit_text() noregion raises Error {
             register_space: int = (saved + 1) / 2 * 16;
             register_base: int = fn.stack_size + (if (save_regs) 24 else 8);
             // Keep the local offsets and 16-byte call alignment in either case.
-            save_ends: []int = new int[4](0);
+            save_ends: [4]int = zeroed([4]int);
             if (save_regs) {
                 cg_alu_imm(5, fn.stack_size + 24 + register_space, 4);
                 if (cg_direct_mode) save_ends[0] = as_cur_off();
@@ -3204,6 +3244,9 @@ emit_text() noregion raises Error {
 }
 
 codegen() noregion raises Error {
+    // Assembler tables are compilation-owned. Analysis that never emits code
+    // must not take them: a multi-file pass keeps source bytes across resets.
+    as_init();
     if (cg_arm && (cg_arm_darwin || cg_arm_android)) arm_collect_externs();
     // The test entry point takes main's symbol.
     if (compile_test_mode) {
