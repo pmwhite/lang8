@@ -87,7 +87,8 @@ function graph(entry) {
 }
 
 // ---- building ----
-const state = { build: 0, ok: false, log: "", ms: 0, time: 0, wasm: null };
+// Keep revisions ahead of clients even when the development server restarts.
+const state = { build: Date.now(), ok: false, log: "", ms: 0, time: 0, wasm: null };
 let files = [];
 let mtimes = new Map();
 let building = null;
@@ -183,6 +184,7 @@ const info = () => ({ build: state.build, ok: state.ok, log: state.log, ms: stat
 
 const deviceLog = [];
 const commands = [];
+let commandId = Date.now();
 const commandWaiters = new Set();
 const shotsDir = path.join(".build", "dev", "shots");
 let shots = 0;
@@ -219,21 +221,28 @@ const server = http.createServer((req, res) => {
     req.on("data", (d) => parts.push(d));
     req.on("end", () => {
       const cmd = Buffer.concat(parts).toString("utf8").trim();
-      commands.push({ id: commands.length + 1, cmd });
-      console.log(`${new Date().toLocaleTimeString()}  command ${commands.length}: ${cmd}`);
+      const id = ++commandId;
+      commands.push({ id, cmd });
+      console.log(`${new Date().toLocaleTimeString()}  command ${id}: ${cmd}`);
       for (const w of commandWaiters) w();
       commandWaiters.clear();
-      json({ id: commands.length });
+      json({ id });
     });
     return;
   }
   if (url.pathname === "/next") {
     const since = Number(url.searchParams.get("since") || 0);
+    // A newly launched host starts at zero. Establish its cursor without
+    // replaying a previous run's reloads, screenshots, or destructive demos.
+    if (since === 0) {
+      res.writeHead(200, { ...headers, "Content-Type": "text/plain; charset=utf-8" });
+      return res.end(`${commandId}\tsay control connected\n`);
+    }
     const answer = () => {
       res.writeHead(200, { ...headers, "Content-Type": "text/plain; charset=utf-8" });
       res.end(commands.filter((c) => c.id > since).map((c) => `${c.id}\t${c.cmd}\n`).join(""));
     };
-    if (commands.length > since) return answer();
+    if (commandId > since) return answer();
     const done = () => {
       clearTimeout(timer);
       commandWaiters.delete(done);

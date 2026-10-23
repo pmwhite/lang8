@@ -179,8 +179,38 @@ node web/dev.mjs -- programs/bible/ios/app.l8 -o .build/dev/bible-ios.wasm
 The first builds the app's bundle with the host as its executable, the
 module and the server's address beside it (`tools/ios/build-linux.sh` does
 the rest, the IPA included); the second serves builds of the app. This
-host is built on every `make` for the simulator (`.build/hot-ios-sim`)
-but has not run on a device or simulator yet: the interpreter, the
-transfer and the proxy are checked on Linux, and the arm64 helpers
-(`programs/wasm/native.arm64-darwin.s`) assemble and link with the
+host is built on every `make` for the simulator (`.build/hot-ios-sim`).
+The interpreter, transfer and proxy are checked on Linux, and the arm64
+helpers (`programs/wasm/native.arm64-darwin.s`) assemble and link with the
 compiler's own tools.
+
+The running host can also be driven through that server:
+
+```sh
+node web/devctl.mjs shot                   # prints the saved PNG's path
+node web/devctl.mjs scroll 600             # points, in the first scroll view
+node web/devctl.mjs notify space.trailingwhite.smoothbible.demo3
+node web/devctl.mjs reload
+node web/devctl.mjs log
+```
+
+These commands use `http://localhost:8777` by default (`--server URL`
+chooses another). A freshly launched host synchronizes its command cursor
+instead of replaying commands from the previous run. Build and command
+revisions advance across server restarts. Bible's demo mode requires
+`L8_DEMO` at launch; it and diagnostics survive a reload. Its notification
+observers use the persistent delegate's identity, so rebuilding the reader
+replaces their registrations instead of accumulating callbacks.
+
+App changes reload as modules; changes to the native host itself require
+rebuilding and reinstalling its executable. On an older host, avoid
+requesting screenshots during a reload: its screenshot and module download
+share a buffer. The current host keeps those separate and cancels replaced
+requests, ignoring their late callbacks.
+
+Decoded instances currently remain on the native host's bump heap (the
+Darwin runtime reserves 256 MiB). A long session can exhaust it. The host
+logs its heap use and defers further reloads once 160 MiB is used, leaving
+room for decoding and transfer rather than letting the allocator terminate
+the app. Close and reopen the app to continue; reclaiming old instances is
+still needed for unbounded reload sessions.

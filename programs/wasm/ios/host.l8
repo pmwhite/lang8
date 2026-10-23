@@ -284,8 +284,19 @@ host_run(bytes: []i8@new) {
 
 // A reload: the new build's instance takes the persistent globals, its
 // ordinary globals are initialized, and its reload() makes the app again.
+extern host_heap_used(): int = l8_heap_used;
+
 host_reload(bytes: []i8@new) {
     if (host_inst == 0) return;
+    // Decoded instances currently remain on the native bump heap. The
+    // Darwin runtime has 256 MiB: leave 96 MiB for decoding, binding and
+    // transfer instead of letting its allocator terminate the app.
+    used: int = host_heap_used();
+    say_int("native heap MiB", used / 1048576);
+    if (used >= 160 * 1048576) {
+        say("reload deferred: native heap is nearly full; close and reopen the app to continue");
+        return
+    }
     old: *WasmInstance = instance_at(host_inst);
     try {
         inst: *WasmInstance = host_instantiate(bytes);
@@ -386,6 +397,8 @@ session: int = 0;
 // The task under way for builds: 1 a wait, 2 a build; what it has sent.
 task_kind: int = 0;
 
+build_task: int = 0;
+
 task_got: []i8 = new i8[16777216](0i8);
 
 task_got_n: int = 0;
@@ -429,16 +442,24 @@ url(path: str): int {
 
 start_task(kind: int, path: str) {
     if (session == 0) return;
+    // A manual reload can replace the outstanding long poll or download.
+    // Cancelled callbacks must not enter the new request's buffer.
+    old: int = build_task;
+    build_task = 0;
+    if (old != 0) msg(old, sel("cancel"));
     task_kind = kind;
     task_got_n = 0;
     request: int = msg1(cls("NSURLRequest"), sel("requestWithURL:"), url(path));
-    task: int = msg1(session, sel("dataTaskWithRequest:"), request);
-    msg(task, sel("resume"))
+    build_task = msg1(session, sel("dataTaskWithRequest:"), request);
+    msg(build_task, sel("resume"))
 }
 
 // ---- commands from the development machine (web/devctl.mjs) ----
 wait_for_command() {
     if (session == 0) return;
+    old: int = ctl_task;
+    ctl_task = 0;
+    if (old != 0) msg(old, sel("cancel"));
     ctl_got_n = 0;
     request: int = msg1(cls("NSURLRequest"), sel("requestWithURL:"), url(path_num("/next?since=",
         ctl_since)));
@@ -486,11 +507,13 @@ run_commands() {
         if (tab < end) {
             id: int = 0;
             for i in at..tab id = id * 10 + (ctl_got[i] - '0') as int;
-            if (id > ctl_since) ctl_since = id;
-            n: int = end - tab - 1;
-            cmd: []i8 = new i8[n](0i8);
-            memcpy(cmd, 0, ctl_got, tab + 1, n);
-            run_command(cmd)
+            if (id > ctl_since) {
+                ctl_since = id;
+                n: int = end - tab - 1;
+                cmd: []i8 = new i8[n](0i8);
+                memcpy(cmd, 0, ctl_got, tab + 1, n);
+                run_command(cmd)
+            }
         }
         at = end + 1
     }
@@ -627,16 +650,11 @@ screenshot() {
         return
     }
     n: int = msg(png, sel("length"));
-    if (n > len(task_got)) {
-        say("the screenshot is too big");
-        return
-    }
-    msg2(png, sel("getBytes:length:"), bytes_address(task_got), n);
     request: int = msg1(cls("NSMutableURLRequest"), sel("requestWithURL:"), url("/shot"));
     msg1(request, sel("setHTTPMethod:"), nsstring("POST"));
-    data: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(task_got),
-        n);
-    msg1(request, sel("setHTTPBody:"), data);
+    // NSData owns the PNG; taking a screenshot must not overwrite a
+    // module download arriving in task_got.
+    msg1(request, sel("setHTTPBody:"), png);
     task: int = msg2(session_sync, sel("dataTaskWithRequest:completionHandler:"),
         request, log_block);
     if (task != 0) msg(task, sel("resume"));
@@ -723,6 +741,7 @@ host_data(
         }
         return 0
     }
+    if (_task != build_task || build_task == 0) return 0;
     if (task_got_n + n <= len(task_got)) {
         msg2(data, sel("getBytes:length:"), bytes_address(task_got) + task_got_n,
             n);
@@ -752,7 +771,7 @@ extern msg_timer(
 ): int = objc_msgSend;
 
 host_retry(_self: int, _cmd: int, _timer: int): int {
-    wait_for_build();
+    if (build_task == 0) wait_for_build();
     0
 }
 
@@ -763,7 +782,7 @@ retry_commands_later() {
 }
 
 host_retry_commands(_self: int, _cmd: int, _timer: int): int {
-    wait_for_command();
+    if (ctl_task == 0) wait_for_command();
     0
 }
 
@@ -785,6 +804,8 @@ host_done(
         } else retry_commands_later();
         return 0
     }
+    if (task != build_task || build_task == 0) return 0;
+    build_task = 0;
     kind: int = task_kind;
     task_kind = 0;
     if (kind == 1) {
