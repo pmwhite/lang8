@@ -322,7 +322,7 @@ Between other statements, the semicolon is required:
 
   $ printf 'tag example;\nmain(): int { value: int = 1 value }\n' > required.l8
   $ l8 compile required.l8
-  error: required.l8:2:30: unexpected token
+  error: required.l8:2:30: expected `;`, found `value`
   [1]
 
 A persistent global (RELOAD.md) keeps its word, as a const does:
