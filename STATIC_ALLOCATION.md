@@ -96,7 +96,7 @@ or `munmap` calls. These measurements do not certify unexecuted compiler paths.
 
 Recent application conversions include tree-calculus, terminal state, FreeType
 backing, Wayland windows, Better's shader/path storage, profile-explorer, Race,
-and Skate. Their READMEs state ownership and capacities. Zero explicit sites
+Skate, and Bible’s chapter/file/terminal storage. Their READMEs state ownership and capacities. Zero explicit sites
 still do not establish that an entry point is allocation-free: remaining local
 slice literals, conversions and native/host boundaries must be checked.
 
@@ -116,9 +116,8 @@ and return `int`. The built-in ELF packers select this entry automatically;
 external ELF linkers must select it explicitly (for GNU ld,
 `-e __l8_static_start`). A static Wasm module fixes its memory maximum at its
 initial size and its `l8_malloc` export returns failure. Its parameterless entry
-does not request host-built argument strings. iOS/Android startup and bounded
-argument/environment storage have not yet been migrated; `--static` rejects those
-platforms. Default compilation still supports existing programs during migration.
+does not request host-built argument strings. iOS/Android startup now has bounded argument/environment storage, but
+`--static` still rejects those platforms pending the remaining boundary audit. Default compilation still supports existing programs during migration.
 
 A native syscall trace of a static buffer/I/O/exception smoke program performed
 no `mmap` or `brk`. A Wasm host smoke check verified fixed memory, allocator
@@ -139,7 +138,7 @@ The inventory counts explicit `new` expressions, `region` blocks, and `bytes()` 
 `cstr()` call syntax per file. It skips comments, strings, character literals,
 expectation text, and `@new` lifetime contracts. Reports separate `src1`, `src2`,
 `stdlib`, each application, and fixtures. The first inventory had 4,165 explicit
-`new` sites. The current migration checkpoint has 360 (3,805 removed), including
+`new` sites. The current migration checkpoint has 271 (3,894 removed), including
 bootstrap and fixtures. Standard output uses a fixed integer buffer and read-only
 text spans without heap copies.
 

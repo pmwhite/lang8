@@ -1,5 +1,7 @@
 tag bible_tui;
 
+import "../core/static_storage.l8";
+
 use_tag std, bible;
 
 // Other programs the terminal's platform runs: curl for the site's Worker
@@ -25,13 +27,14 @@ extern open(path: str, flags: int, mode: int): int;
 extern close(fd: int): int;
 
 // The environment, as the terminal gave it (the programs run get it too).
-pr_env: []?str = static_buffer([1]?str, null);
+pr_env: []?str = static_buffer([4097]?str, null);
 
-pr_env_strs: []str = new str[0]("");
+pr_env_strs: []str = bible_empty_strs;
 
 pr_env_load() noregion {
     pr_env_strs = l8_environment();
-    pr_env = new ?str[len(pr_env_strs) + 1](null);
+    if (len(pr_env_strs) > 4096) bible_storage_full();
+    for i in 0..len(pr_env) pr_env[i] = null;
     for i in 0..len(pr_env_strs) pr_env[i] = pr_env_strs[i]
 }
 
@@ -65,13 +68,34 @@ pr_exists(path: str): bool {
 
 // A program found where programs are kept (/usr/bin, /bin, /usr/local/bin):
 // its path, or "".
-pr_find(name: str): str@new {
-    for dir in ["/usr/bin/", "/bin/", "/usr/local/bin/"] {
-        p: []i8 = new i8[len(dir) + len(name)](0i8);
-        for i in 0..len(dir) p[i] = dir[i];
-        for i in 0..len(name) p[len(dir) + i] = name[i];
-        s: str = cstr(p);
-        if (pr_exists(s)) return s
+// Each discovered executable keeps a permanent path slot. Repeated queries
+// reuse it, including queries from clipboard and browser actions.
+pr_program_names: []str = static_buffer([16]str, "");
+
+pr_program_paths: []TuiText = static_buffer([16]TuiText);
+
+pr_program_count: int = 0;
+
+pr_program_dirs: [3]str = ["/usr/bin/", "/bin/", "/usr/local/bin/"];
+
+pr_find(name: str): str {
+    for k in 0..pr_program_count
+        if (pr_program_names[k] == name) return tui_text_at(&pr_program_paths[k].data[0]);
+    if (pr_program_count == 16) bible_storage_full();
+    out: *TuiText = &pr_program_paths[pr_program_count];
+    for dir in pr_program_dirs {
+        n: int = len(dir) + len(name);
+        if (n > 8192) bible_storage_full();
+        out.count = n;
+        for i in 0..len(dir) out.data[i] = dir[i];
+        for i in 0..len(name) out.data[len(dir) + i] = name[i];
+        out.data[n] = 0i8;
+        value: str = tui_text_at(&out.data[0]);
+        if (pr_exists(value)) {
+            pr_program_names[pr_program_count] = name;
+            pr_program_count = pr_program_count + 1;
+            return value
+        }
     }
     ""
 }
@@ -112,11 +136,16 @@ pr_spawn(path: str, out: str, err: str): int {
     // (O_WRONLY | O_CREAT | O_TRUNC.)
     out_fd: int = if (len(out) > 0) open(out, 577, 384) else -1;
     err_fd: int = if (len(err) > 0) open(err, 577, 384) else -1;
-    args: []?str = new ?str[pr_args_n + 1](null);
+    args: []?str = buffer([24]?str, null);
+    words: []i8 = buffer([65920]i8);
+    pos: int = 0;
     for k in 0..pr_args_n {
-        w: []i8 = new i8[pr_arg_len[k]](0i8);
-        for x in 0..pr_arg_len[k] w[x] = pr_argbuf[pr_arg_at[k] + x];
-        args[k] = cstr(w)
+        n: int = pr_arg_len[k];
+        tui_count_at(&words[pos]).* = n;
+        for x in 0..n words[pos + 8 + x] = pr_argbuf[pr_arg_at[k] + x];
+        words[pos + 8 + n] = 0i8;
+        args[k] = tui_text_at(&words[pos + 8]);
+        pos = pos + 8 + (n + 8) / 8 * 8
     }
     pid: int = l8_fork();
     if (pid == 0) {
@@ -207,10 +236,35 @@ pr_read(path: str): int {
 }
 
 // Bytes path from a buffer (b to e) and a name: a str.
-pr_join(dir: []i8, n: int, name: str): str@new {
-    p: []i8 = new i8[n + 1 + len(name)](0i8);
-    for i in 0..n p[i] = dir[i];
-    p[n] = 47i8;
-    for i in 0..len(name) p[n + 1 + i] = name[i];
-    cstr(p)
+pr_join(
+    dir: []i8,
+    n: int,
+    name: str,
+    out: *TuiText
+): str {
+    size: int = n + 1 + len(name);
+    if (n < 0 || n > len(dir) || size > 8192) bible_storage_full();
+    out.count = size;
+    for i in 0..n out.data[i] = dir[i];
+    out.data[n] = 47i8;
+    for i in 0..len(name) out.data[n + 1 + i] = name[i];
+    out.data[size] = 0i8;
+    tui_text_at(&out.data[0])
 }
+
+// Count and terminator belong to the caller. These values can be reused
+// after the synchronous OS operation or after pr_arg copies their bytes.
+type TuiText = {
+    count: int;
+    data: [8193]i8
+}
+
+tui_text(): TuiText {
+    TuiText { count: 0, data: zeroed([8193]i8) }
+}
+
+extern tui_text_at(p: *i8): str = l8_as_int;
+
+extern tui_count_at(p: *i8): *int = l8_as_int;
+
+extern tui_readonly_bytes(s: str): []i8 = l8_as_int
