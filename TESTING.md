@@ -149,9 +149,9 @@ error: badopen.l8:8:5: argument type mismatch for parameter path of open: have [
 |} */
 ```
 
-Missing `noregion` and nullable-argument diagnostics include source excerpts,
-prose explaining the requirement, and alternatives based on the intended
-behavior. Their entire output belongs in the same compile expectation block.
+Missing `noregion`, nullable-argument, and string-to-mutable-buffer diagnostics
+include a source excerpt and brief alternatives based on the intended behavior.
+Their entire output belongs in the same compile expectation block.
 
 A file without this block expects the compiler to print nothing. A file that
 fails to compile can still pass, which is how tests of compiler errors work;
