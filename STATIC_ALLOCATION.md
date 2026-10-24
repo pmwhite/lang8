@@ -138,7 +138,7 @@ The inventory counts explicit `new` expressions, `region` blocks, and `bytes()` 
 `cstr()` call syntax per file. It skips comments, strings, character literals,
 expectation text, and `@new` lifetime contracts. Reports separate `src1`, `src2`,
 `stdlib`, each application, and fixtures. The first inventory had 4,165 explicit
-`new` sites. The current migration checkpoint has 214 (3,951 removed), including
+`new` sites. The current migration checkpoint has 177 (3,988 removed), including
 bootstrap and fixtures. Standard output uses a fixed integer buffer and read-only
 text spans without heap copies.
 

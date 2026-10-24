@@ -90,5 +90,15 @@ Decoder work is shared by serialized instantiation calls: 2,097,152 output
 words, 256 control labels and 4,096 forward references. Exhaustion terminates
 with a diagnostic. Function code is still copied into module-owned storage.
 Host argument setup copies up to 4,096 string references into a fixed vector.
-Decoded modules, persistent transfer, native proxy code and other host copies
-still have legacy allocation paths; this is not yet an allocation-free host.
+Decoded modules reserve one of four owners, each with 64 MiB for byte vectors
+and decoded instructions. Per owner, record limits are 16,384 signatures,
+4,096 imports, 8,192 functions, 8,192 exports and 256 custom sections.
+`wasm_module_release(m)` requires every instance of that module to have been
+released. All module metadata/code views then expire. Source bytes are borrowed
+and must outlive the module. Malformed input returns a failed decoder's slot.
+
+The iOS reloader releases inactive old instances and modules after transfer;
+the original instance remains pinned while UIApplicationMain is active. A
+failed preparation releases its new owners and restores the old proxy binding.
+Persistent transfer, native proxy code and other host copies still have legacy
+allocation paths; this is not yet an allocation-free host.

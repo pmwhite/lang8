@@ -45,6 +45,9 @@ type WasmExport = {
 }
 
 type WasmModule = {
+    storage_slot: int;
+    instances: int;
+    manifest: int;
     bytes: []i8;
     sigs: []*WasmSig;
     imports: []*WasmImport;
@@ -89,6 +92,7 @@ WT_VOID: int = 64;
 
 // ---- reading ----
 type WasmReader = {
+    storage_slot: int;
     b: []i8;
     at: int;
     end: int
@@ -135,11 +139,18 @@ wr_sleb(r: *WasmReader) raises WasmFormat: int {
 
 wr_name(r: *WasmReader) raises WasmFormat: []i8@new {
     n: int = wr_uleb(r);
-    if (r.at + n > r.end) wr_fail("truncated name");
-    s: []i8 = new i8[n](0i8);
+    if (n < 0 || n > r.end - r.at) wr_fail("truncated name");
+    s: []i8 = wm_take_bytes(r.storage_slot, n);
     for i in 0..n s[i] = r.b[r.at + i];
     r.at = r.at + n;
     s
+}
+
+// Skip metadata names whose contents are not retained by this reader.
+wr_skip_name(r: *WasmReader) raises WasmFormat {
+    n: int = wr_uleb(r);
+    if (n < 0 || n > r.end - r.at) wr_fail("truncated name");
+    r.at = r.at + n
 }
 
 // A constant expression: one i32.const or i64.const, then end.
@@ -152,24 +163,21 @@ wr_const(r: *WasmReader) raises WasmFormat: int {
 }
 
 // ---- the module ----
-wasm_decode(bytes: []i8@new) raises WasmFormat: *WasmModule@new {
-    m: *WasmModule = new WasmModule {
+wm_decode_into(bytes: []i8, slot: int) raises WasmFormat: *WasmModule {
+    m: *WasmModule = wm_module_at(&wm_module_objects[slot * 256]);
+    m.* = WasmModule {
+        storage_slot: slot,
+        instances: 0,
+        manifest: 0,
         bytes: bytes,
-        sigs: new *WasmSig[0](new WasmSig { params: "", results: "" }),
-        imports: new *WasmImport[0](new WasmImport { name: "", sig: 0 }),
-        funcs: new *WasmFunc[0](new WasmFunc {
-            sig: 0,
-            nlocals: 0,
-            body: 0,
-            body_end: 0,
-            code: new int[0](0),
-            name: ""
-        }),
-        table: new int[0](0),
+        sigs: wm_sig_pointers(slot, 0),
+        imports: wm_import_pointers(slot, 0),
+        funcs: wm_func_pointers(slot, 0),
+        table: wm_take_ints(slot, 0),
         pages: 0,
-        global_types: new i8[0](0i8),
-        global_inits: new int[0](0),
-        exports: new *WasmExport[0](new WasmExport { name: "", kind: 0, index: 0 }),
+        global_types: wm_take_bytes(slot, 0),
+        global_inits: wm_take_ints(slot, 0),
+        exports: wm_export_pointers(slot, 0),
         data_at: 0,
         data: 0,
         data_len: 0,
@@ -180,11 +188,16 @@ wasm_decode(bytes: []i8@new) raises WasmFormat: *WasmModule@new {
         names_end: 0,
         customs: null
     };
-    reader: WasmReader = WasmReader { b: bytes, at: 0, end: len(bytes) };
+    reader: WasmReader = WasmReader {
+        storage_slot: slot,
+        b: bytes,
+        at: 0,
+        end: len(bytes)
+    };
     r: *WasmReader = &reader;
     if (len(bytes) < 8 || bytes[0] != 0i8 || bytes[1] != 'a' || bytes[2] != 's' || bytes[3] != 'm') wr_fail("not a wasm module");
     r.at = 8;
-    func_sigs: []int = new int[0](0);
+    func_sigs: []int = wm_take_ints(slot, 0);
     while (r.at < r.end) {
         id: int = wr_byte(r);
         size: int = wr_uleb(r);
@@ -193,12 +206,12 @@ wasm_decode(bytes: []i8@new) raises WasmFormat: *WasmModule@new {
         if (send > r.end) wr_fail("truncated section");
         if (id == 0) {
             name: []i8 = wr_name(r);
-            m.customs = new WasmCustom {
+            m.customs = wm_take_custom(slot, WasmCustom {
                 name: name,
                 at: r.at,
                 end: send,
                 next: m.customs
-            };
+            });
             if (streq(name, "l8persist")) {
                 m.persist = r.at;
                 m.persist_end = send
@@ -208,30 +221,30 @@ wasm_decode(bytes: []i8@new) raises WasmFormat: *WasmModule@new {
             }
         } else if (id == 1) {
             n: int = wr_uleb(r);
-            m.sigs = new *WasmSig[n](new WasmSig { params: "", results: "" });
+            m.sigs = wm_sig_pointers(slot, n);
             for i in 0..n {
                 if (wr_byte(r) != 96) wr_fail("expected a function type");
                 np: int = wr_uleb(r);
-                ps: []i8 = new i8[np](0i8);
+                ps: []i8 = wm_take_bytes(slot, np);
                 for k in 0..np ps[k] = wr_byte(r) trunc i8;
                 nr: int = wr_uleb(r);
-                rs: []i8 = new i8[nr](0i8);
+                rs: []i8 = wm_take_bytes(slot, nr);
                 for k in 0..nr rs[k] = wr_byte(r) trunc i8;
-                m.sigs[i] = new WasmSig { params: ps, results: rs }
+                m.sigs[i] = wm_take_sig(slot, WasmSig { params: ps, results: rs })
             }
         } else if (id == 2) {
             n2: int = wr_uleb(r);
-            m.imports = new *WasmImport[n2](new WasmImport { name: "", sig: 0 });
+            m.imports = wm_import_pointers(slot, n2);
             for i in 0..n2 {
                 _module: []i8 = wr_name(r);
                 iname: []i8 = wr_name(r);
                 kind: int = wr_byte(r);
                 if (kind != 0) wr_fail("only function imports are supported");
-                m.imports[i] = new WasmImport { name: iname, sig: wr_uleb(r) }
+                m.imports[i] = wm_take_import(slot, WasmImport { name: iname, sig: wr_uleb(r) })
             }
         } else if (id == 3) {
             n3: int = wr_uleb(r);
-            func_sigs = new int[n3](0);
+            func_sigs = wm_take_ints(slot, n3);
             for i in 0..n3 func_sigs[i] = wr_uleb(r)
         } else if (id == 4) {
             if (wr_uleb(r) != 1) wr_fail("one table expected");
@@ -239,7 +252,8 @@ wasm_decode(bytes: []i8@new) raises WasmFormat: *WasmModule@new {
             flags: int = wr_byte(r);
             tn: int = wr_uleb(r);
             if ((flags & 1) != 0) _max: int = wr_uleb(r);
-            m.table = new int[tn](0 - 1)
+            m.table = wm_take_ints(slot, tn);
+            for k in 0..tn m.table[k] = -1
         } else if (id == 5) {
             if (wr_uleb(r) != 1) wr_fail("one memory expected");
             mflags: int = wr_byte(r);
@@ -247,8 +261,8 @@ wasm_decode(bytes: []i8@new) raises WasmFormat: *WasmModule@new {
             if ((mflags & 1) != 0) _mmax: int = wr_uleb(r)
         } else if (id == 6) {
             ng: int = wr_uleb(r);
-            m.global_types = new i8[ng](0i8);
-            m.global_inits = new int[ng](0);
+            m.global_types = wm_take_bytes(slot, ng);
+            m.global_inits = wm_take_ints(slot, ng);
             for i in 0..ng {
                 m.global_types[i] = wr_byte(r) trunc i8;
                 _mut: int = wr_byte(r);
@@ -256,11 +270,11 @@ wasm_decode(bytes: []i8@new) raises WasmFormat: *WasmModule@new {
             }
         } else if (id == 7) {
             ne: int = wr_uleb(r);
-            m.exports = new *WasmExport[ne](new WasmExport { name: "", kind: 0, index: 0 });
+            m.exports = wm_export_pointers(slot, ne);
             for i in 0..ne {
                 ename: []i8 = wr_name(r);
                 ekind: int = wr_byte(r);
-                m.exports[i] = new WasmExport { name: ename, kind: ekind, index: wr_uleb(r) }
+                m.exports[i] = wm_take_export(slot, WasmExport { name: ename, kind: ekind, index: wr_uleb(r) })
             }
         } else if (id == 9) {
             nseg: int = wr_uleb(r);
@@ -276,14 +290,7 @@ wasm_decode(bytes: []i8@new) raises WasmFormat: *WasmModule@new {
         } else if (id == 10) {
             nb: int = wr_uleb(r);
             if (nb != len(func_sigs)) wr_fail("function and code counts differ");
-            m.funcs = new *WasmFunc[nb](new WasmFunc {
-                sig: 0,
-                nlocals: 0,
-                body: 0,
-                body_end: 0,
-                code: new int[0](0),
-                name: ""
-            });
+            m.funcs = wm_func_pointers(slot, nb);
             for i in 0..nb {
                 bsize: int = wr_uleb(r);
                 bend: int = r.at + bsize;
@@ -294,14 +301,14 @@ wasm_decode(bytes: []i8@new) raises WasmFormat: *WasmModule@new {
                     _ty: int = wr_byte(r);
                     nl = nl + cnt2
                 }
-                m.funcs[i] = new WasmFunc {
+                m.funcs[i] = wm_take_func(slot, WasmFunc {
                     sig: func_sigs[i],
                     nlocals: nl,
                     body: r.at,
                     body_end: bend,
-                    code: new int[0](0),
+                    code: wm_take_ints(slot, 0),
                     name: ""
-                };
+                });
                 r.at = bend
             }
         } else if (id == 11) {
@@ -322,7 +329,12 @@ wasm_decode(bytes: []i8@new) raises WasmFormat: *WasmModule@new {
 // callbacks.
 wasm_read_names(m: *WasmModule@new) raises WasmFormat {
     if (m.names == 0) return;
-    reader: WasmReader = WasmReader { b: m.bytes, at: m.names, end: m.names_end };
+    reader: WasmReader = WasmReader {
+        storage_slot: m.storage_slot,
+        b: m.bytes,
+        at: m.names,
+        end: m.names_end
+    };
     r: *WasmReader = &reader;
     ni: int = len(m.imports);
     while (r.at < r.end) {
@@ -345,7 +357,7 @@ wasm_read_names(m: *WasmModule@new) raises WasmFormat {
 wasm_custom(m: *WasmModule, name: str): int {
     c: ?*WasmCustom = m.customs;
     while (c != null) {
-        if (streq(c.name, bytes(name))) return c.at;
+        if (streq(c.name, wm_readonly_bytes(name))) return c.at;
         c = c.next
     }
     0 - 1
@@ -354,7 +366,7 @@ wasm_custom(m: *WasmModule, name: str): int {
 wasm_custom_end(m: *WasmModule, name: str): int {
     c: ?*WasmCustom = m.customs;
     while (c != null) {
-        if (streq(c.name, bytes(name))) return c.end;
+        if (streq(c.name, wm_readonly_bytes(name))) return c.end;
         c = c.next
     }
     0 - 1
@@ -362,7 +374,7 @@ wasm_custom_end(m: *WasmModule, name: str): int {
 
 wasm_export(m: *WasmModule, name: str, kind: int): int {
     for e in m.exports {
-        if (e.kind == kind && streq(e.name, bytes(name))) return e.index
+        if (e.kind == kind && streq(e.name, wm_readonly_bytes(name))) return e.index
     }
     0 - 1
 }
@@ -384,3 +396,15 @@ streq(a: []i8, b: []i8): bool {
     }
     true
 }
+
+wasm_decode(bytes: []i8) raises WasmFormat: *WasmModule {
+    slot: int = wm_reserve();
+    try {
+        wm_decode_into(bytes, slot)
+    } with WasmFormat e -> {
+        wm_used[slot] = false;
+        raise WasmFormat { msg: e.msg }
+    }
+}
+
+import "module_storage.l8"

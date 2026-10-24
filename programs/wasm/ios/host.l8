@@ -258,9 +258,21 @@ say_int(s: str, n: int) {
 
 // An instance of the module in bytes, bound.
 host_instantiate(bytes: []i8@new) raises WasmFormat, WasmNoMemory: *WasmInstance@new {
-    inst: *WasmInstance = wasm_instantiate(wasm_decode(bytes), 256, &wasm_proxy_host);
-    wasm_proxy_bind(inst);
-    inst
+    module: *WasmModule = wasm_decode(bytes);
+    made: ?*WasmInstance = null;
+    try {
+        inst: *WasmInstance = wasm_instantiate(module, 256, &wasm_proxy_host);
+        made = inst;
+        wasm_proxy_bind(inst);
+        inst
+    } with WasmFormat e -> {
+        if (made != null) wasm_instance_release(made);
+        wasm_module_release(module);
+        raise WasmFormat { msg: e.msg }
+    } with WasmNoMemory -> {
+        wasm_module_release(module);
+        raise WasmNoMemory
+    }
 }
 
 // The first run: main, which on an iPhone calls UIApplicationMain and
@@ -290,9 +302,8 @@ extern host_heap_used(): int = l8_heap_used;
 
 host_reload(bytes: []i8@new) {
     if (host_inst == 0) return;
-    // Decoded instances currently remain on the native bump heap. The
-    // Darwin runtime has 256 MiB: leave 96 MiB for decoding, binding and
-    // transfer instead of letting its allocator terminate the app.
+    // Manifest/transfer and proxy copies still use the transitional heap.
+    // Leave room for those until their separate migration is complete.
     used: int = host_heap_used();
     say_int("native heap MiB", used / 1048576);
     if (used >= 160 * 1048576) {
@@ -300,12 +311,19 @@ host_reload(bytes: []i8@new) {
         return
     }
     old: *WasmInstance = instance_at(host_inst);
+    prepared: ?*WasmInstance = null;
+    committed: bool = false;
     try {
         inst: *WasmInstance = host_instantiate(bytes);
+        prepared = inst;
         t: *Transfer = wasm_transfer(old, inst);
         for i in 0..t.nlines say(t.lines[i]);
         say_int("persistent globals carried:", t.carried + t.migrated);
         host_inst = instance_address(inst);
+        committed = true;
+        // UIApplicationMain can keep the first instance on a native stack.
+        // Later instances have no active calls at this reload boundary.
+        if (old.depth == 0) host_discard(old);
         _g: int = wasm_call_export(inst, "l8_init_globals", 0, 0, 0, 0, 0);
         if (wasm_export_function(inst.m, "reload") >= 0) {
             _r: int = wasm_call_export(inst, "reload", 0, 0, 0, 0, 0);
@@ -315,10 +333,37 @@ host_reload(bytes: []i8@new) {
             } else say("reloaded")
         } else say("the module has no reload(): its state is carried, but nothing is shown again until the app restarts")
     } with WasmFormat e -> {
+        if (!committed) {
+            if (prepared != null) host_discard(prepared);
+            host_restore_binding(old)
+        }
         say("the build cannot be read:");
         say(e.msg)
     } with WasmNoMemory -> {
+        host_restore_binding(old);
         say("no memory for the build")
+    }
+}
+
+// Release metadata only after its final instance, and never while a native
+// call is still using that instance. Hosts must end all borrowed views too.
+host_discard(inst: *WasmInstance) {
+    try {
+        module: *WasmModule = inst.m;
+        wasm_instance_release(inst);
+        if (module.instances == 0) wasm_module_release(module)
+    } with WasmFormat e -> {
+        say("release failed:");
+        say(e.msg)
+    }
+}
+
+host_restore_binding(inst: *WasmInstance) {
+    try {
+        wasm_proxy_bind(inst)
+    } with WasmFormat e -> {
+        say("could not restore the previous build's imports:");
+        say(e.msg)
     }
 }
 
