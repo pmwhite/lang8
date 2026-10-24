@@ -96,7 +96,7 @@ or `munmap` calls. These measurements do not certify unexecuted compiler paths.
 
 Recent application conversions include tree-calculus, terminal state, FreeType
 backing, Wayland windows, Better's shader/path storage, profile-explorer, Race,
-Skate, and Bible’s chapter/file/terminal storage. Their READMEs state ownership and capacities. Zero explicit sites
+Skate, Bible’s chapter/file/terminal storage, and HTTP/WebSocket transactions. Their READMEs state ownership and capacities. Zero explicit sites
 still do not establish that an entry point is allocation-free: remaining local
 slice literals, conversions and native/host boundaries must be checked.
 
@@ -138,7 +138,7 @@ The inventory counts explicit `new` expressions, `region` blocks, and `bytes()` 
 `cstr()` call syntax per file. It skips comments, strings, character literals,
 expectation text, and `@new` lifetime contracts. Reports separate `src1`, `src2`,
 `stdlib`, each application, and fixtures. The first inventory had 4,165 explicit
-`new` sites. The current migration checkpoint has 271 (3,894 removed), including
+`new` sites. The current migration checkpoint has 242 (3,923 removed), including
 bootstrap and fixtures. Standard output uses a fixed integer buffer and read-only
 text spans without heap copies.
 

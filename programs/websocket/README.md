@@ -31,3 +31,15 @@ make websocket
 ```
 
 Protocol reference: [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html).
+
+Connections reserve one of eight process-local static slots. Each owns a
+16 MiB reassembly buffer, a separate 16 MiB incoming-frame buffer, and its
+state/message records. Message views expire on the next read or connection
+close. Closing returns the slot; its connection pointer must not be used again.
+Exhaustion terminates with the HTTP storage diagnostic. Calls on a connection
+must be serialized. Outgoing client masking uses a 4 KiB call-local buffer.
+
+Handshake work uses an HTTP checkpoint and returns its temporary storage before
+returning. A server's input request remains owned by its caller, who can rewind
+its transaction checkpoint after accepting/rejecting the upgrade. Reads and
+sends reuse connection/call storage without consuming HTTP transaction slots.
