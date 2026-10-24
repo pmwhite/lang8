@@ -104,39 +104,6 @@ append_diagnostic_paragraph(output: *StrBuf@new, text: []i8) raises Error {
 """)
 }
 
-// A guard example may reuse the call only when evaluating its other inputs
-// cannot change the local being narrowed, and the spelling fits on one line.
-nullable_guard_call_available(call: *Expr): bool {
-    match call.kind {
-        Funcall invocation -> {
-            target: ?*Expr = invocation.target;
-            if (target != null) {
-                match target.kind {
-                    Var _ -> { }
-                    _ -> return false
-                }
-            }
-            argument: ?*Expr = invocation.args;
-            while (argument != null) {
-                match argument.kind {
-                    Var _ -> { }
-                    Num _ -> { }
-                    Null -> { }
-                    _ -> return false
-                }
-                argument = argument.next
-            }
-        }
-        _ -> return false
-    }
-    input: DiagnosticSource = diagnostic_source(call.file);
-    if (call.source_start < 0 || call.source_end <= call.source_start || call.source_end > input.length || call.source_end > len(input.text)) return false;
-    for cursor in call.source_start..call.source_end {
-        if (input.text[cursor] == '\n' || input.text[cursor] == '\r') return false
-    }
-    true
-}
-
 error_nullable_argument(
     call: *Expr,
     callee: *Function,
@@ -162,9 +129,7 @@ error_nullable_argument(
         Var reference -> sb_puts(paragraph, reference.name);
         _ -> sb_puts(paragraph, "This argument")
     }
-    sb_puts(paragraph, " has type ");
-    append_type(paragraph, argument.ty);
-    sb_puts(paragraph, " and may be null. Parameter ");
+    sb_puts(paragraph, " may be null; parameter ");
     sb_puts(paragraph, parameter.name);
     sb_puts(paragraph, " of ");
     callee_name: []i8 = callee.name;
@@ -172,45 +137,18 @@ error_nullable_argument(
     sb_puts(paragraph, callee_name);
     sb_puts(paragraph, " requires ");
     append_type(paragraph, parameter.ty);
-    sb_puts(paragraph, ", which does not accept null:");
+    sb_putc(paragraph, '.');
     append_diagnostic_paragraph(output, sb_finish(paragraph));
-    append_diagnostic_excerpt(output, DiagnosticSpan { file: parameter.browse_file, pos: parameter.declared_type_pos, length: parameter.declared_type_end - parameter.declared_type_pos });
-    if (local != null) {
-        paragraph.used = 0;
-        sb_puts(paragraph, "If a missing value means there is nothing to do, make the call only when ");
-        sb_puts(paragraph, local.name);
-        sb_puts(paragraph, " != null.");
-        append_diagnostic_paragraph(output, sb_finish(paragraph));
-        if (nullable_guard_call_available(call)) {
-            input: DiagnosticSource = diagnostic_source(call.file);
-            sb_puts(output, "    if (");
-            sb_puts(output, local.name);
-            sb_puts(output, """
- != null) {
-        """);
-            for cursor in call.source_start..call.source_end sb_putc(output, input.text[cursor]);
-            sb_puts(output, """
-
-    }
-
-""")
-        }
-    } else append_diagnostic_paragraph(output, "If a missing value means there is nothing to do, bind the argument to a local value, check it against null, and make the call only in the non-null branch. Binding it once avoids evaluating the argument twice.");
-    append_diagnostic_paragraph(output, "If a missing value is an error, handle that case before making the call.");
     paragraph.used = 0;
-    sb_puts(paragraph, "If ");
+    if (local == null) sb_puts(paragraph, "Bind the argument once to a local and handle null before calling, or ") else sb_puts(paragraph,
+        "Handle null before calling, or ");
+    if (callee.is_extern) sb_puts(paragraph, "if the external function accepts null, ");
+    sb_puts(paragraph, "let ");
     sb_puts(paragraph, callee_name);
-    sb_puts(paragraph, " should decide what absence means, change its parameter ");
-    sb_puts(paragraph, parameter.name);
-    sb_puts(paragraph, " to ");
+    sb_puts(paragraph, " accept ");
     append_type(paragraph, argument.ty);
-    sb_puts(paragraph, " and handle null there before ");
-    expected: ?*Type = parameter.ty;
-    if (expected != null && is_pointer(expected)) sb_puts(paragraph, "dereferencing it.") else if (expected != null && is_fnptr(expected)) sb_puts(paragraph,
-        "calling it.") else sb_puts(paragraph, "using it as a non-null value.");
+    sb_puts(paragraph, " and handle null there.");
     append_diagnostic_paragraph(output, sb_finish(paragraph));
-    if (callee.is_extern) append_diagnostic_paragraph(output, "Only change an external declaration if the external function really accepts null.");
-    if (len(callee.name) == 0) append_diagnostic_paragraph(output, "For a function value, update its declared signature and the functions assigned to it consistently.");
     raise Error { diagnostic: Diagnostic.Document { text: sb_finish(output) } }
 }
 
@@ -267,27 +205,19 @@ primary_noregion_diagnostic(fn: *Function): bool {
 }
 
 append_noregion_callers(output: *StrBuf@new, root: *Function, primary: *Function) raises Error {
+    paragraph: *StrBuf = sb_new();
     caller: ?*Function = functions;
     while (caller != null) {
         if (caller != primary && missing_noregion(caller) && noregion_origin(caller) == root) {
-            cause: ?*NoregionCause = caller.noregion_cause;
-            if (cause != null) {
-                match cause.reason {
-                    Call call -> {
-                        paragraph: *StrBuf = sb_new();
-                        sb_puts(paragraph, caller.name);
-                        sb_puts(paragraph, " calls ");
-                        sb_puts(paragraph, call.callee);
-                        sb_puts(paragraph, ", so choosing noregion also requires it on ");
-                        sb_puts(paragraph, caller.name);
-                        sb_putc(paragraph, '.');
-                        append_diagnostic_paragraph(output, sb_finish(paragraph))
-                    }
-                    _ -> { }
-                }
-            }
+            if (paragraph.used == 0) sb_puts(paragraph, "Callers also needing noregion: ") else sb_puts(paragraph,
+                ", ");
+            sb_puts(paragraph, caller.name)
         }
         caller = caller.next
+    }
+    if (paragraph.used > 0) {
+        sb_putc(paragraph, '.');
+        append_diagnostic_paragraph(output, sb_finish(paragraph))
     }
 }
 
@@ -307,20 +237,16 @@ append_noregion_diagnostic(output: *StrBuf@new, fn: *Function) raises Error {
             GlobalStore global -> {
                 sb_puts(paragraph, " stores this allocation in global ");
                 sb_puts(paragraph, global.name);
-                sb_puts(paragraph, ". If ");
-                sb_puts(paragraph, fn.name);
-                sb_puts(paragraph, " runs inside a region, ");
-                sb_puts(paragraph, global.name);
-                sb_puts(paragraph, " could retain a pointer to memory freed when that region ends.")
+                sb_puts(paragraph, ", which can outlive its region.")
             }
-            Store -> sb_puts(paragraph, " stores this allocation in storage that can outlive a region. If the allocation is made inside a region, that storage could retain a pointer to memory freed when the region ends.");
-            Payload -> sb_puts(paragraph, " puts this allocation in an exception payload. An exception can outlive the region where it was raised, leaving its payload pointing to freed memory.");
+            Store -> sb_puts(paragraph, " stores this allocation where it can outlive its region.");
+            Payload -> sb_puts(paragraph, " puts this allocation in an exception payload, which can outlive its region.");
             Argument argument -> {
                 sb_puts(paragraph, " passes this allocation to parameter ");
                 sb_puts(paragraph, argument.parameter);
                 sb_puts(paragraph, " of ");
                 sb_puts(paragraph, argument.callee);
-                sb_puts(paragraph, ", whose @immortal contract allows it to retain the value after the call. Memory allocated inside a region is freed when that region ends.")
+                sb_puts(paragraph, ", whose @immortal contract allows it to retain the value.")
             }
             Call call -> {
                 sb_puts(paragraph, " calls ");
@@ -333,20 +259,20 @@ append_noregion_diagnostic(output: *StrBuf@new, fn: *Function) raises Error {
     paragraph.used = 0;
     if (cause != null) {
         match cause.reason {
-            Call _ -> sb_puts(paragraph, "If this restriction is intended, declare ");
-            _ -> sb_puts(paragraph, "If this value should be retained, declare ")
+            Call _ -> sb_puts(paragraph, "Declare ");
+            _ -> sb_puts(paragraph, "For retained storage, declare ")
         }
-    } else sb_puts(paragraph, "If this value should be retained, declare ");
+    } else sb_puts(paragraph, "For retained storage, declare ");
     sb_puts(paragraph, fn.name);
-    sb_puts(paragraph, " as noregion. Its callers also need noregion. This prevents those functions from being called inside a region.");
-    append_diagnostic_paragraph(output, sb_finish(paragraph));
+    sb_puts(paragraph, " and its callers as noregion (unavailable inside regions), or ");
     if (cause != null) {
         match cause.reason {
-            Call _ -> append_diagnostic_paragraph(output, "If this function should remain usable inside a region, call a function that does not require noregion instead. For a callee you own, keeping its temporary allocations local may remove that restriction.");
-            Payload -> append_diagnostic_paragraph(output, "If the value is only needed temporarily, keep it local instead of putting it in the exception payload, and use it before its region ends.");
-            Argument _ -> append_diagnostic_paragraph(output, "If the value is only needed during the call, use a parameter contract that permits borrowing it for the call. Only change a callee's @immortal contract if its implementation does not retain the value.");
-            _ -> append_diagnostic_paragraph(output, "If the allocation is only needed temporarily, keep it local instead of storing it in longer-lived storage, and use it before its region ends.")
+            Call _ -> sb_puts(paragraph, "use a callee that can run inside a region.");
+            Payload -> sb_puts(paragraph, "keep temporary data local instead of in the exception payload.");
+            Argument _ -> sb_puts(paragraph, "use a borrowing parameter if the callee does not retain the value.");
+            _ -> sb_puts(paragraph, "keep temporary data local to its region.")
         }
-    }
+    } else sb_puts(paragraph, "keep temporary data local to its region.");
+    append_diagnostic_paragraph(output, sb_finish(paragraph));
     append_noregion_callers(output, noregion_origin(fn), fn)
 }
