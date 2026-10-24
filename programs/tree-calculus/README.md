@@ -49,19 +49,17 @@ sharing can increase allocations or repeat reductions, but never changes a
 result: application-cache hits require an exact match of both immutable IDs.
 Do not use ID equality as a test of structural equality.
 
-Both caches start at 512 entries. As the native evaluator allocates nodes, the
-node cache grows to at most 16,384 entries and the application cache to at most
-65,536. Growth preserves entries where possible. The native application cache
-also backs off after 64 misses for a function slot, sampling one in sixteen
-lookups until a hit resets the counter. Constructors and direct projections
-bypass application caching. These policies depend on allocation and lookup
-behavior, not the program's identity or expected answer.
+The node cache has 16,384 entries and the application cache has 65,536.
+All machine storage is permanent: 8,388,608 packed nodes, 16,777,216 frames,
+a 65,536-byte cache backoff table, a 16,777,216-byte input line, and two
+8,192-byte I/O buffers. The singleton machine is reset when constructed;
+constructing another invalidates earlier node IDs. Exhaustion terminates with
+an explicit error before writing past a capacity.
 
 The kernel keeps reduction state in registers and uses the same eager rules
 and evaluation order as the reference loop. Parsing, reduction and printing
-use explicit growable stacks. Native buffers and arrays use the L8 runtime heap
-with bulk zeroing and copying, including the input/output buffers: avoiding
-byte-at-a-time initialization matters for short programs. There are no recursive
+use explicit fixed-capacity stacks. Native and reference evaluators share the
+same static arrays, and the assembly kernel contains no allocator. There are no recursive
 evaluator calls or benchmark-specific shortcuts.
 
 The kernel is a trusted memory-access boundary: L8 does not check its native
@@ -71,12 +69,9 @@ builds it directly; no host C compiler or external assembler is required. Bulk
 string instructions use annotated `.byte` encodings because the built-in
 assembler does not accept their mnemonics.
 
-This is a one-shot interpreter. Nodes and superseded array capacities remain
-allocated until process exit; there is no garbage collector. Cache eviction does
+This is a one-shot interpreter. Node slots remain reserved until process exit; there is no garbage collector. Cache eviction does
 not reclaim nodes. The arena is capped at approximately 8 million nodes, input
-lines at 16 million bytes, and stack capacity at 16 million frames. These are
-ceilings, not guaranteed allocations: the runtime heap and available memory may
-limit execution earlier. Compared with full canonicalization, bounded sharing
+lines at 16 million bytes, and stack capacity at 16 million frames. These capacities are reserved up front. Compared with full canonicalization, bounded sharing
 can reach the node limit earlier on some programs. Divergent terms have no
 reduction limit; use an external `timeout` when experimenting.
 

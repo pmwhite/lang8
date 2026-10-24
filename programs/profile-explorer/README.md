@@ -90,3 +90,23 @@ input. `dump.l8` prints the text summary used by `--dump`.
 
 The whole file is kept in memory along with the parsed events: Chromium's
 startup trace (49 MB, 168,000 events, 89 threads) loads in about two seconds.
+
+## Static storage limits
+
+One trace context owns a 256 MiB source buffer, 1,048,576 event slots, 8,192
+track slots, 131,072 interned-name entries and a 262,144-entry name hash table.
+Name bytes use declared 32/256/4,096/65,536-byte slot classes (65,536/65,536/
+4,096/128 slots respectively). Names and views remain live until
+`trace_release`, which returns the context's slots for reuse.
+
+The context has sixteen 64 KiB text builders, eight 65,536-entry integer
+lists, eight 1,048,577-entry sorting/row work buffers, and two summaries of at
+most 128 names. The viewer owns one vertex buffer with 120,000 quads, fixed
+search/collapse flags and a 16,384-column overview. Exhaustion terminates with
+`profile-explorer: static storage exhausted`; oversized/read-failed input files
+return the existing file-read error. Capacity checks precede writes.
+
+Trace parsing, sorting, summaries and viewer state use no L8 heap allocation.
+Process startup, X11/OpenGL and FreeType's own native allocations remain separate
+boundaries in the ongoing migration. Font data owned by L8 uses the static
+slots documented in `../freetype/README.md`.

@@ -84,6 +84,7 @@ type Glyph = {
 
 tag freetype
 type Font = {
+    storage_slot: int;
     atlas: []i8;
     w: int;
     h: int;
@@ -95,6 +96,7 @@ type Font = {
 // is not known at startup. The optional fallback face shares the atlas.
 tag freetype
 type CachedFont = {
+    storage_slot: int;
     library: *i8;
     face: *FT_FaceRec;
     fallback_face: ?*FT_FaceRec;
@@ -128,10 +130,11 @@ empty_glyph(): Glyph {
 
 fail_font(): Font@new {
     Font {
-        atlas: new i8[1](0i8),
+        storage_slot: -1,
+        atlas: ft_failed_atlas,
         w: 0,
         h: 0,
-        glyphs: new Glyph[95](empty_glyph()),
+        glyphs: ft_failed_glyphs,
         ok: false
     }
 }
@@ -151,21 +154,28 @@ copy_glyph_rows(
 
 cached_font_slot(font: *CachedFont, code: int): int {
     slot: int = (code & 2147483647) % len(font.keys);
-    while (font.keys[slot] != 0 && font.keys[slot] != code) slot = (slot + 1) % len(font.keys);
+    probes: int = 0;
+    while (font.keys[slot] != 0 && font.keys[slot] != code && probes < len(font.keys)) {
+        slot = (slot + 1) % len(font.keys);
+        probes = probes + 1
+    }
+    if (probes == len(font.keys)) return -1;
     slot
 }
 
 cached_font_alias(font: *CachedFont, code: int, glyph: Glyph): Glyph {
     slot: int = cached_font_slot(font, code);
-    font.keys[slot] = code;
-    font.values[slot] = glyph;
+    if (slot >= 0) {
+        font.keys[slot] = code;
+        font.values[slot] = glyph
+    }
     glyph
 }
 
 tag freetype
 cached_font_glyph(font: *CachedFont, code: int): Glyph {
     slot_index: int = cached_font_slot(font, code);
-    if (font.keys[slot_index] == code) return font.values[slot_index];
+    if (slot_index >= 0 && font.keys[slot_index] == code) return font.values[slot_index];
     face: *FT_FaceRec = font.face;
     if (FT_Get_Char_Index(face, code) == 0u32) {
         fallback0: ?*FT_FaceRec = font.fallback_face;
@@ -189,8 +199,9 @@ cached_font_glyph(font: *CachedFont, code: int): Glyph {
     if (font.y + gh + 2 > font.height) return cached_font_alias(font, code, font.missing);
     buffer: ?*i8 = slot.buffer;
     if (gw > 0 && gh > 0 && pitch > 0 && buffer != null) {
-        data: []i8 = new i8[pitch * gh](0i8);
-        l8_memcpy(data, buffer, len(data));
+        if (pitch > 65536 / gh) return cached_font_alias(font, code, font.missing);
+        data: []i8 = buffer([65536]i8);
+        l8_memcpy(data, buffer, pitch * gh);
         copy_glyph_rows(font.atlas, font.width, font.x, font.y, data, pitch, gw, gh);
         font.dirty = true
     }
@@ -225,13 +236,13 @@ load_cached_font(
     atlas_height: int,
     capacity: int
 ): ?*CachedFont@new {
-    if (sizeof(FT_FaceRec) != 160 || sizeof(FT_Slot) != 200 || px < 8 || atlas_width < 64 || atlas_height < 64 || capacity < 128) return null;
-    library_slot: []?*i8 = new ?*i8[1](null);
+    if (sizeof(FT_FaceRec) != 160 || sizeof(FT_Slot) != 200 || px < 8 || atlas_width < 64 || atlas_height < 64 || capacity < 128 || capacity > 4096 || atlas_width > 2048 || atlas_height > 2048) return null;
+    library_slot: []?*i8 = buffer([1]?*i8, null);
     if (FT_Init_FreeType(&library_slot[0]) != 0) return null;
     library0: ?*i8 = library_slot[0];
     if (library0 == null) return null;
     library: *i8 = library0;
-    face_slot: []?*FT_FaceRec = new ?*FT_FaceRec[1](null);
+    face_slot: []?*FT_FaceRec = buffer([1]?*FT_FaceRec, null);
     if (FT_New_Face(library, path, 0, &face_slot[0]) != 0) {
         FT_Done_FreeType(library);
         return null
@@ -249,7 +260,7 @@ load_cached_font(
     }
     fallback_face: ?*FT_FaceRec = null;
     if (fallback_path != null) {
-        fallback_slot: []?*FT_FaceRec = new ?*FT_FaceRec[1](null);
+        fallback_slot: []?*FT_FaceRec = buffer([1]?*FT_FaceRec, null);
         if (FT_New_Face(library, fallback_path, 0, &fallback_slot[0]) == 0) {
             fallback0: ?*FT_FaceRec = fallback_slot[0];
             if (fallback0 != null) {
@@ -260,16 +271,26 @@ load_cached_font(
     }
     hash_size: int = 256;
     while (hash_size < capacity * 2) hash_size = hash_size * 2;
-    font: *CachedFont = new CachedFont {
+    storage: int = ft_reserve_storage(atlas_width * atlas_height, capacity, hash_size);
+    if (storage < 0 || sizeof(CachedFont) > 512) {
+        if (storage >= 0) ft_storage_used[storage] = false;
+        if (fallback_face != null) FT_Done_Face(fallback_face);
+        FT_Done_Face(face);
+        FT_Done_FreeType(library);
+        return null
+    }
+    font: *CachedFont = ft_cached_at(&ft_cached_objects[storage * 512]);
+    font.* = CachedFont {
+        storage_slot: storage,
         library: library,
         face: face,
         fallback_face: fallback_face,
-        atlas: new i8[atlas_width * atlas_height](0i8),
+        atlas: ft_atlas_at(&ft_storage[storage].atlas[0]),
         width: atlas_width,
         height: atlas_height,
-        glyphs: new Glyph[capacity](empty_glyph()),
-        keys: new int[hash_size](0),
-        values: new Glyph[hash_size](empty_glyph()),
+        glyphs: ft_glyphs_at(&ft_storage[storage].glyphs[0]),
+        keys: ft_keys_at(&ft_storage[storage].keys[0]),
+        values: ft_glyphs_at(&ft_storage[storage].values[0]),
         count: 0,
         x: 2,
         y: 2,
@@ -286,7 +307,8 @@ close_cached_font(font: *CachedFont) {
     fallback0: ?*FT_FaceRec = font.fallback_face;
     if (fallback0 != null) FT_Done_Face(fallback0);
     FT_Done_Face(font.face);
-    FT_Done_FreeType(font.library)
+    FT_Done_FreeType(font.library);
+    ft_storage_used[font.storage_slot] = false
 }
 
 tag freetype
@@ -300,8 +322,8 @@ load_font(
         eprint("freetype: unexpected ABI layout");
         return fail_font()
     }
-    if (aw < 64 || ah < 64 || px < 8) return fail_font();
-    lib_slot: []?*i8 = new ?*i8[1](null);
+    if (aw < 64 || ah < 64 || aw > 2048 || ah > 2048 || px < 8) return fail_font();
+    lib_slot: []?*i8 = buffer([1]?*i8, null);
     if (FT_Init_FreeType(&lib_slot[0]) != 0) {
         eprint("freetype: init failed");
         return fail_font()
@@ -312,7 +334,7 @@ load_font(
         return fail_font()
     }
     lib: *i8 = lib0;
-    face_slot: []?*FT_FaceRec = new ?*FT_FaceRec[1](null);
+    face_slot: []?*FT_FaceRec = buffer([1]?*FT_FaceRec, null);
     if (FT_New_Face(lib, path, 0, &face_slot[0]) != 0) {
         eprint("freetype: cannot open font");
         FT_Done_FreeType(lib);
@@ -332,8 +354,14 @@ load_font(
         return fail_font()
     }
     ngl: int = FT_LAST - FT_FIRST + 1;
-    glyphs: []Glyph = new Glyph[ngl](empty_glyph());
-    atlas: []i8 = new i8[aw * ah](0i8);
+    storage: int = ft_reserve_storage(aw * ah, ngl, 0);
+    if (storage < 0) {
+        FT_Done_Face(face);
+        FT_Done_FreeType(lib);
+        return fail_font()
+    }
+    glyphs: []Glyph = ft_glyphs_at(&ft_storage[storage].glyphs[0]);
+    atlas: []i8 = ft_atlas_at(&ft_storage[storage].atlas[0]);
     pad: int = 2;
     x: int = pad;
     y: int = pad;
@@ -356,9 +384,11 @@ load_font(
                 if (gw > 0 && gh > 0 && pitch > 0) {
                     if (buf != null) {
                         nb: int = pitch * gh;
-                        tmp: []i8 = new i8[nb](0i8);
-                        l8_memcpy(tmp, buf, nb);
-                        copy_glyph_rows(atlas, aw, x, y, tmp, pitch, gw, gh)
+                        if (nb > 65536) packed = false else {
+                            tmp: []i8 = buffer([65536]i8);
+                            l8_memcpy(tmp, buf, nb);
+                            copy_glyph_rows(atlas, aw, x, y, tmp, pitch, gw, gh)
+                        }
                     }
                 }
                 awf: f32 = aw as f32;
@@ -382,10 +412,12 @@ load_font(
     FT_Done_Face(face);
     FT_Done_FreeType(lib);
     if (!packed) {
+        ft_storage_used[storage] = false;
         eprint("freetype: atlas full");
         return fail_font()
     }
     Font {
+        storage_slot: storage,
         atlas: atlas,
         w: aw,
         h: ah,
@@ -470,4 +502,63 @@ emit_text_scaled(
         }
     }
     i
+}
+
+// Eight independently owned atlas slots. Numeric backing records are zeroable;
+// the counted views are created only after their lengths are installed.
+type FTStorage = {
+    atlas_count: int;
+    atlas: [4194304]i8;
+    glyph_count: int;
+    glyphs: [4096]Glyph;
+    key_count: int;
+    keys: [8192]int;
+    value_count: int;
+    values: [8192]Glyph
+}
+
+ft_storage: []FTStorage = static_buffer([8]FTStorage);
+
+ft_storage_used: []bool = static_buffer([8]bool);
+
+ft_cached_objects: []i8 = static_buffer([4096]i8);
+
+ft_failed_atlas: []i8 = static_buffer([1]i8);
+
+ft_failed_glyphs: []Glyph = static_buffer([95]Glyph);
+
+extern ft_atlas_at(p: *i8): []i8 = l8_as_int;
+
+extern ft_glyphs_at(p: *Glyph): []Glyph = l8_as_int;
+
+extern ft_keys_at(p: *int): []int = l8_as_int;
+
+extern ft_cached_at(p: *i8): *CachedFont = l8_as_int;
+
+ft_reserve_storage(atlas: int, glyphs: int, keys: int): int {
+    if (atlas < 0 || atlas > 4194304 || glyphs < 0 || glyphs > 4096 || keys < 0 || keys > 8192) return -1;
+    i: int = 0;
+    while (i < 8 && ft_storage_used[i]) i = i + 1;
+    if (i == 8) return -1;
+    ft_storage_used[i] = true;
+    ft_storage[i].atlas_count = atlas;
+    ft_storage[i].glyph_count = glyphs;
+    ft_storage[i].key_count = keys;
+    ft_storage[i].value_count = keys;
+    for k in 0..atlas ft_storage[i].atlas[k] = 0i8;
+    for k in 0..glyphs ft_storage[i].glyphs[k] = empty_glyph();
+    for k in 0..keys {
+        ft_storage[i].keys[k] = 0;
+        ft_storage[i].values[k] = empty_glyph()
+    }
+    i
+}
+
+tag freetype
+release_font(font: *Font) {
+    if (font.storage_slot >= 0 && font.ok) {
+        ft_storage_used[font.storage_slot] = false;
+        font.ok = false;
+        font.storage_slot = -1
+    }
 }

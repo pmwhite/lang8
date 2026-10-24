@@ -39,9 +39,8 @@ Source-built compilers no longer perform lifetime analysis. `@name`, `@new`,
 have no effect on stores, returns, calls, or function type compatibility.
 Function types still compare parameter/result types and declared exceptions.
 Null narrowing, definite assignment, bounds checks, and foreign ABI checks remain.
-The checked-in bootstrap retains the previous lifetime rules; `src1` keeps its
-old annotations and a disabled compatibility implementation so it can still be
-built by that executable. `src2` removes the analysis and its inferred metadata.
+Both source stages remove the analysis and its inferred metadata. The promoted
+bootstrap also accepts the compatibility annotations without lifetime checking.
 
 Storage duration remains a runtime property. Frame-backed `buffer` values and
 addresses of locals expire on return; region allocations expire when rewound.
@@ -70,3 +69,11 @@ not part of the language.
 For source compatibility, a literal can be contextually typed as `[]i8` when it
 directly initializes or is passed to a byte-slice slot. An existing `str` never
 converts implicitly; use `bytes(s)` when mutation is intended.
+
+## Native process bounds during migration
+
+Startup arguments and environment snapshots have 4,096-entry vectors and
+separate 4 MiB counted-text stores. Reading the environment borrows its permanent
+snapshot. Native legacy heap backing is reserved in BSS rather than mapped at
+startup; it remains available only while allocation paths are migrated. See
+[STATIC_ALLOCATION.md](STATIC_ALLOCATION.md) for the current verification scope.

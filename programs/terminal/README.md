@@ -124,3 +124,11 @@ and `terminal.l8` connects window events, keyboard encoding, output parsing, and
 cleanup. The `terminal` tag is internal to this application.
 
 Application test suites have been removed; `make terminal` builds the app.
+
+Terminal-owned storage is static: two 240×120 screen grids, one renderer and
+scene snapshot, one cursor and output batch, and a 64 KiB input queue. The
+existing grid, region, ghost and vertex capacities are unchanged. Constructing
+more than these owners fails explicitly. Process setup accepts up to 4,093
+inherited environment entries and a 4,096-byte shell path. Wayland, EGL,
+FreeType and process environment/startup dependencies remain separate allocation
+boundaries in the ongoing migration.

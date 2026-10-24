@@ -644,6 +644,20 @@ type Painter = {
     idx: u32
 }
 
+p_idx: []i32 = static_buffer(P_QUADS * 6, 0i32);
+
+p_font_bits: []i8 = static_buffer(FONT_W * FONT_H, 0i8);
+
+painter_slot: Painter = Painter {
+    prog: 0,
+    u_screen: 0,
+    u_font: 0,
+    u_clip: 0,
+    font_tex: 0u32,
+    buf: 0u32,
+    idx: 0u32
+};
+
 // Whether GL is OpenGL ES 3 (an iPhone's): shaders are put in its dialect,
 // GLSL ES 3.00, as web/game/platform.js does for WebGL.
 p_gles: bool = false;
@@ -658,7 +672,7 @@ p_replace(src: []i8, from: str, to: str): []i8@new {
             i = i + len(from)
         } else i = i + 1
     }
-    out: []i8 = new i8[len(src) + count * (len(to) - len(from))](0i8);
+    out: []i8 = p_shader_bytes(len(src) + count * (len(to) - len(from)));
     o: int = 0;
     k: int = 0;
     while (k < len(src)) {
@@ -712,14 +726,14 @@ extern p_buffer_ints(
 ): int = glBufferData;
 
 // The shader's text for the GL there is.
-p_shader_source(given: []i8, fragment: bool): []i8@new {
-    if (p_gles) return p_es_source(given, fragment);
-    out: []i8 = new i8[len(given)](0i8);
-    for i in 0..len(given) out[i] = given[i];
-    out
+p_shader_source(given: str, fragment: bool): []i8 {
+    p_shader_next = 0;
+    src: []i8 = p_shader_readonly(given);
+    if (p_gles) return p_es_source(src, fragment);
+    src
 }
 
-p_compile(kind: int, given: []i8) raises IoError: int {
+p_compile(kind: int, given: str) raises IoError: int {
     src: []i8 = p_shader_source(given, kind == 35632);
     sh: int = glCreateShader(kind);
     sp: *i8 = src;
@@ -734,7 +748,7 @@ p_compile(kind: int, given: []i8) raises IoError: int {
         n: int = logn[0] as int;
         if (n < 1) n = 1;
         if (n > 4096) n = 4096;
-        buf: []i8 = new i8[n](0i8);
+        buf: []i8 = buffer(4096, 0i8);
         glGetShaderInfoLog(sh, n, null, buf);
         write_bytes_n(2, buf, n);
         write(2, "\n");
@@ -743,7 +757,7 @@ p_compile(kind: int, given: []i8) raises IoError: int {
     sh
 }
 
-p_link(vs: []i8, fs: []i8) raises IoError: int {
+p_link(vs: str, fs: str) raises IoError: int {
     prog: int = glCreateProgram();
     glAttachShader(prog, p_compile(35633, vs));
     glAttachShader(prog, p_compile(35632, fs));
@@ -767,7 +781,7 @@ app_die(msg: str) raises IoError: noreturn {
 
 // The font's picture (see programs/skate/font.l8) as a texture.
 p_font_texture(): u32 {
-    bits: []i8 = new i8[FONT_W * FONT_H](0i8);
+    bits: []i8 = p_font_bits;
     level: []int = buffer([128]int, 0);
     for k in 0..len(FONT_LEVELS) level[FONT_LEVELS[k] as int] = k;
     for y in 0..FONT_H {
@@ -787,7 +801,7 @@ p_font_texture(): u32 {
 }
 
 new_painter() raises IoError: *Painter@new {
-    prog: int = p_link(bytes(PAINT_VS), bytes(PAINT_FS));
+    prog: int = p_link(PAINT_VS, PAINT_FS);
     va: []u32 = buffer([1]u32, 0u32);
     glGenVertexArrays(1, va);
     glBindVertexArray(va[0]);
@@ -795,7 +809,7 @@ new_painter() raises IoError: *Painter@new {
     ids: []u32 = buffer([2]u32, 0u32);
     glGenBuffers(2, ids);
     // The order each quad's corners are drawn in: two triangles.
-    idx: []i32 = new i32[P_QUADS * 6](0i32);
+    idx: []i32 = p_idx;
     for q in 0..P_QUADS {
         c: int = q * 4;
         idx[q * 6] = c trunc i32;
@@ -807,7 +821,7 @@ new_painter() raises IoError: *Painter@new {
     }
     glBindBuffer(34963, ids[1]);
     p_buffer_ints(34963, P_QUADS * 24, idx, 35044);
-    new Painter {
+    painter_slot = Painter {
         prog: prog,
         u_screen: glGetUniformLocation(prog, "screen"),
         u_font: glGetUniformLocation(prog, "font"),
@@ -815,7 +829,8 @@ new_painter() raises IoError: *Painter@new {
         font_tex: p_font_texture(),
         buf: ids[0],
         idx: ids[1]
-    }
+    };
+    &painter_slot
 }
 
 p_draw(r: *Painter) {
@@ -843,4 +858,28 @@ p_draw(r: *Painter) {
         }
     }
     glDisable(3042)
+}
+
+// Translation alternates between two owned slots. GL copies a shader's text
+// synchronously; no translated slice is retained across p_compile calls.
+type PShaderText = {
+    count: int;
+    data: [65536]i8
+}
+
+p_shader_text: []PShaderText = static_buffer([2]PShaderText);
+
+p_shader_next: int = 0;
+
+extern p_shader_at(p: *i8): []i8 = l8_as_int;
+
+// Internal read-only view: callers only inspect these immutable source bytes.
+extern p_shader_readonly(text: str): []i8 = l8_as_int;
+
+p_shader_bytes(n: int): []i8 {
+    if (n < 0 || n > 65536) better_storage_full();
+    i: int = p_shader_next;
+    p_shader_next = 1 - p_shader_next;
+    p_shader_text[i].count = n;
+    p_shader_at(&p_shader_text[i].data[0])
 }

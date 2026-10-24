@@ -18,3 +18,9 @@ A later compilation still starts with fresh pools.
   $ printf 'tag demo; main(): int { 0 }\n' > small.l8
   $ l8 build small.l8 -o small
   $ ./small
+
+Wasm output builders are owned by the backend invocation, after frontend pool
+reset. Its function section must refer to valid signatures.
+
+  $ l8 wasm small.l8 -o small.wasm
+  $ node -e "if (!WebAssembly.validate(require('fs').readFileSync('small.wasm'))) process.exit(1)"

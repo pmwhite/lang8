@@ -18,7 +18,7 @@ remains live. Lifetime analysis has been removed from source-built compilers. Fi
 thread count, and host callbacks need explicit bounds before claiming a whole
 program memory bound. Imported platform libraries and browser/native hosts have
 their own allocations; those must be identified separately, not silently counted
-as static. The saved bootstrap is a migration dependency until promotion.
+as static. Bootstrap promotion remains a separate verified checkpoint.
 
 Each bounded container declares its capacity and exhaustion behavior. Check
 capacity before modifying state and return a documented error, or terminate
@@ -30,8 +30,7 @@ see [memory.md](memory.md) for the transitional storage contract.
 
 ## Implemented storage interfaces
 
-These are accepted by both source compiler stages. The saved bootstrap has not
-been promoted and does not yet understand the new source syntax.
+These are accepted by both source compiler stages and the promoted bootstrap.
 
 ```l8
 const CAPACITY: int = 4096;
@@ -65,20 +64,41 @@ form and `zeroed` require values for which all-zero bytes are valid. Required
 references, strings, refinements and tagged unions need explicit initialization.
 Zero-capacity legacy slices remain to be migrated.
 
-The stage-2 backends construct exception payloads in a frame and publish them
+Both source stages construct exception payloads in a frame and publish them
 through a fixed transfer slot sized for the program's largest exception. Catch
 binders copy the value before handler code runs. Repeated raises no longer consume
 the heap. Native and Wasm compiler fixtures cover nested construction and catches.
-The stage-1 exception backend and saved bootstrap remain legacy dependencies.
 
-The stage-2 compiler's own tokens, AST nodes, and byte buffers come from fixed
+Both source compilers' own tokens, AST nodes, and byte buffers come from fixed
 pools in `src2/storage.l8`. Those pools reset at the start of each compilation.
 Byte buffers use size classes up to 64 MiB. Growth takes one slot for a whole
 class, and source files start in a small class instead of a 512 KiB slot.
 Darwin zero-fill is `__DATA,__bss`: the assembler counts it, and the Mach-O
-image is allocated already zeroed. Data that must stay live across a pool
+linker emits an S_ZEROFILL section without materializing its bytes in the file. Data that must stay live across a pool
 reset, including the test report and diagnostic path prefix, has its own
 static storage. A pointer into a pool does not survive that reset.
+
+## Process storage and current compiler evidence
+
+Native runtimes reserve argument/environment vectors for 4,096 strings each,
+with separate 4 MiB counted-text owners. Environment reads reuse a permanent
+snapshot. Android starts with an empty argument vector. Native startup no longer
+maps an L8 heap. During migration, the legacy allocator still has fixed BSS
+backing (768 MiB on Linux, 256 MiB on iOS/Android) for unmigrated code; retaining
+that arena is not completion. Wasm argument transfer and legacy memory growth
+remain separate host/runtime work.
+
+The source compiler now borrows immutable command text and uses static byte
+pools for owned string copies. `--profile` includes L8 heap bytes and pool usage.
+A native self-build and a Wasm module build both report zero L8 heap bytes. A
+Linux native compiler self-build was also traced with no `brk`, `mmap`, `mremap`
+or `munmap` calls. These measurements do not certify unexecuted compiler paths.
+
+Recent application conversions include tree-calculus, terminal state, FreeType
+backing, Wayland windows, Better's shader/path storage, profile-explorer, Race,
+and Skate. Their READMEs state ownership and capacities. Zero explicit sites
+still do not establish that an entry point is allocation-free: remaining local
+slice literals, conversions and native/host boundaries must be checked.
 
 ## Enforcing static programs
 
@@ -119,7 +139,7 @@ The inventory counts explicit `new` expressions, `region` blocks, and `bytes()` 
 `cstr()` call syntax per file. It skips comments, strings, character literals,
 expectation text, and `@new` lifetime contracts. Reports separate `src1`, `src2`,
 `stdlib`, each application, and fixtures. The first inventory had 4,165 explicit
-`new` sites. The current migration checkpoint has 1,543 (2,622 removed), including
+`new` sites. The current migration checkpoint has 360 (3,805 removed), including
 bootstrap and fixtures. Standard output uses a fixed integer buffer and read-only
 text spans without heap copies.
 

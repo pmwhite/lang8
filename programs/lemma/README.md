@@ -503,3 +503,7 @@ The Foundations region (constructing ℕ, ℤ, ℚ, ℝ and proving each
 rulebook is satisfied); Calculate replaying a certificate through the
 kernel instead of being trusted; holding a row to preview it; more regions
 (topology, linear algebra); a torus.
+
+Native file reads use a reusable 1 MiB static buffer. Theory text is copied
+into the existing retained file store before the next read; oversized files
+fail explicitly.
