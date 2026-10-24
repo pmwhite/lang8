@@ -12,7 +12,7 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `websocket/` | `websocket.l8` | `websocket` | RFC 6455 client, server, and message APIs; imports HTTP |
 | `block-game/` | `block-game.l8` | — | Game, editor, level model, and assets |
 | `wayland/` | `wayland.l8` | `wayland` | Native Wayland/xdg-shell windows, EGL, xkbcommon, and typed protocol bindings |
-| `tree-calculus/` | `main.l8` | `tree_calculus` | Ternary tree-calculus interpreter, correctness tests, and upstream benchmark runner |
+| `tree-calculus/` | `main.l8` | `tree_calculus` | Ternary tree-calculus interpreter and upstream benchmark runner |
 | `terminal/` | `terminal.l8` | — | Wayland/EGL/OpenGL/FreeType terminal with a syscall-backed PTY shell |
 | `profile-explorer/` | `profile-explorer.l8` | — | X11/OpenGL/FreeType timeline viewer for Chrome trace JSON and `perf script` output |
 | `cad/` | `main.l8` | — | CAD viewer drawn by its own renderer: a handheld and its dock, their boards, cases and 3D, step by step how they go together, and how to order them ([README](cad/README.md)) |
@@ -62,7 +62,8 @@ make websocket
 ./l8 build programs/examples/xwin.l8 -o .build/xwin
 ```
 
-The graphical programs require an X11 display (including XWayland). The HTTP
+Graphical programs use X11 (including XWayland), Wayland, or a browser,
+depending on their host; see each program's README. The HTTP
 examples are `programs/examples/http-client.l8` and `programs/examples/http-server.l8`; build output
 remains `.build/http/client` and `.build/http/server`. WebSocket follows the
 same layout with `programs/examples/websocket-{client,server}.l8` and

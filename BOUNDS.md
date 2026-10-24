@@ -73,10 +73,3 @@ item.value
 ```
 
 `p or fallback` unwraps an optional with a fallback value.
-
-## History
-
-Earlier versions proved every access at compile time with a static bounds
-verifier and its `requires`, `ensures`, `invariant`, `forall`, and `index_for`
-annotations. The verifier and that syntax were removed in favor of the run-time
-check; both remain in the git history.

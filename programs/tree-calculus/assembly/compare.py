@@ -31,7 +31,7 @@ def main():
     p.add_argument('--baseline', type=Path, help='also compare a saved earlier assembly executable')
     p.add_argument('--runs', type=int, default=7)
     p.add_argument('--counter-runs', type=int, default=3)
-    p.add_argument('--output', type=Path, default=HERE / 'benchmark-results.json')
+    p.add_argument('--output', type=Path, default=ROOT / '.build/tree-calculus-assembly/benchmark-results.json')
     args = p.parse_args()
     if args.runs < 1 or args.counter_runs < 1:
         p.error('run counts must be positive')

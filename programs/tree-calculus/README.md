@@ -2,7 +2,7 @@
 
 An L8 interpreter with a native x86-64 reduction kernel for the triage-calculus
 rules used by [lambada-llc/tree-calculus](https://github.com/lambada-llc/tree-calculus).
-Build and test from the lang8 repository root:
+Build and run from the lang8 repository root:
 
 ```sh
 ./l8 build programs/tree-calculus/main.l8 -o .build/tree-calculus
@@ -28,9 +28,8 @@ original, pre-optimization interpreter: layouts and node sharing have changed.
 [`assembly/`](assembly/README.md) contains a fully standalone Linux x86-64
 executable with assembly parsing, I/O, allocation and a separately specialized
 reduction kernel. It requires SSE4.2 and GNU `as`/`ld`, with no L8 compiler or
-runtime. A [fresh upstream comparison](assembly/UPSTREAM.md) finds it 2.55–3.67×
-faster than the fastest tested upstream configurations on the four substantial
-mini-suite workloads. That directory includes tests, runners and raw results.
+runtime. Its comparison runner can measure all three implementations on
+the same workloads.
 
 ## Implementation
 
@@ -114,39 +113,3 @@ commands are split into arguments and never executed through a shell. Minbin
 comparisons convert both the input application and expected output, preserving
 the workload. `--runs`, `--timeout`, and `--binary` are configurable. `--json`
 saves every timing sample, command, protocol, status and logical-input checksum.
-
-Measured on 2026-10-03 on an Intel Core i5-8365U, Linux x86-64, against upstream
-commit `5679507e357b1107fc9b1647871bc72c38c63748`. **L8 wins all five mini-suite
-workloads against the tested roster on this machine.** Final comparison, best
-of seven interleaved runs including startup and I/O:
-
-| Workload | L8 | Fastest other | Other time | Speedup |
-|---|---:|---|---:|---:|
-| size | 0.227 ms | ASM noid | 0.333 ms | 1.46× |
-| recursive-fib | 23.932 ms | C++ GCC graph | 54.909 ms | 2.29× |
-| silly-exp | 26.108 ms | C++ Clang peek32 | 33.756 ms | 1.29× |
-| exercise-rules | 46.678 ms | C++ Clang peek32 | 60.322 ms | 1.29× |
-| merge-sort | 48.723 ms | C++ GCC graph | 86.694 ms | 1.78× |
-
-`graph` is `eager-graph-nil-mmap-32`; `peek32` is
-`eager-ternary-nil-mmap-32-peek`. The final run included all six assembly
-evaluators and five fastest C++ configurations selected from the broader scan.
-Every output in this final comparison passed. The tiny `size` workload is
-particularly sensitive to process-startup noise.
-
-The broader seven-run scan covered 32 distinct upstream evaluators in 51
-configurations: 19 C++ evaluators built with both GCC and Clang, six assembly,
-three JavaScript, three WebAssembly and Python. It used the new bounded-cache
-kernel before the final improvement to initialization of the machine arrays.
-Some slower competitors timed out or failed; these remain recorded as failures.
-Lean was not tested because its `lake` toolchain was unavailable.
-
-C++ builds used GCC 12.2 and Clang 14, `-O3 -std=c++20`, with libstdc++ rather
-than upstream's Clang/libc++/C++23 setup. The local driver omitted the include
-and registry entry for `LazyAppStream` (already excluded from the official
-suite) because this host lacks `append_range`; evaluator sources were unchanged.
-JavaScript/WebAssembly used Node 26.7.0; Python was 3.11.2.
-
-[Saved measurements](benchmark-results.json) include both scans, all samples,
-commands, failures and source/binary checksums. These results establish the lead
-on the measured machine and workloads, not on every CPU or arbitrary program.

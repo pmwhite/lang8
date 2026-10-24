@@ -6,6 +6,26 @@ in the source right after the code that produced it. `l8 test` runs the tests,
 shows a diff when the output differs, and `l8 test --accept` rewrites the
 source with the output it saw.
 
+## Repository checks
+
+From the checkout root:
+
+```sh
+make -j4 l8c3
+./l8c3 test -j 2 tests/cli/lint.t
+make -j4 selfhost compiler-test
+make -j4 callback-test wasm-test
+```
+
+`compiler-test` runs language, callback-language and CLI fixtures. The
+separate `callback-test` target needs a C compiler and GNU assembler for
+C interoperability. `wasm-test` needs Node and checks compiler fixtures,
+self-compilation, pause/resume, persistent-state transfer and native import
+proxying, including execution under the L8 interpreter.
+
+Application, standard-library and UI test suites are not retained.
+Application build commands are in `make help` and program READMEs.
+
 ## Writing tests
 
 A test is a top-level declaration with a name and a body:

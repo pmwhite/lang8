@@ -1,16 +1,15 @@
-# Skins: the app in core, a platform's look around it
+# Platform skins
 
-Owner, 2026-10-21: move the app's logic into core so that each platform is a
-*skin*, a small platform-specific wrapper that draws what core describes and
-so has every feature of the app without writing it again. The iPhone keeps
-its look; its screens move onto the same descriptions one at a time. The
-first new skin is Android.
+Core owns app behavior and screen models. Each platform supplies
+presentation and services. Web, Android and terminal use the line-based
+host; iOS also integrates core directly from native UIKit views. This
+file describes the models and protocol used by the current implementations.
 
 ## Layers
 
 | Layer | Where | What it is |
 |---|---|---|
-| The Bible and what is kept | `core/*.l8` (text, layout, store, plans, memory, ...) | Data and rules. No platform, no screens. Unchanged by this. |
+| The Bible and what is kept | `core/*.l8` (text, layout, store, plans, memory, ...) | Data and rules. No platform services. |
 | The app | `core/ui.l8`, `core/skin.l8` and what it imports, `core/prefs.l8` | Every screen as data, what each action does, the settings, and the app's rules and words. No platform. |
 | A skin | `ios/`, `android/`, `web/` | Draws screens and a few views of its own, gives core the platform (files, network, voice, sharing). |
 
@@ -37,11 +36,10 @@ does to the app's state, where the reader goes next).
 
 ## A new skin: the contract
 
-A new platform gets every feature by doing what this list says and no more
-(owner, 2026-10-22: the more skins, the more generic core). Anything a
-feature needs beyond it is a gap in core, to be closed there, not in the
-skin. The web is the reference: `web/main.l8` (the platform, about 120
-lines) and `web/page/skin.js` (the skin).
+A new platform implements the shared models and the services below. Keep
+feature rules in core and platform operations in the skin. The web provides
+a concrete implementation: `web/main.l8` (the platform) and
+`web/page/skin.js` (the skin).
 
 **1. The platform, in L8** (core's host, `core/host.l8`, does the rest):
 
@@ -185,7 +183,7 @@ which stays.
 Core answers an action by changing its state and returning effects, which
 the skin carries out in its own idiom:
 
-| Effect | iPhone | Android | Web (WEB.md §W17) |
+| Effect | iPhone | Android | Web |
 |---|---|---|---|
 | `push id`, `present id` | pushed in the sheet the action came from; a sheet | a page in the panel stack; a full-height panel | panel view with a URL |
 | `pop`, `pop_to id`, `dismiss` | pop, pop to it, dismiss | back, back to it, close | history back, close |
@@ -283,7 +281,7 @@ text (`name value` lines), or maps them to its platform's store.
 
 ## The wire, for skins in another language
 
-Android's skin is Java, as the web's will be JavaScript, so they and core talk
+Android's skin is Java and the web's is JavaScript; both talk to core
 in lines (UTF-8, `\n`-ended; fields split by tabs, a field's tab, newline and
 backslash written `\t`, `\n`, `\\`). An L8 skin (the iPhone's) uses the same
 records in memory and needs no wire. `core/skin.l8` reads the skin's lines
@@ -294,7 +292,7 @@ the whole wire on a terminal, for developing core without a phone:
 printf 'start 400 800 100 0\ntap goto\nact 1 1 42 0\n' | .build/skin-text programs/bible/data /tmp/prefs
 ```
 
-Its own lines make up what a test needs: `visit C V TIME`, `plans`, `plan P
+The utility also accepts development commands: `visit C V TIME`, `plans`, `plan P
 D`, `follow P DAY`, `open KIND ARG` (any screen, presented), `compare C V N`,
 `study C V K`, `esv C V WORDS` (a result of the ESV's own search), `memorize
 C V1 V2` (a passage in Memory, to practise).
@@ -560,7 +558,7 @@ called but through the wire. Its own parts:
 What it turns off in core: Share as Image (`sk_has_card`), Keep Screen On,
 the text size (`sk_has_text_size`: a terminal's text is its own).
 
-## The web, the second new skin
+## The web skin
 
 Core runs in WebAssembly (`web/main.l8`, built with `l8 wasm --async
 bw_wait`): its host's loop waits on the page (`bw_wait`) as Android's
@@ -582,9 +580,9 @@ text, menus where a phone has sheets, the browser's voice for Listen and
 its wake lock for Keep Screen On. Core's words that named the phone are the
 host's (`sk_device`, `sk_follows_text_size`).
 
-It works offline once visited (WEB.md §W9): a Service Worker
+Offline support uses a Service Worker
 (`web/page/sw.js`, `/read/sw.js`, its build's files filled in by
-`build.py`) keeps the shell as it installs and each data file as the app
+`build.py`) that keeps the shell as it installs and each data file as the app
 first reads it (those read before it was there handed over by the page),
 and answers every reader's address with the shell kept; never the site's
 `/api/` or the recordings. The manifest (`/read/manifest.webmanifest`)

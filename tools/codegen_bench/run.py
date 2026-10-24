@@ -7,7 +7,7 @@ Prepare the fixed source checkout once:
 Then, for each revision:
   python3 tools/codegen_bench/run.py build LABEL --compiler ./l8
 Compare adjacent revisions:
-  python3 tools/codegen_bench/run.py compare BEFORE AFTER --output tools/codegen_bench/results/CHANGE.json
+  python3 tools/codegen_bench/run.py compare BEFORE AFTER --output .build/codegen-perf/CHANGE.json
 """
 import argparse
 import hashlib

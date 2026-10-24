@@ -15,9 +15,8 @@ and [`../examples/http-server.l8`](../examples/http-server.l8).
 The selected protocol scope is **HTTP/1.1 over TCP**, with HTTP/1.0 compatibility.
 The reference set includes RFC 9110, RFC 9112, their verified-errata snapshots,
 and the March 2026 RFC 9931 CONNECT security update. Original documents,
-source URLs, and SHA-256 hashes are in [spec/](spec/). The
-[conformance matrix](CONFORMANCE.md) records the implemented scope and historical
-test evidence. The networking test suites have been removed.
+source URLs, and SHA-256 hashes are in [spec/](spec/). Current limits and
+unsupported roles are listed below. No networking test suite is retained.
 
 ## Build and run
 
@@ -239,6 +238,5 @@ explicitly; content codings such as gzip remain opaque representation bytes.
 TLS/HTTPS transport, HTTP/2, HTTP/3, proxy forwarding, caching, cookie storage,
 authentication mechanisms, automatic redirects, content negotiation, compression,
 and automatic retries are outside this implementation. Their fields can be
-carried by the library. RFC 9111 is retained as a reference for future caching,
-not claimed as implemented. Status-specific application obligations (e.g.
+carried by the library. Status-specific application obligations (e.g.
 WWW-Authenticate with 401, Allow with 405) remain the handler's responsibility.

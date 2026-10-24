@@ -3,7 +3,7 @@
 
     make -j4 bible-web
 
-The marketing pages (programs/bible/site/, without DESIGN.md) at the root,
+The marketing pages (programs/bible/site/, without Markdown documentation) at the root,
 and read/: the assets under hashed names (read.<hash>.css, bible.<hash>.js,
 l8.<hash>.js, reload.<hash>.js, app.<hash>.wasm, icons.<hash>.svg, the fonts); the data under
 data/<hash of it all>/, each file gzipped (each version whole, <v>.gz; the
@@ -57,8 +57,8 @@ def boot_hash():
     """worker/boot_hash.js as it should be for web/page/boot.js."""
     with open(os.path.join(HERE, "boot.js"), "rb") as f:
         h = base64.b64encode(hashlib.sha256(f.read()).digest()).decode()
-    return ("// The CSP hash of web/page/boot.js, inlined in every reader page (WEB.md\n"
-            "// §W2.1a). Written by web/page/build.py; test.mjs checks it.\n"
+    return ("// The CSP hash of web/page/boot.js, inlined in every reader page.\n"
+            "// Written by web/page/build.py.\n"
             f'export const BOOT_HASH = "sha256-{h}";\n')
 
 
@@ -105,7 +105,7 @@ def manifest(cache, output):
 def build(wasm, data_manifest, site):
     if os.path.isdir(site):
         shutil.rmtree(site)
-    shutil.copytree(os.path.join(ROOT, "programs", "bible", "site"), site, ignore=shutil.ignore_patterns("DESIGN.md"))
+    shutil.copytree(os.path.join(ROOT, "programs", "bible", "site"), site, ignore=shutil.ignore_patterns("*.md", ".assetsignore"))
     read = os.path.join(site, "read")
     os.makedirs(os.path.join(read, "fonts"))
     css = text(os.path.join(HERE, "read.css"))

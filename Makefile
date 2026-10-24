@@ -25,7 +25,7 @@ SRC2 := $(wildcard src2/*.l8)
 # Programs import one another, the standard library, and native assembly.
 PROGRAMS := $(shell find programs stdlib -type f \( -name '*.l8' -o -name '*.s' \))
 TESTS := $(shell find tests -type f -not -path '*/__pycache__/*')
-# Every compiler fixture and CLI cram test; tests/pending is not run.
+# Every compiler fixture and CLI cram test.
 COMPILER_TESTS := $(sort $(shell find tests/compiler tests/callbacks -name '*.l8') $(wildcard tests/cli/*.t))
 # Fixtures that the stage-1 compiler (built from src1) must pass before it
 # builds stage 2.

@@ -59,3 +59,8 @@ their first assignment:
   warning: tests/compiler/unusedassign.l8:32:5: declaration of delayed can be combined with its first assignment
   warning: tests/compiler/unusedassign.l8:36:5: declaration of branched can be combined with its first assignment
   warning: tests/compiler/unusedassign.l8:40:5: declaration of matched can be combined with its first assignment
+
+The compiler source graphs have no unreachable helper functions:
+
+  $ l8 unused src1/main.l8
+  $ l8 unused src2/main.l8
