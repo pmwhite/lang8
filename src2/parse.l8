@@ -1148,7 +1148,7 @@ new_expr_stmt(lhs: *Expr@new): *Stmt@new {
 
 new_decl(
     name: []i8@new,
-    ty: *Type@new,
+    ty: ?*Type@new,
     init: ?*Expr@new,
     var: ?*Obj@new
 ): *Stmt@new {
@@ -1271,7 +1271,8 @@ new_match_arm(
         trail: null,
         pos: 0,
         file: 0,
-        toklen: 0
+        toklen: 0,
+        end: 0
     }
 }
 
@@ -2004,20 +2005,10 @@ parse_if_expr() noregion raises Error: *Expr@new {
 parse_match_expr() noregion raises Error: *Expr@new {
     skip(TokKind.Match);
     mcond: *Expr = parse_expr();
-    new_match_expr(mcond, parse_match_arms(mcond))
+    new_match_expr(mcond, parse_match_arms())
 }
 
-parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
-    add_type(mcond);
-    et: ?*Type = decay(mcond.ty);
-    enum_subject: bool = false;
-    if (parse_resolve) {
-        if (et == null) error_ty("match requires an enum or integer value", et);
-        etu0: *Type = et;
-        enum_subject = is_enum_ty(etu0);
-        if (!enum_subject && !is_int_width_ty(et)) error_ty("match requires an enum or integer value",
-            et)
-    }
+parse_match_arms() noregion raises Error: ?*MatchArm@new {
     skip(TokKind.LBrace);
     arms: ?*MatchArm = null;
     acur: ?*MatchArm = null;
@@ -2082,40 +2073,7 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
                 chk = chk.next
             }
             if (have_binder) error("wildcard match arm cannot bind a payload")
-        } else if (is_literal) {
-            if (parse_resolve) {
-                if (enum_subject) error("enum match arm requires a variant");
-                lit_ty: *Type = et or error("match requires an integer value");
-                if (is_i8_ty(lit_ty) && (literal < 0 || literal > 255) || is_i32_ty(lit_ty) && (literal < -2147483648 || literal > 2147483647) || is_u32_ty(lit_ty) && (literal < 0 || literal > 4294967295)) error("match literal out of range");
-                chk_lit: ?*MatchArm = arms;
-                while (chk_lit != null) {
-                    if (chk_lit.is_literal && chk_lit.literal == literal) error("duplicate match arm");
-                    chk_lit = chk_lit.next
-                }
-            }
-        } else {
-            if (parse_resolve) {
-                if (!enum_subject) error("integer match arm requires a literal or `_`");
-                etu: *Type = et or error("match requires an enum value");
-                vo: ?*Variant = find_variant(type_enum_def(etu), vname);
-                if (vo == null) error("unknown variant");
-                v: *Variant = vo;
-                chk2: ?*MatchArm = arms;
-                while (chk2 != null) {
-                    if (chk2.variant == v) error("duplicate match arm");
-                    chk2 = chk2.next
-                }
-                arm_variant_n = v;
-                if (have_binder) {
-                    if (v.payload_ty == null) error("unit variant cannot bind a payload");
-                    bo: *Obj = new_obj(binder_name, true);
-                    bo.ty = v.payload_ty;
-                    arm_binder = bo
-                }
-            } else {
-                if (have_binder) arm_binder = new_obj(binder_name, true)
-            }
-        }
+        } else if (have_binder) arm_binder = new_obj(binder_name, true);
         arm_body_n: *Stmt = parse_stmt();
         leave_scope();
         arm: *MatchArm = new_match_arm(vname, arm_variant_n, literal, is_literal,
@@ -2123,6 +2081,7 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
         arm.pos = vpos;
         arm.file = vfile;
         arm.toklen = vlen;
+        arm.end = tok.pos;
         if (acur != null) {
             acur.next = arm;
             acur = arm
@@ -2132,27 +2091,6 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
         }
         if (is_wild) {
             if (tok.kind != TokKind.RBrace) error("wildcard `_` must be the last match arm")
-        }
-    }
-    has_wild: bool = false;
-    walk: ?*MatchArm = arms;
-    while (walk != null) {
-        if (streq(walk.name, "_")) has_wild = true;
-        walk = walk.next
-    }
-    if (!has_wild && parse_resolve) {
-        if (!enum_subject) error("integer match requires a wildcard arm");
-        etu2: *Type = et or error("match requires an enum value");
-        vv: ?*Variant = type_enum_def(etu2).variants;
-        while (vv != null) {
-            found2: bool = false;
-            walk2: ?*MatchArm = arms;
-            while (walk2 != null) {
-                if (walk2.variant == vv) found2 = true;
-                walk2 = walk2.next
-            }
-            if (!found2) error("match not exhaustive");
-            vv = vv.next
         }
     }
     tok = tok.next;
@@ -2218,35 +2156,10 @@ parse_postfix() noregion raises Error: *Expr@new {
                     mlen: int = browse_tok_len;
                     mfile: int = browse_tok_file;
                     tok = tok.next;
-                    if (!parse_resolve) {
-                        n = new_member_access(n, name, null);
-                        n.pos = mpos;
-                        n.file = mfile;
-                        n.toklen = mlen
-                    } else {
-                        add_type(n);
-                        t: ?*Type = decay(n.ty);
-                        sty: *Type = n.ty or error("missing type");
-                        // (Through an optional pointer, the member is found
-                        // all the same: checking the body, which knows every
-                        // assignment before it, says whether it is narrowed.)
-                        if (t != null && is_opt_pointer(t)) t = unwrap_optional(t);
-                        if (t != null && is_pointer(t) && is_struct_ty(type_base(t))) sty = type_base(t) else {
-                            if (t != null && is_pointer(t) && is_exn_ty(type_base(t))) sty = type_base(t) else {
-                                if (!is_struct_ty(sty) && !is_exn_ty(sty)) error_ty("member access on non-struct",
-                                    n.ty)
-                            }
-                        }
-                        m: ?*Member = null;
-                        if (is_exn_ty(sty)) m = find_exn_member(type_exn_def(sty),
-                            name) else m = find_member(type_struct_def(sty), name);
-                        if (m == null) error("unknown member");
-                        mu: *Member = m;
-                        n = new_member_access(n, name, mu);
-                        n.pos = mpos;
-                        n.file = mfile;
-                        n.toklen = mlen
-                    }
+                    n = new_member_access(n, name, null);
+                    n.pos = mpos;
+                    n.file = mfile;
+                    n.toklen = mlen
                 }
             } else {
                 if (tok.kind == TokKind.As || tok.kind == TokKind.Trunc) {
@@ -2979,8 +2892,63 @@ type_if_expr(
     if (en) bind_null_to_pointer(p.ty, els)
 }
 
+// Match subjects may be inferred locals. Resolve payload bindings only after
+// preceding declarations have been checked, in the surrounding effect context.
+resolve_match_arms(cond: *Expr, arms: ?*MatchArm) noregion raises Error {
+    et: *Type = decay(cond.ty) or error_ty("match requires an enum or integer value",
+        null);
+    enum_subject: bool = is_enum_ty(et);
+    if (!enum_subject && !is_int_width_ty(et)) error_ty_expr(cond, "match requires an enum or integer value",
+        et);
+    has_wild: bool = false;
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        if (streq(arm.name, "_")) has_wild = true else if (arm.is_literal) {
+            if (enum_subject) error_at_file(arm.file, arm.pos, "enum match arm requires a variant");
+            literal: int = arm.literal;
+            if (is_i8_ty(et) && (literal < 0 || literal > 255) || is_i32_ty(et) && (literal < -2147483648 || literal > 2147483647) || is_u32_ty(et) && (literal < 0 || literal > 4294967295)) error_at_file(arm.file,
+                arm.body.pos, "match literal out of range")
+        } else {
+            if (!enum_subject) error_at_file(arm.file, arm.pos, "integer match arm requires a literal or `_`");
+            variant: *Variant = find_variant(type_enum_def(et), arm.name) or error_at_file(arm.file,
+                arm.pos, "unknown variant");
+            arm.variant = variant;
+            binder: ?*Obj = arm.binder;
+            if (binder != null) binder.ty = variant.payload_ty or error_at_file(arm.file,
+                arm.pos, "unit variant cannot bind a payload")
+        }
+        prior: ?*MatchArm = arms;
+        while (prior != null && prior != arm) {
+            if (prior.is_literal == arm.is_literal && streq(prior.name, arm.name) || prior.is_literal && arm.is_literal && prior.literal == arm.literal) error_at_file(arm.file,
+                arm.body.pos, "duplicate match arm");
+            prior = prior.next
+        }
+        arm = arm.next
+    }
+    if (!has_wild) {
+        if (!enum_subject) {
+            last: ?*MatchArm = arms;
+            while (last != null && last.next != null) last = last.next;
+            if (last != null) error_at_file(last.file, last.end, "integer match requires a wildcard arm");
+            error("integer match requires a wildcard arm")
+        }
+        variant: ?*Variant = type_enum_def(et).variants;
+        while (variant != null) {
+            found: bool = false;
+            arm = arms;
+            while (arm != null) {
+                if (arm.variant == variant) found = true;
+                arm = arm.next
+            }
+            if (!found) error_at_file(cond.file, cond.pos, "match not exhaustive");
+            variant = variant.next
+        }
+    }
+}
+
 type_match_expr(p: *Expr@new, cond: *Expr@new, arms: ?*MatchArm) noregion raises Error {
     add_type(cond);
+    resolve_match_arms(cond, arms);
     arm: ?*MatchArm = arms;
     while (arm != null) {
         add_type_stmt(arm.body);
@@ -3012,6 +2980,87 @@ type_block_expr(p: *Expr@new, body: ?*Stmt) noregion raises Error {
         s = s.next
     }
     p.ty = stmt_result_ty(last_stmt(body))
+}
+
+// Inferred declarations already typed their initializer to choose storage.
+// Share all assignment checks without visiting that expression a second time.
+type_assignment(
+    p: *Expr,
+    lhs: *Expr@new,
+    rhs: *Expr@new,
+    rhs_typed: bool
+) noregion raises Error {
+    match lhs.kind {
+        Var _p -> {
+            saveu: bool = count_var_use;
+            count_var_use = false;
+            add_type(lhs);
+            count_var_use = saveu
+        }
+        _ -> add_type(lhs)
+    }
+    if (!rhs_typed) add_type(rhs);
+    lt: ?*Type = null;
+    storage: ?*Type = lhs.ty;
+    match lhs.kind {
+        Var vp -> {
+            var: ?*Obj = vp.var;
+            if (var != null) {
+                if (var.is_const) error("cannot assign to const global");
+                storage = var.ty;
+                lt = decay(var.ty)
+            } else lt = decay(lhs.ty)
+        }
+        // (A field stored to is its own type, not its narrowing.)
+        MemberAccess mp -> {
+            mm: ?*Member = mp.member;
+            if (mm != null) {
+                storage = mm.ty;
+                lhs.ty = mm.ty
+            }
+            lt = decay(storage)
+        }
+        _ -> lt = decay(lhs.ty)
+    }
+    if (!assignable(lt, rhs)) error_have_expr_want("assignment type mismatch", rhs,
+        lt);
+    check_store(rhs, dest_life(lhs));
+    if (is_tainted_expr(rhs)) {
+        match lhs.kind {
+            Var vp -> {
+                dest: ?*Obj = vp.var;
+                if (dest == null) error("address of local cannot escape");
+                if (!dest.is_local) error("address of local cannot escape");
+                mark_tainted(dest)
+            }
+            _ -> { }
+        }
+    }
+    match lhs.kind {
+        Var vp2 -> {
+            vo: ?*Obj = vp2.var;
+            if (vo != null) {
+                vu: *Obj = vo;
+                if (vu.is_local && !is_current_param(vu)) {
+                    if (type_has_pointers(vu.ty) || is_tainted_expr(rhs)) vu.life = life_meet(vu.life,
+                        expr_life(rhs))
+                }
+            }
+        }
+        _ -> { }
+    }
+    match lhs.kind {
+        Var vp -> {
+            kill_var_facts(vp.var);
+            narrow_after_store(vp.var, rhs)
+        }
+        Index ik -> {
+            ilt: ?*Type = ik.lhs.ty;
+            if (ilt != null && is_str(ilt)) error("cannot assign through str index")
+        }
+        _ -> { }
+    }
+    p.ty = storage
 }
 
 add_type_expr(p: *Expr@new) noregion raises Error {
@@ -3085,7 +3134,19 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             t0: ?*Type = decay(q.lhs.ty);
             if (t0 != null && is_opt_pointer(t0)) error_ty_expr(q.lhs, "member access on optional pointer (use if (p != null) / while (p != null) to narrow)",
                 t0);
-            mem: *Member = q.member or error("internal");
+            member: ?*Member = q.member;
+            if (member == null) {
+                sty: *Type = t0 or error("missing type");
+                if (is_pointer(sty)) sty = type_base(sty);
+                if (is_exn_ty(sty)) member = find_exn_member(type_exn_def(sty), q.name) else {
+                    if (!is_struct_ty(sty)) error_ty("member access on non-struct",
+                        q.lhs.ty);
+                    member = find_member(type_struct_def(sty), q.name)
+                }
+                if (member == null) error("unknown member");
+                p.kind = ExprKind.MemberAccess { lhs: q.lhs, name: q.name, member: member }
+            }
+            mem: *Member = member or error("missing member");
             p.ty = mem.ty;
             // (Tested against null, with nothing since that may change it.)
             nt: ?*Type = path_view_ty(p);
@@ -3199,77 +3260,7 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             return
         }
         Assign q -> {
-            match q.lhs.kind {
-                Var _p -> {
-                    saveu: bool = count_var_use;
-                    count_var_use = false;
-                    add_type(q.lhs);
-                    count_var_use = saveu
-                }
-                _ -> add_type(q.lhs)
-            }
-            add_type(q.rhs);
-            lt: ?*Type = null;
-            storage: ?*Type = q.lhs.ty;
-            match q.lhs.kind {
-                Var vp -> {
-                    var: ?*Obj = vp.var;
-                    if (var != null) {
-                        if (var.is_const) error("cannot assign to const global");
-                        storage = var.ty;
-                        lt = decay(var.ty)
-                    } else lt = decay(q.lhs.ty)
-                }
-                // (A field stored to is its own type, not its narrowing.)
-                MemberAccess mp -> {
-                    mm: ?*Member = mp.member;
-                    if (mm != null) {
-                        storage = mm.ty;
-                        q.lhs.ty = mm.ty
-                    }
-                    lt = decay(storage)
-                }
-                _ -> lt = decay(q.lhs.ty)
-            }
-            if (!assignable(lt, q.rhs)) error_have_expr_want("assignment type mismatch",
-                q.rhs, lt);
-            check_store(q.rhs, dest_life(q.lhs));
-            if (is_tainted_expr(q.rhs)) {
-                match q.lhs.kind {
-                    Var vp -> {
-                        dest: ?*Obj = vp.var;
-                        if (dest == null) error("address of local cannot escape");
-                        if (!dest.is_local) error("address of local cannot escape");
-                        mark_tainted(dest)
-                    }
-                    _ -> { }
-                }
-            }
-            match q.lhs.kind {
-                Var vp2 -> {
-                    vo: ?*Obj = vp2.var;
-                    if (vo != null) {
-                        vu: *Obj = vo;
-                        if (vu.is_local && !is_current_param(vu)) {
-                            if (type_has_pointers(vu.ty) || is_tainted_expr(q.rhs)) vu.life = life_meet(vu.life,
-                                expr_life(q.rhs))
-                        }
-                    }
-                }
-                _ -> { }
-            }
-            match q.lhs.kind {
-                Var vp -> {
-                    kill_var_facts(vp.var);
-                    narrow_after_store(vp.var, q.rhs)
-                }
-                Index ik -> {
-                    ilt: ?*Type = ik.lhs.ty;
-                    if (ilt != null && is_str(ilt)) error("cannot assign through str index")
-                }
-                _ -> { }
-            }
-            p.ty = storage;
+            type_assignment(p, q.lhs, q.rhs, false);
             return
         }
         Addr q -> {
@@ -3423,7 +3414,7 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 target: null
             };
             add_callee(fnu);
-            if (fnu.return_ty != null) p.ty = fnu.return_ty else p.ty = ty_int;
+            p.ty = fnu.return_ty;
             na: int = 0;
             a = call_args;
             while (a != null) {
@@ -3608,6 +3599,7 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
         }
         Match k -> {
             add_type(k.cond);
+            resolve_match_arms(k.cond, k.arms);
             a5: ?*MatchArm = k.arms;
             while (a5 != null) {
                 add_type_stmt(a5.body);
@@ -3626,8 +3618,22 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
         Decl k -> {
             vo: ?*Obj = k.var;
             init: ?*Expr = k.init;
-            if (init != null && vo != null) add_type(new_assign(new_var_node(vo),
-                init));
+            if (init != null && vo != null) {
+                inferred_initializer: bool = k.ty == null && vo.ty == null;
+                if (inferred_initializer) {
+                    add_type(init);
+                    inferred: ?*Type = init.ty;
+                    if (inferred == null) {
+                        if (is_null_value_expr(init)) error("cannot infer local type; add an explicit annotation");
+                        error("local initializer does not produce a value")
+                    }
+                    if (is_noreturn_ty(inferred)) error("local initializer does not produce a value");
+                    vo.ty = inferred
+                }
+                lhs: *Expr = new_var_node(vo);
+                assignment: *Expr = new_assign(lhs, init);
+                if (inferred_initializer) type_assignment(assignment, lhs, init, true) else add_type(assignment)
+            }
             return
         }
         _ -> { }
@@ -4062,11 +4068,7 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         fitem.browse_pos = ipos;
         fitem.browse_file = ifile;
         fitem.browse_len = ilen;
-        if (fhi != null) fitem.ty = ty_int else if (parse_resolve) {
-            add_type(fiter);
-            it: ?*Type = decay(fiter.ty);
-            if (it != null && (is_slice(it) || is_str(it) || is_array(it))) fitem.ty = type_base(it)
-        }
+        if (fhi != null) fitem.ty = ty_int;
         enter_scope();
         fbody: *Stmt = parse_stmt();
         leave_scope();
@@ -4076,9 +4078,25 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
     if (tok.kind == TokKind.Match) {
         tok = tok.next;
         mcond: *Expr = parse_expr();
-        return new_match(mcond, parse_match_arms(mcond))
+        return new_match(mcond, parse_match_arms())
     }
     if (tok.kind == TokKind.LBrace) return parse_compound();
+    if (tok.kind == TokKind.Ident && tok.next.kind == TokKind.Colon && tok.next.next.kind == TokKind.Assign) {
+        name: []i8 = cur_tokstr();
+        browse_note();
+        pos: int = browse_tok_pos;
+        file: int = browse_tok_file;
+        toklen: int = browse_tok_len;
+        tok = tok.next.next.next;
+        // The new binding is not visible inside its own initializer.
+        rhs: *Expr = parse_expr();
+        o: *Obj = new_obj(name, true);
+        o.browse_pos = pos;
+        o.browse_file = file;
+        o.browse_len = toklen;
+        skip_stmt_semi();
+        return new_decl(name, null, rhs, o)
+    }
     if (tok.kind == TokKind.Ident && tok.next.kind == TokKind.Colon) {
         o: *Obj = parse_decl(true, false);
         if (tok.kind == TokKind.Comma) error("only one variable per declaration");

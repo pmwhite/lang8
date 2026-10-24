@@ -43,6 +43,9 @@ Typical evolution for a breaking language change:
 
 ## Unified command line
 
+[Local type inference](LOCAL_INFERENCE.md) uses `name := initializer`; explicit
+`name: Type = initializer` declarations remain available.
+
 [Named parameters](NAMED_ARGUMENTS.md) use `named name: Type` in declarations
 and `name: value` in calls. Unmarked parameters remain positional.
 
