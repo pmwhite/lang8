@@ -72,7 +72,7 @@ heap_base: .space 8
 heap_end:  .space 8
 initial_envp: .space 8
 // Transitional legacy heap is executable-owned BSS, with no startup mmap.
-heap_storage: .space 805306368
+heap_storage: .space 268435456
 l8_args_header: .space 8
 l8_args_values: .space 32768
 l8_args_text: .space 4194304
@@ -112,7 +112,7 @@ _start:
     str x0, [x1, :lo12:heap_ptr]
     adrp x1, heap_base
     str x0, [x1, :lo12:heap_base]
-    mov x2, #0x30000000
+    mov x2, #0x10000000
     add x0, x0, x2
     adrp x1, heap_end
     str x0, [x1, :lo12:heap_end]

@@ -5,33 +5,53 @@
     .section __TEXT,__text,regular,pure_instructions
     .p2align 2
 
-// wasm_mem_map(size): []i8 -- size bytes of zeroed memory that never move
-// (an anonymous mapping, committed as touched), as an L8 byte slice: its
-// length is the 8 bytes before it. 0 when it cannot be had.
+// Three static linear-memory owners, matching native.s.
     .globl _wasm_mem_map
 _wasm_mem_map:
-    stp x29, x30, [sp, #-32]!
-    mov x29, sp
-    str x19, [sp, #16]
-    mov x19, x0
-    mov x0, #0
-    add x1, x19, #16
-    mov x2, #3
-    mov x3, #0x1002
-    mov x4, #-1
-    mov x5, #0
-    bl _mmap
-    cmn x0, #1
-    b.eq Lmap_failed
-    str x19, [x0, #8]
-    add x0, x0, #16
-    ldr x19, [sp, #16]
-    ldp x29, x30, [sp], #32
+    cmp x0, #0
+    b.le Lmap_failed
+    mov x9, #0x10000000
+    cmp x0, x9
+    b.hi Lmap_large
+    adrp x8, Lwasm_memory_small1@PAGE
+    add x8, x8, Lwasm_memory_small1@PAGEOFF
+    ldr x10, [x8]
+    cbz x10, Lmap_take
+    adrp x8, Lwasm_memory_small2@PAGE
+    add x8, x8, Lwasm_memory_small2@PAGEOFF
+    ldr x10, [x8]
+    cbz x10, Lmap_take
+Lmap_large:
+    mov x9, #0x30000000
+    cmp x0, x9
+    b.hi Lmap_failed
+    adrp x8, Lwasm_memory_large@PAGE
+    add x8, x8, Lwasm_memory_large@PAGEOFF
+    ldr x10, [x8]
+    cbnz x10, Lmap_failed
+Lmap_take:
+    mov x10, #1
+    str x10, [x8]
+    str x0, [x8, #8]
+    add x0, x8, #16
     ret
 Lmap_failed:
     mov x0, #0
-    ldr x19, [sp, #16]
-    ldp x29, x30, [sp], #32
+    ret
+
+    .globl _wasm_mem_release
+_wasm_mem_release:
+    mov x8, x0
+    add x9, x0, x1
+Lmap_clear:
+    cmp x8, x9
+    b.hs Lmap_cleared
+    str xzr, [x8]
+    add x8, x8, #8
+    b Lmap_clear
+Lmap_cleared:
+    stur xzr, [x0, #-8]
+    stur xzr, [x0, #-16]
     ret
 
 // wasm_mem_words(m: []i8): []int -- a view of the same memory as words,
@@ -3435,3 +3455,9 @@ wasm_extra:
     .p2align 4
 wasm_cb_slots:
     .skip 16384
+
+    .section __DATA,__bss
+    .p2align 3
+Lwasm_memory_large: .space 805306384
+Lwasm_memory_small1: .space 268435472
+Lwasm_memory_small2: .space 268435472

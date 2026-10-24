@@ -67,12 +67,12 @@ heap_ptr:  .skip 8
 heap_base: .skip 8
 heap_end:  .skip 8
 initial_envp: .skip 8
-.equ HEAP_SIZE, 768*1024*1024
+.equ HEAP_SIZE, 256*1024*1024
 
 # Transitional legacy heap backing is reserved in the executable's BSS. It
 # remains only for unmigrated constructors; startup never maps a dynamic heap.
 .align 8
-heap_storage: .skip 805306368
+heap_storage: .skip 268435456
 
 # Bounded process-owned copies: 4096 strings and 4 MiB of counted text each.
 .align 8

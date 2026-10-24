@@ -84,8 +84,8 @@ Native runtimes reserve argument/environment vectors for 4,096 strings each,
 with separate 4 MiB counted-text owners. Environment reads reuse a permanent
 snapshot. Android starts with an empty argument vector. Native startup no longer
 maps an L8 heap. During migration, the legacy allocator still has fixed BSS
-backing (768 MiB on Linux, 256 MiB on iOS/Android) for unmigrated code; retaining
-that arena is not completion. Wasm argument transfer and legacy memory growth
+backing (256 MiB per native runtime) for unmigrated code; retaining
+that arena is not completion. Wasm argument transfer and legacy module memory growth
 remain separate host/runtime work.
 
 The source compiler now borrows immutable command text and uses static byte
@@ -138,7 +138,7 @@ The inventory counts explicit `new` expressions, `region` blocks, and `bytes()` 
 `cstr()` call syntax per file. It skips comments, strings, character literals,
 expectation text, and `@new` lifetime contracts. Reports separate `src1`, `src2`,
 `stdlib`, each application, and fixtures. The first inventory had 4,165 explicit
-`new` sites. The current migration checkpoint has 242 (3,923 removed), including
+`new` sites. The current migration checkpoint has 214 (3,951 removed), including
 bootstrap and fixtures. Standard output uses a fixed integer buffer and read-only
 text spans without heap copies.
 
