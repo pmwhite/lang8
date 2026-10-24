@@ -6,6 +6,12 @@ type DiagnosticSource = {
     length: int
 }
 
+type DiagnosticSpan = {
+    file: int;
+    pos: int;
+    length: int
+}
+
 type LifetimeDiagnostics = {
     output: *StrBuf;
     count: int
@@ -39,29 +45,29 @@ append_diagnostic_location(output: *StrBuf@new, file: int, pos: int) raises Erro
     sb_uint(output, column)
 }
 
-append_diagnostic_excerpt(output: *StrBuf@new, cause: *NoregionCause) raises Error {
-    input: DiagnosticSource = diagnostic_source(cause.file);
-    append_diagnostic_location(output, cause.file, cause.pos);
+append_diagnostic_excerpt(output: *StrBuf@new, location: DiagnosticSpan) raises Error {
+    input: DiagnosticSource = diagnostic_source(location.file);
+    append_diagnostic_location(output, location.file, location.pos);
     sb_puts(output, """
 
 
 """);
     limit: int = input.length;
     if (limit > len(input.text)) limit = len(input.text);
-    if (cause.pos < 0 || cause.pos >= limit) return;
-    start: int = cause.pos;
+    if (location.pos < 0 || location.pos >= limit) return;
+    start: int = location.pos;
     while (start > 0 && input.text[start - 1] != '\n') start = start - 1;
-    end: int = cause.pos;
+    end: int = location.pos;
     while (end < limit && input.text[end] != '\n' && input.text[end] != '\r') end = end + 1;
     for cursor in start..end sb_putc(output, input.text[cursor]);
     sb_putc(output, '\n');
-    for cursor in start..cause.pos {
+    for cursor in start..location.pos {
         if (input.text[cursor] == '\t') sb_putc(output, '\t') else sb_putc(output,
             ' ')
     }
-    span: int = cause.span;
+    span: int = location.length;
     if (span < 1) span = 1;
-    if (span > end - cause.pos) span = end - cause.pos;
+    if (span > end - location.pos) span = end - location.pos;
     for _cursor in 0..span sb_putc(output, '^');
     sb_puts(output, """
 
@@ -96,6 +102,135 @@ append_diagnostic_paragraph(output: *StrBuf@new, text: []i8) raises Error {
 
 
 """)
+}
+
+// A guard example may reuse the call only when evaluating its other inputs
+// cannot change the local being narrowed, and the spelling fits on one line.
+nullable_guard_call_available(call: *Expr): bool {
+    match call.kind {
+        Funcall invocation -> {
+            target: ?*Expr = invocation.target;
+            if (target != null) {
+                match target.kind {
+                    Var _ -> { }
+                    _ -> return false
+                }
+            }
+            argument: ?*Expr = invocation.args;
+            while (argument != null) {
+                match argument.kind {
+                    Var _ -> { }
+                    Num _ -> { }
+                    Null -> { }
+                    _ -> return false
+                }
+                argument = argument.next
+            }
+        }
+        _ -> return false
+    }
+    input: DiagnosticSource = diagnostic_source(call.file);
+    if (call.source_start < 0 || call.source_end <= call.source_start || call.source_end > input.length || call.source_end > len(input.text)) return false;
+    for cursor in call.source_start..call.source_end {
+        if (input.text[cursor] == '\n' || input.text[cursor] == '\r') return false
+    }
+    true
+}
+
+error_nullable_argument(
+    call: *Expr,
+    callee: *Function,
+    argument: *Expr,
+    parameter: *Obj
+) noregion raises Error: noreturn {
+    output: *StrBuf = sb_new();
+    argument_pos: int = argument.pos;
+    argument_file: int = argument.file;
+    argument_length: int = argument.toklen;
+    if (argument.source_end > argument.source_start) {
+        argument_pos = argument.source_start;
+        argument_length = argument.source_end - argument.source_start
+    }
+    if (argument_pos == 0) {
+        argument_pos = call.pos;
+        argument_file = call.file
+    }
+    append_diagnostic_excerpt(output, DiagnosticSpan { file: argument_file, pos: argument_pos, length: argument_length });
+    local: ?*Obj = opt_local_var(argument);
+    paragraph: *StrBuf = sb_new();
+    match argument.kind {
+        Var reference -> sb_puts(paragraph, reference.name);
+        _ -> sb_puts(paragraph, "This argument")
+    }
+    sb_puts(paragraph, " has type ");
+    append_type(paragraph, argument.ty);
+    sb_puts(paragraph, " and may be null. Parameter ");
+    sb_puts(paragraph, parameter.name);
+    sb_puts(paragraph, " of ");
+    callee_name: []i8 = callee.name;
+    if (len(callee_name) == 0) callee_name = "this function value";
+    sb_puts(paragraph, callee_name);
+    sb_puts(paragraph, " requires ");
+    append_type(paragraph, parameter.ty);
+    sb_puts(paragraph, ", which does not accept null:");
+    append_diagnostic_paragraph(output, sb_finish(paragraph));
+    append_diagnostic_excerpt(output, DiagnosticSpan { file: parameter.browse_file, pos: parameter.declared_type_pos, length: parameter.declared_type_end - parameter.declared_type_pos });
+    if (local != null) {
+        paragraph.used = 0;
+        sb_puts(paragraph, "If a missing value means there is nothing to do, make the call only when ");
+        sb_puts(paragraph, local.name);
+        sb_puts(paragraph, " != null.");
+        append_diagnostic_paragraph(output, sb_finish(paragraph));
+        if (nullable_guard_call_available(call)) {
+            input: DiagnosticSource = diagnostic_source(call.file);
+            sb_puts(output, "    if (");
+            sb_puts(output, local.name);
+            sb_puts(output, """
+ != null) {
+        """);
+            for cursor in call.source_start..call.source_end sb_putc(output, input.text[cursor]);
+            sb_puts(output, """
+
+    }
+
+""")
+        }
+    } else append_diagnostic_paragraph(output, "If a missing value means there is nothing to do, bind the argument to a local value, check it against null, and make the call only in the non-null branch. Binding it once avoids evaluating the argument twice.");
+    append_diagnostic_paragraph(output, "If a missing value is an error, handle that case before making the call.");
+    paragraph.used = 0;
+    sb_puts(paragraph, "If ");
+    sb_puts(paragraph, callee_name);
+    sb_puts(paragraph, " should decide what absence means, change its parameter ");
+    sb_puts(paragraph, parameter.name);
+    sb_puts(paragraph, " to ");
+    append_type(paragraph, argument.ty);
+    sb_puts(paragraph, " and handle null there before ");
+    expected: ?*Type = parameter.ty;
+    if (expected != null && is_pointer(expected)) sb_puts(paragraph, "dereferencing it.") else if (expected != null && is_fnptr(expected)) sb_puts(paragraph,
+        "calling it.") else sb_puts(paragraph, "using it as a non-null value.");
+    append_diagnostic_paragraph(output, sb_finish(paragraph));
+    if (callee.is_extern) append_diagnostic_paragraph(output, "Only change an external declaration if the external function really accepts null.");
+    if (len(callee.name) == 0) append_diagnostic_paragraph(output, "For a function value, update its declared signature and the functions assigned to it consistently.");
+    raise Error { diagnostic: Diagnostic.Document { text: sb_finish(output) } }
+}
+
+error_call_argument_type(
+    call: *Expr,
+    callee: *Function,
+    argument: *Expr,
+    parameter: *Obj
+) noregion raises Error: noreturn {
+    have: ?*Type = argument.ty;
+    want: ?*Type = parameter.ty;
+    if (have != null && want != null && is_optional(have) && !is_optional(want)) {
+        if (types_equal(unwrap_optional(have), want)) error_nullable_argument(call,
+            callee, argument, parameter)
+    }
+    callee_name: []i8 = callee.name;
+    if (len(callee_name) == 0) error_have_expr_want(argument_type_mismatch_message("function value",
+        parameter.name), argument, want);
+    error_have_expr_want_at(call.file, call.pos, argument_type_mismatch_message(callee_name,
+        parameter.name), argument, want)
 }
 
 // A propagated cause points to a function that already needed noregion, so the
@@ -158,7 +293,7 @@ append_noregion_callers(output: *StrBuf@new, root: *Function, primary: *Function
 
 append_noregion_diagnostic(output: *StrBuf@new, fn: *Function) raises Error {
     cause: ?*NoregionCause = fn.noregion_cause;
-    if (cause != null) append_diagnostic_excerpt(output, cause) else {
+    if (cause != null) append_diagnostic_excerpt(output, DiagnosticSpan { file: cause.file, pos: cause.pos, length: cause.span }) else {
         append_diagnostic_location(output, fn.browse_file, fn.browse_pos);
         sb_puts(output, """
 

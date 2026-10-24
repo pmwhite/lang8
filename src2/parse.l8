@@ -973,6 +973,8 @@ mk_expr(k: ExprKind@new): *Expr@new {
         pos: 0,
         file: 0,
         toklen: 0,
+        source_start: 0,
+        source_end: 0,
         cg_temp: 0
     }
 }
@@ -1384,6 +1386,8 @@ new_obj(name: []i8@new, is_local: bool) noregion: *Obj@new {
         bound_need_imm: false,
         bound_need_new: false,
         bound_named: null,
+        declared_type_pos: 0,
+        declared_type_end: 0,
         browse_id: browse_fresh(),
         browse_pos: browse_tok_pos,
         browse_file: browse_tok_file,
@@ -1523,8 +1527,22 @@ parse_type() noregion raises Error: *Type@new {
     decl_spec()
 }
 
+token_span_end(first: *Token, after: *Token): int {
+    last: *Token = first;
+    while (last.next != after && last.kind != TokKind.Eof) last = last.next;
+    last.pos + last.len
+}
+
 parse_expr() noregion raises Error: *Expr@new {
-    parse_assign()
+    first: *Token = tok;
+    expression: *Expr = parse_assign();
+    if (expression.pos == 0) expression.file = current_file_id;
+    if (expression.source_end == 0) {
+        expression.source_start = first.pos;
+        if (len(first.qualifier) != 0) expression.source_start = first.pos - len(first.qualifier) - 2;
+        expression.source_end = token_span_end(first, tok)
+    }
+    expression
 }
 
 parse_field_inits(members: ?*Member@new) noregion raises Error: ?*FieldInit@new {
@@ -1910,11 +1928,15 @@ parse_primary() noregion raises Error: *Expr@new {
                     cur = arg
                 }
             }
+            call_end: int = tok.pos + tok.len;
             skip(TokKind.RParen);
             fe: *Expr = new_funcall(name, head);
             fe.pos = npos;
             fe.file = nfile;
             fe.toklen = nlen;
+            fe.source_start = npos;
+            if (qualified) fe.source_start = npos - len(qualifier) - 2;
+            fe.source_end = call_end;
             return fe
         }
         varo: ?*Obj = find_var(name);
@@ -2210,6 +2232,8 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
 }
 
 parse_postfix() noregion raises Error: *Expr@new {
+    call_start: int = tok.pos;
+    if (len(tok.qualifier) != 0) call_start = call_start - len(tok.qualifier) - 2;
     n: *Expr = parse_primary();
     while (true) {
         if (tok.kind == TokKind.LParen) {
@@ -2222,6 +2246,7 @@ parse_postfix() noregion raises Error: *Expr@new {
                 if (tail != null) tail.next = arg else head = arg;
                 tail = arg
             }
+            call_end: int = tok.pos + tok.len;
             skip(TokKind.RParen);
             call: *Expr = mk_expr(ExprKind.Funcall {
                 funcname: "",
@@ -2232,6 +2257,8 @@ parse_postfix() noregion raises Error: *Expr@new {
             call.pos = n.pos;
             call.file = n.file;
             call.toklen = n.toklen;
+            call.source_start = call_start;
+            call.source_end = call_end;
             n = call
         } else if (tok.kind == TokKind.LBrack) {
             access_pos: int = tok.pos;
@@ -3474,9 +3501,8 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 if (po != null) {
                     if (po.ty != null) {
                         pt: ?*Type = decay(po.ty);
-                        if (!assignable(pt, a)) error_have_expr_want_at(p.file, p.pos,
-                            argument_type_mismatch_message(q.funcname, po.name), a,
-                            pt)
+                        if (!assignable(pt, a)) error_call_argument_type(p, fnu, a,
+                            po)
                     }
                     po = po.param_next
                 }
@@ -3841,9 +3867,14 @@ parse_decl(is_local: bool, allow_at: bool) noregion raises Error: *Obj@new {
     if (tok.kind != TokKind.Ident) error("expected identifier");
     name: []i8 = cur_tokstr();
     browse_note();
+    name_pos: int = browse_tok_pos;
+    name_file: int = browse_tok_file;
+    name_length: int = browse_tok_len;
     tok = tok.next;
     skip(TokKind.Colon);
+    first_type_token: *Token = tok;
     ty: *Type = parse_type();
+    type_end: int = token_span_end(first_type_token, tok);
     if (is_noreturn_ty(ty)) error("noreturn is only valid as a function return type");
     bound: []i8 = "";
     if (tok.kind == TokKind.At) {
@@ -3858,6 +3889,11 @@ parse_decl(is_local: bool, allow_at: bool) noregion raises Error: *Obj@new {
         } else bound = name
     }
     o: *Obj = new_obj(name, is_local);
+    o.browse_pos = name_pos;
+    o.browse_file = name_file;
+    o.browse_len = name_length;
+    o.declared_type_pos = first_type_token.pos;
+    o.declared_type_end = type_end;
     o.ty = ty;
     o.life_bound = bound;
     o
