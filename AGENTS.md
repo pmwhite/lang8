@@ -1,5 +1,9 @@
 # Working in this repository
 
+Before planning or changing code, read [STYLE.md](STYLE.md) in full. Treat
+it as required project policy; existing code is not a style precedent.
+Before finishing, review the diff against the applicable rules.
+
 L8 is self-hosted. Read [BOOTSTRAP.md](BOOTSTRAP.md) for compiler stages,
 [TESTING.md](TESTING.md) for expect/cram tests, [RELOAD.md](RELOAD.md) for
 hot reload, and the affected program's README.
@@ -26,7 +30,6 @@ hot reload, and the affected program's README.
 
 ## Editing
 
-- Follow [STYLE.md](STYLE.md) for code style; existing code is not the standard.
 - Keep replacements small, assert intended matches and preserve original
   bytes. Compile after structural edits before repeating them widely.
 - Format changed L8 files with `./l8c3 fmt -w path/to/file.l8`, then review
