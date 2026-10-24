@@ -252,7 +252,7 @@ output, so a broken edit is never recorded as the expected result:
   [1]
   $ printf 'tag demo;\n\ntest "same" { }\n\ntest "same" { }\n' > twice.l8
   $ l8 compile twice.l8
-  error: twice.l8:5:7: duplicate test name
+  error: twice.l8:5:7: test "same" is declared more than once
   [1]
 
 Cram files run their commands in a scratch directory with `l8` on the path;
