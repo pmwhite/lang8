@@ -281,3 +281,17 @@ and visible costs.
 
 Apply this to language features, library APIs, compiler workflows,
 command-line tools, and graphical interfaces.
+
+## 24. Match allocation lifetimes to actual use
+
+Distinguish persistent state, session-owned data, operation-local scratch,
+and borrowed views. Give owned allocations a clear lifetime and reclamation
+mechanism.
+
+For repeated work, memory consumption should follow live data and deliberate
+working-set bounds—not the number of completed operations. Choose regions,
+arenas, or reusable storage according to those lifetimes. Avoid replacing a
+reclamation problem with immortal globals or arbitrary fixed capacities.
+
+When the language cannot express the required ownership or reclamation,
+improve its lifetime model or runtime rather than bypassing safety checks.
