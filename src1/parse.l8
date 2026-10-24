@@ -973,7 +973,11 @@ mk_expr(k: ExprKind@new): *Expr@new {
         pos: 0,
         file: 0,
         toklen: 0,
-        cg_temp: 0
+        cg_temp: 0,
+        arg_label: "",
+        arg_order: 0,
+        arg_index: -1,
+        arg_pos: 0
     }
 }
 
@@ -1384,6 +1388,7 @@ new_obj(name: []i8@new, is_local: bool) noregion: *Obj@new {
         init: null,
         next: null,
         param_next: null,
+        param_label: "",
         hash_next: null,
         life: 0,
         storage_life: 0,
@@ -1871,7 +1876,7 @@ parse_primary() noregion raises Error: *Expr@new {
             cur: ?*Expr = null;
             while (tok.kind != TokKind.RParen) {
                 if (cur != null) skip(TokKind.Comma);
-                arg: *Expr = parse_expr();
+                arg: *Expr = parse_call_argument();
                 if (cur != null) {
                     cur.next = arg;
                     cur = arg
@@ -2154,6 +2159,20 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
     arms
 }
 
+// Labels belong to call arguments, never to assignment expressions.
+parse_call_argument() noregion raises Error: *Expr@new {
+    argument_pos: int = tok.pos;
+    label: []i8 = "";
+    if (tok.kind == TokKind.Ident && tok.next.kind == TokKind.Colon) {
+        label = cur_tokstr();
+        tok = tok.next.next
+    }
+    argument: *Expr = parse_expr();
+    argument.arg_label = label;
+    argument.arg_pos = argument_pos;
+    argument
+}
+
 parse_postfix() noregion raises Error: *Expr@new {
     n: *Expr = parse_primary();
     while (true) {
@@ -2163,7 +2182,7 @@ parse_postfix() noregion raises Error: *Expr@new {
             tail: ?*Expr = null;
             while (tok.kind != TokKind.RParen) {
                 if (tail != null) skip(TokKind.Comma);
-                arg: *Expr = parse_expr();
+                arg: *Expr = parse_call_argument();
                 if (tail != null) tail.next = arg else head = arg;
                 tail = arg
             }
@@ -3294,10 +3313,16 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 type_indirect_call(p);
                 return
             }
-            a: ?*Expr = q.args;
-            while (a != null) {
-                add_type(a);
-                a = a.next
+            type_call_arguments(q.args);
+            a: ?*Expr = null;
+            if (streq(q.funcname, "len") || streq(q.funcname, "cstr") || streq(q.funcname,
+                "bytes") || streq(q.funcname, "memcpy") || streq(q.funcname, "read")) {
+                builtin_arg: ?*Expr = q.args;
+                while (builtin_arg != null) {
+                    if (len(builtin_arg.arg_label) != 0) error_at_file(p.file, builtin_arg.arg_pos,
+                        "builtin arguments are positional");
+                    builtin_arg = builtin_arg.next
+                }
             }
             lenarg: ?*Expr = q.args;
             if (streq(q.funcname, "len")) {
@@ -3389,23 +3414,24 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 error(sb_finish(sb))
             }
             fnu: *Function = fno;
-            check_call_lifetimes(fnu, q.args);
+            call_args: ?*Expr = bind_call_arguments(fnu, q.args, p);
+            check_call_lifetimes(fnu, call_args);
             p.kind = ExprKind.Funcall {
                 funcname: q.funcname,
-                args: q.args,
+                args: call_args,
                 fn: fnu,
                 target: null
             };
             add_callee(fnu);
             if (fnu.return_ty != null) p.ty = fnu.return_ty else p.ty = ty_int;
             na: int = 0;
-            a = q.args;
+            a = call_args;
             while (a != null) {
                 na = na + 1;
                 a = a.next
             }
             if (na != fnu.nparams) error("wrong number of arguments");
-            a = q.args;
+            a = call_args;
             po: ?*Obj = fnu.params;
             while (a != null) {
                 if (po != null) {
@@ -4146,6 +4172,8 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
     np: int = 0;
     while (tok.kind != TokKind.RParen) {
         if (np != 0) skip(TokKind.Comma);
+        named_parameter: bool = tok.kind == TokKind.Ident && streq(cur_tokstr(), "named") && tok.next.kind == TokKind.Ident;
+        if (named_parameter) tok = tok.next;
         parameter_name: []i8 = cur_tokstr();
         previous: ?*Obj = fn.params;
         while (previous != null) {
@@ -4153,6 +4181,7 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
             previous = previous.param_next
         }
         p: *Obj = parse_decl(true, true);
+        if (named_parameter) p.param_label = p.name;
         append_fn_param(fn, p);
         np = np + 1
     }
@@ -4189,7 +4218,8 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
                 rtail = el
             }
             tok = tok.next;
-            if (is_extern == 2 && tok.kind == TokKind.Comma && tok.next.kind == TokKind.Ident && tok.next.next.kind == TokKind.Colon) {
+            if (is_extern == 2 && tok.kind == TokKind.Comma && tok.next.kind == TokKind.Ident && (tok.next.next.kind == TokKind.Colon || name_eq_span("named",
+                source, tok.next.pos, tok.next.len) && tok.next.next.kind == TokKind.Ident && tok.next.next.next.kind == TokKind.Colon)) {
                 // A void function type's raises list ends before the next
                 // parameter of the containing signature.
                 rdone = true

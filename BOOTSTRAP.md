@@ -43,6 +43,9 @@ Typical evolution for a breaking language change:
 
 ## Unified command line
 
+[Named parameters](NAMED_ARGUMENTS.md) use `named name: Type` in declarations
+and `name: value` in calls. Unmarked parameters remain positional.
+
 Function values, indirect calls, and C callbacks are supported by both source
 stages. See
 [`tests/callbacks/README.md`](tests/callbacks/README.md) for `fn` syntax,
