@@ -26,7 +26,7 @@ the same way:
 
 ```l8
 /* expect compile {|
-error: badopen.l8:8:5: argument type mismatch: have []i8, want str
+error: badopen.l8:8:5: argument type mismatch for parameter path of open: have []i8, want str
 |} */
 ```
 
