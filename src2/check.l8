@@ -1,6 +1,180 @@
 tag compiler_internal;
 
 // Lifetimes, typing, and post-parse checks (unused, raises, definite assignment).
+life_reset_imm() {
+    life_arrays.n = 3;
+    life_arrays.parent[0] = 0 - 1;
+    life_arrays.kind[0] = 0;
+    life_arrays.parent[1] = 0 - 1;
+    life_arrays.kind[1] = 2;
+    life_arrays.parent[2] = 0 - 1;
+    life_arrays.kind[2] = 1;
+    life_heap = LIFE_IMM;
+    life_cur = LIFE_SELF;
+    life_region_tc = 1;
+    life_arrays.depth_frames[1] = LIFE_SELF;
+    life_arrays.edge_n = 0
+}
+
+life_alloc_frame(parent: int, kind: int) raises Error: int {
+    if (life_arrays.n >= len(life_arrays.parent)) error("too many lifetime frames");
+    id: int = life_arrays.n;
+    life_arrays.parent[id] = parent;
+    life_arrays.kind[id] = kind;
+    life_arrays.n = life_arrays.n + 1;
+    id
+}
+
+life_add_edge(longer: int, shorter: int) {
+    if (life_arrays.edge_n >= len(life_arrays.edge_long)) return;
+    life_arrays.edge_long[life_arrays.edge_n] = longer;
+    life_arrays.edge_short[life_arrays.edge_n] = shorter;
+    life_arrays.edge_n = life_arrays.edge_n + 1
+}
+
+life_is_param(id: int): bool {
+    id >= 3 && id < life_arrays.n && life_arrays.kind[id] == LIFE_KIND_PARAM
+}
+
+life_is_region(id: int): bool {
+    id >= 3 && id < life_arrays.n && life_arrays.kind[id] == 2
+}
+
+life_parent_reaches(from: int, anc: int): bool {
+    x: int = from;
+    steps: int = 0;
+    while (x >= 0 && x < life_arrays.n && steps < 64) {
+        if (x == anc) return true;
+        x = life_arrays.parent[x];
+        steps = steps + 1
+    }
+    false
+}
+
+life_outlives_lim(a: int, b: int, depth: int): bool {
+    if (depth > 32) return false;
+    if (a == b) return true;
+    if (a == LIFE_IMM) return true;
+    if (b == LIFE_IMM) {
+        if (a == LIFE_HEAPTOP) {
+            fn: ?*Function = current_fn;
+            if (fn != null) {
+                fu: *Function = fn;
+                if (fu.need_imm_heap != 0) return true
+            }
+        }
+        return false
+    }
+    if (life_parent_reaches(b, a)) return true;
+    if (b == LIFE_SELF) {
+        if (a == LIFE_HEAPTOP) return true;
+        if (life_is_param(a)) return true;
+        return false
+    }
+    i: int = 0;
+    while (i < life_arrays.edge_n) {
+        if (life_arrays.edge_long[i] == a) {
+            if (life_outlives_lim(life_arrays.edge_short[i], b, depth + 1)) return true
+        }
+        i = i + 1
+    }
+    if (a == LIFE_HEAPTOP && life_outlives_lim(LIFE_SELF, b, depth + 1)) return true;
+    if (life_is_param(a) && life_outlives_lim(LIFE_SELF, b, depth + 1)) return true;
+    false
+}
+
+life_outlives(a: int, b: int): bool {
+    life_outlives_lim(a, b, 0)
+}
+
+obj_storage_life(o: *Obj): int {
+    if (!o.is_local) return LIFE_IMM;
+    d: int = o.storage_life;
+    if (d <= 1) return LIFE_SELF;
+    if (d < len(life_arrays.depth_frames)) {
+        f: int = life_arrays.depth_frames[d];
+        if (f != 0) return f
+    }
+    LIFE_SELF
+}
+
+find_fn_param(fn: *Function, name: []i8): ?*Obj@fn {
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (streq(p.name, name)) return p;
+        p = p.param_next
+    }
+    null
+}
+
+life_bound_immortal(b: []i8): bool {
+    streq(b, "immortal")
+}
+
+life_is_self_bound(p: *Obj): bool {
+    if (life_bound_immortal(p.life_bound)) return false;
+    if (streq(p.life_bound, "new")) return false;
+    len(p.life_bound) == 0 || streq(p.life_bound, p.name)
+}
+
+resolve_fn_bounds(fn: *Function) raises Error {
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (type_is_ref(p.ty) || type_has_pointers(p.ty)) p.life = life_alloc_frame(0 - 1,
+            LIFE_KIND_PARAM) else p.life = LIFE_IMM;
+        p = p.param_next
+    }
+    p = fn.params;
+    while (p != null) {
+        b: []i8 = p.life_bound;
+        if (streq(b, "new")) life_add_edge(p.life, LIFE_HEAPTOP) else if (len(b) != 0 && !life_bound_immortal(b) && !streq(b,
+            p.name)) {
+            q: ?*Obj = find_fn_param(fn, b);
+            if (q == null) error("unknown lifetime bound");
+            qu: *Obj = q;
+            life_add_edge(p.life, qu.life)
+        }
+        p = p.param_next
+    }
+    if (len(fn.ret_bound) == 0 || life_bound_immortal(fn.ret_bound)) fn.ret_life = LIFE_IMM else if (streq(fn.ret_bound,
+        "new")) fn.ret_life = LIFE_HEAPTOP else {
+        r: ?*Obj = find_fn_param(fn, fn.ret_bound);
+        if (r == null) error("unknown lifetime bound");
+        fn.ret_life = r.life
+    }
+}
+
+life_init_fn(fn: *Function) raises Error {
+    life_arrays.n = 3;
+    life_arrays.parent[0] = 0 - 1;
+    life_arrays.kind[0] = 0;
+    life_arrays.parent[1] = 0 - 1;
+    life_arrays.kind[1] = 2;
+    life_arrays.parent[2] = 0 - 1;
+    life_arrays.kind[2] = 1;
+    life_heap = LIFE_HEAPTOP;
+    life_cur = LIFE_SELF;
+    life_region_tc = 1;
+    life_arrays.depth_frames[1] = LIFE_SELF;
+    life_arrays.edge_n = 0;
+    resolve_fn_bounds(fn)
+}
+
+life_enter_region() raises Error: int {
+    f: int = life_alloc_frame(life_cur, 2);
+    life_cur = f;
+    life_heap = f;
+    life_region_tc = life_region_tc + 1;
+    if (life_region_tc >= 0 && life_region_tc < LIFE_MAX) life_arrays.depth_frames[life_region_tc] = f;
+    f
+}
+
+life_leave_region(old_cur: int, old_heap: int) {
+    life_cur = old_cur;
+    life_heap = old_heap;
+    life_region_tc = life_region_tc - 1
+}
+
 var_view_ty(var: ?*Obj): ?*Type@var {
     f: ?*NarrowFrame = narrow_top;
     while (f != null) {
@@ -12,52 +186,52 @@ var_view_ty(var: ?*Obj): ?*Type@var {
 }
 
 narrow_push(var: ?*Obj@new, ty: ?*Type@new) noregion {
-    f: *NarrowFrame = compiler_take_narrow_frame(NarrowFrame {
+    f: *NarrowFrame = new NarrowFrame {
         var: var,
         ty: ty,
         next: narrow_top,
         path: null,
         barrier: false,
         kill: false
-    });
+    };
     narrow_top = f
 }
 
 narrow_push_kill(var: ?*Obj@new, ty: ?*Type@new) noregion {
-    f: *NarrowFrame = compiler_take_narrow_frame(NarrowFrame {
+    f: *NarrowFrame = new NarrowFrame {
         var: var,
         ty: ty,
         next: narrow_top,
         path: null,
         barrier: false,
         kill: true
-    });
+    };
     narrow_top = f
 }
 
 narrow_push_path(path: *Expr@new, ty: ?*Type@new) noregion {
-    f: *NarrowFrame = compiler_take_narrow_frame(NarrowFrame {
+    f: *NarrowFrame = new NarrowFrame {
         var: null,
         ty: ty,
         next: narrow_top,
         path: path,
         barrier: false,
         kill: false
-    });
+    };
     narrow_top = f
 }
 
 // No field path keeps its narrowing past here (logged, as a kill is, so
 // that it holds after the branch it is in).
 narrow_barrier() noregion {
-    f: *NarrowFrame = compiler_take_narrow_frame(NarrowFrame {
+    f: *NarrowFrame = new NarrowFrame {
         var: null,
         ty: null,
         next: narrow_top,
         path: null,
         barrier: true,
         kill: false
-    });
+    };
     narrow_top = f;
     kill_note(null)
 }
@@ -197,19 +371,19 @@ kill_log: ?*KillEntry = null;
 kill_n: int = 0;
 
 narrow_push_barrier_again() noregion {
-    f: *NarrowFrame = compiler_take_narrow_frame(NarrowFrame {
+    f: *NarrowFrame = new NarrowFrame {
         var: null,
         ty: null,
         next: narrow_top,
         path: null,
         barrier: true,
         kill: false
-    });
+    };
     narrow_top = f
 }
 
 kill_note(var: ?*Obj@new) noregion {
-    e: *KillEntry = compiler_take_kill_entry(KillEntry { var: var, seq: kill_n, next: kill_log });
+    e: *KillEntry = new KillEntry { var: var, seq: kill_n, next: kill_log };
     kill_log = e;
     kill_n = kill_n + 1
 }
@@ -381,6 +555,92 @@ kill_again(lo: int, hi: int) noregion {
     }
 }
 
+is_stack_object(n: *Expr): bool {
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return false;
+            v.is_local && !v.is_func
+        }
+        MemberAccess k -> {
+            lt: ?*Type = k.lhs.ty;
+            if (lt != null && (is_pointer(lt) || is_opt_pointer(lt) || is_slice(lt) || is_opt_slice(lt))) return false;
+            is_stack_object(k.lhs)
+        }
+        Index k -> {
+            lt2: ?*Type = k.lhs.ty;
+            if (lt2 != null && (is_slice(lt2) || is_str(lt2))) return false;
+            is_stack_object(k.lhs)
+        }
+        _ -> false
+    }
+}
+
+is_stack_addr_stmt(s: ?*Stmt): bool {
+    if (s == null) return false;
+    match s.kind {
+        Return k -> is_stack_addr(k.lhs);
+        ExprStmt k -> is_stack_addr(k.lhs);
+        Block k -> is_stack_addr_stmt(last_stmt(k.body));
+        If k -> is_stack_addr_stmt(k.then) || is_stack_addr_stmt(k.els);
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                if (is_stack_addr_stmt(arm.body)) return true;
+                arm = arm.next
+            }
+            false
+        }
+        Try k -> {
+            if (is_stack_addr_stmt(k.body)) return true;
+            a: ?*CatchArm = k.arms;
+            while (a != null) {
+                if (is_stack_addr_stmt(a.body)) return true;
+                a = a.next
+            }
+            false
+        }
+        Region k -> is_stack_addr_stmt(k.body);
+        _ -> false
+    }
+}
+
+is_stack_addr(n: ?*Expr): bool {
+    if (n == null) return false;
+    match n.kind {
+        Addr k -> is_stack_object(k.lhs);
+        As k -> is_stack_addr(k.lhs);
+        Trunc k -> is_stack_addr(k.lhs);
+        If k -> is_stack_addr(k.then) || is_stack_addr(k.els);
+        OrElse k -> is_stack_addr(k.lhs) || is_stack_addr(k.rhs);
+        Block k -> is_stack_addr_stmt(last_stmt(k.body));
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                if (is_stack_addr_stmt(arm.body)) return true;
+                arm = arm.next
+            }
+            false
+        }
+        _ -> false
+    }
+}
+
+is_tainted_obj(o: ?*Obj): bool {
+    if (o == null) return false;
+    f: ?*InitFrame = taint_top;
+    while (f != null) {
+        if (f.var == o) return true;
+        f = f.next
+    }
+    false
+}
+
+mark_tainted(o: *Obj@immortal) noregion {
+    if (is_tainted_obj(o)) return;
+    taint_top = new InitFrame { var: o, next: taint_top }
+}
+
 is_addr_taken(o: ?*Obj): bool {
     if (o == null) return false;
     f: ?*InitFrame = addr_top;
@@ -393,8 +653,608 @@ is_addr_taken(o: ?*Obj): bool {
 
 mark_addr_taken(o: *Obj@immortal) noregion {
     if (is_addr_taken(o)) return;
-    addr_top = compiler_take_init_frame(InitFrame { var: o, next: addr_top });
+    addr_top = new InitFrame { var: o, next: addr_top };
     kill_var_facts(o)
+}
+
+taint_result_ty(n: *Expr): ?*Type@n {
+    if (n.ty != null) return n.ty;
+    match n.kind {
+        MemberAccess k -> {
+            mo: ?*Member = k.member;
+            if (mo == null) return null;
+            mo.ty
+        }
+        _ -> null
+    }
+}
+
+taint_from_inner(n: *Expr, inner: ?*Expr): bool {
+    if (!type_has_pointers(taint_result_ty(n))) return false;
+    is_tainted_expr(inner)
+}
+
+is_tainted_expr(n: ?*Expr): bool {
+    if (n == null) return false;
+    if (is_stack_addr(n)) return true;
+    match n.kind {
+        Var k -> is_tainted_obj(k.var);
+        StructLit k -> field_inits_tainted(k.inits);
+        New k -> field_inits_tainted(k.inits);
+        VariantLit k -> field_inits_tainted(k.inits);
+        ArrayLit k -> {
+            a: ?*Expr = k.elems;
+            while (a != null) {
+                if (is_tainted_expr(a)) return true;
+                a = a.next
+            }
+            false
+        }
+        As k -> is_tainted_expr(k.lhs);
+        If k -> is_tainted_expr(k.then) || is_tainted_expr(k.els);
+        OrElse k -> is_tainted_expr(k.lhs) || is_tainted_expr(k.rhs);
+        Block k -> is_stack_addr_stmt(last_stmt(k.body));
+        Match _m -> is_stack_addr(n);
+        MemberAccess k -> taint_from_inner(n, k.lhs);
+        Deref k -> taint_from_inner(n, k.lhs);
+        Index k -> taint_from_inner(n, k.lhs);
+        _ -> false
+    }
+}
+
+field_inits_tainted(inits: ?*FieldInit): bool {
+    a: ?*FieldInit = inits;
+    while (a != null) {
+        if (is_tainted_expr(a.lhs)) return true;
+        a = a.next
+    }
+    false
+}
+
+io_allows_stack(name: []i8): bool {
+    streq(name, "write") || streq(name, "read")
+}
+
+life_meet(a: int, b: int) raises Error: int {
+    if (life_outlives(a, b)) return b;
+    if (life_outlives(b, a)) return a;
+    fn: ?*Function = current_fn;
+    if (fn != null) {
+        raw::raw_write(2, "incomparable lifetimes in ");
+        raw::raw_write_bytes(2, fn.name);
+        raw::raw_write_bytes_n(2, "\n", 1)
+    }
+    error("incomparable lifetimes")
+}
+
+object_storage_life(n: *Expr) raises Error: int {
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return LIFE_IMM;
+            obj_storage_life(v)
+        }
+        Deref k -> expr_life(k.lhs);
+        Index k -> {
+            lt: ?*Type = k.lhs.ty;
+            if (lt != null && (is_slice(lt) || is_str(lt))) return expr_life(k.lhs);
+            object_storage_life(k.lhs)
+        }
+        MemberAccess k -> {
+            lt2: ?*Type = decay(k.lhs.ty);
+            if (lt2 != null && (is_pointer(lt2) || is_opt_pointer(lt2) || is_slice(lt2) || is_opt_slice(lt2))) return expr_life(k.lhs);
+            object_storage_life(k.lhs)
+        }
+        _ -> LIFE_SELF
+    }
+}
+
+field_inits_life(inits: ?*FieldInit) raises Error: int {
+    a: ?*FieldInit = inits;
+    l: int = LIFE_IMM;
+    saw: bool = false;
+    while (a != null) {
+        if (a.lhs != null) {
+            fl: int = expr_life(a.lhs);
+            if (!saw) l = fl else if (life_outlives(l, fl)) l = fl else if (!life_outlives(fl,
+                l)) l = LIFE_SELF;
+            saw = true
+        }
+        a = a.next
+    }
+    l
+}
+
+stmt_result_life(s: ?*Stmt) raises Error: int {
+    if (s == null) return LIFE_IMM;
+    match s.kind {
+        ExprStmt k -> expr_life(k.lhs);
+        Block k -> stmt_result_life(last_stmt(k.body));
+        If k -> {
+            els: ?*Stmt = k.els;
+            if (els == null) return stmt_result_life(k.then);
+            life_meet(stmt_result_life(k.then), stmt_result_life(els))
+        }
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            l: int = LIFE_IMM;
+            saw: bool = false;
+            while (arm != null) {
+                al: int = stmt_result_life(arm.body);
+                if (!saw) l = al else l = life_meet(l, al);
+                saw = true;
+                arm = arm.next
+            }
+            l
+        }
+        Try k -> {
+            l2: int = stmt_result_life(k.body);
+            a: ?*CatchArm = k.arms;
+            while (a != null) {
+                l2 = life_meet(l2, stmt_result_life(a.body));
+                a = a.next
+            }
+            l2
+        }
+        Region k -> stmt_result_life(k.body);
+        _ -> LIFE_IMM
+    }
+}
+
+instantiate_bound(fn: *Function, bound: []i8, args: ?*Expr) raises Error: int {
+    if (len(bound) == 0 || life_bound_immortal(bound)) return LIFE_IMM;
+    if (streq(bound, "new")) return life_heap;
+    p: ?*Obj = fn.params;
+    a: ?*Expr = args;
+    while (p != null && a != null) {
+        if (streq(p.name, bound)) return expr_life(a);
+        p = p.param_next;
+        a = a.next
+    }
+    error("unknown lifetime bound")
+}
+
+expr_life(n: ?*Expr) raises Error: int {
+    if (n == null) return LIFE_IMM;
+    match n.kind {
+        Addr k -> object_storage_life(k.lhs);
+        New _k -> life_heap;
+        ArrayLit _k -> life_heap;
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return LIFE_IMM;
+            if (!v.is_local) return LIFE_IMM;
+            v.life
+        }
+        Deref k -> expr_life(k.lhs);
+        MemberAccess k -> expr_life(k.lhs);
+        Index k -> expr_life(k.lhs);
+        Assign k -> expr_life(k.rhs);
+        As k -> expr_life(k.lhs);
+        Trunc k -> expr_life(k.lhs);
+        If k -> life_meet(expr_life(k.then), expr_life(k.els));
+        OrElse k -> life_meet(expr_life(k.lhs), expr_life(k.rhs));
+        Block k -> stmt_result_life(last_stmt(k.body));
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            l: int = LIFE_IMM;
+            saw: bool = false;
+            while (arm != null) {
+                al: int = stmt_result_life(arm.body);
+                if (!saw) l = al else l = life_meet(l, al);
+                saw = true;
+                arm = arm.next
+            }
+            l
+        }
+        Funcall k -> {
+            if (io_allows_stack(k.funcname)) return LIFE_IMM;
+            if (streq(k.funcname, "len") || streq(k.funcname, "memcpy")) return LIFE_IMM;
+            if (streq(k.funcname, "l8_cstr") || streq(k.funcname, "l8_bytes")) return life_heap;
+            fno: ?*Function = k.fn;
+            if (fno == null) fno = find_function(k.funcname);
+            if (fno == null) return LIFE_IMM;
+            instantiate_bound(fno, fno.ret_bound, k.args)
+        }
+        StructLit k -> field_inits_life(k.inits);
+        VariantLit k -> field_inits_life(k.inits);
+        Null -> LIFE_IMM;
+        _ -> LIFE_IMM
+    }
+}
+
+dest_life(n: *Expr) raises Error: int {
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return LIFE_IMM;
+            obj_storage_life(v)
+        }
+        Deref k -> expr_life(k.lhs);
+        MemberAccess k -> {
+            lt: ?*Type = decay(k.lhs.ty);
+            if (lt != null && (is_pointer(lt) || is_opt_pointer(lt) || is_slice(lt) || is_opt_slice(lt))) return expr_life(k.lhs);
+            dest_life(k.lhs)
+        }
+        Index k -> {
+            lt2: ?*Type = k.lhs.ty;
+            if (lt2 != null && (is_slice(lt2) || is_str(lt2))) return expr_life(k.lhs);
+            dest_life(k.lhs)
+        }
+        _ -> LIFE_SELF
+    }
+}
+
+escape_error(n: ?*Expr) noregion raises Error {
+    fn: ?*Function = current_fn;
+    if (is_tainted_expr(n) || is_stack_addr(n)) {
+        if (fn != null) {
+            sb: *StrBuf = sb_new();
+            sb_puts(sb, "address of local cannot escape in ");
+            sb_puts(sb, fn.name);
+            error(sb_finish(sb))
+        }
+        error("address of local cannot escape")
+    }
+    if (fn != null) {
+        sb2: *StrBuf = sb_new();
+        sb_puts(sb2, "region pointer cannot escape in ");
+        sb_puts(sb2, fn.name);
+        error(sb_finish(sb2))
+    }
+    error("region pointer cannot escape")
+}
+
+note_imm_heap() {
+    fn: ?*Function = current_fn;
+    if (fn != null) fn.need_imm_heap = 1
+}
+
+is_current_param(o: ?*Obj): bool {
+    fn: ?*Function = current_fn;
+    if (o == null || fn == null) return false;
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (p == o) return true;
+        p = p.param_next
+    }
+    false
+}
+
+find_param_by_life(id: int): ?*Obj {
+    fn: ?*Function = current_fn;
+    if (fn == null) return null;
+    if (!life_is_param(id)) return null;
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (p.life == id) return p;
+        p = p.param_next
+    }
+    null
+}
+
+constrain_param_to_dest(p: *Obj, dest: int) {
+    if (dest == LIFE_IMM) {
+        p.bound_need_imm = true;
+        return
+    }
+    if (dest == LIFE_HEAPTOP) {
+        p.bound_need_new = true;
+        return
+    }
+    q: ?*Obj = find_param_by_life(dest);
+    if (q != null && q != p) {
+        if (p.bound_named == null) p.bound_named = q
+    }
+}
+
+note_params_in_inits(inits: ?*FieldInit, dest: int) raises Error {
+    a: ?*FieldInit = inits;
+    while (a != null) {
+        note_params_in_expr(a.lhs, dest);
+        a = a.next
+    }
+}
+
+note_params_in_stmt(s: ?*Stmt, dest: int) raises Error {
+    if (s == null) return;
+    match s.kind {
+        ExprStmt k -> note_params_in_expr(k.lhs, dest);
+        Block k -> note_params_in_stmt(last_stmt(k.body), dest);
+        If k -> {
+            note_params_in_stmt(k.then, dest);
+            note_params_in_stmt(k.els, dest)
+        }
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                note_params_in_stmt(arm.body, dest);
+                arm = arm.next
+            }
+        }
+        Try k -> {
+            note_params_in_stmt(k.body, dest);
+            a: ?*CatchArm = k.arms;
+            while (a != null) {
+                note_params_in_stmt(a.body, dest);
+                a = a.next
+            }
+        }
+        Region k -> note_params_in_stmt(k.body, dest);
+        Return k -> note_params_in_expr(k.lhs, dest);
+        _ -> { }
+    }
+}
+
+note_params_in_expr(n: ?*Expr, dest: int) raises Error {
+    if (n == null) return;
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return;
+            if (is_current_param(v)) {
+                constrain_param_to_dest(v, dest);
+                return
+            }
+            q: ?*Obj = find_param_by_life(v.life);
+            if (q != null) constrain_param_to_dest(q, dest)
+        }
+        Addr k -> note_params_in_expr(k.lhs, dest);
+        Deref k -> note_params_in_expr(k.lhs, dest);
+        MemberAccess k -> note_params_in_expr(k.lhs, dest);
+        Index k -> note_params_in_expr(k.lhs, dest);
+        As k -> note_params_in_expr(k.lhs, dest);
+        Trunc k -> note_params_in_expr(k.lhs, dest);
+        Assign k -> note_params_in_expr(k.rhs, dest);
+        If k -> {
+            note_params_in_expr(k.then, dest);
+            note_params_in_expr(k.els, dest)
+        }
+        OrElse k -> {
+            note_params_in_expr(k.lhs, dest);
+            note_params_in_expr(k.rhs, dest)
+        }
+        Block k -> note_params_in_stmt(last_stmt(k.body), dest);
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                note_params_in_stmt(arm.body, dest);
+                arm = arm.next
+            }
+        }
+        StructLit k -> note_params_in_inits(k.inits, dest);
+        VariantLit k -> note_params_in_inits(k.inits, dest);
+        New k -> note_params_in_inits(k.inits, dest);
+        ArrayLit k -> {
+            a: ?*Expr = k.elems;
+            while (a != null) {
+                note_params_in_expr(a, dest);
+                a = a.next
+            }
+        }
+        _ -> { }
+    }
+}
+
+note_bound_call_param(callee_po: *Obj@immortal, p: *Obj@immortal) noregion {
+    fn: ?*Function = current_fn;
+    if (fn == null) return;
+    fn.bound_calls = new BoundCall { caller_param: p, callee_param: callee_po, next: fn.bound_calls }
+}
+
+note_bound_calls_in_inits(inits: ?*FieldInit, callee_po: *Obj@immortal) noregion raises Error {
+    a: ?*FieldInit = inits;
+    while (a != null) {
+        note_bound_calls_in_expr(a.lhs, callee_po);
+        a = a.next
+    }
+}
+
+note_bound_calls_in_stmt(s: ?*Stmt, callee_po: *Obj@immortal) noregion raises Error {
+    if (s == null) return;
+    match s.kind {
+        ExprStmt k -> note_bound_calls_in_expr(k.lhs, callee_po);
+        Block k -> note_bound_calls_in_stmt(last_stmt(k.body), callee_po);
+        If k -> {
+            note_bound_calls_in_stmt(k.then, callee_po);
+            note_bound_calls_in_stmt(k.els, callee_po)
+        }
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                note_bound_calls_in_stmt(arm.body, callee_po);
+                arm = arm.next
+            }
+        }
+        Try k -> {
+            note_bound_calls_in_stmt(k.body, callee_po);
+            a: ?*CatchArm = k.arms;
+            while (a != null) {
+                note_bound_calls_in_stmt(a.body, callee_po);
+                a = a.next
+            }
+        }
+        Region k -> note_bound_calls_in_stmt(k.body, callee_po);
+        Return k -> note_bound_calls_in_expr(k.lhs, callee_po);
+        _ -> { }
+    }
+}
+
+note_bound_calls_in_expr(n: ?*Expr, callee_po: *Obj@immortal) noregion raises Error {
+    if (n == null) return;
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return;
+            if (is_current_param(v)) {
+                note_bound_call_param(callee_po, v);
+                return
+            }
+            q: ?*Obj = find_param_by_life(v.life);
+            if (q != null) note_bound_call_param(callee_po, q)
+        }
+        Addr k -> note_bound_calls_in_expr(k.lhs, callee_po);
+        Deref k -> note_bound_calls_in_expr(k.lhs, callee_po);
+        MemberAccess k -> note_bound_calls_in_expr(k.lhs, callee_po);
+        Index k -> note_bound_calls_in_expr(k.lhs, callee_po);
+        As k -> note_bound_calls_in_expr(k.lhs, callee_po);
+        Trunc k -> note_bound_calls_in_expr(k.lhs, callee_po);
+        Assign k -> note_bound_calls_in_expr(k.rhs, callee_po);
+        If k -> {
+            note_bound_calls_in_expr(k.then, callee_po);
+            note_bound_calls_in_expr(k.els, callee_po)
+        }
+        OrElse k -> {
+            note_bound_calls_in_expr(k.lhs, callee_po);
+            note_bound_calls_in_expr(k.rhs, callee_po)
+        }
+        Block k -> note_bound_calls_in_stmt(last_stmt(k.body), callee_po);
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                note_bound_calls_in_stmt(arm.body, callee_po);
+                arm = arm.next
+            }
+        }
+        StructLit k -> note_bound_calls_in_inits(k.inits, callee_po);
+        VariantLit k -> note_bound_calls_in_inits(k.inits, callee_po);
+        New k -> note_bound_calls_in_inits(k.inits, callee_po);
+        ArrayLit k -> {
+            a: ?*Expr = k.elems;
+            while (a != null) {
+                note_bound_calls_in_expr(a, callee_po);
+                a = a.next
+            }
+        }
+        _ -> { }
+    }
+}
+
+note_sig_store(src: ?*Expr, dest: int) raises Error {
+    if (src == null) return;
+    if (current_fn == null) return;
+    sl: int = expr_life(src);
+    if (sl == LIFE_HEAPTOP) {
+        dp: ?*Obj = find_param_by_life(dest);
+        if (dp != null) dp.bound_need_new = true
+    }
+    note_params_in_expr(src, dest)
+}
+
+note_sig_return(src: ?*Expr) raises Error {
+    fn: ?*Function = current_fn;
+    if (src == null || fn == null) return;
+    sl: int = expr_life(src);
+    if (sl == LIFE_HEAPTOP) fn.bound_ret_need_new = true;
+    rp: ?*Obj = find_param_by_life(sl);
+    if (rp != null) {
+        if (fn.bound_ret_param == null) fn.bound_ret_param = rp;
+        note_params_in_expr(src, rp.life);
+        return
+    }
+    if (sl == LIFE_HEAPTOP) note_params_in_expr(src, LIFE_HEAPTOP)
+}
+
+check_store(src: ?*Expr, dest: int) noregion raises Error {
+    if (src == null) return;
+    if (!type_has_pointers(src.ty) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
+    sl: int = expr_life(src);
+    note_sig_store(src, dest);
+    if (life_outlives(sl, dest)) return;
+    if (dest == LIFE_IMM && sl == LIFE_HEAPTOP) {
+        note_imm_heap();
+        return
+    }
+    if (sl == LIFE_HEAPTOP && find_param_by_life(dest) != null) return;
+    if (life_is_param(sl) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
+    escape_error(src)
+}
+
+return_needs_new() noregion raises Error {
+    fn: ?*Function = current_fn;
+    if (fn != null) {
+        sb: *StrBuf = sb_new();
+        sb_puts(sb, "return of new requires @new on ");
+        sb_puts(sb, fn.name);
+        error(sb_finish(sb))
+    }
+    error("return of new requires @new")
+}
+
+// (Reported at the value returned.)
+check_return(src: ?*Expr) noregion raises Error {
+    if (src == null) return;
+    outer_pos: int = diag_expr_pos;
+    outer_file: int = diag_expr_file;
+    if (src.pos > 0) {
+        diag_expr_pos = src.pos;
+        diag_expr_file = src.file
+    }
+    check_return_value(src);
+    diag_expr_pos = outer_pos;
+    diag_expr_file = outer_file
+}
+
+check_return_value(src: *Expr) noregion raises Error {
+    if (!type_has_pointers(src.ty) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
+    sl: int = expr_life(src);
+    dest: int = LIFE_IMM;
+    cfn: ?*Function = current_fn;
+    if (cfn != null) dest = cfn.ret_life;
+    note_sig_return(src);
+    if (dest == LIFE_IMM && sl == LIFE_HEAPTOP) return_needs_new();
+    if (life_outlives(sl, dest)) return;
+    if (life_is_param(sl) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
+    escape_error(src)
+}
+
+check_exc_payload(src: ?*Expr) raises Error {
+    if (src == null) return;
+    if (!type_has_pointers(src.ty) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
+    sl: int = expr_life(src);
+    note_sig_store(src, LIFE_IMM);
+    if (life_outlives(sl, LIFE_IMM)) return;
+    if (sl == LIFE_HEAPTOP) {
+        note_imm_heap();
+        return
+    }
+    if (life_is_param(sl) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
+    if (is_tainted_expr(src) || is_stack_addr(src)) error("exception payload cannot hold the address of a local");
+    error("exception payload cannot hold a region pointer")
+}
+
+check_call_lifetimes(fno: *Function@immortal, args: ?*Expr) noregion raises Error {
+    a: ?*Expr = args;
+    po: ?*Obj = fno.params;
+    cfn: ?*Function = current_fn;
+    while (a != null) {
+        if (po != null) {
+            sl: int = expr_life(a);
+            if (cfn != null && !fno.is_extern) {
+                pou: *Obj = po;
+                note_bound_calls_in_expr(a, pou)
+            }
+            if (!life_is_self_bound(po)) {
+                need: int = instantiate_bound(fno, po.life_bound, args);
+                if (!life_outlives(sl, need)) {
+                    if (sl == LIFE_HEAPTOP && need == LIFE_IMM) note_imm_heap() else {
+                        qp2: ?*Obj = find_param_by_life(sl);
+                        if (qp2 != null && !is_tainted_expr(a) && !is_stack_addr(a)) constrain_param_to_dest(qp2,
+                            need) else if (!is_tainted_expr(a) && !is_stack_addr(a) && type_has_pointers(a.ty)) {
+                            note_params_in_expr(a, need);
+                            if (qp2 == null && life_is_region(sl)) escape_error(a)
+                        } else escape_error(a)
+                    }
+                } else {
+                    qp3: ?*Obj = find_param_by_life(sl);
+                    if (qp3 != null && sl != LIFE_IMM && need != LIFE_SELF && need != LIFE_IMM && need != LIFE_HEAPTOP) constrain_param_to_dest(qp3,
+                        need)
+                }
+            }
+            po = po.param_next
+        }
+        a = a.next
+    }
 }
 
 index_lhs_var(n: *Expr): ?*Obj {
@@ -730,7 +1590,7 @@ add_callee(callee: *Function@immortal) noregion {
     fn: ?*Function = current_fn;
     if (fn == null) return;
     fu: *Function = fn;
-    fu.callees = compiler_take_call_edge(CallEdge { callee: callee, next: fu.callees })
+    fu.callees = new CallEdge { callee: callee, next: fu.callees }
 }
 
 mark_reachable(fn: *Function) {
@@ -788,7 +1648,7 @@ collect_unused_functions() noregion {
                     hit: *UnusedFunction = found;
                     if (fn.used) hit.used = true
                 } else {
-                    item: *UnusedFunction = compiler_take_unused_function(UnusedFunction {
+                    item: *UnusedFunction = new UnusedFunction {
                         name: fn.name,
                         path: mf.path,
                         src: mf.src,
@@ -796,7 +1656,7 @@ collect_unused_functions() noregion {
                         pos: fn.browse_pos,
                         used: fn.used,
                         next: null
-                    });
+                    };
                     tail: ?*UnusedFunction = unused_function_tail;
                     if (tail != null) tail.next = item else unused_functions = item;
                     unused_function_tail = item
@@ -1145,6 +2005,7 @@ const_value(n: *Expr) raises Error: int {
 }
 
 typecheck_global_inits() noregion raises Error {
+    life_reset_imm();
     g: ?*Obj = globals;
     while (g != null) {
         if (!g.is_func) {
@@ -1153,17 +2014,7 @@ typecheck_global_inits() noregion raises Error {
             add_type(init);
             if (!assignable(g.ty, init)) error_have_expr_want("global initializer type mismatch",
                 init, g.ty);
-            ity: ?*Type = init.ty;
-            if (ity != null && is_slice(ity))
-                match init.kind {
-                    ArrayLit k -> {
-                        base: *Type = type_base(ity);
-                        count: int = array_literal_count(k.elems);
-                        if (!fixed_storage_valid(base) || count > 536870912 / type_size(base)) error("global slice literal is too large");
-                        init.static_data = 0 - 1
-                    }
-                    _ -> { }
-                }
+            check_store(init, LIFE_IMM)
         }
         g = g.next
     }
@@ -1197,7 +2048,7 @@ init_has(o: *Obj): bool {
 
 init_mark(o: *Obj@immortal) noregion {
     if (init_has(o)) return;
-    init_top = compiler_take_init_frame(InitFrame { var: o, next: init_top })
+    init_top = new InitFrame { var: o, next: init_top }
 }
 
 init_use(o: ?*Obj) noregion raises Error {
@@ -1573,6 +2424,368 @@ check_fn_inited(fn: *Function@immortal) noregion raises Error {
 // The file of the function whose locals' initialization is followed.
 da_file: int = 0;
 
+expr_calls_need_imm(n: ?*Expr): bool {
+    if (n == null) return false;
+    match n.kind {
+        Funcall k -> {
+            if (expr_calls_need_imm(k.target)) return true;
+            fno: ?*Function = k.fn;
+            if (fno == null) fno = find_function(k.funcname);
+            if (fno != null) {
+                fu: *Function = fno;
+                if (fu.need_imm_heap != 0) return true
+            }
+            a: ?*Expr = k.args;
+            while (a != null) {
+                if (expr_calls_need_imm(a)) return true;
+                a = a.next
+            }
+            false
+        }
+        Binary k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs);
+        Assign k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs);
+        Addr k -> expr_calls_need_imm(k.lhs);
+        Deref k -> expr_calls_need_imm(k.lhs);
+        Index k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.idx);
+        Not k -> expr_calls_need_imm(k.lhs);
+        Neg k -> expr_calls_need_imm(k.lhs);
+        BitNot k -> expr_calls_need_imm(k.lhs);
+        LogAnd k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs);
+        LogOr k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs);
+        OrElse k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs);
+        MemberAccess k -> expr_calls_need_imm(k.lhs);
+        As k -> expr_calls_need_imm(k.lhs);
+        Trunc k -> expr_calls_need_imm(k.lhs);
+        New k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.fill) || field_inits_calls_need_imm(k.inits);
+        ArrayLit k -> {
+            a: ?*Expr = k.elems;
+            while (a != null) {
+                if (expr_calls_need_imm(a)) return true;
+                a = a.next
+            }
+            false
+        }
+        StructLit k -> field_inits_calls_need_imm(k.inits);
+        VariantLit k -> field_inits_calls_need_imm(k.inits);
+        If k -> expr_calls_need_imm(k.cond) || expr_calls_need_imm(k.then) || expr_calls_need_imm(k.els);
+        Match k -> {
+            if (expr_calls_need_imm(k.cond)) return true;
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                if (stmt_calls_need_imm(arm.body)) return true;
+                arm = arm.next
+            }
+            false
+        }
+        Block k -> stmt_list_calls_need_imm(k.body);
+        Sizeof k -> expr_calls_need_imm(k.e);
+        _ -> false
+    }
+}
+
+field_inits_calls_need_imm(inits: ?*FieldInit): bool {
+    a: ?*FieldInit = inits;
+    while (a != null) {
+        if (expr_calls_need_imm(a.lhs)) return true;
+        a = a.next
+    }
+    false
+}
+
+stmt_calls_need_imm(s: ?*Stmt): bool {
+    if (s == null) return false;
+    match s.kind {
+        Return k -> expr_calls_need_imm(k.lhs);
+        ExprStmt k -> expr_calls_need_imm(k.lhs);
+        Block k -> stmt_list_calls_need_imm(k.body);
+        If k -> expr_calls_need_imm(k.cond) || stmt_calls_need_imm(k.then) || stmt_calls_need_imm(k.els);
+        While k -> expr_calls_need_imm(k.cond) || stmt_calls_need_imm(k.body);
+        For k -> expr_calls_need_imm(k.iter) || expr_calls_need_imm(k.hi) || stmt_calls_need_imm(k.body);
+        Match k -> {
+            if (expr_calls_need_imm(k.cond)) return true;
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                if (stmt_calls_need_imm(arm.body)) return true;
+                arm = arm.next
+            }
+            false
+        }
+        Raise k -> field_inits_calls_need_imm(k.inits);
+        Try k -> {
+            if (stmt_calls_need_imm(k.body)) return true;
+            a: ?*CatchArm = k.arms;
+            while (a != null) {
+                if (stmt_calls_need_imm(a.body)) return true;
+                a = a.next
+            }
+            false
+        }
+        Region k -> stmt_calls_need_imm(k.body);
+        Decl k -> expr_calls_need_imm(k.init);
+        _ -> false
+    }
+}
+
+stmt_list_calls_need_imm(s: ?*Stmt): bool {
+    while (s != null) {
+        if (stmt_calls_need_imm(s)) return true;
+        s = s.next
+    }
+    false
+}
+
+propagate_need_imm_heap() {
+    changed: bool = true;
+    while (changed) {
+        changed = false;
+        fn: ?*Function = functions;
+        while (fn != null) {
+            if (!fn.is_extern && fn.need_imm_heap == 0) {
+                if (stmt_calls_need_imm(fn.body)) {
+                    fn.need_imm_heap = 1;
+                    changed = true
+                }
+            }
+            fn = fn.next
+        }
+    }
+}
+
+check_region_calls_expr(n: ?*Expr) raises Error {
+    if (n == null) return;
+    match n.kind {
+        Funcall k -> {
+            check_region_calls_expr(k.target);
+            fno: ?*Function = k.fn;
+            if (fno == null) fno = find_function(k.funcname);
+            if (fno != null) {
+                fu: *Function = fno;
+                if (fu.need_imm_heap != 0) {
+                    if (life_heap != LIFE_HEAPTOP && life_heap != LIFE_IMM) error("cannot call from a region")
+                }
+            }
+            a: ?*Expr = k.args;
+            while (a != null) {
+                check_region_calls_expr(a);
+                a = a.next
+            }
+            return
+        }
+        Binary k -> {
+            check_region_calls_expr(k.lhs);
+            check_region_calls_expr(k.rhs);
+            return
+        }
+        Assign k -> {
+            check_region_calls_expr(k.lhs);
+            check_region_calls_expr(k.rhs);
+            return
+        }
+        Addr k -> {
+            check_region_calls_expr(k.lhs);
+            return
+        }
+        Deref k -> {
+            check_region_calls_expr(k.lhs);
+            return
+        }
+        Index k -> {
+            check_region_calls_expr(k.lhs);
+            check_region_calls_expr(k.idx);
+            return
+        }
+        Not k -> {
+            check_region_calls_expr(k.lhs);
+            return
+        }
+        Neg k -> {
+            check_region_calls_expr(k.lhs);
+            return
+        }
+        BitNot k -> {
+            check_region_calls_expr(k.lhs);
+            return
+        }
+        LogAnd k -> {
+            check_region_calls_expr(k.lhs);
+            check_region_calls_expr(k.rhs);
+            return
+        }
+        LogOr k -> {
+            check_region_calls_expr(k.lhs);
+            check_region_calls_expr(k.rhs);
+            return
+        }
+        OrElse k -> {
+            check_region_calls_expr(k.lhs);
+            check_region_calls_expr(k.rhs);
+            return
+        }
+        MemberAccess k -> {
+            check_region_calls_expr(k.lhs);
+            return
+        }
+        As k -> {
+            check_region_calls_expr(k.lhs);
+            return
+        }
+        Trunc k -> {
+            check_region_calls_expr(k.lhs);
+            return
+        }
+        New k -> {
+            check_region_calls_expr(k.lhs);
+            check_region_calls_expr(k.fill);
+            check_region_calls_inits(k.inits);
+            return
+        }
+        ArrayLit k -> {
+            a: ?*Expr = k.elems;
+            while (a != null) {
+                check_region_calls_expr(a);
+                a = a.next
+            }
+            return
+        }
+        StructLit k -> {
+            check_region_calls_inits(k.inits);
+            return
+        }
+        VariantLit k -> {
+            check_region_calls_inits(k.inits);
+            return
+        }
+        If k -> {
+            check_region_calls_expr(k.cond);
+            check_region_calls_expr(k.then);
+            check_region_calls_expr(k.els);
+            return
+        }
+        Match k -> {
+            check_region_calls_expr(k.cond);
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                check_region_calls_stmt(arm.body);
+                arm = arm.next
+            }
+            return
+        }
+        Block k -> {
+            check_region_calls_stmt_list(k.body);
+            return
+        }
+        _ -> return
+    }
+}
+
+check_region_calls_inits(inits: ?*FieldInit) raises Error {
+    a: ?*FieldInit = inits;
+    while (a != null) {
+        check_region_calls_expr(a.lhs);
+        a = a.next
+    }
+}
+
+// (An error in s reported at it, in the function checked.)
+check_region_calls_stmt(s: ?*Stmt) raises Error {
+    if (s == null) return;
+    fn: ?*Function = current_fn;
+    // (Not an if expression: src1, which builds this, narrows only its
+    // statement.)
+    file: int = current_file_id;
+    if (fn != null) file = fn.browse_file;
+    outer_file: int = diag_stmt_file;
+    outer: int = diag_enter_stmt(s, file);
+    check_region_calls_node(s);
+    diag_leave(outer, outer_file)
+}
+
+check_region_calls_node(s: *Stmt) raises Error {
+    match s.kind {
+        Return k -> {
+            check_region_calls_expr(k.lhs);
+            return
+        }
+        ExprStmt k -> {
+            check_region_calls_expr(k.lhs);
+            return
+        }
+        Block k -> {
+            check_region_calls_stmt_list(k.body);
+            return
+        }
+        If k -> {
+            check_region_calls_expr(k.cond);
+            check_region_calls_stmt(k.then);
+            check_region_calls_stmt(k.els);
+            return
+        }
+        While k -> {
+            check_region_calls_expr(k.cond);
+            check_region_calls_stmt(k.body);
+            return
+        }
+        For k -> {
+            check_region_calls_expr(k.iter);
+            check_region_calls_expr(k.hi);
+            check_region_calls_stmt(k.body);
+            return
+        }
+        Match k -> {
+            check_region_calls_expr(k.cond);
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                check_region_calls_stmt(arm.body);
+                arm = arm.next
+            }
+            return
+        }
+        Raise k -> {
+            check_region_calls_inits(k.inits);
+            return
+        }
+        Try k -> {
+            check_region_calls_stmt(k.body);
+            a: ?*CatchArm = k.arms;
+            while (a != null) {
+                check_region_calls_stmt(a.body);
+                a = a.next
+            }
+            return
+        }
+        Region k -> {
+            old_heap: int = life_heap;
+            life_heap = 99;
+            check_region_calls_stmt(k.body);
+            life_heap = old_heap;
+            return
+        }
+        Decl k -> {
+            check_region_calls_expr(k.init);
+            return
+        }
+        _ -> return
+    }
+}
+
+check_region_calls_stmt_list(s: ?*Stmt) raises Error {
+    while (s != null) {
+        check_region_calls_stmt(s);
+        s = s.next
+    }
+}
+
+check_region_calls_all() raises Error {
+    fn: ?*Function = functions;
+    while (fn != null) {
+        if (!fn.is_extern) {
+            life_heap = LIFE_HEAPTOP;
+            check_region_calls_stmt(fn.body)
+        }
+        fn = fn.next
+    }
+}
+
 typecheck_program() noregion raises Error {
     typecheck_global_inits();
     fn: ?*Function = functions;
@@ -1587,13 +2800,18 @@ typecheck_program() noregion raises Error {
             current_return_ty = fn.return_ty;
             catch_top = null;
             narrow_top = null;
+            taint_top = null;
             addr_top = null;
+            life_init_fn(fn);
             add_type_stmt(fn.body);
             check_fn_result(fn);
             check_fn_inited(fn)
         }
         fn = fn.next
     }
+    propagate_need_imm_heap();
+    propagate_param_bounds();
+    check_region_calls_all();
     check_foreign_function_types();
     current_fn = null;
     current_return_ty = null;
@@ -1626,4 +2844,230 @@ check_raises_functions() raises Error {
         }
         fn = fn.next
     }
+}
+
+// The first mark found wrong: where the summary of them is reported.
+mark_first_file: int = 0;
+
+mark_first_pos: int = 0;
+
+mark_print_at(file: int, pos: int, msg: []i8) {
+    if (mark_nerr == 0) {
+        mark_first_file = file;
+        mark_first_pos = pos
+    }
+    f: ?*ImportedFile = imported_files;
+    while (f != null) {
+        if (f.id == file) {
+            print_error_at(f.path, f.src, f.src_len, pos, msg);
+            mark_nerr = mark_nerr + 1;
+            return
+        }
+        f = f.next
+    }
+    print_error_at(source_path, source, source_len, pos, msg);
+    mark_nerr = mark_nerr + 1
+}
+
+check_imm_heap_functions() raises Error {
+    fn: ?*Function = functions;
+    while (fn != null) {
+        // Test bodies cannot declare noregion; only the test entry calls them.
+        if (!fn.is_extern && fn.test_id < 0) {
+            if (fn.need_imm_heap != 0 && fn.decl_imm_heap == 0) {
+                sb: *StrBuf = sb_new();
+                sb_puts(sb, "missing noregion on ");
+                sb_puts(sb, fn.name);
+                mark_print_at(fn.browse_file, fn.browse_pos, sb_finish(sb))
+            }
+            // (A function taken as a value may be noregion for its type: a
+            // noregion fn the value is stored as, as another may need.)
+            if (fn.need_imm_heap == 0 && fn.decl_imm_heap != 0 && !fn.address_taken) {
+                sb2: *StrBuf = sb_new();
+                sb_puts(sb2, "unnecessary noregion on ");
+                sb_puts(sb2, fn.name);
+                mark_print_at(fn.browse_file, fn.browse_pos, sb_finish(sb2))
+            }
+        }
+        fn = fn.next
+    }
+}
+
+BOUND_OMIT: int = 0;
+
+BOUND_NEW: int = 1;
+
+BOUND_IMM: int = 2;
+
+BOUND_NAMED: int = 0 - 1;
+
+written_param_kind(p: *Obj): int {
+    b: []i8 = p.life_bound;
+    if (life_bound_immortal(b)) return BOUND_IMM;
+    if (streq(b, "new")) return BOUND_NEW;
+    if (len(b) == 0 || streq(b, p.name)) return BOUND_OMIT;
+    BOUND_NAMED
+}
+
+inferred_param_kind(p: *Obj): int {
+    if (p.bound_need_imm) return BOUND_IMM;
+    if (p.bound_need_new) return BOUND_NEW;
+    if (p.bound_named != null) return BOUND_NAMED;
+    BOUND_OMIT
+}
+
+written_ret_kind(fn: *Function): int {
+    b: []i8 = fn.ret_bound;
+    if (len(b) == 0 || life_bound_immortal(b)) return BOUND_OMIT;
+    if (streq(b, "new")) return BOUND_NEW;
+    BOUND_NAMED
+}
+
+inferred_ret_kind(fn: *Function): int {
+    if (fn.bound_ret_need_new) return BOUND_NEW;
+    if (fn.bound_ret_param != null) return BOUND_NAMED;
+    BOUND_OMIT
+}
+
+bound_err(msg: []i8, fn: *Function) raises Error {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, msg);
+    sb_puts(sb, fn.name);
+    mark_print_at(fn.browse_file, fn.browse_pos, sb_finish(sb))
+}
+
+bound_err_param(msg: []i8, fn: *Function, p: *Obj) raises Error {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, msg);
+    sb_puts(sb, p.name);
+    sb_puts(sb, " in ");
+    sb_puts(sb, fn.name);
+    mark_print_at(p.browse_file, p.browse_pos, sb_finish(sb))
+}
+
+bound_use_named(fn: *Function, p: ?*Obj) raises Error {
+    if (p == null) {
+        bound_err("omit bound on ", fn);
+        return
+    }
+    pu: *Obj = p;
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "use @");
+    sb_puts(sb, pu.name);
+    sb_puts(sb, " on ");
+    sb_puts(sb, fn.name);
+    mark_print_at(fn.browse_file, fn.browse_pos, sb_finish(sb))
+}
+
+bound_use_named_param(fn: *Function, p: *Obj, inf: ?*Obj) raises Error {
+    if (inf == null) {
+        bound_err_param("omit bound on ", fn, p);
+        return
+    }
+    iu: *Obj = inf;
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "use @");
+    sb_puts(sb, iu.name);
+    sb_puts(sb, " on ");
+    sb_puts(sb, p.name);
+    sb_puts(sb, " in ");
+    sb_puts(sb, fn.name);
+    mark_print_at(p.browse_file, p.browse_pos, sb_finish(sb))
+}
+
+param_needs_bound(p: *Obj): bool {
+    type_is_ref(p.ty) || type_has_pointers(p.ty)
+}
+
+check_written_param(fn: *Function, p: *Obj) raises Error {
+    if (!param_needs_bound(p)) return;
+    have: int = written_param_kind(p);
+    want: int = inferred_param_kind(p);
+    if (have == want) {
+        if (have == BOUND_NAMED) {
+            inf: ?*Obj = p.bound_named;
+            if (inf == null) return;
+            if (!streq(p.life_bound, inf.name)) bound_use_named_param(fn, p, inf)
+        }
+        return
+    }
+    if (want == BOUND_IMM) {
+        bound_err_param("use @immortal on ", fn, p);
+        return
+    }
+    if (want == BOUND_NEW) {
+        bound_err_param("use @new on ", fn, p);
+        return
+    }
+    if (want == BOUND_NAMED) {
+        bound_use_named_param(fn, p, p.bound_named);
+        return
+    }
+    bound_err_param("omit bound on ", fn, p)
+}
+
+check_written_ret(fn: *Function) raises Error {
+    if (!type_is_ref(fn.return_ty)) return;
+    have: int = written_ret_kind(fn);
+    want: int = inferred_ret_kind(fn);
+    if (have == want) {
+        if (have == BOUND_NAMED) {
+            rp: ?*Obj = fn.bound_ret_param;
+            if (rp == null) return;
+            if (!streq(fn.ret_bound, rp.name)) bound_use_named(fn, rp)
+        }
+        return
+    }
+    if (want == BOUND_NEW) {
+        bound_err("return of new requires @new on ", fn);
+        return
+    }
+    if (have == BOUND_NEW) {
+        bound_err("return bound is @new on ", fn);
+        return
+    }
+    if (want == BOUND_NAMED) {
+        bound_use_named(fn, fn.bound_ret_param);
+        return
+    }
+    bound_err("omit bound on ", fn)
+}
+
+propagate_param_bounds() {
+    changed: bool = true;
+    while (changed) {
+        changed = false;
+        fn: ?*Function = functions;
+        while (fn != null) {
+            c: ?*BoundCall = fn.bound_calls;
+            while (c != null) {
+                if (c.callee_param.bound_need_imm && !c.caller_param.bound_need_imm) {
+                    c.caller_param.bound_need_imm = true;
+                    changed = true
+                }
+                if (c.callee_param.bound_need_new && !c.caller_param.bound_need_new) {
+                    c.caller_param.bound_need_new = true;
+                    changed = true
+                }
+                c = c.next
+            }
+            fn = fn.next
+        }
+    }
+}
+
+check_written_bounds() raises Error {
+    fn: ?*Function = functions;
+    while (fn != null) {
+        if (!fn.is_extern) {
+            p: ?*Obj = fn.params;
+            while (p != null) {
+                check_written_param(fn, p);
+                p = p.param_next
+            }
+            check_written_ret(fn)
+        }
+        fn = fn.next
+    }
+    if (mark_nerr != 0) error_at_file(mark_first_file, mark_first_pos, "lifetime marks do not match")
 }

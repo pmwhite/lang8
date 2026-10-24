@@ -1,6 +1,6 @@
 tag websocket_internal;
 
-use_tag http, http_internal;
+use_tag http;
 
 import "../http/http.l8";
 
@@ -19,21 +19,34 @@ WS_CLOSE: int = 8;
 
 const WS_MAX_MESSAGE: int = 16777216;
 
-ws_buffer(): *HttpBuffer {
-    http_buffer()
+type WsBuffer = {
+    data: []i8;
+    size: int
 }
 
-ws_reserve(b: *HttpBuffer, need: int) {
-    http_reserve(b, need)
+ws_buffer(): *WsBuffer@new {
+    new WsBuffer { data: new i8[256](0i8), size: 0 }
 }
 
-ws_push(b: *HttpBuffer@new, byte: int) {
+ws_reserve(b: *WsBuffer@new, need: int) {
+    if (need <= len(b.data)) return;
+    cap: int = len(b.data);
+    while (cap < need) {
+        doubled: int = cap * 2;
+        if (doubled <= cap) cap = need else cap = doubled
+    }
+    next: []i8 = new i8[cap](0i8);
+    memcpy(next, 0, b.data, 0, b.size);
+    b.data = next
+}
+
+ws_push(b: *WsBuffer@new, byte: int) {
     ws_reserve(b, b.size + 1);
     b.data[b.size] = byte trunc i8;
     b.size = b.size + 1
 }
 
-ws_append(b: *HttpBuffer@new, data: []i8, size: int): bool {
+ws_append(b: *WsBuffer@new, data: []i8, size: int): bool {
     if (size < 0 || size > len(data) || b.size > WS_MAX_MESSAGE - size) return false;
     ws_reserve(b, b.size + size);
     for i in 0..size b.data[b.size + i] = data[i];
@@ -41,8 +54,10 @@ ws_append(b: *HttpBuffer@new, data: []i8, size: int): bool {
     true
 }
 
-ws_buffer_string(b: *HttpBuffer): str {
-    http_string(b)
+ws_buffer_string(b: *WsBuffer): str@new {
+    out: []i8 = new i8[b.size](0i8);
+    for i in 0..b.size out[i] = b.data[i];
+    cstr(out)
 }
 
 ws_random(out: []i8, size: int): bool {
@@ -68,7 +83,7 @@ ws_b64_value(c: i8): int {
 }
 
 ws_base64(data: []i8, size: int): str@new {
-    out: *HttpBuffer = ws_buffer();
+    out: *WsBuffer = ws_buffer();
     alphabet: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     p: int = 0;
     while (p < size) {
@@ -115,7 +130,7 @@ type WsSha1State = {
 }
 
 ws_sha1_block(state: *WsSha1State, input: []i8) {
-    w: []u32 = buffer([80]u32, 0u32);
+    w: []u32 = new u32[80](0u32);
     for i in 0..64 {
         word: int = i / 4;
         w[word] = w[word] << 8 | (input[i] as int & 255) trunc u32
@@ -160,7 +175,7 @@ ws_sha1_block(state: *WsSha1State, input: []i8) {
     state.h4 = state.h4 + e
 }
 
-ws_sha1_bytes(data: []i8, size: int, digest: []i8) {
+ws_sha1_bytes(data: []i8, size: int): []i8@new {
     state: WsSha1State = WsSha1State {
         h0: 1732584193u32,
         h1: 4023233417u32,
@@ -170,7 +185,8 @@ ws_sha1_bytes(data: []i8, size: int, digest: []i8) {
     };
     cursor: int = 0;
     done: bool = false;
-    block: []i8 = buffer([64]i8, 0i8);
+    block: []i8 = new i8[64](0i8);
+    digest: []i8 = new i8[20](0i8);
     while (!done) {
         remaining: int = size - cursor;
         if (remaining < 64) {
@@ -186,7 +202,7 @@ ws_sha1_bytes(data: []i8, size: int, digest: []i8) {
             bits: int = size * 8;
             for i in 0..8 block[63 - i] = (bits >> i * 8) trunc i8;
             ws_sha1_block(&state, block);
-            words: [5]u32 = [state.h0, state.h1, state.h2, state.h3, state.h4];
+            words: []u32 = [state.h0, state.h1, state.h2, state.h3, state.h4];
             for i in 0..len(words) {
                 digest[i * 4] = ws_u32_byte(words[i], 24);
                 digest[i * 4 + 1] = ws_u32_byte(words[i], 16);
@@ -200,22 +216,20 @@ ws_sha1_bytes(data: []i8, size: int, digest: []i8) {
             cursor = cursor + 64
         }
     }
-    // The caller owns the 20-byte result buffer.
+    digest
 }
 
-ws_sha1(text: str, digest: []i8) {
-    data: []i8 = http_readonly_bytes(text);
-    ws_sha1_bytes(data, len(data), digest)
+ws_sha1(text: str): []i8@new {
+    data: []i8 = bytes(text);
+    ws_sha1_bytes(data, len(data))
 }
 
 ws_accept_value(key: str): str@new {
     guid: str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    if (len(key) != 24) return "";
-    input: []i8 = buffer([60]i8);
+    input: []i8 = new i8[len(key) + len(guid)](0i8);
     for i in 0..len(key) input[i] = key[i];
     for i in 0..len(guid) input[len(key) + i] = guid[i];
-    digest: []i8 = buffer([20]i8);
-    ws_sha1_bytes(input, len(input), digest);
+    digest: []i8 = ws_sha1_bytes(input, len(input));
     ws_base64(digest, len(digest))
 }
 
@@ -244,7 +258,7 @@ ws_authority(host: str, port: str): str@new {
     for c in host {
         if (c == ':') ipv6 = true
     }
-    out: *HttpBuffer = ws_buffer();
+    out: *WsBuffer = ws_buffer();
     if (ipv6) ws_push(out, '[' as int);
     for c in host ws_push(out, c as int);
     if (ipv6) ws_push(out, ']' as int);
@@ -254,14 +268,13 @@ ws_authority(host: str, port: str): str@new {
 }
 
 type WsState = {
-    storage_slot: int;
     reader: *HttpReader;
     client: bool;
     open: bool;
     close_sent: bool;
     close_received: bool;
     fragment_opcode: int;
-    fragment: *HttpBuffer
+    fragment: *WsBuffer
 }
 
 // The state is intentionally behind an internal type so applications use the
@@ -280,40 +293,31 @@ type WsMessage = {
     error: int
 }
 
-ws_connection(reader: *HttpReader, client: bool): *WsConnection {
-    slot: int = ws_reserve_connection();
-    fragment: *HttpBuffer = ws_fragment_at(&ws_fragment_objects[slot * 32]);
-    fragment.* = HttpBuffer { data: ws_fragment_bytes(slot), size: 0 };
-    state: *WsState = ws_state_at(&ws_state_objects[slot * 128]);
-    state.* = WsState {
-        storage_slot: slot,
+ws_connection(reader: *HttpReader@new, client: bool): *WsConnection@new {
+    new WsConnection { state: new WsState {
         reader: reader,
         client: client,
         open: true,
         close_sent: false,
         close_received: false,
         fragment_opcode: 0,
-        fragment: fragment
-    };
-    out: *WsConnection = ws_connection_at(&ws_connection_objects[slot * 16]);
-    out.* = WsConnection { state: state };
-    out
+        fragment: ws_buffer()
+    } }
 }
 
-ws_empty_message(c: *WsConnection): *WsMessage {
-    out: *WsMessage = ws_message_at(&ws_message_objects[c.state.storage_slot * 64]);
-    out.* = WsMessage {
+ws_empty_message(): *WsMessage@new {
+    new WsMessage {
         kind: 0,
-        data: "",
+        data: new i8[0](0i8),
         size: 0,
         close_code: 0,
         error: 0
-    };
-    out
+    }
 }
 
-ws_client_handshake(host: str, port: str, target: str): ?*WsConnection@new {
-    nonce: []i8 = buffer([16]i8, 0i8);
+tag websocket
+ws_client(host: str, port: str, target: str): ?*WsConnection@new {
+    nonce: []i8 = new i8[16](0i8);
     if (!ws_random(nonce, len(nonce))) return null;
     key: str = ws_base64(nonce, len(nonce));
     optional: ?*HttpClient = http_client(host, port);
@@ -336,7 +340,8 @@ ws_client_handshake(host: str, port: str, target: str): ?*WsConnection@new {
 }
 
 // The caller may inspect target, Origin, cookies, or authorization before accepting.
-ws_accept_handshake(reader: *HttpReader@new, request: *HttpMessage): ?*WsConnection@new {
+tag websocket
+ws_accept(reader: *HttpReader@new, request: *HttpMessage): ?*WsConnection@new {
     key: str = http_get(request, "sec-websocket-key");
     valid: bool = request.error == 0 && request.method == "GET" && request.minor == 1 && http_option(request,
         "connection", "upgrade") && http_option(request, "upgrade", "websocket") && ws_header_count(request,
@@ -408,9 +413,7 @@ ws_write_frame(
     if (size < 0 || size > len(data) || size > WS_MAX_MESSAGE || !c.state.open && opcode != 8) return false;
     control: bool = opcode >= 8;
     if (control && size > 125) return false;
-    head_bytes: []i8 = buffer([14]i8);
-    head_value: HttpBuffer = HttpBuffer { data: head_bytes, size: 0 };
-    head: *HttpBuffer = &head_value;
+    head: *WsBuffer = ws_buffer();
     ws_push(head, 128 | opcode);
     mask: int = 0;
     if (c.state.client) mask = 128;
@@ -426,20 +429,13 @@ ws_write_frame(
     }
     c.state.reader.deadline = http_now() + HTTP_TIMEOUT_MS;
     if (c.state.client) {
-        key: []i8 = buffer(4, 0i8);
+        key: []i8 = new i8[4](0i8);
         if (!ws_random(key, 4)) return false;
         if (!ws_append(head, key, 4)) return false;
-        if (!http_send(c.state.reader, head.data, head.size)) return false;
-        payload: []i8 = buffer([4096]i8);
-        offset: int = 0;
-        while (offset < size) {
-            n: int = size - offset;
-            if (n > len(payload)) n = len(payload);
-            for i in 0..n payload[i] = data[offset + i] ^ key[(offset + i) % 4];
-            if (!http_send(c.state.reader, payload, n)) return false;
-            offset = offset + n
-        }
-        return true
+        payload: []i8 = new i8[size](0i8);
+        for i in 0..size payload[i] = data[i] ^ key[i % 4];
+        return http_send(c.state.reader, head.data, head.size) && http_send(c.state.reader,
+            payload, size)
     }
     http_send(c.state.reader, head.data, head.size) && http_send(c.state.reader, data,
         size)
@@ -460,7 +456,7 @@ ws_send(
 
 tag websocket
 ws_send_text(c: *WsConnection, text: str): bool {
-    ws_send(c, WS_TEXT, http_readonly_bytes(text), len(text))
+    ws_send(c, WS_TEXT, bytes(text), len(text))
 }
 
 tag websocket
@@ -468,22 +464,27 @@ ws_send_binary(c: *WsConnection, data: []i8, size: int): bool {
     ws_send(c, WS_BINARY, data, size)
 }
 
+ws_close_payload(code: int, reason: str): []i8@new {
+    out: []i8 = new i8[2 + len(reason)](0i8);
+    out[0] = (code >> 8) trunc i8;
+    out[1] = code trunc i8;
+    for i in 0..len(reason) out[2 + i] = reason[i];
+    out
+}
+
 tag websocket
 ws_close(c: *WsConnection, code: int, reason: str): bool {
     if (c.state.close_sent) return true;
-    if (!ws_valid_close_code(code) || len(reason) > 123 || !ws_valid_utf8(http_readonly_bytes(reason),
+    if (!ws_valid_close_code(code) || len(reason) > 123 || !ws_valid_utf8(bytes(reason),
         len(reason))) return false;
-    payload: []i8 = buffer([125]i8);
-    payload[0] = (code >> 8) trunc i8;
-    payload[1] = code trunc i8;
-    for i in 0..len(reason) payload[2 + i] = reason[i];
-    ok: bool = ws_write_frame(c, 8, payload, 2 + len(reason));
+    payload: []i8 = ws_close_payload(code, reason);
+    ok: bool = ws_write_frame(c, 8, payload, len(payload));
     if (ok) c.state.close_sent = true;
     ok
 }
 
 ws_fail(c: *WsConnection, code: int): *WsMessage@new {
-    result: *WsMessage = ws_empty_message(c);
+    result: *WsMessage = ws_empty_message();
     result.error = code;
     if (!c.state.close_sent && c.state.reader.error == 0) ws_close(c, code, "");
     c.state.open = false;
@@ -502,7 +503,7 @@ ws_read_exact(c: *WsConnection, out: []i8): bool {
 tag websocket
 ws_read(c: *WsConnection@new): *WsMessage@new {
     if (!c.state.open) {
-        result: *WsMessage = ws_empty_message(c);
+        result: *WsMessage = ws_empty_message();
         result.error = 1006;
         return result
     }
@@ -515,7 +516,7 @@ ws_read(c: *WsConnection@new): *WsMessage@new {
         second: int = http_read_byte(c.state.reader);
         if (first < 0 || second < 0) {
             c.state.open = false;
-            result: *WsMessage = ws_empty_message(c);
+            result: *WsMessage = ws_empty_message();
             result.error = 1006;
             return result
         }
@@ -528,13 +529,13 @@ ws_read(c: *WsConnection@new): *WsMessage@new {
         control: bool = opcode >= 8;
         if (control && (!fin || size > 125)) return ws_fail(c, 1002);
         if (size == 126) {
-            ext: []i8 = buffer(2, 0i8);
+            ext: []i8 = new i8[2](0i8);
             if (!ws_read_exact(c, ext)) return ws_fail(c, 1006);
             size = (ext[0] as int & 255) << 8 | ext[1] as int & 255;
             if (size < 126) return ws_fail(c, 1002)
         } else {
             if (size == 127) {
-                ext: []i8 = buffer(8, 0i8);
+                ext: []i8 = new i8[8](0i8);
                 if (!ws_read_exact(c, ext) || (ext[0] as int & 128) != 0) return ws_fail(c,
                     1002);
                 size = 0;
@@ -547,9 +548,9 @@ ws_read(c: *WsConnection@new): *WsMessage@new {
         }
         if (size > WS_MAX_MESSAGE || !control && c.state.fragment.size > WS_MAX_MESSAGE - size) return ws_fail(c,
             1009);
-        key: []i8 = buffer(4, 0i8);
+        key: []i8 = new i8[4](0i8);
         if (masked && !ws_read_exact(c, key)) return ws_fail(c, 1006);
-        payload: []i8 = ws_frame_bytes(c.state.storage_slot, size);
+        payload: []i8 = new i8[size](0i8);
         if (!ws_read_exact(c, payload)) return ws_fail(c, 1006);
         if (masked) {
             for i in 0..len(payload) payload[i] = payload[i] ^ key[i % 4]
@@ -567,9 +568,10 @@ ws_read(c: *WsConnection@new): *WsMessage@new {
                         code = (payload[0] as int & 255) * 256 + (payload[1] as int & 255);
                         if (!ws_valid_close_code(code)) return ws_fail(c, 1002);
                         // Validate only the reason; the two code bytes are not UTF-8 text.
-                        reason: []i8 = buffer([123]i8);
+                        reason: []i8 = new i8[size - 2](0i8);
                         for i in 2..size reason[i - 2] = payload[i];
-                        if (!ws_valid_utf8(reason, size - 2)) return ws_fail(c, 1007)
+                        if (!ws_valid_utf8(reason, len(reason))) return ws_fail(c,
+                            1007)
                     }
                     if (!c.state.close_sent) {
                         ws_write_frame(c, 8, payload, size);
@@ -577,7 +579,7 @@ ws_read(c: *WsConnection@new): *WsMessage@new {
                     }
                     c.state.close_received = true;
                     c.state.open = false;
-                    result: *WsMessage = ws_empty_message(c);
+                    result: *WsMessage = ws_empty_message();
                     result.kind = WS_CLOSE;
                     result.data = payload;
                     result.size = size;
@@ -598,7 +600,7 @@ ws_read(c: *WsConnection@new): *WsMessage@new {
                     c.state.fragment_opcode = 0;
                     if (kind == WS_TEXT && !ws_valid_utf8(c.state.fragment.data, c.state.fragment.size)) return ws_fail(c,
                         1007);
-                    result: *WsMessage = ws_empty_message(c);
+                    result: *WsMessage = ws_empty_message();
                     result.kind = kind;
                     result.data = c.state.fragment.data;
                     result.size = c.state.fragment.size;
@@ -615,26 +617,5 @@ ws_connection_close(c: *WsConnection) {
         http_close(c.state.reader);
         c.state.reader.fd = -1
     }
-    c.state.open = false;
-    ws_connection_used[c.state.storage_slot] = false
-}
-
-import "storage.l8";
-
-// Handshake products are sent/validated synchronously. Connection input and
-// WebSocket state have separate owners and survive transaction rewind.
-tag websocket
-ws_client(host: str, port: str, target: str): ?*WsConnection {
-    mark: HttpCheckpoint = http_checkpoint();
-    out: ?*WsConnection = ws_client_handshake(host, port, target);
-    http_rewind(mark);
-    out
-}
-
-tag websocket
-ws_accept(reader: *HttpReader, request: *HttpMessage): ?*WsConnection {
-    mark: HttpCheckpoint = http_checkpoint();
-    out: ?*WsConnection = ws_accept_handshake(reader, request);
-    http_rewind(mark);
-    out
+    c.state.open = false
 }

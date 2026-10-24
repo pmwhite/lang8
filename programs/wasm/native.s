@@ -3,54 +3,33 @@
 # no scaled addressing). native.arm64-darwin.s is the same for iOS.
 .section .text
 
-# Three declared memory owners: one 768 MiB and two 256 MiB slots.
-# Smaller requests prefer the smaller slots; no runtime mappings are made.
+# wasm_mem_map(size): []i8 -- size bytes of zeroed memory that never move
+# (mmap, reserved but not committed), as an L8 byte slice: its length is
+# the 8 bytes before it. wasm_mem_words gives a second view of the same
+# memory as []int, starting 8 bytes in (its length word is the slice's
+# first 8 bytes, which a module never uses). 0 when it cannot be had.
 .globl wasm_mem_map
 wasm_mem_map:
-    test %rdi, %rdi
-    jle .Lmap_failed
-    cmp $268435456, %rdi
-    ja .Lmap_large
-    lea wasm_memory_small1(%rip), %rax
-    mov (%rax), %rcx
-    test %rcx, %rcx
-    je .Lmap_take
-    lea wasm_memory_small2(%rip), %rax
-    mov (%rax), %rcx
-    test %rcx, %rcx
-    je .Lmap_take
-.Lmap_large:
-    cmp $805306368, %rdi
-    ja .Lmap_failed
-    lea wasm_memory_large(%rip), %rax
-    mov (%rax), %rcx
-    test %rcx, %rcx
-    jne .Lmap_failed
-.Lmap_take:
-    movq $1, (%rax)
-    mov %rdi, 8(%rax)
+    push %rbx
+    mov %rdi, %rbx
+    mov $9, %rax
+    mov $0, %rdi
+    mov %rbx, %rsi
+    add $16, %rsi
+    mov $3, %rdx
+    mov $16418, %r10
+    mov $-1, %r8
+    mov $0, %r9
+    syscall
+    cmp $-4095, %rax
+    jae .Lmap_failed
+    mov %rbx, 8(%rax)
     add $16, %rax
+    pop %rbx
     ret
 .Lmap_failed:
     mov $0, %rax
-    ret
-
-# Release only after all calls and borrowed native views have ended. Pages
-# ever exposed by the instance are cleared before the slot becomes reusable.
-.globl wasm_mem_release
-wasm_mem_release:
-    mov %rdi, %rdx
-    lea (%rdi), %rcx
-    add %rsi, %rcx
-.Lmap_clear:
-    cmp %rcx, %rdx
-    jae .Lmap_cleared
-    movq $0, (%rdx)
-    add $8, %rdx
-    jmp .Lmap_clear
-.Lmap_cleared:
-    movq $0, -8(%rdi)
-    movq $0, -16(%rdi)
+    pop %rbx
     ret
 
 # wasm_mem_words(m: []i8): []int
@@ -3459,9 +3438,3 @@ wasm_extra:
     .quad 0
 wasm_cb_slots:
     .skip 4096
-
-.section .bss
-.align 8
-wasm_memory_large: .skip 805306384
-wasm_memory_small1: .skip 268435472
-wasm_memory_small2: .skip 268435472

@@ -121,12 +121,3 @@ dishes a cafeteria serves made (as against its ingredients); amounts in the
 kitchen (it knows only whether a food is there); a shopping list from
 what is missing; goals other than the FDA's daily values; sodium, sugar
 and the B vitamins besides B12 and folate.
-
-## Storage
-
-The recipe application's explicit L8 heap constructors have been migrated to
-static globals, bounded function buffers and an inline `Painter` returned by
-value. Shader text is passed through a read-only OpenGL boundary. Existing food,
-recipe, vertex, batch and UI capacities are unchanged. X11/OpenGL, environment
-loading and other legacy runtime/import dependencies still need migration before
-this entry point can pass `--static`; this is not a whole-process memory bound.

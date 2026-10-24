@@ -11,8 +11,7 @@ all bytes are written, or raise `IoError { code }` with a positive Linux errno.
 An error can follow a partial write; output cannot be rolled back.
 
 `write_int(fd, n)` and `write_fixed(fd, x, places)` write numbers without a
-newline. Integer output uses a fixed local buffer, and text output reads immutable
-string spans directly; successful output does not allocate L8 heap storage. `write_bytes_n(fd, bytes, count)` writes a prefix. `write_some(fd, bytes,
+newline. `write_bytes_n(fd, bytes, count)` writes a prefix. `write_some(fd, bytes,
 offset, count)` makes one system call and returns its byte count so a caller
 can resume after a short write. `write_some_text(fd, text)` does the same for
 text. A byte range must satisfy `0 <= offset`, `offset <= len(bytes)`,

@@ -392,27 +392,3 @@ the web reader live, which needs the owner's consent like the rest. Check
 afterwards that `curl -sI https://smoothbible.com/read/bsb/john/3` carries
 the `Content-Security-Policy` and that `/` and `/api/v1/status` are as
 before.
-
-## Static storage
-
-Chapter layouts and chapter ranges each have sixteen independent static slots.
-Long-lived readers retain their slots. Temporary iOS previews release both slots
-once UIKit has copied the attributed text; released views must not be used.
-The terminal keeps sixteen reader caches and twenty-four screen buffers, with
-the same per-cache bounds as before. Exhausting chapter slots terminates.
-
-The portable host and text skin retain data files in a 96 MiB pool keyed by
-file ID (128 IDs). Each ID keeps its first reservation; subsequent loads reuse
-it and may not exceed that capacity. A file's views expire when that ID is
-loaded again. Invalid IDs, oversized files, and pool exhaustion terminate.
-HTTP response parsing and web append use separate 2 MiB call-local buffers;
-HTTP bodies must leave one byte for the terminator. The iOS bundled BSB buffer
-is 6 MiB, and the spoken-text tool has an 8 MiB input buffer.
-
-Terminal path and shell-text builders take caller-owned counted buffers with
-8,192 bytes plus a terminator. Discovered executable paths occupy up to sixteen
-permanent slots, reused by repeated queries. The environment has 4,096 entries;
-process arguments use 24 pointer slots and 64 KiB of copied argument bytes.
-Child processes inherit their own forked copy until exec. These changes remove
-explicit L8 construction sites; implicit conversions and platform libraries
-still need auditing before the application can be certified allocation-free.

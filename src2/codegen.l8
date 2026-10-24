@@ -89,11 +89,6 @@ store_value(ty: *Type) noregion raises Error {
     if (passes_by_ref(ty)) {
         cg_mov_rr(0, 6);
         emit_memcpy(type_size(ty))
-    } else if ((is_struct_ty(ty) || is_exn_ty(ty)) && type_size(ty) < 8) {
-        for byte in 0..type_size(ty) {
-            cg_movb_rm(0, 7, byte);
-            if (byte + 1 < type_size(ty)) cg_shift_imm(5, 8, 0)
-        }
     } else store_mem(ty)
 }
 
@@ -1362,41 +1357,6 @@ cg_emit_constant(n: *Expr) noregion raises Error: bool {
     true
 }
 
-// A counted buffer's data address is in rax. Evaluate its fill once, then
-// initialize the statically reserved slots, preserving surrounding operands.
-gen_fixed_buffer_fill(bt: *Type, fill: *Expr) noregion raises Error {
-    base: *Type = type_base(bt);
-    size: int = type_size(base);
-    cg_push(3);
-    cg_push(12);
-    cg_push(13);
-    cg_mov_rr(0, 3);
-    gen_expr(fill);
-    cg_mov_rr(0, 13);
-    cg_mov_imm(array_len(bt), 12);
-    loop: int = new_label();
-    cg_label_id(loop);
-    cg_mov_rr(3, 7);
-    cg_mov_rr(13, 0);
-    if ((is_struct_ty(base) || is_exn_ty(base)) && size < 8) {
-        // Small records are returned as packed bits. Write their actual
-        // width, including layouts of 2, 3, 5, 6 and 7 bytes.
-        for byte in 0..size {
-            cg_movb_rm(0, 7, byte);
-            if (byte + 1 < size) cg_shift_imm(5, 8, 0)
-        }
-    } else store_value(base);
-    cg_alu_imm(0, size, 3);
-    cg_alu_imm(5, 1, 12);
-    cg_alu_imm(7, 0, 12);
-    cg_jump_id(5, loop);
-    cg_mov_rr(3, 0);
-    cg_alu_imm(5, type_size(bt), 0);
-    cg_pop(13);
-    cg_pop(12);
-    cg_pop(3)
-}
-
 gen_expr(n: *Expr) noregion raises Error {
     match n.kind {
         Num k -> {
@@ -1721,48 +1681,6 @@ gen_expr(n: *Expr) noregion raises Error {
             return
         }
         Funcall k -> {
-            if (k.fn == null && streq(k.funcname, "l8_static_buffer")) {
-                bt: *Type = fixed_buffer_type(k.args);
-                cg_mov_imm(array_len(bt), 0);
-                cg_mov_r_rip(0, cg_name_num(".L.static_buffer", n.cg_temp), 0);
-                cg_lea_rip(cg_name_num(".L.static_buffer", n.cg_temp), 8, 0);
-                metadata: *Expr = k.args or error("missing static buffer type");
-                fill: ?*Expr = metadata.next;
-                // BSS already provides zeroes before the global initializer.
-                if (fill != null && !fixed_buffer_zero_fill(fill)) gen_fixed_buffer_fill(bt,
-                    fill);
-                return
-            }
-            if (k.fn == null && streq(k.funcname, "l8_fixed_buffer")) {
-                bt: *Type = fixed_buffer_type(k.args);
-                slot: int = cg_temp_offset(n);
-                cg_mov_imm(array_len(bt), 0);
-                cg_mov_rm(0, 5, slot);
-                metadata: *Expr = k.args or error("missing fixed buffer type");
-                fill: ?*Expr = metadata.next;
-                if (fill != null && !fixed_buffer_zero_fill(fill)) {
-                    cg_lea_mr(5, slot + 8, 0);
-                    gen_fixed_buffer_fill(bt, fill)
-                } else {
-                    cg_lea_mr(5, slot + 8, 7);
-                    cg_mov_imm(type_size(bt), 1);
-                    cg_mov_imm(0, 0);
-                    cg_cld();
-                    cg_rep_stosb();
-                    cg_lea_mr(5, slot + 8, 0)
-                }
-                return
-            }
-            if (k.fn == null && streq(k.funcname, "l8_zeroed_array")) {
-                cg_lea_mr(5, cg_temp_offset(n), 7);
-                cg_mov_imm(type_size(n.ty or error("missing zeroed array type")),
-                    1);
-                cg_mov_imm(0, 0);
-                cg_cld();
-                cg_rep_stosb();
-                cg_lea_mr(5, cg_temp_offset(n), 0);
-                return
-            }
             if (k.target != null) {
                 gen_indirect_call(n);
                 return
@@ -2008,13 +1926,6 @@ gen_expr(n: *Expr) noregion raises Error {
                 return
             }
             base: *Type = type_base(nty);
-            if (n.static_data > 0) {
-                cg_mov_imm(array_literal_count(k.elems), 0);
-                cg_mov_r_rip(0, cg_name_num(".L.static_literal", n.static_data), 0);
-                cg_lea_rip(cg_name_num(".L.static_literal", n.static_data), 8, 0);
-                gen_fill_array(k.elems, base, cg_array_save_offset(n));
-                return
-            }
             esz: int = type_size(base);
             if (esz <= 0) esz = 8;
             cnt: int = 0;
@@ -2362,13 +2273,13 @@ gen_stmt(n: *Stmt) noregion raises Error {
             if (ex.members != null) {
                 esz: int = ex.size;
                 if (esz <= 0) esz = 8;
-                // Construct in the frame: nested raises in field initializers
-                // must not overwrite fields already evaluated for this raise.
-                gen_field_inits_at(k.inits, 5, k.temp);
-                cg_lea_mr(5, k.temp, 6);
-                cg_lea_rip(".L.exc_payload", 0, 7);
-                emit_memcpy(esz);
-                cg_lea_rip(".L.exc_payload", 0, 6)
+                cg_mov_imm(esz, 7);
+                emit_exc_malloc();
+                cg_push(3);
+                cg_mov_rr(0, 3);
+                gen_struct_inits(k.inits);
+                cg_mov_rr(3, 6);
+                cg_pop(3)
             } else cg_mov_imm(0, 6);
             cg_mov_imm(ex.tag, 7);
             cg_call("l8_raise");
@@ -2571,10 +2482,6 @@ cg_temps_expr(e: ?*Expr, off: int) raises Error: int {
             off));
         Funcall k -> {
             o: int = cg_temps_list(k.args, cg_temps_expr(k.target, off));
-            if (k.fn == null && streq(k.funcname, "l8_fixed_buffer")) return cg_temp_slot(n,
-                type_size(fixed_buffer_type(k.args)) + 8, o);
-            if (k.fn == null && streq(k.funcname, "l8_zeroed_array")) return cg_temp_slot(n,
-                type_size(n.ty or error("missing zeroed array type")), o);
             callee: ?*Function = k.fn;
             if (callee == null) return o;
             if (callee.sret == null) return o;
@@ -2623,20 +2530,7 @@ cg_temps_stmts(stmts: ?*Stmt, off: int) raises Error: int {
             ExprStmt k -> o = cg_temps_expr(k.lhs, o);
             Decl k -> o = cg_temps_expr(k.init, o);
             Match k -> o = cg_temps_arms(k.arms, cg_temps_expr(k.cond, o));
-            Raise k -> {
-                o = cg_temps_inits(k.inits, o);
-                ex: ?*ExnDef = k.exn;
-                if (ex != null && ex.members != null) {
-                    o = (o + 7) / 8 * 8 + (ex.size + 7) / 8 * 8;
-                    q.kind = StmtKind.Raise {
-                        name: k.name,
-                        exn: k.exn,
-                        inits: k.inits,
-                        has: k.has,
-                        temp: 0 - o
-                    }
-                }
-            }
+            Raise k -> o = cg_temps_inits(k.inits, o);
             Try k -> {
                 o = cg_temps_stmts(k.body, o);
                 arm: ?*CatchArm = k.arms;
@@ -2690,16 +2584,6 @@ emit_bss_global(g: *Obj) noregion raises Error {
     cg_skip(sz)
 }
 
-exception_payload_size(): int {
-    size: int = 8;
-    ex: ?*ExnDef = exn_defs;
-    while (ex != null) {
-        if (ex.size > size) size = ex.size;
-        ex = ex.next
-    }
-    (size + 7) / 8 * 8
-}
-
 emit_data() noregion raises Error {
     g: ?*Obj = globals;
     any_data: bool = false;
@@ -2730,41 +2614,6 @@ emit_data() noregion raises Error {
     if (!any_bss) {
         cg_section(as_SEC_BSS);
         cg_align(8)
-    }
-    // Catch binders copy the transfer payload before running handler code.
-    // No user code runs between the final copy into this slot and l8_raise.
-    cg_align(8);
-    cg_label(".L.exc_payload");
-    cg_skip(exception_payload_size());
-    // A static counted buffer reserves its length header and typed elements
-    // in BSS. Its global initializer writes only the header and pointer.
-    buffer_id: int = 1;
-    bg: ?*Obj = globals;
-    while (bg != null) {
-        bi: ?*Expr = bg.init;
-        if (bi != null)
-            match bi.kind {
-                Funcall bk -> {
-                    if (streq(bk.funcname, "l8_static_buffer")) {
-                        cg_align(8);
-                        bi.cg_temp = buffer_id;
-                        cg_label(cg_name_num(".L.static_buffer", buffer_id));
-                        cg_skip(type_size(fixed_buffer_type(bk.args)) + 8);
-                        buffer_id = buffer_id + 1
-                    }
-                }
-                ArrayLit bk -> {
-                    if (bi.static_data != 0) {
-                        cg_align(8);
-                        bi.static_data = buffer_id;
-                        cg_label(cg_name_num(".L.static_literal", buffer_id));
-                        cg_skip(array_literal_count(bk.elems) * type_size(type_base(bi.ty or error("missing literal type"))) + 8);
-                        buffer_id = buffer_id + 1
-                    }
-                }
-                _ -> { }
-            }
-        bg = bg.next
     }
     cg_global("l8_init_done");
     cg_label("l8_init_done");
@@ -3066,18 +2915,6 @@ emit_text() noregion raises Error {
     fn: ?*Function = functions;
     cg_section(as_SEC_TEXT);
     oob_lab = new_label();
-    if (static_storage_mode) {
-        // The static ELF entry bypasses the legacy runtime's heap mapping and
-        // argv copies. Static programs currently have a parameterless main.
-        cg_global("__l8_static_start");
-        cg_label("__l8_static_start");
-        // This is an OS entry, not a called L8 function. The arm64 shadow
-        // stack must be initialized before any call can push a frame.
-        if (cg_arm) emit("  mov x28, sp\n");
-        cg_call("main");
-        cg_mov_rr(0, cg_arg_reg(0));
-        cg_call("exit")
-    }
     emit_l8_init_globals_fn();
     while (fn != null) {
         if (!fn.is_extern && (fn.test_id < 0 || compile_test_mode)) {
@@ -3089,7 +2926,7 @@ emit_text() noregion raises Error {
             // also lets allocation use r12/r13 throughout the function. A body
             // that makes no calls can first use r8/r9, which need no saves,
             // once they no longer hold incoming arguments.
-            candidates: [8]int = zeroed([8]int);
+            candidates: []int = new int[8](0);
             ncandidates: int = 0;
             int_args: int = fn.nparams + (if (fn.sret != null) 1 else 0);
             // main calls l8_init_globals after moving its parameters.
@@ -3107,7 +2944,7 @@ emit_text() noregion raises Error {
                 candidates[ncandidates] = (if (extra < 2) 14 + extra else 10 + extra);
                 ncandidates = ncandidates + 1
             }
-            allocated: int = cg_assign_registers(fn, &candidates, ncandidates);
+            allocated: int = cg_assign_registers(fn, candidates, ncandidates);
             saved: int = cg_saved_count(allocated);
             current_fn_name = fn.name;
             current_return_ty = fn.return_ty;
@@ -3124,7 +2961,7 @@ emit_text() noregion raises Error {
             register_space: int = (saved + 1) / 2 * 16;
             register_base: int = fn.stack_size + (if (save_regs) 24 else 8);
             // Keep the local offsets and 16-byte call alignment in either case.
-            save_ends: [4]int = zeroed([4]int);
+            save_ends: []int = new int[4](0);
             if (save_regs) {
                 cg_alu_imm(5, fn.stack_size + 24 + register_space, 4);
                 if (cg_direct_mode) save_ends[0] = as_cur_off();
@@ -3244,9 +3081,6 @@ emit_text() noregion raises Error {
 }
 
 codegen() noregion raises Error {
-    // Assembler tables are compilation-owned. Analysis that never emits code
-    // must not take them: a multi-file pass keeps source bytes across resets.
-    as_init();
     if (cg_arm && (cg_arm_darwin || cg_arm_android)) arm_collect_externs();
     // The test entry point takes main's symbol.
     if (compile_test_mode) {

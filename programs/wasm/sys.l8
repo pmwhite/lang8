@@ -30,19 +30,10 @@ extern l8_getrandom(buf: *i8, n: int): int;
 extern l8_environment(): []str@new;
 
 // The program's arguments, as l8_argv gives them to main.
-sys_args: []str = static_buffer([4096]str, "");
+sys_args: []str = new str[0]("");
 
-sys_argc: int = 0;
-
-sys_set_args(args: []str) {
-    sys_set_args_n(args, len(args))
-}
-
-sys_set_args_n(args: []str, n: int) {
-    if (n < 0 || n > len(args) || n > 4096) wi_storage_full();
-    for i in 0..n sys_args[i] = args[i];
-    for i in n..sys_argc sys_args[i] = "";
-    sys_argc = n
+sys_set_args(args: []str@immortal) {
+    sys_args = args
 }
 
 // Output written to fds 1 and 2, for the test protocol's offsets.
@@ -88,13 +79,11 @@ SYS_TEST_EXPECT: int = 18;
 
 SYS_SQRT: int = 19;
 
-SYS_WRITE_TEXT_AT: int = 20;
-
 // The import kinds of the instance bound last.
 sys_bound: int = 0 - 1;
 
 // (Room for 4096 imports, filled in place: binding allocates nothing.)
-sys_kinds: []int = static_buffer([4096]int);
+sys_kinds: []int = new int[4096](0);
 
 sys_heap_base: int = 0;
 
@@ -109,7 +98,7 @@ sys_kind_of(name: []i8): int {
         "l8_heap_used")) SYS_HEAP_USED else if (streq(name, "l8_getrandom")) SYS_GETRANDOM else if (streq(name,
         "qsort")) SYS_QSORT else if (streq(name, "l8_test_index")) SYS_TEST_INDEX else if (streq(name,
         "l8_test_record")) SYS_TEST_RECORD else if (streq(name, "l8_test_expect")) SYS_TEST_EXPECT else if (streq(name,
-        "sqrt")) SYS_SQRT else if (streq(name, "l8_std_write_text_at")) SYS_WRITE_TEXT_AT else SYS_NONE
+        "sqrt")) SYS_SQRT else SYS_NONE
 }
 
 // Bind the standard imports to inst: before it runs (a host function
@@ -153,19 +142,13 @@ wasm_new_bytes(inst: *WasmInstance, data: []i8, n: int): int {
 
 // A new []str in the module.
 wasm_new_strings(inst: *WasmInstance, list: []str): int {
-    wasm_new_strings_n(inst, list, len(list))
-}
-
-extern sys_readonly_bytes(text: str): []i8 = l8_as_int;
-
-wasm_new_strings_n(inst: *WasmInstance, list: []str, n: int): int {
+    n: int = len(list);
     outer: int = wasm_alloc(inst, 8 + 8 * n);
     if (outer == 0) return 0;
     wi_store64(inst, outer, n);
     for i in 0..n {
         s: str = list[i];
-        wi_store64(inst, outer + 8 + 8 * i, wasm_new_bytes(inst, sys_readonly_bytes(s),
-            len(s)))
+        wi_store64(inst, outer + 8 + 8 * i, wasm_new_bytes(inst, bytes(s), len(s)))
     }
     outer + 8
 }
@@ -187,7 +170,7 @@ wasm_str_at(inst: *WasmInstance, p: int): str@new {
 
 // ---- the imports ----
 sys_record(a: int, b: int) {
-    buf: []i8 = buffer([16]i8);
+    buf: []i8 = new i8[16](0i8);
     for k in 0..8 buf[k] = (a >> 8 * k) trunc i8;
     for k in 0..8 buf[8 + k] = (b >> 8 * k) trunc i8;
     _w: int = sys_write_at(3, &buf[0], 16)
@@ -207,7 +190,7 @@ sys_qsort(
     if (f < 0) return;
     mem: []i8 = inst.mem8;
     tmp: []i8 = new i8[count * width](0i8);
-    args: []int = buffer([2]int);
+    args: []int = new int[2](0);
     w: int = 1;
     while (w < count) {
         lo: int = 0;
@@ -249,7 +232,7 @@ sys_qsort(
 }
 
 sys_arg_number(i: int): int {
-    if (i < 0 || i >= sys_argc) return 0 - 1;
+    if (i >= len(sys_args)) return 0 - 1;
     s: str = sys_args[i];
     if (len(s) == 0) return 0 - 1;
     v: int = 0;
@@ -276,7 +259,7 @@ wasm_sys_host(
     if (kind == SYS_EXIT) {
         wasm_exit(inst, sx32(args[0]));
         0
-    } else if (kind == SYS_ARGV) wasm_new_strings_n(inst, sys_args, sys_argc) else if (kind == SYS_ENV) wasm_new_strings(inst,
+    } else if (kind == SYS_ARGV) wasm_new_strings(inst, sys_args) else if (kind == SYS_ENV) wasm_new_strings(inst,
         l8_environment()) else if (kind == SYS_OPEN) {
         path: str = wasm_str_at(inst, args[0]);
         open(path, args[1], args[2])
@@ -285,12 +268,11 @@ wasm_sys_host(
         if (args[1] + want > inst.pages * 65536) want = inst.pages * 65536 - args[1];
         r: int = read(args[0], mem, args[1], want);
         r
-    } else if (kind == SYS_WRITE || kind == SYS_WRITE_TEXT_AT) {
+    } else if (kind == SYS_WRITE) {
         fd: int = args[0];
-        cnt: int = if (kind == SYS_WRITE_TEXT_AT) args[3] else args[2];
-        offset: int = if (kind == SYS_WRITE_TEXT_AT) args[2] else 0;
+        cnt: int = args[2];
         if (cnt <= 0) return 0;
-        wrote: int = sys_write_at(fd, &mem[args[1] + offset], cnt);
+        wrote: int = sys_write_at(fd, &mem[args[1]], cnt);
         if (wrote > 0 && (fd == 1 || fd == 2)) sys_output = sys_output + wrote;
         wrote
     } else if (kind == SYS_CLOCK) {

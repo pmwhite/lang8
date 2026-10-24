@@ -37,7 +37,7 @@ The server arguments are `PORT [BIND_ADDRESS [TIMEOUT_MS]]`, defaulting to
 listening. It uses up to 64 processes for concurrent connections; the parent
 reaps finished workers when accepting connections. Each connection handles
 up to 1,000 ordered requests and advertises closure on the final response.
-Per-request checkpoints return transaction slots before the next request.
+Per-request regions reclaim allocations before the next request.
 
 The example application returns a greeting for GET/HEAD, echoes binary POST/PUT
 content, and answers OPTIONS/DELETE. `/chunked` selects a chunked response with
@@ -74,22 +74,10 @@ For absolute-form requests, `authority` comes from the request-target, taking
 precedence over Host. Percent escapes are validated and preserved, not decoded.
 There is no filesystem path interpretation.
 
-Constructors reserve bounded static storage. Take `http_checkpoint()` before
-constructing a transaction, consume its response, then call `http_rewind(mark)`.
-Every transaction buffer, message, string, range result, upload and body-reader
-created after the checkpoint expires on rewind. Checkpoints must be rewound in
-reverse order; no operation using the discarded objects may still be active.
-Connection readers and clients have separate storage and survive rewind. The
-client contains no pointers into completed transactions. `@new` annotations are
-legacy syntax and have no ownership effect.
-
-The transaction pool has 256 MiB of byte/field storage, 4,096 buffer records,
-256 messages, 128 body readers, 64 uploads and 256 range results. Up to 32
-connection readers each own 8 KiB of input. Closing returns the connection slot;
-its reader and client pointers then expire. Pool exhaustion prints a diagnostic
-and terminates; it never falls back to a heap. Protocol size limits still apply.
-These pools are process-local and operations must be serialized within a process;
-the example server uses separate worker processes for concurrent connections.
+Every constructor returns `@new` storage. Allocate each transaction in an L8
+`region`; consume its response inside that region. Keep `HttpReader`/`HttpClient`
+outside the transaction region to retain connection input buffers. The client
+contains no pointers into previously completed requests or responses.
 
 `error == 0` means successful processing. Positive errors use descriptive HTTP
 status numbers (400 malformed/incomplete, 408 deadline, 413 body limit,
@@ -111,14 +99,12 @@ main(): int {
     optional: ?*HttpClient = http_client("127.0.0.1", "8080");
     if (optional == null) { return 1; }
     client: *HttpClient = optional;
-    mark: HttpCheckpoint = http_checkpoint();
-    {
+    region {
         request: *HttpMessage = http_request("POST", "/", "127.0.0.1:8080");
         http_text(request.body, "hello");
         response: *HttpMessage = http_exchange(client, request);
         if (response.error == 0) { write(1, response.body.data, response.body.size); }
     }
-    http_rewind(mark);
     http_client_close(client);
     0;
 }

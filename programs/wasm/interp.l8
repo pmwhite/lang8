@@ -15,7 +15,7 @@ import "module.l8";
 
 native "native.s";
 
-extern wasm_mem_map(size: int): ?[]i8;
+extern wasm_mem_map(size: int): []i8;
 
 extern wasm_mem_words(m: []i8): []int;
 
@@ -37,7 +37,8 @@ wi_trace: bool = false;
 extern wi_trace_write(fd: int, data: []i8, n: int): int = l8_std_write;
 
 tr_text(s: str) {
-    _w: int = raw::raw_text_sys(2, s, len(s))
+    b: []i8 = bytes(s);
+    _w: int = wi_trace_write(2, b, len(b))
 }
 
 tr_bytes(b: []i8) {
@@ -45,7 +46,7 @@ tr_bytes(b: []i8) {
 }
 
 tr_int(v: int) {
-    b: []i8 = buffer([24]i8);
+    b: []i8 = new i8[24](0i8);
     n: int = 0;
     neg: bool = v < 0;
     u: int = if (neg) 0 - v else v;
@@ -62,9 +63,9 @@ tr_int(v: int) {
         b[n] = '-';
         n = n + 1
     }
-    out: []i8 = buffer([24]i8);
+    out: []i8 = new i8[n](0i8);
     for i in 0..n out[i] = b[n - 1 - i];
-    _w: int = wi_trace_write(2, out, n)
+    tr_bytes(out)
 }
 
 // ---- the decoded operations ----
@@ -180,7 +181,6 @@ WI_FRAME: int = 6;
 WI_HANDLER: int = 4;
 
 type WasmInstance = {
-    storage_slot: int;
     m: *WasmModule;
     mem8: []i8;
     mem64: []int;
@@ -237,37 +237,24 @@ wasm_host: fn(inst: *WasmInstance, imp: int, args: []int, n: int): int = &wasm_n
 // segment placed and the table filled; nothing has run. host answers every
 // import.
 wasm_instantiate(m: *WasmModule@new, max_mb: int, host: fn(inst: *WasmInstance, imp: int, args: []int, n: int): int) raises WasmNoMemory, WasmFormat: *WasmInstance@new {
-    if (max_mb < 1 || max_mb > 768 || m.pages < 0 || m.pages > max_mb * 16) raise WasmNoMemory;
     size: int = max_mb * 1048576;
-    initial: int = m.pages * 65536;
-    if (m.data_at < 0 || m.data_len < 0 || m.data_at > initial || m.data_len > initial - m.data_at || m.data < 0 || m.data > len(m.bytes) || m.data_len > len(m.bytes) - m.data || len(m.global_inits) > 65536 || len(m.table) > 65536) wr_fail("module exceeds instance storage bounds");
-    mapped: ?[]i8 = wasm_mem_map(size);
-    if (mapped == null) raise WasmNoMemory;
-    mem8: []i8 = mapped;
-    slot: int = wi_instance_reserve();
-    if (slot < 0) {
-        _r: int = wasm_mem_release(mem8, 0);
-        raise WasmNoMemory
-    }
-    wi_instance_storage[slot].globals_count = len(m.global_inits);
-    wi_instance_storage[slot].table_count = len(m.table);
-    inst: *WasmInstance = wi_instance_at(&wi_instance_objects[slot * 256]);
-    inst.* = WasmInstance {
-        storage_slot: slot,
+    mem8: []i8 = wasm_mem_map(size);
+    if (len(mem8) == 0) raise WasmNoMemory;
+    inst: *WasmInstance = new WasmInstance {
         m: m,
         mem8: mem8,
         mem64: wasm_mem_words(mem8),
         pages: m.pages,
         max_pages: size / 65536,
-        globals: wi_counted_ints(&wi_instance_storage[slot].globals_data[0]),
-        table: wi_counted_ints(&wi_instance_storage[slot].table_data[0]),
-        vals: wi_counted_ints(&wi_instance_storage[slot].vals_data[0]),
+        globals: new int[len(m.global_inits)](0),
+        table: new int[len(m.table)](0),
+        vals: new int[1048576](0),
         sp: 0,
-        frames: wi_counted_ints(&wi_instance_storage[slot].frames_data[0]),
+        frames: new int[65536 * WI_FRAME](0),
         nframes: 0,
-        handlers: wi_counted_ints(&wi_instance_storage[slot].handlers_data[0]),
+        handlers: new int[8192 * WI_HANDLER](0),
         nhandlers: 0,
-        args: wi_counted_ints(&wi_instance_storage[slot].args_data[0]),
+        args: new int[64](0),
         exiting: false,
         exit_code: 0,
         trapped: false,
@@ -276,22 +263,16 @@ wasm_instantiate(m: *WasmModule@new, max_mb: int, host: fn(inst: *WasmInstance, 
         host_data: 0,
         id: wi_next_id
     };
-    m.instances = m.instances + 1;
     wi_next_id = wi_next_id + 1;
     wasm_host = host;
-    try {
-        for i in 0..len(m.global_inits) inst.globals[i] = m.global_inits[i];
-        for i in 0..len(m.table) inst.table[i] = m.table[i];
-        memcpy(mem8, m.data_at, m.bytes, m.data, m.data_len);
-        d: *Decoder = new_decoder();
-        for i in 0..len(m.funcs) {
-            if (len(m.funcs[i].code) == 0) wasm_decode_function(m, i, d)
-        }
-        inst
-    } with WasmFormat e -> {
-        wasm_instance_release(inst);
-        raise WasmFormat { msg: e.msg }
+    for i in 0..len(m.global_inits) inst.globals[i] = m.global_inits[i];
+    for i in 0..len(m.table) inst.table[i] = m.table[i];
+    memcpy(mem8, m.data_at, m.bytes, m.data, m.data_len);
+    d: *Decoder = new_decoder();
+    for i in 0..len(m.funcs) {
+        if (len(m.funcs[i].code) == 0) wasm_decode_function(m, i, d)
     }
+    inst
 }
 
 wasm_global_index(inst: *WasmInstance, name: str): int {
@@ -390,71 +371,32 @@ DC_IF: int = 2;
 
 DC_TRY: int = 3;
 
-dc_code_storage: []int = static_buffer([2097152]int);
-
-dc_kind_storage: []int = static_buffer([256]int);
-
-dc_height_storage: []int = static_buffer([256]int);
-
-dc_arity_storage: []int = static_buffer([256]int);
-
-dc_start_storage: []int = static_buffer([256]int);
-
-dc_patch_storage: []int = static_buffer([256]int);
-
-dc_else_word_storage: []int = static_buffer([256]int);
-
-dc_outer_unreach_storage: []bool = static_buffer([256]bool);
-
-dc_ref_pos_storage: []int = static_buffer([4096]int);
-
-dc_ref_next_storage: []int = static_buffer([4096]int);
-
-dc_storage: Decoder = Decoder {
-    code: dc_code_storage,
-    n: 0,
-    kind: dc_kind_storage,
-    height: dc_height_storage,
-    arity: dc_arity_storage,
-    start: dc_start_storage,
-    patch: dc_patch_storage,
-    else_word: dc_else_word_storage,
-    outer_unreach: dc_outer_unreach_storage,
-    top: 0,
-    ref_pos: dc_ref_pos_storage,
-    ref_next: dc_ref_next_storage,
-    nrefs: 0,
-    height_now: 0,
-    unreach: false
-};
-
-extern wi_storage_exit(code: int): noreturn = l8_exit;
-
-wi_storage_full(): noreturn {
-    raw::raw_write(2, "wasm: decoder static storage exhausted\n");
-    wi_storage_exit(1)
+new_decoder(): *Decoder@new {
+    new Decoder {
+        code: new int[1024](0),
+        n: 0,
+        kind: new int[256](0),
+        height: new int[256](0),
+        arity: new int[256](0),
+        start: new int[256](0),
+        patch: new int[256](0),
+        else_word: new int[256](0),
+        outer_unreach: new bool[256](false),
+        top: 0,
+        ref_pos: new int[4096](0),
+        ref_next: new int[4096](0),
+        nrefs: 0,
+        height_now: 0,
+        unreach: false
+    }
 }
 
-new_decoder(): *Decoder {
-    dc_storage.n = 0;
-    dc_storage.top = 0;
-    dc_storage.nrefs = 0;
-    dc_storage.height_now = 0;
-    dc_storage.unreach = false;
-    for i in 0..256 dc_kind_storage[i] = 0;
-    for i in 0..256 dc_height_storage[i] = 0;
-    for i in 0..256 dc_arity_storage[i] = 0;
-    for i in 0..256 dc_start_storage[i] = 0;
-    for i in 0..256 dc_patch_storage[i] = 0;
-    for i in 0..256 dc_else_word_storage[i] = 0;
-    for i in 0..256 dc_outer_unreach_storage[i] = false;
-    for i in 0..4096 dc_ref_pos_storage[i] = 0;
-    for i in 0..4096 dc_ref_next_storage[i] = 0;
-    &dc_storage
-}
-
-dc_emit(d: *Decoder, v: int) {
-    if (d.n >= len(d.code)) wi_storage_full();
+dc_emit(d: *Decoder@new, v: int) {
+    if (d.n >= len(d.code)) {
+        bigger: []int = new int[len(d.code) * 2](0);
+        for i in 0..d.n bigger[i] = d.code[i];
+        d.code = bigger
+    }
     d.code[d.n] = v;
     d.n = d.n + 1
 }
@@ -555,13 +497,7 @@ dc_unary(iop: int): bool {
 // instantiation, so that running needs no allocation).
 wasm_decode_function(m: *WasmModule@new, fi: int, d: *Decoder@new) raises WasmFormat {
     f: *WasmFunc = m.funcs[fi];
-    reader: WasmReader = WasmReader {
-        storage_slot: m.storage_slot,
-        b: m.bytes,
-        at: f.body,
-        end: f.body_end
-    };
-    r: *WasmReader = &reader;
+    r: *WasmReader = new WasmReader { b: m.bytes, at: f.body, end: f.body_end };
     sig: *WasmSig = m.sigs[f.sig];
     d.n = 0;
     d.top = 0;
@@ -711,7 +647,7 @@ wasm_decode_function(m: *WasmModule@new, fi: int, d: *Decoder@new) raises WasmFo
         }
     }
     if (d.top != 0) wr_fail("function body without its end");
-    code: []int = wm_take_ints(m.storage_slot, d.n);
+    code: []int = new int[d.n](0);
     for i in 0..d.n code[i] = d.code[i];
     f.code = code
 }
@@ -745,7 +681,7 @@ wi_trap_uncaught(inst: *WasmInstance, f: int) {
     name: []i8 = wasm_function_name(inst.m, f);
     head: str = "uncaught exception in ";
     tag: int = if (len(inst.globals) > 2) inst.globals[2] else 0;
-    digits: []i8 = buffer([24]i8);
+    digits: []i8 = new i8[24](0i8);
     nd: int = 0;
     v: int = if (tag < 0) 0 - tag else tag;
     if (v == 0) {
@@ -841,7 +777,7 @@ wasm_tell_frames(inst: *WasmInstance) {
 
 // A label and a number, as a str.
 wi_line(label: str, n: int): str@new {
-    digits: []i8 = buffer([24]i8);
+    digits: []i8 = new i8[24](0i8);
     nd: int = 0;
     v: int = if (n < 0) 0 - n else n;
     if (v == 0) {
@@ -1486,7 +1422,7 @@ wasm_start(inst: *WasmInstance) raises WasmFormat: int {
     inst.sp = 0;
     inst.nframes = 0;
     inst.nhandlers = 0;
-    none: []int = buffer([1]int);
+    none: []int = new int[1](0);
     _r: int = wasm_call(inst, f, none, 0);
     if (inst.exiting) return inst.exit_code;
     if (inst.trapped) return 0 - 1;
@@ -1509,5 +1445,3 @@ wasm_call_export(
     args: []int = [a, b, c, d];
     wasm_call(inst, f, args, n)
 }
-
-import "instance_storage.l8"

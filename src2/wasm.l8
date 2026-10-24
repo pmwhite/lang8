@@ -141,38 +141,6 @@ type WasmImport = {
     next: ?*WasmImport
 }
 
-const WASM_TYPE_CAP: int = 65536;
-
-wasm_type_blank: WasmType = WasmType { sig: "", next: null };
-
-wasm_type_slots: []WasmType = static_buffer(WASM_TYPE_CAP, wasm_type_blank);
-
-wasm_type_used: int = 0;
-
-wasm_take_type(value: WasmType): *WasmType {
-    i: int = wasm_type_used;
-    if (i >= WASM_TYPE_CAP) compiler_pool_exhausted("wasm types (65536)");
-    wasm_type_used = i + 1;
-    wasm_type_slots[i] = value;
-    &wasm_type_slots[i]
-}
-
-const WASM_IMPORT_CAP: int = 65536;
-
-wasm_import_blank: WasmImport = WasmImport { name: "", type_index: 0, next: null };
-
-wasm_import_slots: []WasmImport = static_buffer(WASM_IMPORT_CAP, wasm_import_blank);
-
-wasm_import_used: int = 0;
-
-wasm_take_import(value: WasmImport): *WasmImport {
-    i: int = wasm_import_used;
-    if (i >= WASM_IMPORT_CAP) compiler_pool_exhausted("wasm imports (65536)");
-    wasm_import_used = i + 1;
-    wasm_import_slots[i] = value;
-    &wasm_import_slots[i]
-}
-
 wasm_types: ?*WasmType = null;
 
 wasm_types_tail: ?*WasmType = null;
@@ -186,27 +154,19 @@ wasm_imports_tail: ?*WasmImport = null;
 wasm_nimports: int = 0;
 
 // Function section entries and code section bodies, in function order.
-wasm_func_types_initial: StrBuf = StrBuf { data: "", used: 0 };
+wasm_func_types: *StrBuf = sb_new();
 
-wasm_func_types: *StrBuf = &wasm_func_types_initial;
-
-wasm_code_initial: StrBuf = StrBuf { data: "", used: 0 };
-
-wasm_code: *StrBuf = &wasm_code_initial;
+wasm_code: *StrBuf = sb_new();
 
 wasm_ndefined: int = 0;
 
 // Initialized data, starting at WASM_STACK_TOP.
-wasm_data_initial: StrBuf = StrBuf { data: "", used: 0 };
-
-wasm_data: *StrBuf = &wasm_data_initial;
+wasm_data: *StrBuf = sb_new();
 
 // Address of each string literal by label.
-wasm_str_addr: []int = compiler_take_ints(0);
+wasm_str_addr: []int = new int[0](0);
 
 wasm_heap_base: int = 0;
-
-wasm_exc_payload: int = 0;
 
 // Index of the function type with this encoding, added when new.
 wasm_type_index(sig: []i8@new) noregion: int {
@@ -217,7 +177,7 @@ wasm_type_index(sig: []i8@new) noregion: int {
         i = i + 1;
         t = t.next
     }
-    n: *WasmType = wasm_take_type(WasmType { sig: sig, next: null });
+    n: *WasmType = new WasmType { sig: sig, next: null };
     tail: ?*WasmType = wasm_types_tail;
     if (tail != null) tail.next = n else wasm_types = n;
     wasm_types_tail = n;
@@ -270,7 +230,7 @@ wasm_extern_sig(fn: *Function) noregion raises Error: int {
 
 // The function index of a new import from "env".
 wasm_add_import(name: []i8@new, type_index: int) noregion: int {
-    n: *WasmImport = wasm_take_import(WasmImport { name: name, type_index: type_index, next: null });
+    n: *WasmImport = new WasmImport { name: name, type_index: type_index, next: null };
     tail: ?*WasmImport = wasm_imports_tail;
     if (tail != null) tail.next = n else wasm_imports = n;
     wasm_imports_tail = n;
@@ -333,9 +293,7 @@ WASM_NRUNTIME: int = 13;
 // ---- code emission ----
 
 // The code of the function being generated.
-wc_initial: StrBuf = StrBuf { data: "", used: 0 };
-
-wc: *StrBuf = &wc_initial;
+wc: *StrBuf = sb_new();
 
 // Open blocks, loops, ifs, and try_tables. A label's id is the depth at
 // which it opened.
@@ -1270,7 +1228,7 @@ wg_assign(lhs: *Expr, rhs: *Expr) noregion raises Error {
 
 // memcpy(dst, di, src, si, n) with the x86 backend's range checks.
 wg_memcpy(args: ?*Expr) noregion raises Error {
-    ts: [5]int = zeroed([5]int);
+    ts: []int = new int[5](0);
     a: ?*Expr = args;
     for i in 0..5 {
         e: *Expr = a or error("memcpy takes five arguments");
@@ -1407,67 +1365,6 @@ wg_indirect_call(target: *Expr, fn: *Function, args: ?*Expr) noregion raises Err
     wt_put(t)
 }
 
-// The destination data address is on the wasm stack; leave it there as
-// the result after filling the declared slots from one evaluated value.
-wg_fixed_buffer_fill(bt: *Type, fill: *Expr) noregion raises Error {
-    base: *Type = type_base(bt);
-    ptr: int = wt_get();
-    w_lset(ptr);
-    value: int = wt_get();
-    wg_expr(fill);
-    w_lset(value);
-    index: int = wt_get();
-    w_i64(0);
-    w_lset(index);
-    done: int = w_block();
-    top: int = w_loop();
-    w_lget(index);
-    w_i64(array_len(bt));
-    w_op(89);
-    w_br_if(done);
-    w_lget(ptr);
-    w_lget(index);
-    w_i64(type_size(base));
-    w_op(126);
-    w_op(124);
-    w_wrap();
-    w_lget(value);
-    if (passes_by_ref(base)) {
-        w_wrap();
-        w_i32(type_size(base));
-        w_memory_copy()
-    } else if (wasm_small_record(base) && type_size(base) != 1 && type_size(base) != 2 && type_size(base) != 4 && type_size(base) != 8) {
-        packed: int = wt_get();
-        address: int = wt_get();
-        w_lset(packed);
-        w_extend();
-        w_lset(address);
-        for byte in 0..type_size(base) {
-            w_lget(address);
-            w_wrap();
-            w_lget(packed);
-            if (byte > 0) {
-                w_i64(byte * 8);
-                w_op(136)
-            }
-            w_mem(60, byte)
-        }
-        wt_put(address);
-        wt_put(packed)
-    } else wg_store_op(base, 0);
-    w_lget(index);
-    w_i64(1);
-    w_op(124);
-    w_lset(index);
-    w_br(top);
-    w_end();
-    w_end();
-    w_lget(ptr);
-    wt_put(index);
-    wt_put(value);
-    wt_put(ptr)
-}
-
 wg_call(
     n: *Expr,
     funcname: []i8,
@@ -1480,50 +1377,6 @@ wg_call(
         return
     }
     if (fno == null) {
-        if (streq(funcname, "l8_static_buffer")) {
-            bt: *Type = fixed_buffer_type(args);
-            w_i32(n.cg_temp);
-            w_i64(array_len(bt));
-            w_mem(55, 0);
-            w_i64(n.cg_temp + 8);
-            metadata: *Expr = args or error("missing static buffer type");
-            fill: ?*Expr = metadata.next;
-            if (fill != null && !fixed_buffer_zero_fill(fill)) wg_fixed_buffer_fill(bt,
-                fill);
-            return
-        }
-        if (streq(funcname, "l8_fixed_buffer")) {
-            bt: *Type = fixed_buffer_type(args);
-            slot: int = wl_rbp + cg_temp_offset(n);
-            wg_frame_addr(slot);
-            w_wrap();
-            w_i64(array_len(bt));
-            w_mem(55, 0);
-            metadata: *Expr = args or error("missing fixed buffer type");
-            fill: ?*Expr = metadata.next;
-            if (fill != null && !fixed_buffer_zero_fill(fill)) {
-                wg_frame_addr(slot + 8);
-                wg_fixed_buffer_fill(bt, fill)
-            } else {
-                wg_frame_addr(slot + 8);
-                w_wrap();
-                w_i32(0);
-                w_i32(type_size(bt));
-                w_memory_fill();
-                wg_frame_addr(slot + 8)
-            }
-            return
-        }
-        if (streq(funcname, "l8_zeroed_array")) {
-            slot: int = wl_rbp + cg_temp_offset(n);
-            wg_frame_addr(slot);
-            w_wrap();
-            w_i32(0);
-            w_i32(type_size(n.ty or error("missing zeroed array type")));
-            w_memory_fill();
-            wg_frame_addr(slot);
-            return
-        }
         if (streq(funcname, "len")) {
             argument: *Expr = args or error("missing len argument");
             wg_expr(argument);
@@ -1550,10 +1403,6 @@ wg_call(
         error_at_file(n.file, n.pos, "wasm: unknown builtin function")
     }
     fn: *Function = fno or error("missing function");
-    if (wasm_is_identity(fn)) {
-        wg_expr(args or error("identity requires an argument"));
-        return
-    }
     site: bool = wl_async && fn.wasm_async;
     if (site && !wa_site_ok) wa_misplaced(n);
     wa_site_ok = false;
@@ -1719,18 +1568,6 @@ wg_expr(n: *Expr) noregion raises Error {
                 wg_frame_addr(disp3);
                 return
             }
-            if (n.static_data > 0) {
-                w_i32(n.static_data);
-                w_i64(array_literal_count(k.elems));
-                w_mem(55, 0);
-                tp: int = wt_get();
-                w_i64(n.static_data + 8);
-                w_lset(tp);
-                wg_fill_list(k.elems, base, tp, 0);
-                w_lget(tp);
-                wt_put(tp);
-                return
-            }
             esz: int = type_size(base);
             if (esz <= 0) esz = 8;
             cnt: int = 0;
@@ -1774,22 +1611,6 @@ wasm_str(label: int): int {
 // and makes the call again; the import sees the rewinding state, clears it,
 // and returns. A pausing call must be a whole statement, so the wasm operand
 // stack is empty across a pause.
-const WASM_ASYNC_CAP: int = 64;
-
-wasm_async_blank: NeedLib = NeedLib { name: "", next: null };
-
-wasm_async_slots: []NeedLib = static_buffer(WASM_ASYNC_CAP, wasm_async_blank);
-
-wasm_async_used: int = 0;
-
-wasm_take_async(value: NeedLib): *NeedLib {
-    i: int = wasm_async_used;
-    if (i >= WASM_ASYNC_CAP) compiler_pool_exhausted("wasm async imports (64)");
-    wasm_async_used = i + 1;
-    wasm_async_slots[i] = value;
-    &wasm_async_slots[i]
-}
-
 wasm_async_names: ?*NeedLib = null;
 
 // Generating a resumable function, outside code that skips while rewinding.
@@ -2442,22 +2263,18 @@ wg_try(body: *Stmt, arms: ?*CatchArm) noregion raises Error {
     wt_put(rn)
 }
 
-wg_raise(exn: ?*ExnDef, inits: ?*FieldInit, temp: int) noregion raises Error {
+wg_raise(exn: ?*ExnDef, inits: ?*FieldInit) noregion raises Error {
     ex: *ExnDef = exn or error("internal");
     if (ex.members != null) {
         esz: int = ex.size;
         if (esz <= 0) esz = 8;
-        // As on native backends, finish evaluation in the frame before
-        // publishing into the fixed exception transfer slot.
-        slot: int = wl_rbp + temp;
-        wg_inits(inits, 0 - 1, slot);
-        w_i32(wasm_exc_payload);
-        wg_frame_addr(slot);
-        w_wrap();
-        w_i32(esz);
-        w_memory_copy();
+        t: int = wt_get();
+        w_i64(esz);
+        wg_malloc_into(t);
+        wg_inits(inits, t, 0);
         w_i64(ex.tag);
-        w_i64(wasm_exc_payload)
+        w_lget(t);
+        wt_put(t)
     } else {
         w_i64(ex.tag);
         w_i64(0)
@@ -2549,7 +2366,7 @@ wg_stmt_code(n: *Stmt) noregion raises Error {
         }
         For k -> wg_for(k.item, k.coll, k.idx, k.n, k.iter, k.hi, k.body);
         Match k -> wg_match(k.cond, k.arms);
-        Raise k -> wg_raise(k.exn, k.inits, k.temp);
+        Raise k -> wg_raise(k.exn, k.inits);
         Try k -> wg_try(k.body, k.arms);
         Region k -> {
             resuming: bool = wa_resuming();
@@ -3120,14 +2937,6 @@ wr_memory_bytes() raises Error {
 // malloc(size): bump allocation, 8-byte aligned, growing memory as needed.
 // Zero when memory is exhausted.
 wr_malloc() noregion raises Error {
-    if (static_storage_mode) {
-        // A host requesting a new object receives failure; linear memory has
-        // a fixed maximum and no generated runtime path can grow it.
-        wasm_begin(null, 1);
-        w_i64(0);
-        wasm_emit_body(wasm_sig_i64(1, 1), 0, 0);
-        return
-    }
     wasm_begin(null, 1);
     w_gget(WG_HEAP);
     w_lset(1);
@@ -3407,10 +3216,6 @@ wasm_is_exit(fn: *Function): bool {
     fn.is_extern && (streq(fn.link_name, "exit") || streq(fn.link_name, "l8_exit"))
 }
 
-wasm_is_identity(fn: *Function): bool {
-    runtime_word_identity(fn)
-}
-
 wasm_emits(fn: *Function): bool {
     !fn.is_extern && fn.body != null && (fn.test_id < 0 || compile_test_mode)
 }
@@ -3426,7 +3231,7 @@ wasm_plan() noregion raises Error {
     }
     fn: ?*Function = functions;
     while (fn != null) {
-        if (fn.is_extern && !wasm_is_exit(fn) && !wasm_is_identity(fn)) fn.wasm_index = wasm_add_import(fn.link_name,
+        if (fn.is_extern && !wasm_is_exit(fn)) fn.wasm_index = wasm_add_import(fn.link_name,
             wasm_extern_sig(fn));
         fn = fn.next
     }
@@ -3463,7 +3268,7 @@ wasm_pad(addr: int): int {
 // Place string literals and initialized globals in the data segment, then
 // the zeroed globals and region marks; the heap starts after them.
 wasm_layout() noregion raises Error {
-    wasm_str_addr = compiler_take_ints(str_count);
+    wasm_str_addr = new int[str_count](0);
     addr: int = WASM_STACK_TOP;
     s: ?*StrLit = str_lits;
     while (s != null) {
@@ -3502,29 +3307,6 @@ wasm_layout() noregion raises Error {
         }
         g = g.next
     }
-    wasm_exc_payload = addr;
-    addr = addr + exception_payload_size();
-    bg: ?*Obj = globals;
-    while (bg != null) {
-        bi: ?*Expr = bg.init;
-        if (bi != null)
-            match bi.kind {
-                Funcall bk -> {
-                    if (streq(bk.funcname, "l8_static_buffer")) {
-                        bi.cg_temp = addr;
-                        addr = wasm_pad(addr + type_size(fixed_buffer_type(bk.args)) + 8)
-                    }
-                }
-                ArrayLit bk -> {
-                    if (bi.static_data != 0) {
-                        bi.static_data = addr;
-                        addr = wasm_pad(addr + array_literal_count(bk.elems) * type_size(type_base(bi.ty or error("missing literal type"))) + 8)
-                    }
-                }
-                _ -> { }
-            }
-        bg = bg.next
-    }
     wasm_region_marks = addr;
     addr = addr + 8 * WASM_REGION_CAP;
     wasm_async_stack = addr;
@@ -3533,20 +3315,6 @@ wasm_layout() noregion raises Error {
 }
 
 wasm_codegen() noregion raises Error {
-    // Frontend initialization resets the builder pool. These output builders
-    // belong to this backend invocation and must be reserved afterwards.
-    wasm_func_types = sb_new();
-    wasm_code = sb_new();
-    wasm_data = sb_new();
-    wasm_ndefined = 0;
-    wasm_types = null;
-    wasm_types_tail = null;
-    wasm_ntypes = 0;
-    wasm_type_used = 0;
-    wasm_imports = null;
-    wasm_imports_tail = null;
-    wasm_nimports = 0;
-    wasm_import_used = 0;
     // The test entry point stands in for main.
     wasm_plan();
     wasm_mark_async();
@@ -3628,9 +3396,8 @@ wasm_module() noregion raises Error: *StrBuf@new {
     s = sb_new();
     wb_uleb(s, 1);
     wb_byte(s, 1);
-    pages: int = (wasm_heap_base + 65535) / 65536 + (if (static_storage_mode) 0 else 16);
-    wb_uleb(s, pages);
-    wb_uleb(s, if (static_storage_mode) pages else 65536);
+    wb_uleb(s, (wasm_heap_base + 65535) / 65536 + 16);
+    wb_uleb(s, 65536);
     wb_section(m, 5, s);
     s = sb_new();
     wb_uleb(s, 1);
@@ -3705,12 +3472,12 @@ wasm_name_section(m: *StrBuf@new) raises Error {
         index = index + 1;
         imp = imp.next
     }
-    runtime: [13]str = ["l8_malloc", "l8_region_push", "l8_region_pop", "l8_region_unwind",
+    runtime: []str = ["l8_malloc", "l8_region_push", "l8_region_pop", "l8_region_unwind",
         "l8_str_eq", "l8_opt_str_eq", "l8_cstr", "l8_bytes", "l8_raise", "l8_out_of_bounds",
         "l8_init_globals", "_start", "l8_exit"];
     for r in runtime {
         wb_uleb(names, index);
-        wb_name(names, compiler_readonly_text(r));
+        wb_name(names, bytes(r));
         index = index + 1
     }
     fn: ?*Function = functions;
@@ -3755,7 +3522,7 @@ compiler_build_wasm(src_path: []i8@immortal) noregion: int {
 
 // web/run.mjs beside the compiler executable.
 wasm_runner_path() raises Error: []i8@new {
-    buffer: []i8 = buffer([4096]i8);
+    buffer: []i8 = new i8[4096](0i8);
     n: int = runtime_readlink(89, "/proc/self/exe", buffer, len(buffer));
     if (n <= 0) error("cannot locate the compiler executable");
     slash: int = 0;
@@ -3769,14 +3536,13 @@ wasm_runner_path() raises Error: []i8@new {
 }
 
 wasm_usage(): int {
-    raw::raw_write(2, "error: usage: l8 wasm [--profile|-p] [--unchecked-index] [--static] [--async <import>]... <source.l8> -o <module.wasm>\n");
+    raw::raw_write(2, "error: usage: l8 wasm [--profile|-p] [--unchecked-index] [--async <import>]... <source.l8> -o <module.wasm>\n");
     1
 }
 
 compiler_wasm_main(argc: int, argv: []str) noregion: int {
     do_profile = false;
     check_index_mode = true;
-    static_storage_mode = false;
     have_s: bool = false;
     have_o: bool = false;
     want_o: bool = false;
@@ -3792,9 +3558,9 @@ compiler_wasm_main(argc: int, argv: []str) noregion: int {
             have_o = true;
             want_o = false
         } else if (want_async) {
-            wasm_async_names = wasm_take_async(NeedLib { name: compiler_readonly_text(arg), next: wasm_async_names });
+            wasm_async_names = new NeedLib { name: bytes(arg), next: wasm_async_names };
             want_async = false
-        } else if (is_profile_flag(arg)) do_profile = true else if (is_unchecked_flag(arg)) check_index_mode = false else if (is_static_flag(arg)) static_storage_mode = true else if (arg == "-o") want_o = true else if (arg == "--async") want_async = true else {
+        } else if (is_profile_flag(arg)) do_profile = true else if (is_unchecked_flag(arg)) check_index_mode = false else if (arg == "-o") want_o = true else if (arg == "--async") want_async = true else {
             if (have_s) return wasm_usage();
             source = arg;
             have_s = true
@@ -3802,7 +3568,7 @@ compiler_wasm_main(argc: int, argv: []str) noregion: int {
     }
     if (!have_s || !have_o || want_o || want_async) return wasm_usage();
     try {
-        compiler_analyze(compiler_readonly_text(source));
+        compiler_analyze(bytes(source));
         wasm_codegen();
         profile_mark("codegen");
         wasm_write_file(output, wasm_module());

@@ -109,9 +109,6 @@ export async function instantiate(module, sys, extra = {}) {
     close(fd) {
       return BigInt(sys.close(Number(fd)));
     },
-    l8_std_write_text_at(fd, ptr, off, n) {
-      return env.l8_std_write(fd, ptr + off, n);
-    },
     l8_std_write(fd, ptr, n) {
       const p = Number(ptr);
       return BigInt(write(Number(fd), bytes().slice(p, p + Number(n))));

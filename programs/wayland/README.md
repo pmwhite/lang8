@@ -6,10 +6,8 @@ xdg-shell toplevel and a desktop OpenGL context through EGL, and handles keyboar
 input with xkbcommon. No C shim, C compiler, or wayland-scanner is needed to build
 applications. Rebuild the L8 compiler with `make selfhost` first.
 
-`wl_window_open(width, height, title, app_id)` returns `?*WLWindow@new`. There are 16 static window slots, each with a 128-entry key queue. Opening
-returns null when the slots are full. Closing returns the slot for reuse; a
-closed window pointer must no longer be used. libwayland retains its callback
-data until close.
+`wl_window_open(width, height, title, app_id)` returns `?*WLWindow@new`. Opening a
+window requires `noregion`: libwayland retains its callback data until close.
 `wl_window_close` releases the EGL and Wayland objects, keymap/compose state,
 cursor theme, file descriptors, and connection. Use each window from one thread.
 

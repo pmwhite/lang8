@@ -65,8 +65,7 @@ on_exception(exc: int): int {
 // An NSString, said.
 say_ns(ns: int) {
     if (ns == 0) return;
-    text: NSBytes = ns_bytes_storage();
-    b: []i8 = nsstring_bytes(ns, &text);
+    b: []i8 = nsstring_bytes(ns);
     try {
         write(2, "hot: ");
         write_bytes_n(2, b, len(b));
@@ -88,7 +87,7 @@ extern addr_1(f: fn(a: int): int): int = l8_as_int;
 
 extern as_str(p: int): str = l8_as_int;
 
-pending_classes: []int = static_buffer([256]int);
+pending_classes: []int = new int[256](0);
 
 w_allocate_class(superclass: int, name: int, extra: int): int {
     existing: int = objc_getClass(as_str(name));
@@ -150,8 +149,7 @@ extern sys_open(path: str, flags: int, mode: int): int = open;
 extern sys_close(fd: int): int = close;
 
 log_path(): str@new {
-    home_text: NSBytes = ns_bytes_storage();
-    home: []i8 = nsstring_bytes(NSHomeDirectory(), &home_text);
+    home: []i8 = nsstring_bytes(NSHomeDirectory());
     tail: str = "/Documents/hot-last.log";
     b: []i8 = new i8[len(home) + len(tail)](0i8);
     memcpy(b, 0, home, 0, len(home));
@@ -233,7 +231,7 @@ say_int(s: str, n: int) {
         write(2, "hot: ");
         write(2, s);
         write(2, " ");
-        buf: []i8 = buffer(24, 0i8);
+        buf: []i8 = new i8[24](0i8);
         k: int = 0;
         v: int = if (n < 0) 0 - n else n;
         if (v == 0) {
@@ -258,21 +256,9 @@ say_int(s: str, n: int) {
 
 // An instance of the module in bytes, bound.
 host_instantiate(bytes: []i8@new) raises WasmFormat, WasmNoMemory: *WasmInstance@new {
-    module: *WasmModule = wasm_decode(bytes);
-    made: ?*WasmInstance = null;
-    try {
-        inst: *WasmInstance = wasm_instantiate(module, 256, &wasm_proxy_host);
-        made = inst;
-        wasm_proxy_bind(inst);
-        inst
-    } with WasmFormat e -> {
-        if (made != null) wasm_instance_release(made);
-        wasm_module_release(module);
-        raise WasmFormat { msg: e.msg }
-    } with WasmNoMemory -> {
-        wasm_module_release(module);
-        raise WasmNoMemory
-    }
+    inst: *WasmInstance = wasm_instantiate(wasm_decode(bytes), 512, &wasm_proxy_host);
+    wasm_proxy_bind(inst);
+    inst
 }
 
 // The first run: main, which on an iPhone calls UIApplicationMain and
@@ -302,8 +288,9 @@ extern host_heap_used(): int = l8_heap_used;
 
 host_reload(bytes: []i8@new) {
     if (host_inst == 0) return;
-    // Manifest/transfer and proxy copies still use the transitional heap.
-    // Leave room for those until their separate migration is complete.
+    // Decoded instances currently remain on the native bump heap. The
+    // Darwin runtime has 256 MiB: leave 96 MiB for decoding, binding and
+    // transfer instead of letting its allocator terminate the app.
     used: int = host_heap_used();
     say_int("native heap MiB", used / 1048576);
     if (used >= 160 * 1048576) {
@@ -311,19 +298,12 @@ host_reload(bytes: []i8@new) {
         return
     }
     old: *WasmInstance = instance_at(host_inst);
-    prepared: ?*WasmInstance = null;
-    committed: bool = false;
     try {
         inst: *WasmInstance = host_instantiate(bytes);
-        prepared = inst;
         t: *Transfer = wasm_transfer(old, inst);
         for i in 0..t.nlines say(t.lines[i]);
         say_int("persistent globals carried:", t.carried + t.migrated);
         host_inst = instance_address(inst);
-        committed = true;
-        // UIApplicationMain can keep the first instance on a native stack.
-        // Later instances have no active calls at this reload boundary.
-        if (old.depth == 0) host_discard(old);
         _g: int = wasm_call_export(inst, "l8_init_globals", 0, 0, 0, 0, 0);
         if (wasm_export_function(inst.m, "reload") >= 0) {
             _r: int = wasm_call_export(inst, "reload", 0, 0, 0, 0, 0);
@@ -333,37 +313,10 @@ host_reload(bytes: []i8@new) {
             } else say("reloaded")
         } else say("the module has no reload(): its state is carried, but nothing is shown again until the app restarts")
     } with WasmFormat e -> {
-        if (!committed) {
-            if (prepared != null) host_discard(prepared);
-            host_restore_binding(old)
-        }
         say("the build cannot be read:");
         say(e.msg)
     } with WasmNoMemory -> {
-        host_restore_binding(old);
         say("no memory for the build")
-    }
-}
-
-// Release metadata only after its final instance, and never while a native
-// call is still using that instance. Hosts must end all borrowed views too.
-host_discard(inst: *WasmInstance) {
-    try {
-        module: *WasmModule = inst.m;
-        wasm_instance_release(inst);
-        if (module.instances == 0) wasm_module_release(module)
-    } with WasmFormat e -> {
-        say("release failed:");
-        say(e.msg)
-    }
-}
-
-host_restore_binding(inst: *WasmInstance) {
-    try {
-        wasm_proxy_bind(inst)
-    } with WasmFormat e -> {
-        say("could not restore the previous build's imports:");
-        say(e.msg)
     }
 }
 
@@ -384,7 +337,7 @@ on_signal(sig: int): int {
         if (syms != 0) say_ns(msg1(syms, sel("componentsJoinedByString:"), nsstring("\n")));
         // The default action, so the fault ends the process as it would
         // have (returning re-runs the faulting instruction).
-        dfl: []i8 = buffer(16, 0i8);
+        dfl: []i8 = new i8[16](0i8);
         _r: int = sigaction(sig, dfl, 0)
     }
     0
@@ -394,7 +347,7 @@ catch_faults() {
     // Darwin's struct sigaction: the handler, the mask (4 bytes), the flags
     // (4 bytes: SA_NODEFER, so the signal stays deliverable after the
     // handler is left by abandoning).
-    act: []i8 = buffer([16]i8, 0i8);
+    act: []i8 = new i8[16](0i8);
     h: int = addr_sig(&on_signal);
     for k in 0..8 act[k] = (h >> 8 * k) trunc i8;
     act[12] = 16i8;
@@ -405,7 +358,7 @@ catch_faults() {
 // Its address, host:port: the Settings app's (the Settings.bundle
 // tools/ios/hot.sh puts in the app, the key hot_server in the user
 // defaults), else dev-server.txt beside the executable.
-server: []i8 = static_buffer([256]i8);
+server: []i8 = new i8[256](0i8);
 
 server_n: int = 0;
 
@@ -416,8 +369,7 @@ server_file: []i8 = new i8[0](0i8);
 read_server() {
     defaults: int = msg(cls("NSUserDefaults"), sel("standardUserDefaults"));
     ns: int = msg1(defaults, sel("stringForKey:"), nsstring("hot_server"));
-    text: NSBytes = ns_bytes_storage();
-    b: []i8 = if (ns != 0) nsstring_bytes(ns, &text) else server_file;
+    b: []i8 = if (ns != 0) nsstring_bytes(ns) else server_file;
     if (server_trim(b) == 0) b = server_file;
     n: int = server_trim(b);
     if (n > len(server)) n = len(server);
@@ -447,7 +399,7 @@ task_kind: int = 0;
 
 build_task: int = 0;
 
-task_got: []i8 = static_buffer([16777216]i8);
+task_got: []i8 = new i8[16777216](0i8);
 
 task_got_n: int = 0;
 
@@ -456,7 +408,7 @@ since: int = 0;
 // The task for commands (the server's /next), and what it has sent.
 ctl_task: int = 0;
 
-ctl_got: []i8 = static_buffer([65536]i8);
+ctl_got: []i8 = new i8[65536](0i8);
 
 ctl_got_n: int = 0;
 
@@ -523,7 +475,7 @@ path_num(path: str, n: int): str@new {
         b[k] = c;
         k = k + 1
     }
-    digits: []i8 = buffer([20]i8, 0i8);
+    digits: []i8 = new i8[20](0i8);
     nd: int = 0;
     v: int = n;
     if (v == 0) {
@@ -623,7 +575,7 @@ scroll_by(dy: int) {
         say("no window to scroll");
         return
     }
-    queue: []int = buffer(4096, 0);
+    queue: []int = new int[4096](0);
     head: int = 0;
     tail: int = 1;
     queue[0] = msg1(windows, sel("objectAtIndex:"), 0);
@@ -647,7 +599,7 @@ scroll_by(dy: int) {
         say("no scroll view");
         return
     }
-    at: [4]f64 = msg_hfa(scroller, sel("contentOffset"), 0);
+    at: []f64 = msg_hfa(scroller, sel("contentOffset"), 0);
     _s: int = msg_offset(scroller, sel("setContentOffset:animated:"), at[0], at[1] + dy as f64,
         0);
     say_int("scrolled to", (at[1] + dy as f64) as int)
@@ -685,7 +637,7 @@ screenshot() {
         return
     }
     window: int = msg1(windows, sel("objectAtIndex:"), 0);
-    bounds: [4]f64 = msg_hfa(window, sel("bounds"), 0);
+    bounds: []f64 = msg_hfa(window, sel("bounds"), 0);
     scale: f64 = msg_f(msg(cls("UIScreen"), sel("mainScreen")), sel("scale"));
     _b: int = begin_image(bounds[2], bounds[3], 1, scale);
     _d: int = msg_rect_bool(window, sel("drawViewHierarchyInRect:afterScreenUpdates:"),
@@ -710,13 +662,13 @@ screenshot() {
 }
 
 wait_for_build() {
-    b: []i8 = buffer([40]i8, 0i8);
+    b: []i8 = new i8[40](0i8);
     n: int = 0;
     for c in "/wait?since=" {
         b[n] = c;
         n = n + 1
     }
-    digits: []i8 = buffer([20]i8, 0i8);
+    digits: []i8 = new i8[20](0i8);
     k: int = 0;
     v: int = since;
     if (v == 0) {
@@ -958,20 +910,14 @@ extern fn_address4(f: fn(block: int, a: int, b: int, c: int): int): int = l8_as_
 // A global block of three arguments (block.l8's, with one more).
 block_descriptor: []int = [0, 32];
 
-// Each callback owns four permanent words. The immortal adapter keeps the
-// raw integer address from outliving frame-backed storage.
-first_block_words: []int = static_buffer([4]int);
-
-log_block_words: []int = static_buffer([4]int);
-
-extern immortal_ints_address(words: []int@immortal): int = l8_as_int;
-
-block3_of(words: []int@immortal, invoke: int): int {
+// (Each block its own four words, never freed.)
+block3_of(invoke: int): int {
+    words: []int = new int[4](0);
     words[0] = dlsym(0 - 2, "_NSConcreteGlobalBlock");
     words[1] = 268435456;
     words[2] = invoke;
     words[3] = ints_address(block_descriptor);
-    immortal_ints_address(words)
+    ints_address(words)
 }
 
 main(argc: int, argv: []str) noregion: int {
@@ -993,8 +939,8 @@ main(argc: int, argv: []str) noregion: int {
     session = msg3(cls("NSURLSession"), sel("sessionWithConfiguration:delegate:delegateQueue:"),
         config, delegate, msg(cls("NSOperationQueue"), sel("mainQueue")));
     session_sync = msg1(cls("NSURLSession"), sel("sessionWithConfiguration:"), config);
-    first_block = block3_of(first_block_words, fn_address4(&first_completed));
-    log_block = block3_of(log_block_words, fn_address4(&log_completed));
+    first_block = block3_of(fn_address4(&first_completed));
+    log_block = block3_of(fn_address4(&log_completed));
     proxy_bind("l8_std_write", addr_write(&log_write));
     proxy_bind("l8_os_write", addr_write(&log_write));
     wasm_on_trap = &trapped;

@@ -67,22 +67,7 @@ heap_ptr:  .skip 8
 heap_base: .skip 8
 heap_end:  .skip 8
 initial_envp: .skip 8
-.equ HEAP_SIZE, 256*1024*1024
-
-# Transitional legacy heap backing is reserved in the executable's BSS. It
-# remains only for unmigrated constructors; startup never maps a dynamic heap.
-.align 8
-heap_storage: .skip 268435456
-
-# Bounded process-owned copies: 4096 strings and 4 MiB of counted text each.
-.align 8
-l8_args_header: .skip 8
-l8_args_values: .skip 32768
-l8_args_text: .skip 4194304
-l8_env_header: .skip 8
-l8_env_values: .skip 32768
-l8_env_text: .skip 4194304
-l8_env_ready: .skip 8
+.equ HEAP_SIZE, 768*1024*1024
 
 # Current exception (set by l8_raise, read by catch codegen)
 l8_exc_tag: .skip 8
@@ -114,132 +99,102 @@ l8_try_regions: .skip 512
 
 # _start: call main(argc, argv), then exit with its return value
 _start:
-    mov (%rsp), %r12
-    lea 8(%rsp), %r13
-    mov %r12, %rax
+    mov (%rsp), %rdi       # argc
+    lea 8(%rsp), %rsi      # argv
+    mov %rdi, %rax
     shl $3, %rax
-    add %r13, %rax
-    add $8, %rax
+    add %rsp, %rax
+    add $16, %rax
     mov %rax, initial_envp(%rip)
-    lea heap_storage(%rip), %rax
+    push %rdi
+    push %rsi
+
+    # mmap, not brk: libc malloc also uses the program break, and a
+    # dynlinked need "libX11" / libGL process will corrupt Mesa's
+    # FBConfig list if we steal brk for the bump heap.
+    mov $0, %rdi
+    mov $0, %rsi
+    lea HEAP_SIZE(%rsi), %rsi
+    mov $3, %rdx           # PROT_READ|PROT_WRITE
+    mov $34, %r10          # MAP_PRIVATE|MAP_ANONYMOUS
+    mov $-1, %r8
+    mov $0, %r9
+    mov $9, %rax           # mmap
+    syscall
     mov %rax, heap_ptr(%rip)
     mov %rax, heap_base(%rip)
-    lea HEAP_SIZE(%rax), %rax
-    mov %rax, heap_end(%rip)
-    mov %r13, %rdi
-    mov %r12, %rsi
-    lea l8_args_header(%rip), %rdx
-    lea l8_args_text(%rip), %rcx
-    call .Lbounded_process_strings
-    mov %rax, %rsi
+    lea HEAP_SIZE(%rax), %rdi
+    mov %rdi, heap_end(%rip)
+
+    pop %r13              # raw argv
+    pop %r12              # argc
+
+    # Build []str argv. Each element has its own length prefix and trailing NUL;
+    # the outer slice has the usual length prefix.
+    mov %r12, %rax
+    add %rax, %rax
+    add %rax, %rax
+    add %rax, %rax
+    add $8, %rax
+    mov %rax, %rdi
+    call malloc
+    test %rax, %rax
+    jz .Lalloc_fail
+    mov %r12, 0(%rax)
+    lea 8(%rax), %r15     # argv slice data
+    xor %rbx, %rbx
+.Largv_next:
+    cmp %r12, %rbx
+    je .Largv_done
+    mov 0(%r13), %r10
+    add $8, %r13
+    xor %r11, %r11
+    mov %r10, %r8
+.Largv_len:
+    movzb 0(%r8), %rax
+    cmp $0, %rax
+    je .Largv_have_len
+    add $1, %r8
+    add $1, %r11
+    jmp .Largv_len
+.Largv_have_len:
+    lea 9(%r11), %rdi
+    call malloc
+    test %rax, %rax
+    jz .Lalloc_fail
+    mov %r11, 0(%rax)
+    lea 8(%rax), %r9
+    mov %r9, 0(%r15)
+    add $8, %r15
+    xor %rdx, %rdx
+.Largv_string_copy:
+    movzb 0(%r10), %rax
+    mov %al, 0(%r9)
+    cmp %r11, %rdx
+    je .Largv_string_done
+    add $1, %r10
+    add $1, %r9
+    add $1, %rdx
+    jmp .Largv_string_copy
+.Largv_string_done:
+    add $1, %rbx
+    jmp .Largv_next
+.Largv_done:
     mov %r12, %rdi
+    mov %r15, %rsi
+    mov %r12, %rax
+    add %rax, %rax
+    add %rax, %rax
+    add %rax, %rax
+    sub %rax, %rsi
     call main
     mov %rax, %rdi
-    mov $60, %rax
+    mov $60, %rax          # exit
     syscall
 .Lalloc_fail:
     mov $1, %rdi
     mov $60, %rax
     syscall
-
-# Copy a C vector into fixed counted storage. rsi=-1 counts a null-terminated
-# environment; otherwise it is argc. Preserve every callee-saved register.
-.Lbounded_process_strings:
-    push %rbx
-    push %r12
-    push %r13
-    push %r14
-    push %r15
-    mov %rdi, %r12
-    mov %rsi, %r13
-    lea 8(%rdx), %r14
-    mov %rcx, %r15
-    lea 4194304(%rcx), %rbx
-    cmp $0, %r13
-    jge .Lbounded_counted
-    xor %r13, %r13
-    test %r12, %r12
-    jz .Lbounded_counted
-.Lbounded_count:
-    mov %r13, %rax
-    shl $3, %rax
-    add %r12, %rax
-    mov 0(%rax), %rax
-    test %rax, %rax
-    jz .Lbounded_counted
-    add $1, %r13
-    cmp $4096, %r13
-    ja .Lprocess_storage_full
-    jmp .Lbounded_count
-.Lbounded_counted:
-    cmp $4096, %r13
-    ja .Lprocess_storage_full
-    mov %r13, -8(%r14)
-    xor %r9, %r9
-.Lbounded_next:
-    cmp %r13, %r9
-    je .Lbounded_done
-    mov %r9, %rax
-    shl $3, %rax
-    add %r12, %rax
-    mov 0(%rax), %r10
-    xor %r11, %r11
-.Lbounded_length:
-    mov %r10, %rax
-    add %r11, %rax
-    movzb 0(%rax), %rax
-    test %rax, %rax
-    jz .Lbounded_string
-    add $1, %r11
-    cmp $4194295, %r11
-    ja .Lprocess_storage_full
-    jmp .Lbounded_length
-.Lbounded_string:
-    lea 16(%r11), %rax
-    and $-8, %rax
-    mov %r15, %rdx
-    add %rax, %rdx
-    cmp %rbx, %rdx
-    ja .Lprocess_storage_full
-    mov %r11, 0(%r15)
-    lea 8(%r15), %r8
-    mov %r9, %rax
-    shl $3, %rax
-    add %r14, %rax
-    mov %r8, 0(%rax)
-    xor %rcx, %rcx
-.Lbounded_copy:
-    mov %r10, %rax
-    add %rcx, %rax
-    movzb 0(%rax), %rax
-    mov %r8, %rsi
-    add %rcx, %rsi
-    mov %al, 0(%rsi)
-    cmp %r11, %rcx
-    je .Lbounded_copied
-    add $1, %rcx
-    jmp .Lbounded_copy
-.Lbounded_copied:
-    mov %rdx, %r15
-    add $1, %r9
-    jmp .Lbounded_next
-.Lbounded_done:
-    mov %r14, %rax
-    pop %r15
-    pop %r14
-    pop %r13
-    pop %r12
-    pop %rbx
-    ret
-.Lprocess_storage_full:
-    mov $2, %rdi
-    lea .Lprocess_storage_message(%rip), %rsi
-    mov $37, %rdx
-    mov $1, %rax
-    syscall
-    jmp .Lalloc_fail
-.Lprocess_storage_message:
-    .byte 108, 56, 58, 32, 112, 114, 111, 99, 101, 115, 115, 32, 115, 116, 97, 116, 105, 99, 32, 115, 116, 111, 114, 97, 103, 101, 32, 101, 120, 104, 97, 117, 115, 116, 101, 100, 10
 
 # long syscall(long nr, long a1, long a2, long a3, long a4, long a5)
 # Sixth syscall arg is always 0. Typed adapters below cover the wider OS surface
@@ -353,22 +308,84 @@ l8_kill:
     syscall
     ret
 
-# The initial environment is copied once into its permanent, bounded owner.
+# []str l8_environment() -- counted copies of the initial process environment.
+# Caller owns the result in its current region; raw envp remains on the initial stack.
 l8_environment:
-    mov l8_env_ready(%rip), %rax
+    push %rbx
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+    mov initial_envp(%rip), %r12
+    xor %r13, %r13
+.Lenv_count:
+    mov %r13, %rax
+    shl $3, %rax
+    add %r12, %rax
+    mov 0(%rax), %rax
     test %rax, %rax
-    jz .Lbounded_environment_init
-    lea l8_env_values(%rip), %rax
-    ret
-.Lbounded_environment_init:
-    sub $8, %rsp
-    mov initial_envp(%rip), %rdi
-    mov $-1, %rsi
-    lea l8_env_header(%rip), %rdx
-    lea l8_env_text(%rip), %rcx
-    call .Lbounded_process_strings
-    add $8, %rsp
-    movq $1, l8_env_ready(%rip)
+    jz .Lenv_alloc
+    add $1, %r13
+    jmp .Lenv_count
+.Lenv_alloc:
+    mov %r13, %rdi
+    shl $3, %rdi
+    add $8, %rdi
+    call malloc
+    test %rax, %rax
+    jz .Lalloc_fail
+    mov %r13, 0(%rax)
+    lea 8(%rax), %r14
+    xor %r15, %r15
+.Lenv_next:
+    cmp %r13, %r15
+    je .Lenv_done
+    mov %r15, %rbx
+    shl $3, %rbx
+    add %r12, %rbx
+    mov 0(%rbx), %rbx
+    xor %rdx, %rdx
+.Lenv_length:
+    mov %rbx, %rax
+    add %rdx, %rax
+    movzb 0(%rax), %rax
+    test %rax, %rax
+    jz .Lenv_string
+    add $1, %rdx
+    jmp .Lenv_length
+.Lenv_string:
+    lea 9(%rdx), %rdi
+    call malloc
+    test %rax, %rax
+    jz .Lalloc_fail
+    mov %rdx, 0(%rax)
+    lea 8(%rax), %rcx
+    mov %r15, %rax
+    shl $3, %rax
+    add %r14, %rax
+    mov %rcx, 0(%rax)
+    xor %r8, %r8
+.Lenv_copy:
+    mov %rbx, %r9
+    add %r8, %r9
+    movzb 0(%r9), %rax
+    mov %rcx, %r9
+    add %r8, %r9
+    mov %al, 0(%r9)
+    cmp %rdx, %r8
+    je .Lenv_copied
+    add $1, %r8
+    jmp .Lenv_copy
+.Lenv_copied:
+    add $1, %r15
+    jmp .Lenv_next
+.Lenv_done:
+    mov %r14, %rax
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %rbx
     ret
 l8_time:
     xor %rdi, %rdi

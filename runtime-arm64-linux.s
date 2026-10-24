@@ -71,15 +71,6 @@ heap_ptr:  .space 8
 heap_base: .space 8
 heap_end:  .space 8
 initial_envp: .space 8
-// Transitional legacy heap is executable-owned BSS, with no startup mmap.
-heap_storage: .space 268435456
-l8_args_header: .space 8
-l8_args_values: .space 32768
-l8_args_text: .space 4194304
-l8_env_header: .space 8
-l8_env_values: .space 32768
-l8_env_text: .space 4194304
-l8_env_ready: .space 8
 // The current exception (set by l8_raise, read by the catch).
 l8_exc_tag: .space 8
 l8_exc_ptr: .space 8
@@ -106,118 +97,69 @@ _start:
     add x0, x0, #8
     adrp x1, initial_envp
     str x0, [x1, :lo12:initial_envp]
-    adrp x0, heap_storage
-    add x0, x0, :lo12:heap_storage
+    // The heap: one anonymous mapping that malloc bumps through.
+    mov x0, #0
+    mov x1, #0x30000000         // 768 MiB
+    mov x2, #3                  // PROT_READ|PROT_WRITE
+    mov x3, #34                 // MAP_PRIVATE|MAP_ANONYMOUS
+    mov x4, #-1
+    mov x5, #0
+    mov x8, #222                // mmap
+    svc #0
     adrp x1, heap_ptr
     str x0, [x1, :lo12:heap_ptr]
     adrp x1, heap_base
     str x0, [x1, :lo12:heap_base]
-    mov x2, #0x10000000
+    mov x2, #0x30000000
     add x0, x0, x2
     adrp x1, heap_end
     str x0, [x1, :lo12:heap_end]
-    mov x0, x20
-    mov x1, x19
-    adrp x2, l8_args_header
-    add x2, x2, :lo12:l8_args_header
-    adrp x3, l8_args_text
-    add x3, x3, :lo12:l8_args_text
-    bl .Lbounded_process_strings
-    mov x1, x0
+    // argv as a []str: each string counted and NUL-ended.
+    lsl x0, x19, #3
+    add x0, x0, #8
+    bl malloc
+    cbz x0, .Lalloc_fail
+    str x19, [x0]
+    add x21, x0, #8             // the slice's data
+    mov x23, x21
+    mov x22, #0                 // index
+.Largv_next:
+    cmp x22, x19
+    b.eq .Largv_done
+    ldr x24, [x20, x22, lsl #3] // the C string
+    mov x25, #0
+.Largv_len:
+    ldrb w0, [x24, x25]
+    cbz w0, .Largv_have_len
+    add x25, x25, #1
+    b .Largv_len
+.Largv_have_len:
+    add x0, x25, #9
+    bl malloc
+    cbz x0, .Lalloc_fail
+    str x25, [x0]
+    add x1, x0, #8
+    str x1, [x23, x22, lsl #3]
+    mov x2, #0
+.Largv_copy:
+    ldrb w3, [x24, x2]
+    strb w3, [x1, x2]
+    cmp x2, x25
+    add x2, x2, #1
+    b.ne .Largv_copy
+    add x22, x22, #1
+    b .Largv_next
+.Largv_done:
     mov x0, x19
-    mov x28, sp
+    mov x1, x21
+    mov x28, sp                 // L8's stack starts here
     bl main
-    mov x8, #93
+    mov x8, #93                 // exit
     svc #0
 .Lalloc_fail:
     mov x0, #1
     mov x8, #93
     svc #0
-
-// x0 raw vector, x1 argc (or -1 for env), x2 counted vector, x3 text owner.
-.Lbounded_process_strings:
-    stp x29, x30, [sp, #-80]!
-    mov x29, sp
-    stp x19, x20, [sp, #16]
-    stp x21, x22, [sp, #32]
-    stp x23, x24, [sp, #48]
-    stp x25, x26, [sp, #64]
-    mov x19, x0
-    mov x20, x1
-    add x21, x2, #8
-    mov x22, x3
-    mov x4, #0x400000
-    add x23, x3, x4
-    mov x7, #4096
-    cmp x20, #0
-    b.ge .Lbounded_counted
-    mov x20, #0
-    cbz x19, .Lbounded_counted
-.Lbounded_count:
-    ldr x0, [x19, x20, lsl #3]
-    cbz x0, .Lbounded_counted
-    add x20, x20, #1
-    cmp x20, x7
-    b.hi .Lprocess_storage_full
-    b .Lbounded_count
-.Lbounded_counted:
-    cmp x20, x7
-    b.hi .Lprocess_storage_full
-    sub x8, x21, #8
-    str x20, [x8]
-    mov x24, #0
-.Lbounded_next:
-    cmp x24, x20
-    b.eq .Lbounded_done
-    ldr x25, [x19, x24, lsl #3]
-    mov x26, #0
-.Lbounded_length:
-    ldrb w0, [x25, x26]
-    cbz w0, .Lbounded_string
-    add x26, x26, #1
-    mov x8, #0x400000
-    sub x8, x8, #9
-    cmp x26, x8
-    b.hi .Lprocess_storage_full
-    b .Lbounded_length
-.Lbounded_string:
-    add x4, x26, #16
-    and x4, x4, #-8
-    add x5, x22, x4
-    cmp x5, x23
-    b.hi .Lprocess_storage_full
-    str x26, [x22]
-    add x6, x22, #8
-    str x6, [x21, x24, lsl #3]
-    mov x4, #0
-.Lbounded_copy:
-    ldrb w0, [x25, x4]
-    strb w0, [x6, x4]
-    cmp x4, x26
-    add x4, x4, #1
-    b.ne .Lbounded_copy
-    mov x22, x5
-    add x24, x24, #1
-    b .Lbounded_next
-.Lbounded_done:
-    mov x0, x21
-    ldp x25, x26, [sp, #64]
-    ldp x23, x24, [sp, #48]
-    ldp x21, x22, [sp, #32]
-    ldp x19, x20, [sp, #16]
-    ldp x29, x30, [sp], #80
-    ret
-.Lprocess_storage_full:
-    mov x0, #2
-    adrp x1, .Lprocess_storage_message
-    add x1, x1, :lo12:.Lprocess_storage_message
-    mov x2, #37
-    mov x8, #64
-    svc #0
-    b .Lalloc_fail
-.Lprocess_storage_message:
-    .byte 108, 56, 58, 32, 112, 114, 111, 99, 101, 115, 115, 32, 115, 116, 97, 116, 105, 99, 32, 115, 116, 111, 114, 97, 103, 101, 32, 101, 120, 104, 97, 117, 115, 116, 101, 100, 10
-    .p2align 2
 
 // long syscall(nr, a1, a2, a3, a4, a5): Linux's arm64 numbers.
 syscall:
@@ -365,29 +307,60 @@ l8_time:
     add sp, sp, #16
     ret
 
-// A permanent counted snapshot; repeated reads do not consume any heap.
+// []str l8_environment(): counted copies of the environment.
 l8_environment:
-    adrp x1, l8_env_ready
-    ldr x0, [x1, :lo12:l8_env_ready]
-    cbz x0, .Lbounded_env_init
-    adrp x0, l8_env_values
-    add x0, x0, :lo12:l8_env_values
-    ret
-.Lbounded_env_init:
-    stp x29, x30, [sp, #-16]!
-    mov x29, sp
-    adrp x0, initial_envp
-    ldr x0, [x0, :lo12:initial_envp]
-    mov x1, #-1
-    adrp x2, l8_env_header
-    add x2, x2, :lo12:l8_env_header
-    adrp x3, l8_env_text
-    add x3, x3, :lo12:l8_env_text
-    bl .Lbounded_process_strings
-    adrp x1, l8_env_ready
-    mov x2, #1
-    str x2, [x1, :lo12:l8_env_ready]
-    ldp x29, x30, [sp], #16
+    stp x29, x30, [sp, #-64]!
+    stp x19, x20, [sp, #16]
+    stp x21, x22, [sp, #32]
+    stp x23, x24, [sp, #48]
+    adrp x19, initial_envp
+    ldr x19, [x19, :lo12:initial_envp]
+    mov x20, #0
+1:
+    ldr x0, [x19, x20, lsl #3]
+    cbz x0, 2f
+    add x20, x20, #1
+    b 1b
+2:
+    lsl x0, x20, #3
+    add x0, x0, #8
+    bl malloc
+    cbz x0, .Lalloc_fail
+    str x20, [x0]
+    add x21, x0, #8
+    mov x22, #0
+3:
+    cmp x22, x20
+    b.eq 7f
+    ldr x23, [x19, x22, lsl #3]
+    mov x24, #0
+4:
+    ldrb w0, [x23, x24]
+    cbz w0, 5f
+    add x24, x24, #1
+    b 4b
+5:
+    add x0, x24, #9
+    bl malloc
+    cbz x0, .Lalloc_fail
+    str x24, [x0]
+    add x1, x0, #8
+    str x1, [x21, x22, lsl #3]
+    mov x2, #0
+6:
+    ldrb w3, [x23, x2]
+    strb w3, [x1, x2]
+    cmp x2, x24
+    add x2, x2, #1
+    b.ne 6b
+    add x22, x22, #1
+    b 3b
+7:
+    mov x0, x21
+    ldp x23, x24, [sp, #48]
+    ldp x21, x22, [sp, #32]
+    ldp x19, x20, [sp, #16]
+    ldp x29, x30, [sp], #64
     ret
 
 // The bump heap and regions (as runtime.s). These keep x9.
