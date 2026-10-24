@@ -38,6 +38,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 	tests/compiler/hello.l8 \
 	tests/compiler/i8.l8 \
 	tests/compiler/imports/main.l8 \
+	tests/compiler/lifetime_scalar_copy.l8 \
 	tests/compiler/logic.l8 \
 	tests/compiler/narrow.l8 \
 	tests/compiler/null.l8 \

@@ -149,6 +149,10 @@ error: badopen.l8:8:5: argument type mismatch for parameter path of open: have [
 |} */
 ```
 
+Missing `noregion` diagnostics include source excerpts, prose explaining the
+lifetime requirement, and alternatives based on whether the value should be
+retained. Their entire output belongs in the same compile expectation block.
+
 A file without this block expects the compiler to print nothing. A file that
 fails to compile can still pass, which is how tests of compiler errors work;
 its tests do not run. `--accept` records warnings anywhere, but records an

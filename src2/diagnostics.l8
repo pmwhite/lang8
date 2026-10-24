@@ -1,0 +1,217 @@
+tag compiler_internal;
+
+type DiagnosticSource = {
+    path: []i8;
+    text: []i8;
+    length: int
+}
+
+type LifetimeDiagnostics = {
+    output: *StrBuf;
+    count: int
+}
+
+diagnostic_source(file: int): DiagnosticSource {
+    imported: ?*ImportedFile = imported_files;
+    while (imported != null) {
+        if (imported.id == file) return DiagnosticSource { path: imported.path, text: imported.src, length: imported.src_len };
+        imported = imported.next
+    }
+    DiagnosticSource { path: source_path, text: source, length: source_len }
+}
+
+append_diagnostic_location(output: *StrBuf@new, file: int, pos: int) raises Error {
+    input: DiagnosticSource = diagnostic_source(file);
+    line: int = 1;
+    column: int = 1;
+    cursor: int = 0;
+    while (cursor < pos && cursor < input.length && cursor < len(input.text)) {
+        if (input.text[cursor] == '\n') {
+            line = line + 1;
+            column = 1
+        } else column = column + 1;
+        cursor = cursor + 1
+    }
+    sb_puts(output, diag_relative(input.path));
+    sb_putc(output, ':');
+    sb_uint(output, line);
+    sb_putc(output, ':');
+    sb_uint(output, column)
+}
+
+append_diagnostic_excerpt(output: *StrBuf@new, cause: *NoregionCause) raises Error {
+    input: DiagnosticSource = diagnostic_source(cause.file);
+    append_diagnostic_location(output, cause.file, cause.pos);
+    sb_puts(output, """
+
+
+""");
+    limit: int = input.length;
+    if (limit > len(input.text)) limit = len(input.text);
+    if (cause.pos < 0 || cause.pos >= limit) return;
+    start: int = cause.pos;
+    while (start > 0 && input.text[start - 1] != '\n') start = start - 1;
+    end: int = cause.pos;
+    while (end < limit && input.text[end] != '\n' && input.text[end] != '\r') end = end + 1;
+    for cursor in start..end sb_putc(output, input.text[cursor]);
+    sb_putc(output, '\n');
+    for cursor in start..cause.pos {
+        if (input.text[cursor] == '\t') sb_putc(output, '\t') else sb_putc(output,
+            ' ')
+    }
+    span: int = cause.span;
+    if (span < 1) span = 1;
+    if (span > end - cause.pos) span = end - cause.pos;
+    for _cursor in 0..span sb_putc(output, '^');
+    sb_puts(output, """
+
+
+""")
+}
+
+// Wrap prose between words, preserving complete identifiers even when a name is long.
+append_diagnostic_paragraph(output: *StrBuf@new, text: []i8) raises Error {
+    column: int = 0;
+    cursor: int = 0;
+    while (cursor < len(text)) {
+        while (cursor < len(text) && text[cursor] == ' ') cursor = cursor + 1;
+        start: int = cursor;
+        while (cursor < len(text) && text[cursor] != ' ') cursor = cursor + 1;
+        width: int = cursor - start;
+        if (width > 0) {
+            if (column > 0) {
+                if (column + 1 + width > 72) {
+                    sb_putc(output, '\n');
+                    column = 0
+                } else {
+                    sb_putc(output, ' ');
+                    column = column + 1
+                }
+            }
+            for index in start..cursor sb_putc(output, text[index]);
+            column = column + width
+        }
+    }
+    sb_puts(output, """
+
+
+""")
+}
+
+// A propagated cause points to a function that already needed noregion, so the
+// recorded explanation chains terminate even when the program's call graph cycles.
+noregion_origin(fn: *Function): *Function@fn {
+    origin: *Function = fn;
+    while (origin.noregion_cause != null) {
+        cause: *NoregionCause = origin.noregion_cause;
+        match cause.reason {
+            Call call -> {
+                callee: ?*Function = find_function(call.callee);
+                if (callee == null) return origin;
+                origin = callee
+            }
+            _ -> return origin
+        }
+    }
+    origin
+}
+
+missing_noregion(fn: *Function): bool {
+    !fn.is_extern && fn.test_id < 0 && fn.need_imm_heap != 0 && fn.decl_imm_heap == 0
+}
+
+primary_noregion_diagnostic(fn: *Function): bool {
+    root: *Function = noregion_origin(fn);
+    if (missing_noregion(root)) return fn == root;
+    earlier: ?*Function = functions;
+    while (earlier != null && earlier != fn) {
+        if (missing_noregion(earlier) && noregion_origin(earlier) == root) return false;
+        earlier = earlier.next
+    }
+    true
+}
+
+append_noregion_callers(output: *StrBuf@new, root: *Function, primary: *Function) raises Error {
+    caller: ?*Function = functions;
+    while (caller != null) {
+        if (caller != primary && missing_noregion(caller) && noregion_origin(caller) == root) {
+            cause: ?*NoregionCause = caller.noregion_cause;
+            if (cause != null) {
+                match cause.reason {
+                    Call call -> {
+                        paragraph: *StrBuf = sb_new();
+                        sb_puts(paragraph, caller.name);
+                        sb_puts(paragraph, " calls ");
+                        sb_puts(paragraph, call.callee);
+                        sb_puts(paragraph, ", so choosing noregion also requires it on ");
+                        sb_puts(paragraph, caller.name);
+                        sb_putc(paragraph, '.');
+                        append_diagnostic_paragraph(output, sb_finish(paragraph))
+                    }
+                    _ -> { }
+                }
+            }
+        }
+        caller = caller.next
+    }
+}
+
+append_noregion_diagnostic(output: *StrBuf@new, fn: *Function) raises Error {
+    cause: ?*NoregionCause = fn.noregion_cause;
+    if (cause != null) append_diagnostic_excerpt(output, cause) else {
+        append_diagnostic_location(output, fn.browse_file, fn.browse_pos);
+        sb_puts(output, """
+
+
+""")
+    }
+    paragraph: *StrBuf = sb_new();
+    sb_puts(paragraph, fn.name);
+    if (cause != null) {
+        match cause.reason {
+            GlobalStore global -> {
+                sb_puts(paragraph, " stores this allocation in global ");
+                sb_puts(paragraph, global.name);
+                sb_puts(paragraph, ". If ");
+                sb_puts(paragraph, fn.name);
+                sb_puts(paragraph, " runs inside a region, ");
+                sb_puts(paragraph, global.name);
+                sb_puts(paragraph, " could retain a pointer to memory freed when that region ends.")
+            }
+            Store -> sb_puts(paragraph, " stores this allocation in storage that can outlive a region. If the allocation is made inside a region, that storage could retain a pointer to memory freed when the region ends.");
+            Payload -> sb_puts(paragraph, " puts this allocation in an exception payload. An exception can outlive the region where it was raised, leaving its payload pointing to freed memory.");
+            Argument argument -> {
+                sb_puts(paragraph, " passes this allocation to parameter ");
+                sb_puts(paragraph, argument.parameter);
+                sb_puts(paragraph, " of ");
+                sb_puts(paragraph, argument.callee);
+                sb_puts(paragraph, ", whose @immortal contract allows it to retain the value after the call. Memory allocated inside a region is freed when that region ends.")
+            }
+            Call call -> {
+                sb_puts(paragraph, " calls ");
+                sb_puts(paragraph, call.callee);
+                sb_puts(paragraph, ", which requires noregion and cannot run inside a region.")
+            }
+        }
+    } else sb_puts(paragraph, " requires noregion because it retains memory allocated in the caller's region.");
+    append_diagnostic_paragraph(output, sb_finish(paragraph));
+    paragraph.used = 0;
+    if (cause != null) {
+        match cause.reason {
+            Call _ -> sb_puts(paragraph, "If this restriction is intended, declare ");
+            _ -> sb_puts(paragraph, "If this value should be retained, declare ")
+        }
+    } else sb_puts(paragraph, "If this value should be retained, declare ");
+    sb_puts(paragraph, fn.name);
+    sb_puts(paragraph, " as noregion. Its callers also need noregion. This prevents those functions from being called inside a region.");
+    append_diagnostic_paragraph(output, sb_finish(paragraph));
+    if (cause != null) {
+        match cause.reason {
+            Call _ -> append_diagnostic_paragraph(output, "If this function should remain usable inside a region, call a function that does not require noregion instead. For a callee you own, keeping its temporary allocations local may remove that restriction.");
+            Payload -> append_diagnostic_paragraph(output, "If the value is only needed temporarily, keep it local instead of putting it in the exception payload, and use it before its region ends.");
+            Argument _ -> append_diagnostic_paragraph(output, "If the value is only needed during the call, use a parameter contract that permits borrowing it for the call. Only change a callee's @immortal contract if its implementation does not retain the value.");
+            _ -> append_diagnostic_paragraph(output, "If the allocation is only needed temporarily, keep it local instead of storing it in longer-lived storage, and use it before its region ends.")
+        }
+    }
+    append_noregion_callers(output, noregion_origin(fn), fn)
+}
