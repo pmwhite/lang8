@@ -82,6 +82,28 @@ Integer match arms:
   $ l8 test intmatch.l8
   1 file, 1 test
 
+Batch formatting replaces the build's comparison script. Checking never writes,
+and writing canonical files preserves their timestamps:
+
+  $ printf 'tag example;\nfirst(): int { 1 }\n' > first.l8
+  $ printf 'tag example;\nsecond(): int { 2 }\n' > second.l8
+  $ cp first.l8 original.l8
+  $ l8 fmt --check first.l8 second.l8
+  unformatted: first.l8 (run l8 fmt -w on this file)
+  unformatted: second.l8 (run l8 fmt -w on this file)
+  [1]
+  $ cmp first.l8 original.l8
+  $ l8 fmt -w first.l8 second.l8
+  formatted first.l8
+  formatted second.l8
+  $ l8 fmt --check first.l8 second.l8
+  $ touch -t 200001010000 first.l8 && touch -r first.l8 timestamp
+  $ l8 fmt -w first.l8 second.l8
+  $ test ! first.l8 -nt timestamp
+  $ l8 fmt first.l8 second.l8
+  error: usage: l8 fmt <source.l8> | l8 fmt {-w|--check} <source.l8>...
+  [1]
+
 Match arms with one expression or return lose their braces; arms that scope a
 declaration or carry a comment keep them:
 

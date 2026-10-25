@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 20. Project tooling defaults to Python and shell instead of improving L8
-
-Status: open; related style rule approved.
-Locations: `tools/profile.py`, `tools/format_src2.sh`, `programs/wayland/generate.py`, `tools/ios/assets.py`; `stdlib/` currently supplies output helpers rather than a general tool-writing library.
-
-Observation: Routine tool logic uses Python for arguments, paths, directory traversal, subprocess capture, temporary files, hashing and structured data; shell implements iteration, comparisons and branching. These dependencies make tools convenient outside L8 while leaving the same conveniences absent inside it. Some platform integration and pre-compiler bootstrap steps may legitimately require another language.
-
-Follow-up: Make L8 the default for project logic, including quick tools, and use real tool migrations to develop ergonomic standard-library APIs and a fast edit/run workflow. Start with a representative small tool; build reusable capabilities as required, not mechanical syscall-heavy translations. Separate host-required code and genuine bootstrap constraints from convenience-based language selection. Preserve formatter timestamp behavior, subprocess exit/error handling, output determinism and bootstrap-stage dependencies when migrating the examples.
-
 ## 21. Reusable capabilities remain buried in application-specific code
 
 Status: open; related style rule approved.

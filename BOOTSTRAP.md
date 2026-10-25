@@ -202,6 +202,13 @@ They update only the working tree; create the commit separately.
 
 ## Profiling
 
+`./l8c3 fmt -w path/to/one.l8 path/to/two.l8` rewrites only files whose
+canonical formatting differs, preserving other files' timestamps. Use
+`fmt --check` with the same paths to report differences without writing.
+Both batch modes return a nonzero status on failure. Printing to standard
+output accepts one file. The make formatting targets invoke these L8 commands
+directly; they require stage 2, without an additional scripting runtime.
+
 `tools/profile.py` times the compiler self-build, the block game build, and
 formatting `src2/`, reporting medians over alternating runs. `--baseline PATH`
 compares another compiler, `--phases` adds the compiler's per-phase timings,

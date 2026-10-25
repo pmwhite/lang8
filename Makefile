@@ -99,14 +99,14 @@ selfhost: l8
 # Rewrite only files whose formatting changes, so formatted sources keep
 # their timestamps and downstream steps stay cached. The formatter is built
 # from src2, so the sources alone decide whether formatting is current.
-$(OK)/fmt: $(SRC2) tools/format_src2.sh | l8c2 $(OK)
-	@$(STEP) 'format src2' tools/format_src2.sh write l8c2
+$(OK)/fmt: $(SRC2) | l8c2 $(OK)
+	@$(STEP) 'format src2' ./l8c2 fmt -w $(SRC2)
 	@touch $@
 
 fmt: $(OK)/fmt
 
-$(OK)/fmt-check: l8c2 $(SRC2) tools/format_src2.sh | $(OK)
-	@$(STEP) 'check src2 format' tools/format_src2.sh check l8c2
+$(OK)/fmt-check: l8c2 $(SRC2) | $(OK)
+	@$(STEP) 'check src2 format' ./l8c2 fmt --check $(SRC2)
 	@touch $@
 
 # ---- compiler tests ----

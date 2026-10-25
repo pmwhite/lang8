@@ -1,5 +1,7 @@
 tag compiler_internal;
 
+import "../stdlib/write_bytes.l8";
+
 // Canonical printer: one layout, comments stay on the node they document.
 FMT_WIDTH: int = 100;
 
@@ -1081,44 +1083,99 @@ fmt_MODE: int = 420;
 fmt_write_path(path: []i8, text: []i8) raises Error {
     fd: int = open_path(path, fmt_O_WRONLY + fmt_O_CREAT + fmt_O_TRUNC, fmt_MODE);
     if (fd < 0) error("cannot write formatted file");
-    raw::raw_write_bytes(fd, text);
-    close(fd)
+    try {
+        std::write_bytes(fd, text)
+    } with std::IoError _failure -> {
+        close(fd);
+        error("cannot write formatted file")
+    }
+    if (close(fd) < 0) error("cannot close formatted file")
 }
 
 fmt_usage(): int {
-    raw::raw_write(2, "error: usage: l8 fmt [-w] <source.l8>\n");
+    raw::raw_write(2, "error: usage: l8 fmt <source.l8> | l8 fmt {-w|--check} <source.l8>...\n");
     1
 }
 
-compiler_fmt_main(argc: int, argv: []str) noregion: int {
-    have_s: bool = false;
-    write_back: bool = false;
-    if (argc < 1) return fmt_usage();
-    source: str = argv[0];
-    for ai in 0..argc {
-        arg: str = argv[ai];
-        if (arg != "fmt") {
-            if (arg == "-w") write_back = true else {
-                if (have_s) return fmt_usage();
-                source = arg;
-                have_s = true
+type FmtMode =
+    | Print
+    | Write
+    | Check
+
+// Parsing retains the input bytes, including their exact length. Compare
+// before opening for write so canonical files keep their timestamps.
+fmt_input_matches(text: []i8) raises Error: bool {
+    input: *ImportedFile = imported_files or error("missing formatter input");
+    if (input.src_len != len(text)) return false;
+    for index in 0..len(text) {
+        if (input.src[index] != text[index]) return false
+    }
+    true
+}
+
+fmt_path(path: str, mode: FmtMode) noregion raises Error: int {
+    parse_program(bytes(path));
+    text: []i8 = fmt_file();
+    match mode {
+        Print -> raw::raw_write_bytes(1, text);
+        Write -> {
+            if (!fmt_input_matches(text)) {
+                fmt_write_path(bytes(path), text);
+                raw::raw_write(1, "formatted ");
+                raw::raw_write(1, path);
+                raw::raw_write(1, "\n")
+            }
+        }
+        Check -> {
+            if (!fmt_input_matches(text)) {
+                raw::raw_write(2, "unformatted: ");
+                raw::raw_write(2, path);
+                raw::raw_write(2, " (run l8 fmt -w on this file)\n");
+                return 1
             }
         }
     }
-    if (!have_s) return fmt_usage();
+    0
+}
+
+compiler_fmt_main(argc: int, argv: []str) noregion: int {
+    mode: FmtMode = FmtMode.Print;
+    path_count: int = 0;
+    for ai in 0..argc {
+        arg: str = argv[ai];
+        if (arg != "fmt") {
+            if (arg == "-w" || arg == "--check") {
+                match mode {
+                    Print -> { }
+                    _ -> return fmt_usage()
+                }
+                if (arg == "-w") mode = FmtMode.Write else mode = FmtMode.Check
+            } else path_count = path_count + 1
+        }
+    }
+    if (path_count == 0) return fmt_usage();
+    match mode {
+        Print -> {
+            if (path_count != 1) return fmt_usage()
+        }
+        _ -> { }
+    }
     try {
         as_init();
         init_runtime();
         init_dummies();
         parse_follow_imports = false;
         parse_resolve = false;
-        parse_program(bytes(source));
+        status: int = 0;
+        for ai in 0..argc {
+            arg: str = argv[ai];
+            if (arg != "fmt" && arg != "-w" && arg != "--check") {
+                if (fmt_path(arg, mode) != 0) status = 1
+            }
+        }
         parse_follow_imports = true;
         parse_resolve = true;
-        text: []i8 = fmt_file();
-        if (write_back) fmt_write_path(bytes(source), text) else raw::raw_write_bytes(1,
-            text);
-        0
+        status
     } with Error e -> {
         print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
         1

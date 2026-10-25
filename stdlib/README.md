@@ -10,6 +10,10 @@ an `i8` value. These functions retry interrupted and partial writes until
 all bytes are written, or raise `IoError { code }` with a positive Linux errno.
 An error can follow a partial write; output cannot be rolled back.
 
+Tools that only need complete byte-slice output can import `write_bytes.l8`
+directly. It exposes `std::write_bytes` and `std::IoError`, with the same Linux
+contract, without the text and number-formatting helpers.
+
 `write_int(fd, n)` and `write_fixed(fd, x, places)` write numbers without a
 newline. `write_bytes_n(fd, bytes, count)` writes a prefix. `write_some(fd, bytes,
 offset, count)` makes one system call and returns its byte count so a caller
