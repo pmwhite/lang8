@@ -297,8 +297,7 @@ tc_apply:
 .globl tc_copy_nodes
 tc_copy_nodes:
     mov %rdx, %rcx
-    # rep movsq: L8's source assembler has no mnemonic for string instructions.
-    .byte 243, 72, 165
+    rep movsq
     xor %rax, %rax
     ret
 
@@ -335,8 +334,8 @@ tc_frames:
     mov %rdx, %rdi
     mov %rbp, %rcx
     xor %rax, %rax
-    # rep stosq: zero exactly the allocated payload; header holds element count.
-    .byte 243, 72, 171
+    # Zero exactly the allocated payload; header holds element count.
+    rep stosq
     mov %rdx, %rax
     add $8, %rsp
     pop %rbp

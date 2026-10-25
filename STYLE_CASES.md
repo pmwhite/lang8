@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 18. Toolchain workarounds outlive limitations
-
-Status: open; related style rule approved.
-Location: `programs/tree-calculus/reduce.s` — tc_copy_nodes/tc_alloc, around lines 300 and 338.
-
-Observation: rep movsq and rep stosq use raw .byte encodings. Current src2/assembler.l8 supports rep stosq, so at least that workaround is obsolete for the current development assembler.
-
-Follow-up: Reproduce missing mnemonic support, fix the assembler with regression coverage, and use supported mnemonics. Check bootstrap/stage compatibility before replacing encodings; do not assume every historical limitation is fixed. Recurring language friction should drive toolchain work, not application contortions.
-
 ## 19. Resource cleanup repeated across failure exits
 
 Status: open; related style rule approved.

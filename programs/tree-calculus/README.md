@@ -66,9 +66,10 @@ evaluator calls or benchmark-specific shortcuts.
 The kernel is a trusted memory-access boundary: L8 does not check its native
 loads. It relies on valid node IDs, nonempty power-of-two cache capacities and
 the documented record/slice layouts. L8's built-in assembler
-builds it directly; no host C compiler or external assembler is required. Bulk
-string instructions use annotated `.byte` encodings because the built-in
-assembler does not accept their mnemonics.
+builds it directly; no host C compiler or external assembler is required.
+The development assembler accepts the bulk-copy and zeroing mnemonics used
+by the kernel. Build the compiler stages before using them with a saved
+bootstrap that predates that support.
 
 This is a one-shot interpreter. Nodes and superseded array capacities remain
 allocated until process exit; there is no garbage collector. Cache eviction does
