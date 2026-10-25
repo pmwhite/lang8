@@ -7,6 +7,15 @@ learning and practice. A skin draws the app and supplies platform services.
 ## Shared core
 
 `core/skin.l8` and `core/ui.l8` describe screens and route actions.
+`core/study_screens.l8` owns study subjects, the derived lexical cache,
+grammar screens and concordance filtering. Its entry points open or ready a
+subject and build its screens; concordance changes go through its operations.
+Study values shared with definition/forms screens describe the readied subject.
+Cache construction, row helpers and filter storage carry an internal tag.
+
+The screen coordinator retains navigation, platform-service callbacks and action
+routing. Those operations share the screen stack and host contract; they stay
+together even where their combined size exceeds the module-size heuristic.
 `core/host.l8` runs the line-based host used by web, Android and terminal.
 `core/kept.l8` loads and saves named user files. Data modules handle text,
 study records, original languages, audio timings and the ESV cache.

@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 11. Large module with potential independent contracts
-
-Status: open; related style rule approved.
-Location: `programs/bible/core/skin.l8` — whole file; approximately 5,796 lines when inspected.
-
-Observation: Plans, voice, library, word study, search, actions and wire handling share one large file and broad visibility.
-
-Follow-up: Investigate ownership, internal assumptions and useful contracts. Do not split mechanically: the approved heuristic is roughly 500–3,000 lines, with cohesion and genuine abstractions taking precedence.
-
 ## 12. Broad tag activation for a narrower capability
 
 Status: open; related style rule approved.
