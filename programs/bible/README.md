@@ -87,6 +87,14 @@ operations; the web uses browser storage. Reading position, marks, notes,
 plans and learning progress are local to each installation. There is no
 cross-device synchronization.
 
+Terminal replacement saves write a private temporary sibling, check completion
+and close, then rename it over the saved file. A reported replacement failure
+preserves the previous file. Saves do not use fsync, so the latest replacement
+is not guaranteed to survive power loss. Append operations may leave an
+incomplete appended suffix on failure. A save failure is reported to stderr
+and remains in the terminal status bar for the session, taking priority over
+transient success messages.
+
 ## Deployment and CI
 
 `worker/wrangler.toml` serves `.build/bible-site` and routes `/api/` to the

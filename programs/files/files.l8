@@ -1,0 +1,101 @@
+tag files_internal;
+
+import "../../stdlib/write.l8";
+
+need "libc.so.6";
+
+extern files_mkstemp(path: *i8): i32 = mkstemp;
+
+extern files_rename(from: str, to: str): i32 = rename;
+
+extern files_unlink(path: str): i32 = unlink;
+
+extern files_close(descriptor: int): int = close;
+
+extern files_errno(): *i32 = __errno_location;
+
+tag files
+type FileOperation =
+    | CreateTemporary
+    | Write
+    | Close
+    | Replace
+
+tag files
+exception FileError {
+    operation: FileOperation;
+    code: int;
+    cleanup_code: int
+}
+
+type TemporaryDescriptor =
+    | Open { descriptor: int }
+    | Closed
+
+type TemporaryFile = {
+    path: str;
+    descriptor: TemporaryDescriptor
+}
+
+close_temporary(file: *TemporaryFile): int {
+    match file.descriptor {
+        Open opened -> {
+            descriptor: int = opened.descriptor;
+            // Linux may already have released the descriptor on failure.
+            // Never retry close and risk closing a reused descriptor.
+            file.descriptor = TemporaryDescriptor.Closed;
+            files_close(descriptor)
+        }
+        Closed -> 0
+    }
+}
+
+discard_temporary(file: *TemporaryFile): int {
+    closed: int = close_temporary(file);
+    removed: int = files_unlink(file.path) as int;
+    cleanup_code: int = if (removed < 0) files_errno().* as int else 0;
+    // An absent temporary file needs no further cleanup.
+    if (cleanup_code == 2) cleanup_code = 0;
+    if (closed < 0) 0 - closed else cleanup_code
+}
+
+tag files
+file_operation_name(operation: FileOperation): str {
+    match operation {
+        CreateTemporary -> "create a temporary file";
+        Write -> "write the replacement";
+        Close -> "close the replacement";
+        Replace -> "replace the saved file"
+    }
+}
+
+// Replace with a complete private (0600) file, on the same filesystem.
+// Any reported failure preserves the destination. No fsync is performed:
+// successful return guarantees atomic visibility, not power-loss durability.
+// Temporary-file cleanup failures accompany the original error separately.
+tag files
+replace_file_bytes(path: str, data: []i8, count: int) raises FileError {
+    if (count < 0 || count > len(data)) raise FileError { operation: FileOperation.Write, code: 22, cleanup_code: 0 };
+    suffix: str = ".tmp.XXXXXX";
+    template: []i8 = new i8[len(path) + len(suffix) + 1](0i8);
+    for index in 0..len(path) template[index] = path[index];
+    for index in 0..len(suffix) template[len(path) + index] = suffix[index];
+    descriptor: int = files_mkstemp(&template[0]) as int;
+    if (descriptor < 0) raise FileError { operation: FileOperation.CreateTemporary, code: files_errno().* as int, cleanup_code: 0 };
+    name: []i8 = new i8[len(template) - 1](0i8);
+    for index in 0..len(name) name[index] = template[index];
+    file: TemporaryFile = TemporaryFile { path: cstr(name), descriptor: TemporaryDescriptor.Open { descriptor: descriptor } };
+    try {
+        try {
+            std::write_bytes_n(descriptor, data, count)
+        } with std::IoError error -> {
+            raise FileError { operation: FileOperation.Write, code: error.code, cleanup_code: 0 }
+        }
+        closed: int = close_temporary(&file);
+        if (closed < 0) raise FileError { operation: FileOperation.Close, code: 0 - closed, cleanup_code: 0 };
+        if (files_rename(file.path, path) < 0i32) raise FileError { operation: FileOperation.Replace, code: files_errno().* as int, cleanup_code: 0 }
+    } with FileError error -> {
+        cleanup_code: int = discard_temporary(&file);
+        raise FileError { operation: error.operation, code: error.code, cleanup_code: cleanup_code }
+    }
+}

@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 17. Previous saved state destroyed before successful replacement
-
-Status: open; related style rule approved.
-Location: `programs/bible/tui/main.l8` — tui_write/tui_out, around lines 89–105.
-
-Observation: O_TRUNC removes existing contents before writing, and a failed write can leave no complete saved value.
-
-Follow-up: Define the save failure guarantee; prepare a temporary replacement, check completion and commit appropriately. Decide crash-durability requirements explicitly and coordinate with error reporting.
-
 ## 18. Toolchain workarounds outlive limitations
 
 Status: open; related style rule approved.

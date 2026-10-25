@@ -9,6 +9,7 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `x11/` | `x.l8` | `x11` | X11 types and bindings |
 | `skate/` | `math.l8` | `skate_math` | Deterministic scalar math, vectors and column-major matrices; imports libm for square root and floor |
 | `freetype/` | `ft.l8` | `freetype` | Font loading, glyph atlases, and text vertices |
+| `files/` | `files.l8` | `files` | Atomic replacement of private saved files on native Linux; reports write, close, rename and cleanup failures |
 | `http/` | `http.l8` | `http` | HTTP/1.1 client, server, and streaming APIs |
 | `websocket/` | `websocket.l8` | `websocket` | RFC 6455 client, server, and message APIs; imports HTTP |
 | `block-game/` | `block-game.l8` | — | Game, editor, level model, and assets |
