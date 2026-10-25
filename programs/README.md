@@ -7,6 +7,7 @@ Each directory owns one library or application. Runnable demonstrations live in
 |---|---|---|---|
 | `gl/` | `gl.l8`, `core.l8` | `gl` | OpenGL bindings; `gl.l8` adds GLX/X11, `core.l8` is platform-independent |
 | `x11/` | `x.l8` | `x11` | X11 types and bindings |
+| `skate/` | `math.l8` | `skate_math` | Deterministic scalar math, vectors and column-major matrices; imports libm for square root and floor |
 | `freetype/` | `ft.l8` | `freetype` | Font loading, glyph atlases, and text vertices |
 | `http/` | `http.l8` | `http` | HTTP/1.1 client, server, and streaming APIs |
 | `websocket/` | `websocket.l8` | `websocket` | RFC 6455 client, server, and message APIs; imports HTTP |
@@ -24,6 +25,11 @@ Each directory owns one library or application. Runnable demonstrations live in
 Import the entry point relative to your source file, then activate the public
 tag with `use_tag`. Tags do not propagate through imports: GL applications using
 X11 declarations also need `use_tag x11;`.
+
+Skate math exports scalar operations, `PI`/`TAU`, `V3` and its vector operations,
+and `mat_*` matrix operations. Approximation helpers and scratch buffers carry
+only `skate_math_internal`. The `skate` application tag also exposes the public
+math operations for its existing application consumers.
 
 HTTP, WebSocket, and FreeType files carry `http_internal`, `websocket_internal`,
 and `freetype_internal`; only

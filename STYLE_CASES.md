@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 10. API and implementation share one broad tag
-
-Status: open; related style rule approved.
-Location: `programs/skate/math.l8` — tag skate; sinf, cosf, sin_near and constants.
-
-Observation: Consumer-facing math operations and approximation internals carry the same file tag.
-
-Follow-up: Design coherent math API/internal tags, exposing only deliberate API declarations. Review current consumers before deciding the supported surface.
-
 ## 11. Large module with potential independent contracts
 
 Status: open; related style rule approved.
