@@ -13,6 +13,10 @@ struct listener {
 };
 static const struct listener *saved;
 
+int32_t cb_signed_result(void) { return -7; }
+typedef int32_t (*signed_result_fn)(void);
+signed_result_fn cb_get_signed_result(void) { return cb_signed_result; }
+
 int64_t cb_register(const struct listener *listener) {
     saved = listener;
     return 0;
