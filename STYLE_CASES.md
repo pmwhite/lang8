@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 9. Remote mutation hidden by a lookup name
-
-Status: open; related style rule approved.
-Location: `tools/ios/apple.py` — bundle_id, around line 81.
-
-Observation: bundle_id() looks up a registration and creates one remotely when absent, while app_id() is only a lookup.
-
-Follow-up: Separate lookup and creation or use an explicit ensure/register name. Do not run remote registration just to investigate this case.
-
 ## 10. API and implementation share one broad tag
 
 Status: open; related style rule approved.

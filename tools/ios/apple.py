@@ -78,7 +78,7 @@ def call(method, path, body=None, params=None):
     return r.json() if r.text else {}
 
 
-def bundle_id():
+def ensure_bundle_registered():
     found = call("GET", "/bundleIds", params={"filter[identifier]": BUNDLE})["data"]
     found = [b for b in found if b["attributes"]["identifier"] == BUNDLE]
     if found:
@@ -129,7 +129,7 @@ def profile(kind):
     with open(os.path.join(HOME, f"{kind}.cert-id")) as f:
         cert_id = f.read().strip()
     rel = {
-        "bundleId": {"data": {"type": "bundleIds", "id": bundle_id()["id"]}},
+        "bundleId": {"data": {"type": "bundleIds", "id": ensure_bundle_registered()["id"]}},
         "certificates": {"data": [{"type": "certificates", "id": cert_id}]},
     }
     phones = 0
@@ -209,7 +209,7 @@ def builds():
 def main():
     what = sys.argv[1] if len(sys.argv) > 1 else ""
     if what == "bundle":
-        b = bundle_id()
+        b = ensure_bundle_registered()
         print("bundle id", b["attributes"]["identifier"], "team", b["attributes"].get("seedId"))
     elif what == "device":
         name, udid = sys.argv[2], sys.argv[3]
