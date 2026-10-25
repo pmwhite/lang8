@@ -9,8 +9,11 @@ Clients activate `websocket`; servers also activate `http` to read and inspect
 the upgrade request. Both import `websocket.l8`. The WebSocket public surface is
 `WsConnection`, `WsMessage`, the three message-kind constants,
 `ws_client`, `ws_accept`, `ws_read`, `ws_send`, `ws_send_text`,
-`ws_send_binary`, `ws_close`, and `ws_connection_close`. Handshake hashing,
-base64, frame parsing, masking, and buffers remain under `websocket_internal`.
+`ws_send_binary`, `ws_close`, and `ws_connection_close`. Handshake policy,
+frame parsing, masking, and buffers remain under `websocket_internal`.
+General encoding and validation come from the independent
+[Base64](../base64/README.md), [SHA-1](../sha1/README.md), and
+[UTF-8](../utf8/README.md) libraries, without bringing HTTP into their imports.
 `WsConnection` is abstract under `websocket`: its entire representation is
 available only through `websocket_internal`, including when its type is inferred.
 `WsMessage` is a public record whose fields describe the received message.

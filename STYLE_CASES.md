@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 21. Reusable capabilities remain buried in application-specific code
-
-Status: open; related style rule approved.
-Locations: `programs/websocket/websocket.l8` — `ws_base64`, `ws_sha1_bytes`, UTF-8 handling; `programs/bible/core/json.l8` — JSON reading and decoding; library catalog in `programs/README.md`.
-
-Observation: General encoding, hashing and structured-data capabilities exist, but their code and visibility are tied to the application/protocol that first needed them. New L8 tools lack a discoverable, coherent collection of reusable APIs. The owner wants an expansive library collection grown boldly on demand, without requiring a single unified standard library.
-
-Follow-up: Use actual needs to create or improve focused libraries with deliberate contracts, public/internal tags, stable import entry points, documented dependencies/platform support and a shared catalog. Do not require a second caller before recognizing a clearly reusable capability; do not build speculative frameworks. Review application assumptions before promoting existing JSON/encoding/hash implementations into reusable APIs. Keep capability libraries independently usable rather than forcing them into stdlib or an application dependency graph.
-
 ## 22. Human-facing interfaces need task-centered explanations
 
 Status: open; related style rule approved.

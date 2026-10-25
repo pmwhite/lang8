@@ -10,6 +10,9 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `skate/` | `math.l8` | `skate_math` | Deterministic scalar math, vectors and column-major matrices; imports libm for square root and floor |
 | `freetype/` | `ft.l8` | `freetype` | Font loading, glyph atlases, and text vertices |
 | `files/` | `files.l8` | `files` | Atomic replacement of private saved files on native Linux; reports write, close, rename and cleanup failures |
+| `base64/` | `base64.l8` | `base64` | Padded RFC 4648 Base64 encoding of binary data; native and Wasm |
+| `sha1/` | `sha1.l8` | `sha1` | SHA-1 digests for protocol compatibility; native and Wasm |
+| `utf8/` | `utf8.l8` | `utf8` | Strict UTF-8 prefix validation; native and Wasm |
 | `http/` | `http.l8` | `http` | HTTP/1.1 client, server, and streaming APIs |
 | `websocket/` | `websocket.l8` | `websocket` | RFC 6455 client, server, and message APIs; imports HTTP |
 | `block-game/` | `block-game.l8` | — | Game, editor, level model, and assets |
