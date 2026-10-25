@@ -295,3 +295,36 @@ reclamation problem with immortal globals or arbitrary fixed capacities.
 
 When the language cannot express the required ownership or reclamation,
 improve its lifetime model or runtime rather than bypassing safety checks.
+
+## 25. Design tests around module contracts and user experience
+
+Tests should reinforce deliberate module boundaries. For a library, use L8
+expect tests to demonstrate useful behavior through its intended API. Choose
+concise examples that explain the contract and catch meaningful mistakes.
+Derive expectations from that contract rather than simply recording current
+output.
+
+For applications, prefer high-level, end-to-end tests that describe a basic
+aspect of the user experience: what a person does and what they should
+observe. Provide a coherent application harness that makes these scenarios
+cheap to write, run, understand, and maintain. Avoid ad hoc scripts, repeated
+setup, and assertions tied to internal implementation details. If a simple
+scenario requires elaborate test code, improve the harness or application
+boundary.
+
+Add tests selectively. Each should protect a distinct, important behavior
+beyond existing checks. Prefer a few revealing examples over repetitive
+cases or tests added routinely for every change. Correct refactoring should
+normally preserve them.
+
+Match testing depth to the consequences of failure. Critical library
+contracts may warrant substantial fuzzing or exhaustive testing, with
+independently justified correctness checks. Keep expensive campaigns outside
+the main build, behind explicit commands with documented scope and
+reproducible failures. Reduce discovered bugs to small regressions suitable
+for routine checks.
+
+Treat test code and expectations as maintained design. Keep failures clear
+and runs repeatable; review recorded output before accepting it. Simplify or
+remove tests whose upkeep exceeds their protection. For compiler fixes,
+retain a small regression that exposes the original failure.
