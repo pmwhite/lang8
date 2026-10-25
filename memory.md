@@ -96,8 +96,9 @@ be record or variant fields, array or slice elements, or pointer targets.
 ordinary local assignment can give that pointer another name. Mutable aliases
 are allowed; a borrow does not impose Rust's exclusive-reference rule. Pointers
 from the borrow cannot escape into longer-lived storage. `match` payloads remain
-shallow copies in arm locals, so changing a variant's tag through another alias
-does not change the payload local's layout.
+shallow copies in arm locals. A pointer copied from a region or arena scrutinee
+keeps that lifetime, so it cannot outlive the value it was copied from. Changing
+a variant's tag through another alias does not change the payload local's layout.
 
 `allocate pointer { ... }` selects the arena recorded for a local borrowed
 pointer or its local alias. A `borrow` alone does not change where `new`
