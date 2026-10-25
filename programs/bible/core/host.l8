@@ -28,7 +28,7 @@ type HostIO = {
     // Data file name asked for as id (it comes as `got ID SIZE`).
     ask: fn(id: int, name: str);
     // A GET of the address (b's first n bytes) as id (its answer comes as
-    // `http ID STATUS SIZE`).
+    // `http ID STATUS SIZE`). Consume or copy b before returning.
     http: fn(id: int, b: []i8, n: int);
     // File or answer id, as it came, into out: its whole length.
     file: fn(id: int, out: []i8): int;
@@ -619,33 +619,40 @@ HS_PATHS_ID: int = 64;
 
 hs_tim_files: []str = ["audio/souer.tim", "audio/hays.tim", "audio/gilbert.tim", "audio/henson.tim"];
 
-hs_url: []i8 = new i8[2048](0i8);
-
-hs_url_n: int = 0;
-
-hs_url_byte(k: int) {
-    if (hs_url_n < len(hs_url)) hs_url[hs_url_n] = k trunc i8;
-    hs_url_n = hs_url_n + 1
+type HsRequest = {
+    id: int;
+    url: []i8;
+    byte_count: int
 }
 
-hs_url_str(s: str) {
-    for c in s hs_url_byte(c as int)
+hs_url_byte(request: *HsRequest, k: int) {
+    if (request.byte_count < len(request.url)) request.url[request.byte_count] = k trunc i8;
+    request.byte_count = request.byte_count + 1
 }
 
-hs_url_int(n: int) {
-    if (n >= 10) hs_url_int(n / 10);
-    hs_url_byte(48 + n % 10)
+hs_url_str(request: *HsRequest, s: str) {
+    for c in s hs_url_byte(request, c as int)
+}
+
+hs_url_int(request: *HsRequest, n: int) {
+    if (n >= 10) hs_url_int(request, n / 10);
+    hs_url_byte(request, 48 + n % 10)
 }
 
 // Bytes b to e as a query's words (each byte not plain escaped).
-hs_url_query(b: []i8, s: int, e: int) {
+hs_url_query(
+    request: *HsRequest,
+    b: []i8,
+    s: int,
+    e: int
+) {
     for i in s..e {
         k: int = b[i] as int & 255;
         plain: bool = k >= 48 && k <= 57 || k >= 65 && k <= 90 || k >= 97 && k <= 122 || k == 45 || k == 46 || k == 95 || k == 126;
-        if (plain) hs_url_byte(k) else {
-            hs_url_byte(37);
-            hs_url_byte(hs_hex(k / 16));
-            hs_url_byte(hs_hex(k % 16))
+        if (plain) hs_url_byte(request, k) else {
+            hs_url_byte(request, 37);
+            hs_url_byte(request, hs_hex(k / 16));
+            hs_url_byte(request, hs_hex(k % 16))
         }
     }
 }
@@ -654,30 +661,28 @@ hs_hex(d: int): int {
     if (d < 10) 48 + d else 55 + d
 }
 
-// The address hs_begun with the Worker's, then path.
-hs_url_begin(path: str) {
-    hs_url_n = 0;
-    for i in 0..hs_api_n hs_url_byte(hs_api[i] as int);
-    hs_url_str(path)
+// Construction storage belongs to the caller's request region. HTTP hosts
+// consume or copy its bytes during the call, before that region ends.
+hs_request(id: int, path: str): HsRequest@new {
+    request: HsRequest = HsRequest { id: id, url: new i8[2048](0i8), byte_count: 0 };
+    for i in 0..hs_api_n hs_url_byte(&request, hs_api[i] as int);
+    hs_url_str(&request, path);
+    request
 }
 
-hs_get() {
-    if (hs_url_n > len(hs_url)) {
-        // Report the standard URI-too-long outcome through the same request
-        // completion path; never send a request for a partial URL.
-        hs_answer(hs_req_id, 414, 0);
-        return
-    }
+hs_get(request: HsRequest): bool {
+    if (request.byte_count > len(request.url)) return false;
     f: fn(id: int, b: []i8, n: int) = host_io.http;
-    f(hs_req_id, hs_url, hs_url_n)
+    f(request.id, request.url, request.byte_count);
+    true
 }
-
-hs_req_id: int = 0;
 
 hs_get_path(id: int, path: str) {
-    hs_url_begin(path);
-    hs_req_id = id;
-    hs_get()
+    sent: bool = false;
+    region {
+        sent = hs_get(hs_request(id, path))
+    }
+    if (!sent) hs_answer(id, 414, 0)
 }
 
 // The ESV's chapters (core/esv_client.l8 asks: count from c).
@@ -689,14 +694,17 @@ hs_fetch(what: int, c: int, count: int): bool {
     if (what != SK_FETCH_ESV || c < 0 || c >= chapters || hs_api_n == 0) return false;
     hs_esv_c = c;
     hs_esv_count = count;
-    hs_url_begin("esv/chapters?book=");
-    for x in 0..3 hs_url_byte(bsb_code_byte(ch_book[c], x));
-    hs_url_str("&chapter=");
-    hs_url_int(ch_num[c]);
-    hs_url_str("&count=");
-    hs_url_int(count);
-    hs_req_id = HS_CHAPTERS;
-    hs_get();
+    sent: bool = false;
+    region {
+        request: HsRequest = hs_request(HS_CHAPTERS, "esv/chapters?book=");
+        for x in 0..3 hs_url_byte(&request, bsb_code_byte(ch_book[c], x));
+        hs_url_str(&request, "&chapter=");
+        hs_url_int(&request, ch_num[c]);
+        hs_url_str(&request, "&count=");
+        hs_url_int(&request, count);
+        sent = hs_get(request)
+    }
+    if (!sent) hs_answer(HS_CHAPTERS, 414, 0);
     true
 }
 
@@ -706,13 +714,16 @@ hs_esr_state: int = 0;
 
 hs_esv_search(page: int) {
     if (hs_api_n == 0) return;
-    hs_url_begin("esv/search?q=");
-    hs_url_query(sk_sq, 0, sk_sq_n);
-    hs_url_str("&page=");
-    hs_url_int(page);
     hs_esr_state = ESV_LOADING;
-    hs_req_id = HS_SEARCH;
-    hs_get();
+    sent: bool = false;
+    region {
+        request: HsRequest = hs_request(HS_SEARCH, "esv/search?q=");
+        hs_url_query(&request, sk_sq, 0, sk_sq_n);
+        hs_url_str(&request, "&page=");
+        hs_url_int(&request, page);
+        sent = hs_get(request)
+    }
+    if (!sent) hs_answer(HS_SEARCH, 414, 0);
     sk_update_all()
 }
 
@@ -723,12 +734,15 @@ hs_esv_audio(c: int) {
         lw_esv_url(hs_words, 0);
         return
     }
-    hs_url_begin("esv/audio?book=");
-    for x in 0..3 hs_url_byte(bsb_code_byte(ch_book[c], x));
-    hs_url_str("&chapter=");
-    hs_url_int(ch_num[c]);
-    hs_req_id = HS_AUDIO;
-    hs_get()
+    sent: bool = false;
+    region {
+        request: HsRequest = hs_request(HS_AUDIO, "esv/audio?book=");
+        for x in 0..3 hs_url_byte(&request, bsb_code_byte(ch_book[c], x));
+        hs_url_str(&request, "&chapter=");
+        hs_url_int(&request, ch_num[c]);
+        sent = hs_get(request)
+    }
+    if (!sent) hs_answer(HS_AUDIO, 414, 0)
 }
 
 // ---- answers ----

@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 5. Implicit mutable working state
-
-Status: open; related style rule approved.
-Location: `programs/bible/core/host.l8` — hs_url_begin, hs_get, hs_get_path, around lines 660–676.
-
-Observation: hs_get() consumes the request ID, URL and length left in globals by preceding calls.
-
-Follow-up: Introduce an explicit request/builder contract and separate temporary construction state from long-lived host state.
-
 ## 6. Errors discarded without a policy
 
 Status: open; related style rule approved.
