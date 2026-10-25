@@ -43,7 +43,8 @@ public API. Game implementation and level declarations share the application-onl
 FreeType exports `Font`, `CachedFont`, `Glyph`, `FT_FIRST`, `FT_LAST`, `load_font`,
 `load_cached_font`, `cached_font_glyph`, `close_cached_font`, `load_default_font`,
 `load_mono_font`, and `emit_text`. Its foreign bindings, ABI layouts, atlas
-defaults, and construction helpers remain internal. See
+defaults, and construction helpers remain internal. Its [README](freetype/README.md)
+documents cached-font ownership and cleanup. See
 [`http/README.md`](http/README.md) for the HTTP API.
 
 HTTP uses direct Linux x86-64 system calls and builds as a static executable with

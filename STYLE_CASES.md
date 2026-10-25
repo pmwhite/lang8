@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 19. Resource cleanup repeated across failure exits
-
-Status: open; related style rule approved.
-Location: `programs/freetype/ft.l8` — `load_cached_font`, around lines 228–248; `close_cached_font`.
-
-Observation: Early failure returns manually release different sets of acquired FreeType resources. The inspected paths do perform cleanup; no resource leak has been established. Correctness depends on keeping acquisition and each exit's cleanup synchronized.
-
-Follow-up: Consider an ownership/scoped-cleanup contract that handles partial acquisition and successful transfer. L8 memory regions do not substitute for releasing external resources. Any missing language mechanism needs its own design; no cleanup syntax is assumed here.
-
 ## 20. Project tooling defaults to Python and shell instead of improving L8
 
 Status: open; related style rule approved.
