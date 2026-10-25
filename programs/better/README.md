@@ -217,6 +217,11 @@ gone START       an activity deleted
 
 ## How it is built
 
+`shared.l8` assembles the shared application and its math, font and drawing
+dependencies. Linux/web (`main.l8`), iOS and Android import that entry point.
+Each platform root supplies its GL bindings, services and event loop; iOS and
+Android also compose `native.l8` for their shared native host support.
+
 `paint.l8` (the recipe book's) draws everything as quads one shader shapes
 per pixel, in Rubik from `../skate/font.l8`. `record.l8` is the recording:
 fixes smoothed (a Kalman filter on position; the phone's measured speed

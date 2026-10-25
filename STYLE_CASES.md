@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 13. Consumers repeat implementation composition
-
-Status: open; related style rule approved.
-Location: `programs/better/main.l8` — shared import list, around lines 23–47.
-
-Observation: Linux, programs/better/ios.l8 and programs/better/android.l8 independently list nearly the same shared implementation files.
-
-Follow-up: Define a deliberate entry point for the cohesive shared application while retaining explicit platform-specific composition.
-
 ## 14. Type wrapper is not representation hiding
 
 Status: open; related style rule approved.
