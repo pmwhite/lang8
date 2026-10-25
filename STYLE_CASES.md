@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 6. Errors discarded without a policy
-
-Status: open; related style rule approved.
-Location: `web/skate/skate.js` — store, around line 306.
-
-Observation: An empty catch covers both JSON serialization and localStorage writes; callers cannot distinguish save success from failure.
-
-Follow-up: Separate programming/serialization errors from expected storage failures and choose a visible persistence-failure policy. Similar helpers exist in web/race/race.js.
-
 ## 7. Illegal lifecycle combinations
 
 Status: open; related style rule approved.

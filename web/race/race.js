@@ -7,6 +7,7 @@
 // keeps, from one visit to the next, what the game asks to have kept.
 import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "../game/platform.js";
+import { saveLocalText as store } from "../local-storage.js";
 
 const canvas = document.getElementById("screen");
 const overlay = document.getElementById("overlay");
@@ -60,11 +61,6 @@ const stored = (key) => {
   } catch {
     return null;
   }
-};
-const store = (key, value) => {
-  try {
-    localStorage.setItem(key, value);
-  } catch {}
 };
 // A name: twelve letters at most, none of them unseen.
 const tidyName = (text) => (text ?? "").replace(/[\p{C}]/gu, "").trim().slice(0, 12).trim();

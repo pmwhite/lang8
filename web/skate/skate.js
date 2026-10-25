@@ -11,6 +11,7 @@ import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "../game/platform.js";
 import { startControl } from "../game/control.js";
 import { createPacer } from "./pace.js";
+import { saveLocalJson as store } from "../local-storage.js";
 // (Who plays: see the leaderboards, below. A person's link is taken out of
 // the address as this comes in, before anything else sees it there.)
 import * as people from "../people/people.js";
@@ -302,11 +303,6 @@ const stored = (key, fallback) => {
   } catch {
     return fallback;
   }
-};
-const store = (key, value) => {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {}
 };
 // His own runs on each place, kept on the device: the latest few and the
 // best few, each a score and when.
