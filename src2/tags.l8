@@ -4,6 +4,114 @@ use_tag compiler_internal;
 // directives apply to the whole file, and imports never inherit the caller's tags.
 tag compiler_tags;
 
+// A type can expose its identity through its declaration tags while reserving
+// its complete representation for a separate capability. No entry means the
+// ordinary, fully exposed representation.
+type TypeRepresentation = {
+    name: []i8;
+    tags: ?*TagSet;
+    next: ?*TypeRepresentation
+}
+
+type_representations: ?*TypeRepresentation = null;
+
+type RepresentationOperation =
+    | Construct
+    | AccessField
+    | MatchVariants
+
+type RepresentationAccess = {
+    name: []i8;
+    qualifier: []i8;
+    operation: RepresentationOperation;
+    scope: *TagScope;
+    tags: ?*TagSet;
+    pos: int;
+    next: ?*RepresentationAccess
+}
+
+representation_accesses: ?*RepresentationAccess = null;
+
+representation_tags(name: []i8): ?*TagSet@immortal {
+    representation: ?*TypeRepresentation = type_representations;
+    while (representation != null) {
+        if (streq(representation.name, name)) return representation.tags;
+        representation = representation.next
+    }
+    null
+}
+
+note_representation_access(
+    ty: *Type,
+    qualifier: []i8,
+    operation: RepresentationOperation,
+    pos: int
+) noregion raises Error {
+    if (!parse_resolve) return;
+    name: []i8;
+    match ty.* {
+        Record record -> name = intern(record.def.name, 0, len(record.def.name));
+        Enum choice -> name = intern(choice.def.name, 0, len(choice.def.name));
+        _ -> return
+    }
+    representation_accesses = new RepresentationAccess {
+        name: name,
+        qualifier: intern(qualifier, 0, len(qualifier)),
+        operation: operation,
+        scope: tag_scope or error("missing tag scope"),
+        tags: tag_local,
+        pos: pos,
+        next: representation_accesses
+    }
+}
+
+check_representation_access(access: *RepresentationAccess) noregion raises Error {
+    name: []i8 = access.name;
+    tags: ?*TagSet = representation_tags(name);
+    match access.operation {
+        AccessField -> {
+            if (len(access.qualifier) != 0) {
+                if (tags == null) {
+                    definition: ?*TaggedDef = tag_find(name);
+                    if (definition != null) tags = tag_union(definition.tags, definition.scope.tags)
+                }
+                if (tag_has(tags, access.qualifier)) return;
+                message: *StrBuf = sb_new();
+                sb_puts(message, "representation of ");
+                sb_puts(message, name);
+                sb_puts(message, " does not have tag ");
+                sb_puts(message, access.qualifier);
+                error_at_file(access.scope.file.id, access.pos, sb_finish(message))
+            }
+        }
+        Construct -> { }
+        MatchVariants -> { }
+    }
+    if (tags == null) return;
+    scope: *TagScope = access.scope;
+    if (tag_intersects(tags, access.tags) || tag_intersects(tags, scope.tags) || tag_intersects(tags,
+        scope.uses)) return;
+    if (len(access.qualifier) != 0 && tag_has(tags, access.qualifier)) return;
+    message: *StrBuf = sb_new();
+    sb_puts(message, "representation of ");
+    sb_puts(message, name);
+    sb_puts(message, " is abstract here; use its API or enable a representation tag: ");
+    while (tags != null) {
+        sb_puts(message, tags.name);
+        tags = tags.next;
+        if (tags != null) sb_puts(message, ", ")
+    }
+    error_at_file(scope.file.id, access.pos, sb_finish(message))
+}
+
+check_representation_accesses() noregion raises Error {
+    access: ?*RepresentationAccess = representation_accesses;
+    while (access != null) {
+        check_representation_access(access);
+        access = access.next
+    }
+}
+
 tag_has(tags: ?*TagSet, name: []i8): bool {
     t: ?*TagSet = tags;
     while (t != null) {

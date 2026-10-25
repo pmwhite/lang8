@@ -1600,8 +1600,11 @@ parse_primary() noregion raises Error: *Expr@new {
         new_file: int = current_file_id;
         new_len: int = tok.len;
         tok = tok.next;
+        representation_qualifier: []i8 = tok.qualifier;
         if (tok.next.kind == TokKind.Dot && (is_type_name() || !parse_resolve)) {
             ety: *Type = syntax_as_enum(parse_type());
+            note_representation_access(ety, representation_qualifier, RepresentationOperation.Construct,
+                new_pos);
             skip(TokKind.Dot);
             if (tok.kind != TokKind.Ident) error("expected variant name after new Enum.");
             vname: []i8 = cur_tokstr();
@@ -1649,6 +1652,8 @@ parse_primary() noregion raises Error: *Expr@new {
         if (is_pointer(base)) error("new expects a non-pointer type");
         if (tok.kind != TokKind.LBrace) error("expected {, [, or .Variant after new");
         if (is_enum_ty(base)) error("use new Enum.Variant { ... } for sum types");
+        note_representation_access(base, representation_qualifier, RepresentationOperation.Construct,
+            new_pos);
         hn2: *Expr = new_heap_node(null, 0, parse_struct_field_inits(base), null,
             null, "", ptr_to(base));
         hn2.pos = new_pos;
@@ -1809,7 +1814,11 @@ parse_primary() noregion raises Error: *Expr@new {
         nk: TokKind = tok.next.kind;
         local_name: bool = len(tok.qualifier) == 0 && find_local(name) != null;
         if (!local_name && nk == TokKind.Dot && (is_named_type(name) || syntax_variant_fields())) {
+            representation_qualifier: []i8 = tok.qualifier;
+            representation_pos: int = tok.pos;
             ety: *Type = syntax_as_enum(parse_type());
+            note_representation_access(ety, representation_qualifier, RepresentationOperation.Construct,
+                representation_pos);
             skip(TokKind.Dot);
             if (tok.kind != TokKind.Ident) error("expected variant name");
             vname: []i8 = cur_tokstr();
@@ -1844,7 +1853,10 @@ parse_primary() noregion raises Error: *Expr@new {
             struct_pos: int = tok.pos;
             struct_file: int = current_file_id;
             struct_len: int = tok.len;
+            representation_qualifier: []i8 = tok.qualifier;
             sty: *Type = parse_type();
+            note_representation_access(sty, representation_qualifier, RepresentationOperation.Construct,
+                struct_pos);
             if (parse_resolve && !is_struct_ty(sty)) error("struct literal requires a struct type");
             lit: *Expr = new_struct_lit(name, parse_struct_field_inits(sty), sty);
             lit.pos = struct_pos;
@@ -2003,6 +2015,11 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
         if (et == null) error_ty("match requires an enum or integer value", et);
         etu0: *Type = et;
         enum_subject = is_enum_ty(etu0);
+        // The saved bootstrap treats mcond.pos as a reference escaping the
+        // borrowed AST. Use the match brace until its lifetime checker is
+        // promoted; the current compiler can use the subject's position.
+        if (enum_subject) note_representation_access(etu0, "", RepresentationOperation.MatchVariants,
+            tok.pos);
         if (!enum_subject && !is_int_width_ty(et)) error_ty("match requires an enum or integer value",
             et)
     }
@@ -2186,7 +2203,8 @@ parse_postfix() noregion raises Error: *Expr@new {
                 } else {
                     tok = tok.next;
                     if (tok.kind != TokKind.Ident) error("expected member name");
-                    name: []i8 = cur_tokstr();
+                    representation_qualifier: []i8 = tok.qualifier;
+                    name: []i8 = reference_name();
                     browse_note();
                     mpos: int = browse_tok_pos;
                     mlen: int = browse_tok_len;
@@ -2211,6 +2229,8 @@ parse_postfix() noregion raises Error: *Expr@new {
                                     n.ty)
                             }
                         }
+                        note_representation_access(sty, representation_qualifier,
+                            RepresentationOperation.AccessField, mpos);
                         m: ?*Member = null;
                         if (is_exn_ty(sty)) m = find_exn_member(type_exn_def(sty),
                             name) else m = find_member(type_struct_def(sty), name);
@@ -4427,6 +4447,11 @@ parse_type_def() noregion raises Error {
         }
     }
     skip(TokKind.Assign);
+    if (tag_is_directive("tag")) {
+        tok = tok.next;
+        tags: ?*TagSet = parse_tag_names();
+        type_representations = new TypeRepresentation { name: name, tags: tags, next: type_representations }
+    }
     if (tok.kind == TokKind.LBrace) {
         if (has_ann) error("struct type cannot have a tag type or size");
         if (find_enum(name) != null) error("redefinition of type");
@@ -5117,6 +5142,8 @@ parse_program(entry_path: []i8) noregion raises Error {
     tag_scope = null;
     tag_local = null;
     tag_refs = null;
+    type_representations = null;
+    representation_accesses = null;
     tag_buckets.buckets = new TagBucket[4096](TagBucket { head: null });
     file_items = null;
     file_items_tail = null;
@@ -5131,5 +5158,8 @@ parse_program(entry_path: []i8) noregion raises Error {
     parse_defer_bodies = parse_resolve;
     parse_source_file(normalize_path(entry_path), true);
     parse_run_deferred();
-    if (parse_resolve) tag_check_references()
+    if (parse_resolve) {
+        tag_check_references();
+        check_representation_accesses()
+    }
 }

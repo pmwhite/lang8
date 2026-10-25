@@ -11,6 +11,9 @@ the upgrade request. Both import `websocket.l8`. The WebSocket public surface is
 `ws_client`, `ws_accept`, `ws_read`, `ws_send`, `ws_send_text`,
 `ws_send_binary`, `ws_close`, and `ws_connection_close`. Handshake hashing,
 base64, frame parsing, masking, and buffers remain under `websocket_internal`.
+`WsConnection` is abstract under `websocket`: its entire representation is
+available only through `websocket_internal`, including when its type is inferred.
+`WsMessage` is a public record whose fields describe the received message.
 
 `ws_read` returns one complete, reassembled application message or `WS_CLOSE`.
 An `error` of zero means success; otherwise it contains the close code used for

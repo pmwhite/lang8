@@ -68,7 +68,7 @@ parser::parse("hello");
 ```
 
 This needs no `use_tag` statement. The compiler checks that the globally named
-`parse` definition actually carries the `parser` tag. Qualification grants no
+`parse` definition actually carries the `parser` tag. Global qualification grants no
 access to later unqualified references. It also bypasses local-variable shadowing
 and always refers to a global declaration.
 
@@ -94,9 +94,43 @@ so it needs no tag unless source code references it. Unused types, globals,
 exceptions, and externs retain the existing warning behavior (no unused warning).
 
 Builtins remain available without tags and cannot be qualified. Access checks
-apply to explicit global-name references; tags do not restrict passing values,
-inferring their types, or accessing their fields. An API may refer to types from another tag without duplicating those
+apply to explicit global-name references; tags do not restrict passing values
+or inferring their types. An API may refer to types from another tag without duplicating those
 types into every tag on the API.
+
+## Abstract type representations
+
+An ordinary record or enum definition exposes its complete representation.
+To expose the type's identity while reserving its representation for selected
+tags, put those tags after `=`:
+
+```l8
+tag connection_internal;
+
+tag connection
+type Connection = tag connection_internal {
+    descriptor: int
+}
+```
+
+A caller using `connection` can hold, copy and pass `Connection` values through
+the API. Constructing a value or accessing any field requires an active
+`connection_internal` tag. The restriction applies through inferred types,
+pointers and field addresses as well as explicit type annotations. It covers
+the whole representation; fields do not have independent visibility.
+
+An explicit representation qualifier also permits an isolated operation:
+`connection_internal::Connection { descriptor: 3 }` or
+`value.connection_internal::descriptor`. Qualifying only with the public type
+tag does not grant representation access. A matching active representation tag
+still permits access when the type name is qualified with a different public tag.
+
+The same syntax applies to enums, before their variants. Construction and
+pattern matching require a representation tag; copying an existing enum value
+does not. Representation tags do not activate themselves or expose other
+declarations. File and declaration tags use the same scope rules as ordinary
+references. `sizeof` and ABI layout remain compiler-known so abstract values
+can be stored and passed by value.
 
 ## Files and vendored libraries
 

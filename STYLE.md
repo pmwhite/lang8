@@ -156,8 +156,8 @@ Public records are appropriate when callers are intended to inspect or
 construct their data directly. Choose deliberately: exposing fields makes
 their layout, meaning, and permitted mutations part of the API contract.
 
-This rule assumes the proposed feature for tag-controlled type representation
-visibility. Current tags do not yet enforce field privacy.
+Use representation tags to expose the complete representation to selected
+callers while keeping the type abstract elsewhere; see [tags.md](tags.md).
 
 ## 15. Write comments that explain current intent, contracts, and reasoning
 

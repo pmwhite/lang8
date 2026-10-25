@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 14. Type wrapper is not representation hiding
-
-Status: open; related style rule approved.
-Location: `programs/websocket/websocket.l8` — WsConnection, around lines 280–285.
-
-Observation: A comment describes codec state as hidden, but callers can reach connection.state fields through inferred types under current tag semantics.
-
-Follow-up: Design and implement tag-controlled type representation visibility, then expose the connection identity/operations publicly and representation internally. This language feature was requested as the basis for rule 14; no syntax or implementation has been approved yet. The rejected convention-only rule is not the intended resolution.
-
 ## 15. Historical and stale comments
 
 Status: open; related style rule approved.
