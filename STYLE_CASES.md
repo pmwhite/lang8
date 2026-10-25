@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 15. Historical and stale comments
-
-Status: open; related style rule approved.
-Location: `programs/bible/core/help.l8` — introductory comment, around lines 5–10.
-
-Observation: The introduction mixes removed quick tips, dated owner directions, obsolete design sections and the old filename ios_help.l8.
-
-Follow-up: Describe current responsibilities and relevant invariants; use programs/bible/ios/help.l8 as the current UI reference. Audit similar historical citations without deleting useful rationale or migration constraints.
-
 ## 16. Coherent concepts flattened into argument lists
 
 Status: open; related style rule approved.
