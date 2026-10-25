@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 1. Names that require decoding
-
-Status: open; related style rule approved.
-Location: `programs/bible/core/host.l8` — hs_answer, around line 779.
-
-Observation: The chapter-response loop uses p, bp, k, num and w for different domain concepts.
-
-Follow-up: Rename by meaning, distinguishing JSON positions, book indices, chapter numbers and byte counts.
-
 ## 2. Indirect recognition of protocol values
 
 Status: open; related style rule approved.
