@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 4. Opaque boolean mode arguments
-
-Status: open; related style rule approved.
-Location: `src2/a64asm.l8` — a64_ldr and its dispatch calls, around lines 1159 and 1361.
-
-Observation: a64_ldr(true, false) selects load/store and addressing mode; the name also covers stores.
-
-Follow-up: Choose meaningful operation/mode variants or distinct entry points, retaining shared encoding logic. Consider both compiler stages.
-
 ## 5. Implicit mutable working state
 
 Status: open; related style rule approved.
