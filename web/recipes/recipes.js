@@ -25,6 +25,7 @@
 // 1000000000 + 1000 * what + number (see page_says in book.l8).
 import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "../game/platform.js";
+import { showAppRecovery } from "../app-recovery.js";
 
 const KITCHEN = "/kitchen.txt";
 const BOOK = "/recipes.txt";
@@ -39,17 +40,29 @@ const ASIDE = "recipes:set-aside";
 const $ = (id) => document.getElementById(id);
 const canvas = $("screen");
 const input = $("type");
-const show = (html) => {
-  $("message").innerHTML = html;
-  $("overlay").hidden = false;
-};
+let recoveryFiles = null;
+let bookRunning = false;
+
+function recoverBook(error) {
+  console.error("Recipes could not continue", error);
+  showAppRecovery({
+    title: bookRunning ? "Recipes stopped" : "Recipes couldn’t open",
+    explanation: bookRunning ? [
+      "You can’t change your kitchen or food log until you restart.",
+      sync.fresh
+        ? "This fresh kitchen wasn’t saved. Download a recovery copy before restarting; Restart opens your previously saved kitchen."
+        : "Restart to reopen your saved kitchen. The latest changes may not have reached browser storage or your other devices.",
+    ] : ["Restart to try opening your saved kitchen again. Recipes couldn’t finish loading."],
+    files: recoveryFiles?.() || [],
+  });
+}
 
 for (const name of ["gesturestart", "gesturechange", "dblclick", "contextmenu"]) {
   document.addEventListener(name, (e) => e.preventDefault(), { passive: false });
 }
 for (const name of ["touchstart", "touchmove"]) {
   document.addEventListener(name, (e) => {
-    if (e.target !== input) e.preventDefault();
+    if (e.target !== input && !e.target.closest("#overlay")) e.preventDefault();
   }, { passive: false });
 }
 const touch = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
@@ -65,6 +78,7 @@ async function main() {
   sync.fresh = fresh;
   const kitchen = fresh ? "" : await startKitchen(params);
   const fs = new MemFS({ [BOOK]: book, [KITCHEN]: kitchen });
+  recoveryFiles = () => [{ name: "recipes-kitchen-recovery.txt", data: fs.readFile(KITCHEN) }];
   const decoder = new TextDecoder();
   let platform = null;
   let pending = "";
@@ -198,8 +212,9 @@ async function main() {
 
   canvas.focus({ preventScroll: true });
   requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove("booting")));
+  bookRunning = true;
   const status = await runResumable(instance, () => platform.nextFrame());
-  show(`The book stopped${status ? ` with status ${status}` : ""}.<br><a href="">Start again</a>`);
+  recoverBook({ exitStatus: status });
 }
 
 // ---- keeping the kitchen ----
@@ -331,8 +346,4 @@ setInterval(() => {
   if (document.visibilityState === "visible") pull();
 }, 120000);
 
-main().catch((e) => {
-  console.error(e);
-  document.body.classList.remove("booting");
-  show(`The book stopped: ${e.message}`);
-});
+main().catch(recoverBook);

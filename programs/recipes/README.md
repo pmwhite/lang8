@@ -86,6 +86,13 @@ ate DAY RECIPE SERVINGS      DAY as days from 1970
 
 ## The book
 
+If the web app stops, its recovery message offers a download of the kitchen
+file last written in that page before restarting. That copy can include work
+which has not reached browser storage or the worker; it cannot include edits
+the app had not yet written. Keep the download for recovery help. Restart
+reopens the saved kitchen and removes `?fresh`, so a fresh session is not
+silently started again. A fresh kitchen needs a recovery download to keep it.
+
 `recipes.txt` holds the foods and the recipes; its head says the format.
 It starts empty: foods are added as they come up, and recipes as they
 are asked for. `test-book.txt` (the first book, 63 foods and 20 recipes)

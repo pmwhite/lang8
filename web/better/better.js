@@ -69,6 +69,7 @@
 // app.l8).
 import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "../game/platform.js";
+import { showAppRecovery } from "../app-recovery.js";
 import { kept, keptBefore } from "./store.js";
 
 const LOG = "/log.txt";
@@ -79,10 +80,24 @@ const ANSWER = "/http-answer.txt";
 const $ = (id) => document.getElementById(id);
 const canvas = $("screen");
 const input = $("type");
-const show = (html) => {
-  $("message").innerHTML = html;
-  $("overlay").hidden = false;
-};
+let recoveryFiles = null;
+let betterRunning = false;
+
+function recoverBetter(error) {
+  console.error("Better could not continue", error);
+  gps.want(false);
+  wake.want(false);
+  showAppRecovery({
+    title: betterRunning ? "Better stopped" : "Better couldn’t open",
+    explanation: betterRunning ? [
+      "Recording has stopped. Time and distance after this point won’t be recorded.",
+      sync.fresh
+        ? "This test session doesn’t save changes. Download recovery copies before restarting."
+        : "Restart to reopen your saved log and any saved recording, paused. The latest changes or seconds of a recording may be missing, and the log may not have reached your other devices.",
+    ] : ["Restart to try opening your saved log and any saved recording again. Better couldn’t finish loading."],
+    files: recoveryFiles?.() || [],
+  });
+}
 const decoder = new TextDecoder();
 
 for (const name of ["gesturestart", "gesturechange", "dblclick", "contextmenu"]) {
@@ -90,7 +105,7 @@ for (const name of ["gesturestart", "gesturechange", "dblclick", "contextmenu"])
 }
 for (const name of ["touchstart", "touchmove"]) {
   document.addEventListener(name, (e) => {
-    if (e.target !== input) e.preventDefault();
+    if (e.target !== input && !e.target.closest("#overlay")) e.preventDefault();
   }, { passive: false });
 }
 const touch = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
@@ -146,6 +161,10 @@ async function main() {
   else if (sync.secret) inbox += accountLine(await kept.get("account")) + "\n";
   if (code) inbox += `code ${code}\n`;
   const fs = new MemFS({ [LOG]: log, [LIVE]: live, [INBOX]: inbox });
+  recoveryFiles = () => [
+    { name: "better-log-recovery.txt", data: fs.readFile(LOG) },
+    { name: "better-recording-recovery.txt", data: fs.readFile(LIVE) },
+  ];
   let platform = null;
   let pending = "";
   fs.onOutput = (_fd, data) => {
@@ -380,8 +399,9 @@ async function main() {
 
   canvas.focus({ preventScroll: true });
   requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove("booting")));
+  betterRunning = true;
   const status = await runResumable(instance, () => platform.nextFrame());
-  show(`Better stopped${status ? ` with status ${status}` : ""}.<br><a href="">Start again</a>`);
+  recoverBetter({ exitStatus: status });
 }
 
 // ---- where the phone is ----
@@ -499,7 +519,12 @@ const wake = {
     }
     if (this.lock || !navigator.wakeLock || document.visibilityState !== "visible") return;
     try {
-      this.lock = await navigator.wakeLock.request("screen");
+      const lock = await navigator.wakeLock.request("screen");
+      if (!this.wanted) {
+        await lock.release();
+        return;
+      }
+      this.lock = lock;
       this.lock.addEventListener("release", () => (this.lock = null));
     } catch (e) {
       console.warn(e);
@@ -772,8 +797,4 @@ setInterval(() => {
   if (document.visibilityState === "visible") pull();
 }, 120000);
 
-main().catch((e) => {
-  console.error(e);
-  document.body.classList.remove("booting");
-  show(`Better stopped: ${e.message}`);
-});
+main().catch(recoverBetter);

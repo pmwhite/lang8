@@ -200,6 +200,16 @@ that to a page left behind) takes it up again, paused.
 
 The log's file, a line to a thing, each activity's lines after its own:
 
+If the web app stops, recording and location tracking stop. The recovery
+message offers downloads of the log and recording files last written in that
+page. These may include work not yet saved to IndexedDB or the worker, but
+cannot include changes the app had not written. Keep the copies for recovery
+help before restarting. Restart reopens saved data, including a saved recording
+paused; the latest seconds may be missing. Test sessions (`?fresh` or made-up
+accounts) do not save changes and need those downloads to keep their work.
+
+The saved format is:
+
 ```
 units mi|km
 act START TZ SPORT ELAPSED MOVING DIST MAX NAME...

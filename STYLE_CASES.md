@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 22. Human-facing interfaces need task-centered explanations
-
-Status: open; related style rule approved.
-Locations: `web/recipes/recipes.js` — post-run overlay around line 202 and startup catch around line 337; `web/better/better.js` — corresponding overlays around lines 384 and 778. Compiler examples: `src2/parse.l8` emits generic "unknown exception" diagnostics in several paths; `tests/compiler/unknownfn.l8` and `tests/compiler/badopen.l8` show existing location/name/type reporting to build on.
-
-Observation: User-facing overlays say the app stopped with a numeric status or display an exception message. Those messages expose runtime outcomes without explaining the effect on the user's work, what remains available, or an appropriate next action. A restart link appears in the post-run message, but that alone does not explain consequences.
-
-Follow-up: Treat compiler diagnostics, CLI commands, library APIs, documentation and graphical apps as UX. Design around the person's task, vocabulary, feedback and next step. Compiler errors should identify the relevant source, declaration, expectation and actual input where useful; avoid suggesting speculative or semantics-changing fixes. Apply the same task-centered contract to visible app state, preservation of work and recovery. Map technical failures into truthful, actionable explanations and preserve diagnostics for troubleshooting. Verify what is actually saved before making any reassurance. This is a proposal derived from source inspection; no live UI behavior has been tested.
-
 ## 23. Successful use depends on remembering an operation sequence
 
 Status: open; related style rule approved.
