@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 2. Indirect recognition of protocol values
-
-Status: open; related style rule approved.
-Location: `programs/bible/core/host.l8` — hs_answer, around line 774.
-
-Observation: daily_limit is recognized by length and two numeric character checks instead of its complete value.
-
-Follow-up: Compare the full decoded identifier; retain the Worker protocol meaning. The producer is programs/bible/worker/worker.js.
-
 ## 3. Silent buffer truncation
 
 Status: open; related style rule approved.
