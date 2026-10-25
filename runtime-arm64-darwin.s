@@ -86,9 +86,19 @@ _l8_exc_tag: .quad 0
 _l8_exc_ptr: .quad 0
 l8_handler_top: .quad 0
 l8_region_n: .quad 0
-l8_region_marks: .space 512
+l8_region_marks: .space 2048
 l8_try_rn: .quad 0
 l8_try_regions: .space 512
+
+    .section __DATA,__data
+    .p2align 3
+l8_arena_state:
+    .quad 0
+    .quad 0
+    .quad heap_ptr
+    .quad heap_end
+    .quad l8_region_n
+    .quad l8_region_marks
 
     .section __TEXT,__text,regular,pure_instructions
     .p2align 2
@@ -360,9 +370,7 @@ _l8_environment:
 
 // ---- the bump heap and regions (as runtime.s); these keep x9 ----
 _l8_heap_mark:
-    adrp x0, heap_ptr@PAGE
-    ldr x0, [x0, heap_ptr@PAGEOFF]
-    ret
+    b .Larm_arena_heap_mark
 _l8_heap_used:
     adrp x0, heap_ptr@PAGE
     ldr x0, [x0, heap_ptr@PAGEOFF]
@@ -375,32 +383,9 @@ _l8_heap_reset:
     str x0, [x1, heap_ptr@PAGEOFF]
     ret
 _l8_region_push:
-    adrp x1, l8_region_n@PAGE
-    ldr x2, [x1, l8_region_n@PAGEOFF]
-    cmp x2, #63
-    b.hi 1f
-    adrp x3, l8_region_marks@PAGE
-    add x3, x3, l8_region_marks@PAGEOFF
-    str x0, [x3, x2, lsl #3]
-    add x2, x2, #1
-    str x2, [x1, l8_region_n@PAGEOFF]
-    ret
-1:
-    mov x0, #1
-    bl _exit
+    b .Larm_arena_region_push
 _l8_region_pop:
-    adrp x1, l8_region_n@PAGE
-    ldr x2, [x1, l8_region_n@PAGEOFF]
-    cbz x2, 1f
-    sub x2, x2, #1
-    str x2, [x1, l8_region_n@PAGEOFF]
-    adrp x3, l8_region_marks@PAGE
-    add x3, x3, l8_region_marks@PAGEOFF
-    ldr x4, [x3, x2, lsl #3]
-    adrp x5, heap_ptr@PAGE
-    str x4, [x5, heap_ptr@PAGEOFF]
-1:
-    ret
+    b .Larm_arena_region_pop
 _l8_exc_malloc:
     add x0, x0, #7
     and x0, x0, #-8
@@ -419,6 +404,10 @@ _l8_exc_malloc:
     ret
 // void *malloc(size): bump, 8-byte aligned; 0 when the heap is full.
 _l8rt_malloc:
+    adrp x1, l8_arena_state@PAGE
+    add x1, x1, l8_arena_state@PAGEOFF
+    ldr x1, [x1]
+    cbnz x1, .Larm_arena_malloc
     adrp x1, heap_ptr@PAGE
     ldr x2, [x1, heap_ptr@PAGEOFF]
     add x0, x0, #7
@@ -596,21 +585,7 @@ _l8_raise:
     adrp x5, l8_try_regions@PAGE
     add x5, x5, l8_try_regions@PAGEOFF
     ldr x6, [x5, x4, lsl #3]
-    adrp x7, l8_region_n@PAGE
-    add x7, x7, l8_region_n@PAGEOFF
-    adrp x10, l8_region_marks@PAGE
-    add x10, x10, l8_region_marks@PAGEOFF
-    adrp x11, heap_ptr@PAGE
-    add x11, x11, heap_ptr@PAGEOFF
-1:
-    ldr x4, [x7]
-    cmp x4, x6
-    b.ls 3f
-    sub x4, x4, #1
-    str x4, [x7]
-    ldr x12, [x10, x4, lsl #3]
-    str x12, [x11]
-    b 1b
+    bl .Larm_arena_unwind
 3:
     ldr x4, [x0, #64]
     str x4, [x2, l8_handler_top@PAGEOFF]
@@ -703,3 +678,72 @@ _l8_run_loop_common_modes:
 
 // The C library's math functions that L8 programs declare come from
 // libSystem itself (sqrtf, floorf).
+
+    .section __TEXT,__text,regular,pure_instructions
+    .p2align 2
+    .globl _l8_arena_new
+    .globl _l8_reserve_bytes
+_l8_reserve_bytes:
+    b .Larm_arena_reserve_bytes
+_l8_arena_new:
+    b .Larm_arena_new
+    .globl _l8_arena_drop
+_l8_arena_drop:
+    b .Larm_arena_free
+    .globl _l8_arena_live
+_l8_arena_live:
+    b .Larm_arena_live
+    .globl _l8_own_enter
+_l8_own_enter:
+    b .Larm_arena_own_enter
+    .globl _l8_own_commit
+_l8_own_commit:
+    b .Larm_arena_own_commit
+    .globl _l8_borrow_enter
+_l8_borrow_enter:
+    b .Larm_arena_borrow_enter
+    .globl _l8_alloc_enter
+_l8_alloc_enter:
+    b .Larm_arena_alloc_enter
+    .globl _l8_arena_suspend
+_l8_arena_suspend:
+    b .Larm_arena_suspend
+    .globl _l8_arena_resume
+_l8_arena_resume:
+    b .Larm_arena_region_pop
+    .globl _l8_region_unwind
+_l8_region_unwind:
+    mov x6, x0
+    b .Larm_arena_unwind
+    .globl _l8_region_depth
+_l8_region_depth:
+    stp x9, x30, [sp, #-16]!
+    bl .Larm_arena_state_address
+    ldr x0, [x15, #32]
+    ldr x0, [x0]
+    ldp x9, x30, [sp], #16
+    ret
+.Larm_arena_state_address:
+    adrp x15, l8_arena_state@PAGE
+    add x15, x15, l8_arena_state@PAGEOFF
+    ret
+.Larm_arena_map:
+    stp x9, x30, [sp, #-16]!
+    mov x1, x0
+    mov x0, #0
+    mov x2, #3
+    mov x3, #0x1002
+    mov x4, #-1
+    mov x5, #0
+    bl _mmap
+    cmn x0, #1
+    b.ne 1f
+    mov x0, #0
+1:
+    ldp x9, x30, [sp], #16
+    ret
+.Larm_arena_unmap:
+    b _munmap
+.Larm_arena_fail:
+    mov x0, #1
+    b _exit

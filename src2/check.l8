@@ -175,6 +175,99 @@ life_leave_region(old_cur: int, old_heap: int) {
     life_region_tc = life_region_tc - 1
 }
 
+life_enter_arena() raises Error: int {
+    f: int = life_alloc_frame(0 - 1, LIFE_KIND_ARENA);
+    life_cur = f;
+    life_heap = f;
+    life_region_tc = life_region_tc + 1;
+    if (life_region_tc >= 0 && life_region_tc < LIFE_MAX) life_arrays.depth_frames[life_region_tc] = f;
+    f
+}
+
+life_enter_borrow(parent: int) raises Error: int {
+    f: int = life_alloc_frame(life_cur, 2);
+    life_add_edge(parent, f);
+    life_cur = f;
+    life_region_tc = life_region_tc + 1;
+    if (life_region_tc >= 0 && life_region_tc < LIFE_MAX) life_arrays.depth_frames[life_region_tc] = f;
+    f
+}
+
+life_is_arena(id: int): bool {
+    id >= 3 && id < life_arrays.n && life_arrays.kind[id] == LIFE_KIND_ARENA
+}
+
+type ObjArena = {
+    obj: *Obj;
+    life: int;
+    header: *Obj;
+    next: ?*ObjArena
+}
+
+type ExprArena = {
+    expr: *Expr;
+    life: int;
+    header: *Obj;
+    next: ?*ExprArena
+}
+
+obj_arenas: ?*ObjArena = null;
+
+expr_arenas: ?*ExprArena = null;
+
+note_obj_arena(obj: *Obj@immortal, life: int, header: *Obj@immortal) noregion {
+    a: ?*ObjArena = obj_arenas;
+    while (a != null) {
+        if (a.obj == obj) {
+            a.life = life;
+            a.header = header;
+            return
+        }
+        a = a.next
+    }
+    obj_arenas = new ObjArena {
+        obj: obj,
+        life: life,
+        header: header,
+        next: obj_arenas
+    }
+}
+
+note_expr_arena(expr: *Expr@immortal, life: int, header: *Obj@immortal) noregion {
+    expr_arenas = new ExprArena {
+        expr: expr,
+        life: life,
+        header: header,
+        next: expr_arenas
+    }
+}
+
+obj_arena(obj: ?*Obj): ?*ObjArena {
+    a: ?*ObjArena = obj_arenas;
+    while (a != null) {
+        if (a.obj == obj) return a;
+        a = a.next
+    }
+    null
+}
+
+expr_arena(expr: ?*Expr): ?*ExprArena {
+    a: ?*ExprArena = expr_arenas;
+    while (a != null) {
+        if (a.expr == expr) return a;
+        a = a.next
+    }
+    null
+}
+
+ensure_owner_arena(obj: *Obj@immortal) noregion raises Error: *ObjArena {
+    found: ?*ObjArena = obj_arena(obj);
+    if (found != null) return found;
+    life: int = life_alloc_frame(0 - 1, LIFE_KIND_ARENA);
+    note_obj_arena(obj, life, obj);
+    obj_arena(obj) or error("internal: owner arena")
+}
+
 var_view_ty(var: ?*Obj): ?*Type@var {
     f: ?*NarrowFrame = narrow_top;
     while (f != null) {
@@ -438,6 +531,9 @@ kill_assigned_stmt(s: *Stmt) noregion {
             }
         }
         Region k -> kill_assigned_stmt(k.body);
+        Borrow k -> kill_assigned_stmt(k.body);
+        Allocate k -> kill_assigned_stmt(k.body);
+        Drop k -> kill_assigned_expr(k.target);
         Expect _ -> { }
         Break -> { }
         Continue -> { }
@@ -799,6 +895,8 @@ stmt_result_life(s: ?*Stmt) raises Error: int {
             l2
         }
         Region k -> stmt_result_life(k.body);
+        Borrow k -> stmt_result_life(k.body);
+        Allocate k -> stmt_result_life(k.body);
         _ -> LIFE_IMM
     }
 }
@@ -825,6 +923,8 @@ expr_life(n: ?*Expr) raises Error: int {
         Var k -> {
             v: ?*Obj = k.var;
             if (v == null) return LIFE_IMM;
+            noted: ?*ObjArena = obj_arena(v);
+            if (noted != null) return noted.life;
             if (!v.is_local) return LIFE_IMM;
             v.life
         }
@@ -907,6 +1007,17 @@ escape_error(n: ?*Expr) noregion raises Error {
     error("region pointer cannot escape")
 }
 
+arena_escape() noregion raises Error {
+    fn: ?*Function = current_fn;
+    if (fn != null) {
+        sb: *StrBuf = sb_new();
+        sb_puts(sb, "arena pointer cannot escape in ");
+        sb_puts(sb, fn.name);
+        error(sb_finish(sb))
+    }
+    error("arena pointer cannot escape")
+}
+
 note_imm_heap(value: *Expr, reason: NoregionReason@immortal) noregion {
     fn: ?*Function = current_fn;
     if (fn == null) return;
@@ -954,7 +1065,7 @@ find_param_by_life(id: int): ?*Obj {
 }
 
 constrain_param_to_dest(p: *Obj, dest: int) {
-    if (dest == LIFE_IMM) {
+    if (dest == LIFE_IMM || life_is_arena(dest)) {
         p.bound_need_imm = true;
         return
     }
@@ -1075,7 +1186,18 @@ note_params_in_expr(n: ?*Expr, dest: int) raises Error {
 note_bound_call_param(callee_po: *Obj@immortal, p: *Obj@immortal) noregion {
     fn: ?*Function = current_fn;
     if (fn == null) return;
-    fn.bound_calls = new BoundCall { caller_param: p, callee_param: callee_po, next: fn.bound_calls }
+    // A callee's @new refers to this call's allocation destination. Scratch
+    // regions do not constrain the caller's allocation lifetime; an independent
+    // owned arena can only retain immortal caller data.
+    allocation_bound: int = BOUND_OMIT;
+    if (life_heap == LIFE_HEAPTOP) allocation_bound = BOUND_NEW;
+    if (life_heap == LIFE_IMM || life_is_arena(life_heap)) allocation_bound = BOUND_IMM;
+    fn.bound_calls = new BoundCall {
+        caller_param: p,
+        callee_param: callee_po,
+        allocation_bound: allocation_bound,
+        next: fn.bound_calls
+    }
 }
 
 note_bound_calls_in_inits(inits: ?*FieldInit, callee_po: *Obj@immortal) noregion raises Error {
@@ -1213,7 +1335,7 @@ check_store(src: ?*Expr, dest: int, target: ?*Expr) noregion raises Error {
     sl: int = expr_life(src);
     note_sig_store(src, dest);
     if (life_outlives(sl, dest)) return;
-    if (dest == LIFE_IMM && sl == LIFE_HEAPTOP) {
+    if ((dest == LIFE_IMM || life_is_arena(dest)) && sl == LIFE_HEAPTOP) {
         reason: NoregionReason = NoregionReason.Store;
         if (target != null) {
             match target.kind {
@@ -1230,6 +1352,7 @@ check_store(src: ?*Expr, dest: int, target: ?*Expr) noregion raises Error {
     }
     if (sl == LIFE_HEAPTOP && find_param_by_life(dest) != null) return;
     if (life_is_param(sl) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
+    if (life_is_arena(sl)) arena_escape();
     escape_error(src)
 }
 
@@ -1268,6 +1391,7 @@ check_return_value(src: *Expr) noregion raises Error {
     if (dest == LIFE_IMM && sl == LIFE_HEAPTOP) return_needs_new();
     if (life_outlives(sl, dest)) return;
     if (life_is_param(sl) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
+    if (life_is_arena(sl)) arena_escape();
     escape_error(src)
 }
 
@@ -1283,6 +1407,7 @@ check_exc_payload(src: ?*Expr) noregion raises Error {
     }
     if (life_is_param(sl) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
     if (is_tainted_expr(src) || is_stack_addr(src)) error("exception payload cannot hold the address of a local");
+    if (life_is_arena(sl)) error("exception payload cannot hold an arena pointer");
     error("exception payload cannot hold a region pointer")
 }
 
@@ -1311,6 +1436,7 @@ check_call_lifetimes(fno: *Function@immortal, args: ?*Expr) noregion raises Erro
                         if (qp2 != null && !is_tainted_expr(a) && !is_stack_addr(a)) constrain_param_to_dest(qp2,
                             need) else if (!is_tainted_expr(a) && !is_stack_addr(a) && type_has_pointers(a.ty)) {
                             note_params_in_expr(a, need);
+                            if (qp2 == null && life_is_arena(sl)) arena_escape();
                             if (qp2 == null && life_is_region(sl)) escape_error(a)
                         } else escape_error(a)
                     }
@@ -1553,6 +1679,8 @@ stmt_always_diverges(n: *Stmt): bool {
             true
         }
         Region k -> stmt_always_diverges(k.body);
+        Borrow k -> stmt_always_diverges(k.body);
+        Allocate k -> stmt_always_diverges(k.body);
         _ -> false
     }
 }
@@ -1598,6 +1726,8 @@ stmt_assigns_to(n: *Stmt, v: *Obj): bool {
             if (els != null) stmt_assigns_to(els, v) else false
         }
         Region k -> stmt_assigns_to(k.body, v);
+        Borrow k -> stmt_assigns_to(k.body, v);
+        Allocate k -> stmt_assigns_to(k.body, v);
         _ -> false
     }
 }
@@ -1637,6 +1767,8 @@ stmt_ensures_nonnull(n: *Stmt, v: *Obj): bool {
                 v) else false
         }
         Region k -> stmt_ensures_nonnull(k.body, v);
+        Borrow k -> stmt_ensures_nonnull(k.body, v);
+        Allocate k -> stmt_ensures_nonnull(k.body, v);
         _ -> false
     }
 }
@@ -2343,7 +2475,9 @@ da_expr(n: ?*Expr) noregion raises Error: bool {
             false
         }
         Block k -> da_stmt_list(k.body);
-        Sizeof k -> da_expr(k.e)
+        Sizeof k -> da_expr(k.e);
+        Own k -> da_stmt(k.body);
+        Move k -> da_expr(k.lhs)
     }
 }
 
@@ -2484,6 +2618,12 @@ da_stmt_node(s: *Stmt) noregion raises Error: bool {
             false
         }
         Region k -> da_stmt(k.body);
+        Borrow k -> {
+            init_mark(k.shadow);
+            da_stmt(k.body)
+        }
+        Allocate k -> da_stmt(k.body);
+        Drop k -> da_expr(k.target);
         Decl k -> {
             _di: bool = da_expr(k.init);
             vo: ?*Obj = k.var;
@@ -2578,6 +2718,8 @@ record_noregion_call_expr(owner: *Function@immortal, n: ?*Expr) raises Error: bo
         }
         Block k -> record_noregion_call_stmts(owner, k.body);
         Sizeof k -> record_noregion_call_expr(owner, k.e);
+        Own k -> record_noregion_call_stmt(owner, k.body);
+        Move k -> record_noregion_call_expr(owner, k.lhs);
         _ -> false
     }
 }
@@ -2623,6 +2765,9 @@ record_noregion_call_stmt(owner: *Function@immortal, s: ?*Stmt) raises Error: bo
             false
         }
         Region k -> record_noregion_call_stmt(owner, k.body);
+        Borrow k -> record_noregion_call_stmt(owner, k.body);
+        Allocate k -> record_noregion_call_stmt(owner, k.body);
+        Drop k -> record_noregion_call_expr(owner, k.target);
         Decl k -> record_noregion_call_expr(owner, k.init);
         _ -> false
     }
@@ -2656,6 +2801,17 @@ propagate_need_imm_heap() raises Error {
 check_region_calls_expr(n: ?*Expr) noregion raises Error {
     if (n == null) return;
     match n.kind {
+        Own k -> {
+            old_heap: int = life_heap;
+            life_heap = 99;
+            check_region_calls_stmt(k.body);
+            life_heap = old_heap;
+            return
+        }
+        Move k -> {
+            check_region_calls_expr(k.lhs);
+            return
+        }
         Funcall k -> {
             check_region_calls_expr(k.target);
             fno: ?*Function = k.fn;
@@ -2868,6 +3024,21 @@ check_region_calls_node(s: *Stmt) noregion raises Error {
             life_heap = old_heap;
             return
         }
+        Borrow k -> {
+            check_region_calls_stmt(k.body);
+            return
+        }
+        Allocate k -> {
+            old_heap: int = life_heap;
+            life_heap = 99;
+            check_region_calls_stmt(k.body);
+            life_heap = old_heap;
+            return
+        }
+        Drop k -> {
+            check_region_calls_expr(k.target);
+            return
+        }
         Decl k -> {
             check_region_calls_expr(k.init);
             return
@@ -2894,6 +3065,126 @@ check_region_calls_all() noregion raises Error {
     }
 }
 
+stmt_value_expr(s: ?*Stmt): ?*Expr {
+    if (s == null) return null;
+    match s.kind {
+        ExprStmt k -> k.lhs;
+        Block k -> stmt_value_expr(last_stmt(k.body));
+        If k -> stmt_value_expr(k.then);
+        Region k -> stmt_value_expr(k.body);
+        _ -> null
+    }
+}
+
+type_own_expr(p: *Expr@immortal, body: *Stmt, slot: *Obj@immortal) noregion raises Error {
+    old_cur: int = life_cur;
+    old_heap: int = life_heap;
+    frame: int = life_enter_arena();
+    slot.ty = ty_int;
+    add_type_stmt(body);
+    value: ?*Expr = stmt_value_expr(body);
+    if (value == null) error("own needs a pointer result allocated in its arena");
+    result: *Expr = value or error("own needs a pointer result");
+    rt: ?*Type = decay(result.ty);
+    if (rt == null || !is_pointer(rt)) error("own's result must be a pointer into its arena");
+    if (stmt_result_life(body) != frame) error("own's result must be allocated in its arena");
+    life_leave_region(old_cur, old_heap);
+    p.ty = owned_type(type_base(rt), false);
+    slot.ty = p.ty;
+    note_expr_arena(p, frame, slot)
+}
+
+type_move_expr(p: *Expr@immortal, lhs: *Expr@immortal) noregion raises Error {
+    saved: int = owner_read_ok;
+    owner_read_ok = owner_read_ok + 1;
+    add_type(lhs);
+    owner_read_ok = saved;
+    lt: ?*Type = decay(lhs.ty);
+    if (lt == null || !is_owned_ty(lt)) error("move requires an owner");
+    match lhs.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) error("move requires an owner variable");
+            owner: *Obj = v;
+            noted: *ObjArena = ensure_owner_arena(owner);
+            p.ty = lt;
+            note_expr_arena(p, noted.life, owner);
+            return
+        }
+        _ -> error("move requires an owner variable")
+    }
+}
+
+type_borrow_stmt(
+    owner: *Obj@immortal,
+    shadow: *Obj@immortal,
+    header: *Obj@immortal,
+    body: *Stmt
+) noregion raises Error {
+    mark_var_use(owner);
+    ot: ?*Type = decay(owner.ty);
+    if (ot == null || !is_owned_ty(ot)) error("borrow requires an owner");
+    shadow.ty = ptr_to(owned_pointee(ot));
+    noted: *ObjArena = ensure_owner_arena(owner);
+    note_obj_arena(shadow, noted.life, header);
+    old_cur: int = life_cur;
+    old_heap: int = life_heap;
+    _f: int = life_enter_borrow(noted.life);
+    add_type_stmt(body);
+    life_leave_region(old_cur, old_heap)
+}
+
+type_allocate_stmt(slot: *Obj, body: *Stmt) noregion raises Error {
+    mark_var_use(slot);
+    noted: ?*ObjArena = obj_arena(slot);
+    if (noted == null || noted.header == slot && is_owned_ty(decay(slot.ty))) error("allocate needs a pointer from a borrow");
+    if (noted == null) error("allocate needs a pointer from a borrow");
+    arena: *ObjArena = noted;
+    old_heap: int = life_heap;
+    life_heap = arena.life;
+    add_type_stmt(body);
+    life_heap = old_heap
+}
+
+type_drop_stmt(target: *Expr@immortal) noregion raises Error {
+    saved: int = owner_read_ok;
+    owner_read_ok = owner_read_ok + 1;
+    add_type(target);
+    owner_read_ok = saved;
+    lt: ?*Type = decay(target.ty);
+    if (lt == null || !is_owned_ty(lt)) error("drop requires an owner");
+    match target.kind {
+        Var _ -> return;
+        _ -> error("drop requires an owner variable")
+    }
+}
+
+note_assigned_arena(lhs: *Expr, rhs: *Expr) noregion {
+    match lhs.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return;
+            noted: ?*ExprArena = expr_arena(rhs);
+            if (noted == null) {
+                match rhs.kind {
+                    Var rv -> {
+                        src: ?*Obj = rv.var;
+                        onote: ?*ObjArena = obj_arena(src);
+                        if (onote != null && !is_owned_ty(decay(rhs.ty))) note_obj_arena(v,
+                            onote.life, onote.header)
+                    }
+                    _ -> { }
+                }
+                return
+            }
+            header: *Obj = noted.header;
+            if (is_owned_ty(decay(lhs.ty))) header = v;
+            note_obj_arena(v, noted.life, header)
+        }
+        _ -> { }
+    }
+}
+
 typecheck_program() noregion raises Error {
     typecheck_global_inits();
     fn: ?*Function = functions;
@@ -2911,9 +3202,12 @@ typecheck_program() noregion raises Error {
             taint_top = null;
             addr_top = null;
             life_init_fn(fn);
+            obj_arenas = null;
+            expr_arenas = null;
             add_type_stmt(fn.body);
             check_fn_result(fn);
-            check_fn_inited(fn)
+            check_fn_inited(fn);
+            check_fn_owners(fn)
         }
         fn = fn.next
     }
@@ -3165,7 +3459,11 @@ propagate_param_bounds() {
                     c.caller_param.bound_need_imm = true;
                     changed = true
                 }
-                if (c.callee_param.bound_need_new && !c.caller_param.bound_need_new) {
+                if (c.callee_param.bound_need_new && c.allocation_bound == BOUND_IMM && !c.caller_param.bound_need_imm) {
+                    c.caller_param.bound_need_imm = true;
+                    changed = true
+                }
+                if (c.callee_param.bound_need_new && c.allocation_bound == BOUND_NEW && !c.caller_param.bound_need_new) {
                     c.caller_param.bound_need_new = true;
                     changed = true
                 }

@@ -52,6 +52,79 @@ uses that value in an immortal context. This may not be exposed in any way by
 parameters or the return type, so we have it as an piece of information that
 analysis of a function must determine.
 
+## Owned arenas
+
+`owned *T` is a unique, movable handle to an arena and its root `T`. An arena
+can outlive the function that creates it. `?owned *T` also admits `null`.
+
+```l8
+type Box = { value: int }
+
+make_box(): owned *Box {
+    own { new Box { value: 1 } }
+}
+
+main(): int {
+    box: owned *Box = make_box();
+    borrow box {
+        // Here box is the root *Box, with the same name as its owner outside.
+        alias: *Box = box;
+        alias.value = 2;
+        allocate alias {
+            _extra: *Box = new Box { value: 3 };
+            // New allocations use box's arena; ordinary calls inherit it too.
+        }
+    }
+    next: owned *Box = move box;
+    drop next;
+    0
+}
+```
+
+`own` creates an independent arena. Its block must produce a pointer allocated
+in that arena. If construction raises or otherwise leaves the block before
+completion, the incomplete arena is reclaimed. The completed handle has no
+automatic destructor: explicitly `drop` it when finished. Dropping an empty
+handle is harmless. Moving a handle empties its source; copying one is an error.
+Assignment requires an empty destination and does not free its old value.
+An owner assignment has no value; it cannot also supply a second owner through
+a surrounding expression.
+Handles can be locals, globals, parameters, and return values. They cannot yet
+be record or variant fields, array or slice elements, or pointer targets.
+
+`borrow name { ... }` temporarily exposes the root through the same name. An
+ordinary local assignment can give that pointer another name. Mutable aliases
+are allowed; a borrow does not impose Rust's exclusive-reference rule. Pointers
+from the borrow cannot escape into longer-lived storage. `match` payloads remain
+shallow copies in arm locals, so changing a variant's tag through another alias
+does not change the payload local's layout.
+
+`allocate pointer { ... }` selects the arena recorded for a local borrowed
+pointer or its local alias. A `borrow` alone does not change where `new`
+allocates. A `region` inside `own` or `allocate` provides scratch storage in the
+selected arena and rewinds it on exit. Scratch cannot be retained in the arena.
+An independent arena can capture immortal pointers, but cannot retain pointers
+into another arena, a caller's borrowed data, or a lexical region. Copy that data
+into the new arena instead. Existing `@new` contracts refer to the allocation
+destination at the call; a call inside a scratch region does not require its
+caller to retain the arguments in the caller's allocation destination.
+
+The runtime keeps a borrow count and rejects dropping an arena while borrowed,
+including an indirect drop through a global. Moving an owner while borrowed is
+allowed: the borrow keeps the original arena, and its new owner still cannot
+drop it until the borrow ends. Return, loop exits, and exceptions release scope
+frames and borrows. External native calls temporarily select the process heap,
+so a reentrant callback does not inherit its caller's arena. Foreign code must
+still obey declared lifetime contracts and must not retain borrowed pointers.
+
+Native arenas use mapped chunks, returned to the OS on `drop`. WebAssembly
+returns chunks to a reusable free list because its linear memory cannot shrink;
+its memory therefore follows its peak working set. Scope frames (regions,
+borrows, allocation scopes, and suspended external calls) are limited to 64
+simultaneous frames natively and 4096 in Wasm; exceeding the limit exits with
+status 1. File descriptors, sockets, native objects, and other external resources
+remain the programmer's responsibility. Dropping an arena only reclaims memory.
+
 ## Strings and byte slices
 
 `str` is the language's string and C-string boundary type. It is immutable,

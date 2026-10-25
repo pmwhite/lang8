@@ -15,6 +15,11 @@ tag compiler_internal;
 // throws the module's one wasm tag; a catch restores the shadow stack and the
 // region depth recorded at its try.
 //
+// An owned arena is a header plus chunks taken from memory.grow (returned to
+// a free list on drop; wasm cannot unmap). The current arena, when set, is
+// what malloc and region checkpoints bump. Extern calls suspend it, so a
+// callback allocates on the process heap.
+//
 // Externs become imports from module "env" named by their link names. Floats
 // cross that boundary as f32/f64 and everything else as i64; `exit` and
 // `l8_exit` are implemented in the module. The module exports its memory, its
@@ -52,6 +57,16 @@ WG_EXIT_STATUS: int = 6;
 WG_ASYNC_STATE: int = 7;
 
 WG_ASYNC_TOP: int = 8;
+
+// The arena malloc currently bumps, and how many arenas are live.
+WG_ARENA: int = 9;
+
+WG_ARENA_LIVE: int = 10;
+
+// Chunks and headers waiting to be reused. Wasm cannot unmap.
+WG_CHUNK_FREE: int = 11;
+
+WG_HEADER_FREE: int = 12;
 
 WA_UNWINDING: int = 1;
 
@@ -253,6 +268,32 @@ wasm_fnptr_type(fn: *Function) noregion raises Error: int {
 // ---- runtime and import function indices ----
 wf_exit: int = 0;
 
+wf_arena_mmap: int = 0;
+
+wf_arena_free: int = 0;
+
+wf_frame_push: int = 0;
+
+wf_arena_alloc: int = 0;
+
+wf_arena_new: int = 0;
+
+wf_arena_drop: int = 0;
+
+wf_arena_live: int = 0;
+
+wf_own_enter: int = 0;
+
+wf_own_commit: int = 0;
+
+wf_borrow_enter: int = 0;
+
+wf_alloc_enter: int = 0;
+
+wf_arena_suspend: int = 0;
+
+wf_arena_resume: int = 0;
+
 wf_read: int = 0;
 
 wf_argv: int = 0;
@@ -288,7 +329,7 @@ wf_init_globals: int = 0;
 wf_start: int = 0;
 
 // Runtime functions follow the imports in this order; then L8 functions.
-WASM_NRUNTIME: int = 13;
+WASM_NRUNTIME: int = 26;
 
 // ---- code emission ----
 
@@ -679,6 +720,23 @@ wg_convert(from: ?*Type, to: ?*Type) raises Error {
         w_op(182);
         wg_from_f(false)
     }
+}
+
+// The bump a region checkpoints: the current arena's, or the process heap.
+wg_allocator_header() raises Error {
+    w_gget(WG_ARENA);
+    w_op(80);
+    w_if_i64();
+    w_i64(wasm_process_header);
+    w_else();
+    w_gget(WG_ARENA);
+    w_end()
+}
+
+wg_heap_mark() raises Error {
+    wg_allocator_header();
+    w_wrap();
+    w_mem(41, 8)
 }
 
 // ---- variables ----
@@ -1235,6 +1293,12 @@ wg_assign(lhs: *Expr, rhs: *Expr) noregion raises Error {
         Var k -> {
             vo: ?*Obj = k.var;
             if (vo != null) {
+                if (!vo.is_local && is_owned_ty(decay(lty))) {
+                    wg_load_var(vo, lty);
+                    w_i64(0);
+                    w_op(82);
+                    w_oob_if()
+                }
                 w_lget(t);
                 wg_store_var(vo, lty);
                 w_lget(t);
@@ -1398,6 +1462,10 @@ wg_call(
     fno: ?*Function,
     target: ?*Expr
 ) noregion raises Error {
+    if (fno != null && fno.is_extern && streq(fno.link_name, "l8_heap_mark")) {
+        wg_heap_mark();
+        return
+    }
     if (target != null) {
         wg_indirect_call(target, fno or error("missing function signature"), args);
         return
@@ -1447,8 +1515,11 @@ wg_call(
         }
         a = a.next
     }
+    external: bool = fn.is_extern && !wasm_is_exit(fn) && !wasm_is_arena_live(fn);
+    if (external) w_call(wf_arena_suspend);
     w_call(fn.wasm_index);
-    if (wasm_is_exit(fn)) w_unreachable() else if (fn.is_extern) {
+    if (wasm_is_exit(fn)) w_unreachable() else if (external) {
+        w_call(wf_arena_resume);
         rt: ?*Type = fn.return_ty;
         if (wasm_returns_value(rt)) wg_from_import(rt) else w_unreachable()
     }
@@ -1594,6 +1665,39 @@ wg_expr(n: *Expr) noregion raises Error {
             wg_stmts(k.body);
             w_lget(wl_acc)
         }
+        Own k -> {
+            w_call(wf_arena_new);
+            wg_store_var(k.slot, k.slot.ty or ty_int);
+            wg_load_var(k.slot, k.slot.ty or ty_int);
+            w_call(wf_own_enter);
+            wl_region_depth = wl_region_depth + 1;
+            wg_stmt(k.body);
+            root: int = wt_get();
+            w_lget(wl_acc);
+            w_lset(root);
+            wg_load_var(k.slot, k.slot.ty or ty_int);
+            w_lget(root);
+            wt_put(root);
+            w_call(wf_own_commit);
+            wl_region_depth = wl_region_depth - 1;
+            wg_load_var(k.slot, k.slot.ty or ty_int)
+        }
+        Move k -> {
+            match k.lhs.kind {
+                Var v -> {
+                    src: *Obj = v.var or error("move");
+                    sty: *Type = src.ty or ty_int;
+                    wg_load_var(src, sty);
+                    held: int = wt_get();
+                    w_lset(held);
+                    w_i64(0);
+                    wg_store_var(src, sty);
+                    w_lget(held);
+                    wt_put(held)
+                }
+                _ -> error("move")
+            }
+        }
         Sizeof k -> {
             sty: ?*Type = k.ty;
             if (sty == null) {
@@ -1722,6 +1826,8 @@ wa_count_expr(e: ?*Expr): int {
         If k -> wa_count_expr(k.cond) + wa_count_expr(k.then) + wa_count_expr(k.els);
         Match k -> wa_count_expr(k.cond) + wa_count_arms(k.arms);
         Block k -> wa_count_stmts(k.body);
+        Own k -> wa_count_stmt(k.body);
+        Move k -> wa_count_expr(k.lhs);
         ArrayLit k -> {
             total2: int = 0;
             el: ?*Expr = k.elems;
@@ -1787,6 +1893,9 @@ wa_count_stmt(s: *Stmt): int {
             total
         }
         Region k -> wa_count_stmt(k.body);
+        Borrow k -> wa_count_stmt(k.body);
+        Allocate k -> wa_count_stmt(k.body);
+        Drop k -> wa_count_expr(k.target);
         Expect _ -> 0;
         Break -> 0;
         Continue -> 0
@@ -2427,7 +2536,7 @@ wg_stmt_code(n: *Stmt) noregion raises Error {
         Region k -> {
             resuming: bool = wa_resuming();
             saved: bool = if (resuming) wa_skip_begin() else false;
-            w_gget(WG_HEAP);
+            wg_heap_mark();
             wg_store_var(k.mark, ty_int);
             wg_load_var(k.mark, ty_int);
             w_call(wf_region_push);
@@ -2436,6 +2545,44 @@ wg_stmt_code(n: *Stmt) noregion raises Error {
             wg_stmt(k.body);
             wl_region_depth = wl_region_depth - 1;
             w_call(wf_region_pop)
+        }
+        Borrow k -> {
+            oty: *Type = k.owner.ty or ty_int;
+            wg_load_var(k.owner, oty);
+            wg_store_var(k.header, ty_int);
+            wg_load_var(k.header, ty_int);
+            w_call(wf_borrow_enter);
+            wl_region_depth = wl_region_depth + 1;
+            wg_load_var(k.header, ty_int);
+            w_wrap();
+            w_mem(41, 32);
+            wg_store_var(k.shadow, k.shadow.ty or ty_int);
+            wg_stmt(k.body);
+            wl_region_depth = wl_region_depth - 1;
+            w_call(wf_region_pop)
+        }
+        Allocate k -> {
+            header: *Obj = k.header or error("missing allocation owner");
+            hty: *Type = header.ty or ty_int;
+            wg_load_var(header, hty);
+            w_call(wf_alloc_enter);
+            wl_region_depth = wl_region_depth + 1;
+            wg_stmt(k.body);
+            wl_region_depth = wl_region_depth - 1;
+            w_call(wf_region_pop)
+        }
+        Drop k -> {
+            match k.target.kind {
+                Var v -> {
+                    dropped: *Obj = v.var or error("drop");
+                    dty: *Type = dropped.ty or ty_int;
+                    wg_load_var(dropped, dty);
+                    w_call(wf_arena_drop);
+                    w_i64(0);
+                    wg_store_var(dropped, dty)
+                }
+                _ -> error("drop")
+            }
         }
         Expect k -> {
             if (!compile_test_mode) error("expect outside a test");
@@ -2559,6 +2706,8 @@ wasm_mark_expr(e: ?*Expr) {
             wasm_mark_arms(k.arms)
         }
         Block k -> wasm_mark_stmts(k.body);
+        Own k -> wasm_mark_stmts(k.body);
+        Move k -> wasm_mark_expr(k.lhs);
         ArrayLit k -> wasm_mark_list(k.elems);
         Sizeof k -> wasm_mark_expr(k.e);
         _ -> { }
@@ -2602,6 +2751,9 @@ wasm_mark_stmts(stmts: ?*Stmt) {
                 }
             }
             Region k -> wasm_mark_stmts(k.body);
+            Borrow k -> wasm_mark_stmts(k.body);
+            Allocate k -> wasm_mark_stmts(k.body);
+            Drop k -> wasm_mark_expr(k.target);
             Expect _ -> { }
             Break -> { }
             Continue -> { }
@@ -2974,78 +3126,40 @@ wasm_gen_test_entry(done: int) raises Error {
 // ---- runtime functions ----
 wasm_region_marks: int = 0;
 
+wasm_process_header: int = 0;
+
 wasm_async_stack: int = 0;
 
-// The address of region mark n, from the i64 n on the stack.
+// The address of frame n, from the i64 n on the stack. A frame is 32 bytes:
+// kind, a, b, and the chunk saved by a region checkpoint.
 wr_mark_addr() raises Error {
-    w_wrap();
-    w_i32(3);
-    w_op(116);
-    w_i32(wasm_region_marks);
-    w_op(106)
-}
-
-// Bytes of linear memory, as an i64.
-wr_memory_bytes() raises Error {
-    w_op(63);
-    w_op(0);
-    w_extend();
-    w_i64(16);
-    w_op(134)
+    w_i64(32);
+    w_op(126);
+    w_i64(wasm_region_marks);
+    w_op(124);
+    w_wrap()
 }
 
 // malloc(size): bump allocation, 8-byte aligned, growing memory as needed.
-// Zero when memory is exhausted.
+// Zero when memory is exhausted. An owned arena, when current, bumps its chunks.
 wr_malloc() noregion raises Error {
     wasm_begin(null, 1);
-    w_gget(WG_HEAP);
+    wg_allocator_header();
     w_lset(1);
     w_lget(1);
     w_lget(0);
-    w_i64(7);
-    w_op(124);
-    w_i64(0 - 8);
-    w_op(131);
-    w_op(124);
+    w_call(wf_arena_alloc);
     w_lset(2);
-    w_lget(2);
-    wr_memory_bytes();
-    w_op(86);
+    w_gget(WG_ARENA);
+    w_op(80);
     w_if();
-    w_lget(2);
-    wr_memory_bytes();
-    w_op(125);
-    w_i64(65535);
-    w_op(124);
-    w_i64(16);
-    w_op(136);
-    w_lset(3);
-    // Grow with 16MiB to spare when possible.
-    w_lget(3);
-    w_i64(256);
-    w_op(124);
-    w_wrap();
-    w_op(64);
-    w_op(0);
-    w_i32(0 - 1);
-    w_op(70);
-    w_if();
-    w_lget(3);
-    w_wrap();
-    w_op(64);
-    w_op(0);
-    w_i32(0 - 1);
-    w_op(70);
-    w_if();
-    w_i64(0);
-    w_op(15);
-    w_end();
-    w_end();
-    w_end();
-    w_lget(2);
-    w_gset(WG_HEAP);
     w_lget(1);
-    wasm_emit_body(wasm_sig_i64(1, 1), 0, 3)
+    w_wrap();
+    w_mem(41, 8);
+    w_gset(WG_HEAP);
+    w_end();
+    w_lget(2);
+    wasm_emit_body(wasm_sig_i64(1, 1), 0, 2)
 }
 
 wr_region_push() noregion raises Error {
@@ -3055,14 +3169,30 @@ wr_region_push() noregion raises Error {
     w_op(90);
     w_oob_if();
     w_gget(WG_REGION_N);
+    w_lset(1);
+    w_lget(1);
+    wr_mark_addr();
+    w_i64(0);
+    w_mem(55, 0);
+    w_lget(1);
+    wr_mark_addr();
+    wg_allocator_header();
+    w_mem(55, 8);
+    w_lget(1);
     wr_mark_addr();
     w_lget(0);
-    w_mem(55, 0);
-    w_gget(WG_REGION_N);
+    w_mem(55, 16);
+    w_lget(1);
+    wr_mark_addr();
+    wg_allocator_header();
+    w_wrap();
+    w_mem(41, 24);
+    w_mem(55, 24);
+    w_lget(1);
     w_i64(1);
     w_op(124);
     w_gset(WG_REGION_N);
-    wasm_emit_body(wasm_sig_i64(1, 0), 0, 0)
+    wasm_emit_body(wasm_sig_i64(1, 0), 0, 1)
 }
 
 wr_region_pop() noregion raises Error {
@@ -3079,7 +3209,530 @@ wr_region_pop() noregion raises Error {
     w_gget(WG_REGION_N);
     wr_mark_addr();
     w_mem(41, 0);
+    w_lset(0);
+    w_gget(WG_REGION_N);
+    wr_mark_addr();
+    w_mem(41, 8);
+    w_lset(1);
+    w_gget(WG_REGION_N);
+    wr_mark_addr();
+    w_mem(41, 16);
+    w_lset(2);
+    w_gget(WG_REGION_N);
+    wr_mark_addr();
+    w_mem(41, 24);
+    w_lset(3);
+    w_lget(0);
+    w_i64(0);
+    w_op(81);
+    w_if();
+    w_lget(1);
+    w_op(80);
+    w_if();
+    w_lget(2);
     w_gset(WG_HEAP);
+    w_else();
+    finished: int = w_block();
+    chunks: int = w_loop();
+    w_lget(1);
+    w_wrap();
+    w_mem(41, 24);
+    w_ltee(4);
+    w_lget(3);
+    w_op(81);
+    w_br_if(finished);
+    w_lget(1);
+    w_wrap();
+    w_lget(4);
+    w_wrap();
+    w_mem(41, 0);
+    w_mem(55, 24);
+    w_lget(4);
+    w_wrap();
+    w_gget(WG_CHUNK_FREE);
+    w_mem(55, 0);
+    w_lget(4);
+    w_gset(WG_CHUNK_FREE);
+    w_br(chunks);
+    w_end();
+    w_end();
+    w_lget(1);
+    w_wrap();
+    w_lget(3);
+    w_lget(3);
+    w_wrap();
+    w_mem(41, 8);
+    w_op(124);
+    w_mem(55, 16);
+    w_lget(1);
+    w_wrap();
+    w_lget(2);
+    w_mem(55, 8);
+    w_lget(1);
+    w_i64(wasm_process_header);
+    w_op(81);
+    w_if();
+    w_lget(2);
+    w_gset(WG_HEAP);
+    w_end();
+    w_end();
+    w_op(15);
+    w_end();
+    w_lget(0);
+    w_i64(1);
+    w_op(81);
+    w_if();
+    w_lget(2);
+    w_gset(WG_ARENA);
+    w_lget(1);
+    w_call(wf_arena_free);
+    w_op(15);
+    w_end();
+    w_lget(0);
+    w_i64(3);
+    w_op(81);
+    w_if();
+    w_lget(1);
+    w_wrap();
+    w_lget(1);
+    w_wrap();
+    w_mem(41, 0);
+    w_i64(1);
+    w_op(125);
+    w_mem(55, 0);
+    w_op(15);
+    w_end();
+    w_lget(2);
+    w_gset(WG_ARENA);
+    wasm_emit_body(wasm_sig_i64(0, 0), 0, 5)
+}
+
+// memory.grow a page-aligned block, or take one from the chunk free list.
+wr_arena_mmap() noregion raises Error {
+    wasm_begin(null, 1);
+    w_i64(0);
+    w_lset(1);
+    w_gget(WG_CHUNK_FREE);
+    w_lset(2);
+    done: int = w_block();
+    top: int = w_loop();
+    w_lget(2);
+    w_op(80);
+    w_br_if(done);
+    w_lget(2);
+    w_wrap();
+    w_mem(41, 8);
+    w_lget(0);
+    w_op(90);
+    w_if();
+    w_lget(2);
+    w_wrap();
+    w_mem(41, 0);
+    w_lset(3);
+    w_lget(1);
+    w_op(80);
+    w_if();
+    w_lget(3);
+    w_gset(WG_CHUNK_FREE);
+    w_else();
+    w_lget(1);
+    w_wrap();
+    w_lget(3);
+    w_mem(55, 0);
+    w_end();
+    w_lget(2);
+    w_op(15);
+    w_end();
+    w_lget(2);
+    w_lset(1);
+    w_lget(2);
+    w_wrap();
+    w_mem(41, 0);
+    w_lset(2);
+    w_br(top);
+    w_end();
+    w_end();
+    w_lget(0);
+    w_i64(65535);
+    w_op(124);
+    w_i64(16);
+    w_op(136);
+    w_lset(4);
+    w_op(63);
+    w_op(0);
+    w_extend();
+    w_i64(16);
+    w_op(134);
+    w_lset(5);
+    w_lget(4);
+    w_wrap();
+    w_op(64);
+    w_op(0);
+    w_i32(0 - 1);
+    w_op(70);
+    w_if();
+    w_i64(0);
+    w_op(15);
+    w_end();
+    w_lget(5);
+    wasm_emit_body(wasm_sig_i64(1, 1), 0, 5)
+}
+
+// Return header's chunks to the free list and the header after them.
+wr_arena_free() noregion raises Error {
+    wasm_begin(null, 1);
+    w_lget(0);
+    w_op(80);
+    w_if();
+    w_op(15);
+    w_end();
+    w_lget(0);
+    w_wrap();
+    w_mem(41, 0);
+    w_op(80);
+    w_if();
+    w_else();
+    w_call(wf_oob);
+    w_end();
+    w_lget(0);
+    w_wrap();
+    w_mem(41, 24);
+    w_lset(1);
+    done: int = w_block();
+    top: int = w_loop();
+    w_lget(1);
+    w_op(80);
+    w_br_if(done);
+    w_lget(1);
+    w_wrap();
+    w_mem(41, 0);
+    w_lset(2);
+    w_lget(1);
+    w_wrap();
+    w_gget(WG_CHUNK_FREE);
+    w_mem(55, 0);
+    w_lget(1);
+    w_gset(WG_CHUNK_FREE);
+    w_lget(2);
+    w_lset(1);
+    w_br(top);
+    w_end();
+    w_end();
+    w_lget(0);
+    w_wrap();
+    w_gget(WG_HEADER_FREE);
+    w_mem(55, 40);
+    w_lget(0);
+    w_gset(WG_HEADER_FREE);
+    w_gget(WG_ARENA_LIVE);
+    w_i64(1);
+    w_op(125);
+    w_gset(WG_ARENA_LIVE);
+    wasm_emit_body(wasm_sig_i64(1, 0), 0, 2)
+}
+
+// frame_push(kind, a, b).
+wr_frame_push() noregion raises Error {
+    wasm_begin(null, 3);
+    w_gget(WG_REGION_N);
+    w_i64(WASM_REGION_CAP);
+    w_op(90);
+    w_oob_if();
+    w_gget(WG_REGION_N);
+    w_lset(3);
+    w_lget(3);
+    wr_mark_addr();
+    w_lget(0);
+    w_mem(55, 0);
+    w_lget(3);
+    wr_mark_addr();
+    w_lget(1);
+    w_mem(55, 8);
+    w_lget(3);
+    wr_mark_addr();
+    w_lget(2);
+    w_mem(55, 16);
+    w_lget(3);
+    w_i64(1);
+    w_op(124);
+    w_gset(WG_REGION_N);
+    wasm_emit_body(wasm_sig_i64(3, 0), 0, 1)
+}
+
+// Bump size bytes in header, growing by a chunk when the current one is full.
+wr_arena_alloc() noregion raises Error {
+    wasm_begin(null, 2);
+    w_lget(1);
+    w_i64(7);
+    w_op(124);
+    w_i64(0 - 8);
+    w_op(131);
+    w_lset(2);
+    w_lget(0);
+    w_wrap();
+    w_mem(41, 8);
+    w_lset(3);
+    w_lget(3);
+    w_lget(2);
+    w_op(124);
+    w_lset(4);
+    w_lget(0);
+    w_wrap();
+    w_mem(41, 16);
+    w_lset(5);
+    w_lget(4);
+    w_lget(5);
+    w_op(88);
+    w_if();
+    w_lget(0);
+    w_wrap();
+    w_lget(4);
+    w_mem(55, 8);
+    w_lget(3);
+    w_op(15);
+    w_end();
+    w_lget(2);
+    w_i64(16);
+    w_op(124);
+    w_lset(7);
+    w_lget(7);
+    w_i64(65536);
+    w_op(84);
+    w_if();
+    w_i64(65536);
+    w_lset(7);
+    w_end();
+    w_lget(7);
+    w_i64(4095);
+    w_op(124);
+    w_i64(0 - 4096);
+    w_op(131);
+    w_lset(7);
+    w_lget(7);
+    w_call(wf_arena_mmap);
+    w_lset(6);
+    w_lget(6);
+    w_op(80);
+    w_if();
+    w_i64(0);
+    w_op(15);
+    w_end();
+    w_lget(6);
+    w_wrap();
+    w_lget(0);
+    w_wrap();
+    w_mem(41, 24);
+    w_mem(55, 0);
+    w_lget(6);
+    w_wrap();
+    w_lget(7);
+    w_mem(55, 8);
+    w_lget(0);
+    w_wrap();
+    w_lget(6);
+    w_mem(55, 24);
+    w_lget(6);
+    w_i64(16);
+    w_op(124);
+    w_lset(8);
+    w_lget(8);
+    w_lget(2);
+    w_op(124);
+    w_lset(4);
+    w_lget(6);
+    w_lget(7);
+    w_op(124);
+    w_lset(5);
+    w_lget(0);
+    w_wrap();
+    w_lget(4);
+    w_mem(55, 8);
+    w_lget(0);
+    w_wrap();
+    w_lget(5);
+    w_mem(55, 16);
+    w_lget(8);
+    wasm_emit_body(wasm_sig_i64(2, 1), 0, 7)
+}
+
+wr_arena_new() noregion raises Error {
+    wasm_begin(null, 0);
+    w_gget(WG_HEADER_FREE);
+    w_lset(1);
+    w_lget(1);
+    w_op(80);
+    w_if();
+    w_i64(4096);
+    w_call(wf_arena_mmap);
+    w_lset(1);
+    w_lget(1);
+    w_op(80);
+    w_if();
+    w_call(wf_oob);
+    w_end();
+    w_else();
+    w_lget(1);
+    w_wrap();
+    w_mem(41, 40);
+    w_gset(WG_HEADER_FREE);
+    w_end();
+    w_lget(1);
+    w_wrap();
+    w_i64(0);
+    w_mem(55, 0);
+    w_lget(1);
+    w_wrap();
+    w_i64(0);
+    w_mem(55, 32);
+    w_i64(65536);
+    w_call(wf_arena_mmap);
+    w_lset(2);
+    w_lget(2);
+    w_op(80);
+    w_if();
+    w_call(wf_oob);
+    w_end();
+    w_lget(2);
+    w_wrap();
+    w_i64(0);
+    w_mem(55, 0);
+    w_lget(2);
+    w_wrap();
+    w_i64(65536);
+    w_mem(55, 8);
+    w_lget(1);
+    w_wrap();
+    w_lget(2);
+    w_mem(55, 24);
+    w_lget(1);
+    w_wrap();
+    w_lget(2);
+    w_i64(16);
+    w_op(124);
+    w_mem(55, 8);
+    w_lget(1);
+    w_wrap();
+    w_lget(2);
+    w_i64(65536);
+    w_op(124);
+    w_mem(55, 16);
+    w_gget(WG_ARENA_LIVE);
+    w_i64(1);
+    w_op(124);
+    w_gset(WG_ARENA_LIVE);
+    w_lget(1);
+    wasm_emit_body(wasm_sig_i64(0, 1), 0, 3)
+}
+
+wr_arena_drop() noregion raises Error {
+    wasm_begin(null, 1);
+    w_lget(0);
+    w_op(80);
+    w_if();
+    w_op(15);
+    w_end();
+    w_lget(0);
+    w_call(wf_arena_free);
+    wasm_emit_body(wasm_sig_i64(1, 0), 0, 0)
+}
+
+wr_arena_live() noregion raises Error {
+    wasm_begin(null, 0);
+    w_gget(WG_ARENA_LIVE);
+    wasm_emit_body(wasm_sig_i64(0, 1), 0, 0)
+}
+
+wr_own_enter() noregion raises Error {
+    wasm_begin(null, 1);
+    w_gget(WG_ARENA);
+    w_lset(1);
+    w_lget(0);
+    w_gset(WG_ARENA);
+    w_i64(1);
+    w_lget(0);
+    w_lget(1);
+    w_call(wf_frame_push);
+    wasm_emit_body(wasm_sig_i64(1, 0), 0, 1)
+}
+
+wr_own_commit() noregion raises Error {
+    wasm_begin(null, 2);
+    w_lget(0);
+    w_wrap();
+    w_lget(1);
+    w_mem(55, 32);
+    w_gget(WG_REGION_N);
+    w_op(80);
+    w_if();
+    w_op(15);
+    w_end();
+    w_gget(WG_REGION_N);
+    w_i64(1);
+    w_op(125);
+    w_gset(WG_REGION_N);
+    w_gget(WG_REGION_N);
+    wr_mark_addr();
+    w_mem(41, 16);
+    w_gset(WG_ARENA);
+    wasm_emit_body(wasm_sig_i64(2, 0), 0, 0)
+}
+
+wr_borrow_enter() noregion raises Error {
+    wasm_begin(null, 1);
+    w_lget(0);
+    w_op(80);
+    w_if();
+    w_call(wf_oob);
+    w_end();
+    w_lget(0);
+    w_wrap();
+    w_lget(0);
+    w_wrap();
+    w_mem(41, 0);
+    w_i64(1);
+    w_op(124);
+    w_mem(55, 0);
+    w_i64(3);
+    w_lget(0);
+    w_i64(0);
+    w_call(wf_frame_push);
+    wasm_emit_body(wasm_sig_i64(1, 0), 0, 0)
+}
+
+wr_alloc_enter() noregion raises Error {
+    wasm_begin(null, 1);
+    w_lget(0);
+    w_op(80);
+    w_if();
+    w_call(wf_oob);
+    w_end();
+    w_gget(WG_ARENA);
+    w_lset(1);
+    w_lget(0);
+    w_gset(WG_ARENA);
+    w_i64(2);
+    w_lget(0);
+    w_lget(1);
+    w_call(wf_frame_push);
+    wasm_emit_body(wasm_sig_i64(1, 0), 0, 1)
+}
+
+wr_arena_suspend() noregion raises Error {
+    wasm_begin(null, 0);
+    w_gget(WG_ARENA);
+    w_lset(0);
+    w_i64(0);
+    w_gset(WG_ARENA);
+    w_i64(4);
+    w_i64(0);
+    w_lget(0);
+    w_call(wf_frame_push);
+    wasm_emit_body(wasm_sig_i64(0, 0), 0, 1)
+}
+
+wr_arena_resume() noregion raises Error {
+    wasm_begin(null, 0);
+    w_call(wf_region_pop);
     wasm_emit_body(wasm_sig_i64(0, 0), 0, 0)
 }
 
@@ -3276,6 +3929,10 @@ wasm_is_exit(fn: *Function): bool {
     fn.is_extern && (streq(fn.link_name, "exit") || streq(fn.link_name, "l8_exit"))
 }
 
+wasm_is_arena_live(fn: *Function): bool {
+    fn.is_extern && streq(fn.link_name, "l8_arena_live")
+}
+
 wasm_emits(fn: *Function): bool {
     !fn.is_extern && fn.body != null && (fn.test_id < 0 || compile_test_mode)
 }
@@ -3291,7 +3948,7 @@ wasm_plan() noregion raises Error {
     }
     fn: ?*Function = functions;
     while (fn != null) {
-        if (fn.is_extern && !wasm_is_exit(fn)) fn.wasm_index = wasm_add_import(fn.link_name,
+        if (fn.is_extern && !wasm_is_exit(fn) && !wasm_is_arena_live(fn)) fn.wasm_index = wasm_add_import(fn.link_name,
             wasm_extern_sig(fn));
         fn = fn.next
     }
@@ -3309,10 +3966,24 @@ wasm_plan() noregion raises Error {
     wf_init_globals = base + 10;
     wf_start = base + 11;
     wf_exit = base + 12;
+    wf_arena_mmap = base + 13;
+    wf_arena_free = base + 14;
+    wf_frame_push = base + 15;
+    wf_arena_alloc = base + 16;
+    wf_arena_new = base + 17;
+    wf_arena_drop = base + 18;
+    wf_arena_live = base + 19;
+    wf_own_enter = base + 20;
+    wf_own_commit = base + 21;
+    wf_borrow_enter = base + 22;
+    wf_alloc_enter = base + 23;
+    wf_arena_suspend = base + 24;
+    wf_arena_resume = base + 25;
     next: int = base + WASM_NRUNTIME;
     fn = functions;
     while (fn != null) {
         if (wasm_is_exit(fn)) fn.wasm_index = wf_exit;
+        if (wasm_is_arena_live(fn)) fn.wasm_index = wf_arena_live;
         if (wasm_emits(fn)) {
             fn.wasm_index = next;
             next = next + 1
@@ -3368,10 +4039,22 @@ wasm_layout() noregion raises Error {
         g = g.next
     }
     wasm_region_marks = addr;
-    addr = addr + 8 * WASM_REGION_CAP;
+    addr = addr + 32 * WASM_REGION_CAP;
     wasm_async_stack = addr;
     addr = addr + 24 * WASM_ASYNC_DEPTH;
-    wasm_heap_base = (addr + 15) / 16 * 16
+    wasm_process_header = (addr + 15) / 16 * 16;
+    wasm_heap_base = wasm_process_header + 64;
+    memory_end: int = ((wasm_heap_base + 65535) / 65536 + 16) * 65536;
+    while (wasm_data.used + WASM_STACK_TOP < wasm_process_header) wb_byte(wasm_data,
+        0);
+    wb_le(wasm_data, 0, 8);
+    wb_le(wasm_data, wasm_heap_base, 8);
+    wb_le(wasm_data, memory_end, 8);
+    wb_le(wasm_data, wasm_process_header + 48, 8);
+    wb_le(wasm_data, 0, 8);
+    wb_le(wasm_data, 0, 8);
+    wb_le(wasm_data, 0, 8);
+    wb_le(wasm_data, memory_end - wasm_process_header - 48, 8)
 }
 
 wasm_codegen() noregion raises Error {
@@ -3392,6 +4075,19 @@ wasm_codegen() noregion raises Error {
     wasm_gen_init_globals();
     wasm_gen_start();
     wr_exit();
+    wr_arena_mmap();
+    wr_arena_free();
+    wr_frame_push();
+    wr_arena_alloc();
+    wr_arena_new();
+    wr_arena_drop();
+    wr_arena_live();
+    wr_own_enter();
+    wr_own_commit();
+    wr_borrow_enter();
+    wr_alloc_enter();
+    wr_arena_suspend();
+    wr_arena_resume();
     fn: ?*Function = functions;
     while (fn != null) {
         if (wasm_emits(fn)) wasm_gen_function(fn);
@@ -3465,7 +4161,7 @@ wasm_module() noregion raises Error: *StrBuf@new {
     wb_uleb(s, wasm_sig_i64(0, 0));
     wb_section(m, 13, s);
     s = sb_new();
-    wb_uleb(s, 9);
+    wb_uleb(s, 13);
     wb_global(s, WT_I32, WASM_STACK_TOP);
     wb_global(s, WT_I64, wasm_heap_base);
     wb_global(s, WT_I64, 0);
@@ -3475,11 +4171,15 @@ wasm_module() noregion raises Error: *StrBuf@new {
     wb_global(s, WT_I64, 0);
     wb_global(s, WT_I64, 0);
     wb_global(s, WT_I64, wasm_async_stack);
+    wb_global(s, WT_I64, 0);
+    wb_global(s, WT_I64, 0);
+    wb_global(s, WT_I64, 0);
+    wb_global(s, WT_I64, 0);
     wb_section(m, 6, s);
     s = sb_new();
     reload_fn: ?*Function = find_function("reload");
     has_reload: bool = reload_fn != null && wasm_emits(reload_fn) && reload_fn.used && reload_fn.nparams == 0;
-    wb_uleb(s, if (has_reload) 9 else 8);
+    wb_uleb(s, if (has_reload) 10 else 9);
     wb_export(s, "memory", 2, 0);
     wb_export(s, "table", 1, 0);
     wb_export(s, "_start", 0, wf_start);
@@ -3488,6 +4188,7 @@ wasm_module() noregion raises Error: *StrBuf@new {
     wb_export(s, "l8_heap", 3, WG_HEAP);
     wb_export(s, "l8_exit_status", 3, WG_EXIT_STATUS);
     wb_export(s, "l8_async_state", 3, WG_ASYNC_STATE);
+    wb_export(s, "l8_arena_live", 3, WG_ARENA_LIVE);
     // A program's hot reload entry (RELOAD.md): run instead of _start.
     if (has_reload && reload_fn != null) wb_export(s, "reload", 0, reload_fn.wasm_index);
     wb_section(m, 7, s);
@@ -3534,7 +4235,10 @@ wasm_name_section(m: *StrBuf@new) raises Error {
     }
     runtime: []str = ["l8_malloc", "l8_region_push", "l8_region_pop", "l8_region_unwind",
         "l8_str_eq", "l8_opt_str_eq", "l8_cstr", "l8_bytes", "l8_raise", "l8_out_of_bounds",
-        "l8_init_globals", "_start", "l8_exit"];
+        "l8_init_globals", "_start", "l8_exit", "l8_arena_mmap", "l8_arena_free",
+        "l8_frame_push", "l8_arena_alloc", "l8_arena_new", "l8_arena_drop", "l8_arena_live",
+        "l8_own_enter", "l8_own_commit", "l8_borrow_enter", "l8_alloc_enter", "l8_arena_suspend",
+        "l8_arena_resume"];
     for r in runtime {
         wb_uleb(names, index);
         wb_name(names, bytes(r));

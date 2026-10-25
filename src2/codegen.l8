@@ -153,6 +153,19 @@ emit_check_new_count(nreg: int, esz: int) noregion raises Error {
     cg_jump_id(7, oob_lab)
 }
 
+emit_user_call(name: []i8@immortal, fn: ?*Function) noregion raises Error {
+    external: bool = false;
+    if (fn != null && fn.is_extern) external = true;
+    if (fn != null && (streq(fn.link_name, "l8_region_depth") || streq(fn.link_name,
+        "l8_region_unwind") || streq(fn.link_name, "l8_reserve_bytes") || streq(fn.link_name,
+        "l8_heap_mark") || streq(fn.link_name, "l8_heap_used") || streq(fn.link_name,
+        "l8_heap_reset") || streq(fn.link_name, "l8_arena_live") || streq(fn.link_name,
+        "wasm_callback_abandon") || streq(fn.link_name, "wasm_native_abandon"))) external = false;
+    if (external) cg_call("l8_arena_suspend");
+    cg_call(name);
+    if (external) cg_call("l8_arena_resume")
+}
+
 emit_malloc() noregion raises Error {
     cg_call("malloc");
     cg_alu_imm(7, 0, 0);
@@ -1623,6 +1636,15 @@ gen_expr(n: *Expr) noregion raises Error {
                     Var k -> {
                         vo: ?*Obj = k.var;
                         if (vo != null) {
+                            // A call in the RHS can refill a global owner. Check
+                            // after evaluation so reentrancy cannot lose it.
+                            if (!vo.is_local && is_owned_ty(decay(lhs_ty))) {
+                                cg_push(0);
+                                emit_load_var(vo, lhs_ty);
+                                cg_alu_imm(7, 0, 0);
+                                cg_jump_id(5, oob_lab);
+                                cg_pop(0)
+                            }
                             emit_store_var(vo, lhs_ty);
                             return
                         }
@@ -1771,7 +1793,7 @@ gen_expr(n: *Expr) noregion raises Error {
                     emit_io_call(k.funcname, k.args);
                     return
                 }
-                cg_call(call_name);
+                emit_user_call(call_name, fno);
                 emit_ret_to_rax(n.ty);
                 return
             }
@@ -1786,7 +1808,7 @@ gen_expr(n: *Expr) noregion raises Error {
                         cg_mov_rr(0, cg_arg_reg(0))
                     }
                 }
-                cg_call(call_name);
+                emit_user_call(call_name, fno);
                 emit_ret_to_rax(n.ty);
                 return
             }
@@ -1840,7 +1862,7 @@ gen_expr(n: *Expr) noregion raises Error {
                     return
                 }
                 cg_arm_nstack = nstack;
-                cg_call(call_name);
+                emit_user_call(call_name, fno);
                 if (nstack > 0) cg_alu_imm(0, 8 * nstack, 4);
                 if (call_pad != 0) cg_alu_imm(0, call_pad, 4);
                 emit_ret_to_rax(n.ty);
@@ -1914,7 +1936,7 @@ gen_expr(n: *Expr) noregion raises Error {
                 a = a.next
             }
             cg_arm_nstack = nst_pred;
-            cg_call(call_name);
+            emit_user_call(call_name, fno);
             if (nst_pred > 0) cg_alu_imm(0, 8 * nst_pred, 4);
             if (call_pad_f != 0) cg_alu_imm(0, call_pad_f, 4);
             emit_ret_to_rax(n.ty);
@@ -1949,6 +1971,39 @@ gen_expr(n: *Expr) noregion raises Error {
                 s = s.next
             }
             return
+        }
+        Own k -> {
+            cg_call("l8_arena_new");
+            cg_alu_imm(7, 0, 0);
+            cg_jump_id(4, oob_lab);
+            emit_store_var(k.slot, k.slot.ty or ty_int);
+            emit_load_var(k.slot, k.slot.ty or ty_int);
+            cg_mov_rr(0, cg_arg_reg(0));
+            cg_call("l8_own_enter");
+            cg_region_depth = cg_region_depth + 1;
+            gen_stmt(k.body);
+            cg_push(0);
+            emit_load_var(k.slot, k.slot.ty or ty_int);
+            cg_mov_rr(0, cg_arg_reg(0));
+            cg_pop(cg_arg_reg(1));
+            cg_call("l8_own_commit");
+            cg_region_depth = cg_region_depth - 1;
+            emit_load_var(k.slot, k.slot.ty or ty_int);
+            return
+        }
+        Move k -> {
+            match k.lhs.kind {
+                Var v -> {
+                    src: *Obj = v.var or error("move");
+                    emit_load_var(src, src.ty or ty_int);
+                    cg_push(0);
+                    cg_mov_imm(0, 0);
+                    emit_store_var(src, src.ty or ty_int);
+                    cg_pop(0);
+                    return
+                }
+                _ -> error("move")
+            }
         }
         Sizeof k -> {
             sty: ?*Type = k.ty;
@@ -2455,6 +2510,49 @@ gen_stmt(n: *Stmt) noregion raises Error {
             cg_pop(0);
             return
         }
+        Borrow k -> {
+            emit_load_var(k.owner, k.owner.ty or ty_int);
+            emit_store_var(k.header, ty_int);
+            cg_mov_rr(0, cg_arg_reg(0));
+            cg_call("l8_borrow_enter");
+            cg_region_depth = cg_region_depth + 1;
+            emit_load_var(k.header, ty_int);
+            cg_mov_mr(0, 32, 0);
+            emit_store_var(k.shadow, k.shadow.ty or ty_int);
+            gen_stmt(k.body);
+            cg_region_depth = cg_region_depth - 1;
+            cg_push(0);
+            cg_call("l8_region_pop");
+            cg_pop(0);
+            return
+        }
+        Allocate k -> {
+            header: *Obj = k.header or error("missing allocation owner");
+            emit_load_var(header, header.ty or ty_int);
+            cg_mov_rr(0, cg_arg_reg(0));
+            cg_call("l8_alloc_enter");
+            cg_region_depth = cg_region_depth + 1;
+            gen_stmt(k.body);
+            cg_region_depth = cg_region_depth - 1;
+            cg_push(0);
+            cg_call("l8_region_pop");
+            cg_pop(0);
+            return
+        }
+        Drop k -> {
+            match k.target.kind {
+                Var v -> {
+                    dropped: *Obj = v.var or error("drop");
+                    emit_load_var(dropped, dropped.ty or ty_int);
+                    cg_mov_rr(0, cg_arg_reg(0));
+                    cg_call("l8_arena_drop");
+                    cg_mov_imm(0, 0);
+                    emit_store_var(dropped, dropped.ty or ty_int);
+                    return
+                }
+                _ -> error("drop")
+            }
+        }
         Expect k -> {
             // The test entry records which expectation the output so far
             // belongs to.
@@ -2634,6 +2732,8 @@ cg_temps_expr(e: ?*Expr, off: int) raises Error: int {
         If k -> cg_temps_expr(k.els, cg_temps_expr(k.then, cg_temps_expr(k.cond, off)));
         Match k -> cg_temps_arms(k.arms, cg_temps_expr(k.cond, off));
         Block k -> cg_temps_stmts(k.body, off);
+        Own k -> cg_temps_stmts(k.body, off);
+        Move k -> cg_temps_expr(k.lhs, off);
         Sizeof k -> cg_temps_expr(k.e, off);
         Num _ -> off;
         Null -> off;
@@ -2667,6 +2767,9 @@ cg_temps_stmts(stmts: ?*Stmt, off: int) raises Error: int {
                 }
             }
             Region k -> o = cg_temps_stmts(k.body, o);
+            Borrow k -> o = cg_temps_stmts(k.body, o);
+            Allocate k -> o = cg_temps_stmts(k.body, o);
+            Drop k -> o = cg_temps_expr(k.target, o);
             Expect _ -> { }
             Break -> { }
             Continue -> { }

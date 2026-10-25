@@ -26,6 +26,10 @@ references in their own file. Tags do not change global symbol identity or
 relative import resolution. Both source stages use tags, and the saved bootstrap
 enforces tag visibility when building them and programs.
 
+The development compiler in `src2/` supports owned arenas (`own`, `borrow`,
+`allocate`, `move`, and `drop`); see [memory.md](memory.md). The saved bootstrap
+and `src1/` do not parse that syntax. Programs using it must use `l8c2` or later.
+
 `runtime.s` remains source input when building programs and successor compiler
 stages, but it is already embedded in the saved bootstrap executable. A library
 can declare `native "relative/path.s"` to add assembly source to a direct
@@ -118,7 +122,8 @@ code with Apple's naming). The x86-64 code
 generator drives it unchanged: `src2/arm64.l8` writes each of the primitives
 in `src2/direct.l8` as arm64, an x86 register standing for an arm64 one, and
 explains the stack and calling conventions that keep L8 and C able to call
-each other. A library's `native "NAME.s"` is `NAME.arm64-linux.s`,
+each other. Each platform runtime includes the shared owned-arena routines in
+`runtime-arena-arm64.s`. A library's `native "NAME.s"` is `NAME.arm64-linux.s`,
 `NAME.arm64-darwin.s` or `NAME.arm64-android.s` there. With `--exe` the
 compiler assembles and links that text itself (`src2/a64asm.l8`,
 `src2/a64link.l8`), with no other toolchain: for Linux, a static ELF

@@ -19,6 +19,7 @@ OK := $(BUILD)/ok
 STEP := tools/step.sh
 
 RUNTIME := runtime.s
+ARM_ARENA_RUNTIME := runtime-arena-arm64.s
 STDLIB := $(wildcard stdlib/*.l8 stdlib/*.s)
 SRC1 := $(wildcard src1/*.l8)
 SRC2 := $(wildcard src2/*.l8)
@@ -179,18 +180,18 @@ better: $(BUILD)/better
 
 # Better as an iPhone app, and the arm64 runtime's check, as arm64 assembly
 # for iOS (built into an app on a Mac: see programs/better/README.md).
-$(BUILD)/better-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
+$(BUILD)/better-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s $(ARM_ARENA_RUNTIME) | $(OK)
 	@$(STEP) 'better for iOS' sh -c './l8c3 arm64 --target ios programs/better/ios.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 # Better as an Android app's code, as arm64 assembly (built into an APK by
 # tools/android/build.sh: see programs/better/README.md).
-$(BUILD)/better-android.s: l8c3 $(PROGRAMS) runtime-arm64-android.s stdlib/write.arm64-android.s | $(OK)
+$(BUILD)/better-android.s: l8c3 $(PROGRAMS) runtime-arm64-android.s $(ARM_ARENA_RUNTIME) stdlib/write.arm64-android.s | $(OK)
 	@$(STEP) 'better for Android' sh -c './l8c3 arm64 --target android programs/better/android.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 # Smooth Bible as an Android skin (programs/bible/SKINS.md): its L8, as
 # arm64 assembly (built into an APK by programs/bible/android/build.sh),
 # and the text skin, which speaks the same wire on a terminal.
-$(BUILD)/bible-android.s: l8c3 $(PROGRAMS) runtime-arm64-android.s stdlib/write.arm64-android.s | $(OK)
+$(BUILD)/bible-android.s: l8c3 $(PROGRAMS) runtime-arm64-android.s $(ARM_ARENA_RUNTIME) stdlib/write.arm64-android.s | $(OK)
 	@$(STEP) 'bible for Android' sh -c './l8c3 arm64 --target android programs/bible/android/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 $(BUILD)/skin-text: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
@@ -203,14 +204,14 @@ $(BUILD)/smooth-bible: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 
 bible-tui: $(BUILD)/smooth-bible
 
-$(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
+$(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s $(ARM_ARENA_RUNTIME) | $(OK)
 	@$(STEP) 'iOS check' sh -c './l8c3 arm64 --target ios programs/ios/check.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 # The same, assembled and linked by the compiler into Mach-O executables
 # for the simulator (see src2/a64link.l8), whose code signatures and fixups
 # tools/ios/macho.py checks.
 IOS_LINK = ./l8c3 arm64 --target ios-sim --exe --imports tools/ios/imports.txt
-$(BUILD)/better-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt | $(OK)
+$(BUILD)/better-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s $(ARM_ARENA_RUNTIME) tools/ios/imports.txt | $(OK)
 	@$(STEP) 'better for the simulator' sh -c '$(IOS_LINK) $(foreach f,UIKit Foundation CoreLocation QuartzCore OpenGLES AVFoundation,--framework $(f)) programs/better/ios.l8 -o $@.tmp && python3 -I tools/ios/macho.py check $@.tmp && mv -f $@.tmp $@'
 
 # The Bible app on the web: core (programs/bible/web/main.l8) waiting on the
@@ -255,16 +256,16 @@ VERSION ?= bsb
 bible-spoken: l8c3 $(PROGRAMS) $(RUNTIME)
 	@./l8c3 build programs/bible/tools/spoken.l8 -o $(BUILD)/bible-spoken && $(BUILD)/bible-spoken programs/bible/data/$(VERSION).txt
 
-$(BUILD)/bible-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
+$(BUILD)/bible-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s $(ARM_ARENA_RUNTIME) | $(OK)
 	@$(STEP) 'bible for iOS' sh -c './l8c3 arm64 --target ios programs/bible/ios/app.l8 -o $@.tmp && mv -f $@.tmp $@'
 
-$(BUILD)/bible-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt programs/bible/ios/frameworks | $(OK)
+$(BUILD)/bible-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s $(ARM_ARENA_RUNTIME) tools/ios/imports.txt programs/bible/ios/frameworks | $(OK)
 	@$(STEP) 'bible for the simulator' sh -c '$(IOS_LINK) $(foreach f,$(shell cat programs/bible/ios/frameworks),--framework $(f)) programs/bible/ios/app.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 # The hot reload host for an iPhone (RELOAD.md, programs/wasm/ios/host.l8),
 # linked for the simulator with the Bible's frameworks, so it keeps
 # building; tools/ios/hot.sh makes the app.
-$(BUILD)/hot-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt programs/bible/ios/frameworks | $(OK)
+$(BUILD)/hot-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s $(ARM_ARENA_RUNTIME) tools/ios/imports.txt programs/bible/ios/frameworks | $(OK)
 	@$(STEP) 'hot reload host for the simulator' sh -c '$(IOS_LINK) $(foreach f,$(shell cat programs/bible/ios/frameworks),--framework $(f)) programs/wasm/ios/host.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 # A terminal may be running from the previous output; `mv` replaces the

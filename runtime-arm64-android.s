@@ -81,9 +81,19 @@ l8_exc_tag: .quad 0
 l8_exc_ptr: .quad 0
 l8_handler_top: .quad 0
 l8_region_n: .quad 0
-l8_region_marks: .space 512
+l8_region_marks: .space 2048
 l8_try_rn: .quad 0
 l8_try_regions: .space 512
+
+    .section .data
+    .p2align 3
+l8_arena_state:
+    .quad 0
+    .quad 0
+    .quad heap_ptr
+    .quad heap_end
+    .quad l8_region_n
+    .quad l8_region_marks
 
     .section .text
     .p2align 2
@@ -276,9 +286,7 @@ l8_environment:
 
 // ---- the bump heap and regions (as runtime.s); these keep x9 ----
 l8_heap_mark:
-    adrp x0, heap_ptr
-    ldr x0, [x0, :lo12:heap_ptr]
-    ret
+    b .Larm_arena_heap_mark
 l8_heap_used:
     adrp x0, heap_ptr
     ldr x0, [x0, :lo12:heap_ptr]
@@ -291,32 +299,9 @@ l8_heap_reset:
     str x0, [x1, :lo12:heap_ptr]
     ret
 l8_region_push:
-    adrp x1, l8_region_n
-    ldr x2, [x1, :lo12:l8_region_n]
-    cmp x2, #63
-    b.hi 1f
-    adrp x3, l8_region_marks
-    add x3, x3, :lo12:l8_region_marks
-    str x0, [x3, x2, lsl #3]
-    add x2, x2, #1
-    str x2, [x1, :lo12:l8_region_n]
-    ret
-1:
-    mov x0, #1
-    bl exit
+    b .Larm_arena_region_push
 l8_region_pop:
-    adrp x1, l8_region_n
-    ldr x2, [x1, :lo12:l8_region_n]
-    cbz x2, 1f
-    sub x2, x2, #1
-    str x2, [x1, :lo12:l8_region_n]
-    adrp x3, l8_region_marks
-    add x3, x3, :lo12:l8_region_marks
-    ldr x4, [x3, x2, lsl #3]
-    adrp x5, heap_ptr
-    str x4, [x5, :lo12:heap_ptr]
-1:
-    ret
+    b .Larm_arena_region_pop
 l8_exc_malloc:
     add x0, x0, #7
     and x0, x0, #-8
@@ -335,6 +320,10 @@ l8_exc_malloc:
     ret
 // void *malloc(size): bump, 8-byte aligned; 0 when the heap is full.
 l8rt_malloc:
+    adrp x1, l8_arena_state
+    add x1, x1, :lo12:l8_arena_state
+    ldr x1, [x1]
+    cbnz x1, .Larm_arena_malloc
     adrp x1, heap_ptr
     ldr x2, [x1, :lo12:heap_ptr]
     add x0, x0, #7
@@ -512,21 +501,7 @@ l8_raise:
     adrp x5, l8_try_regions
     add x5, x5, :lo12:l8_try_regions
     ldr x6, [x5, x4, lsl #3]
-    adrp x7, l8_region_n
-    add x7, x7, :lo12:l8_region_n
-    adrp x10, l8_region_marks
-    add x10, x10, :lo12:l8_region_marks
-    adrp x11, heap_ptr
-    add x11, x11, :lo12:heap_ptr
-1:
-    ldr x4, [x7]
-    cmp x4, x6
-    b.ls 3f
-    sub x4, x4, #1
-    str x4, [x7]
-    ldr x12, [x10, x4, lsl #3]
-    str x12, [x11]
-    b 1b
+    bl .Larm_arena_unwind
 3:
     ldr x4, [x0, #64]
     str x4, [x2, :lo12:l8_handler_top]
@@ -571,3 +546,72 @@ l8rt_argv:
     ldr x0, [x0, :lo12:l8_c_argv]
     ret
 
+
+    .section .text
+    .p2align 2
+    .globl l8_arena_new
+    .globl l8_reserve_bytes
+l8_reserve_bytes:
+    b .Larm_arena_reserve_bytes
+l8_arena_new:
+    b .Larm_arena_new
+    .globl l8_arena_drop
+l8_arena_drop:
+    b .Larm_arena_free
+    .globl l8_arena_live
+l8_arena_live:
+    b .Larm_arena_live
+    .globl l8_own_enter
+l8_own_enter:
+    b .Larm_arena_own_enter
+    .globl l8_own_commit
+l8_own_commit:
+    b .Larm_arena_own_commit
+    .globl l8_borrow_enter
+l8_borrow_enter:
+    b .Larm_arena_borrow_enter
+    .globl l8_alloc_enter
+l8_alloc_enter:
+    b .Larm_arena_alloc_enter
+    .globl l8_arena_suspend
+l8_arena_suspend:
+    b .Larm_arena_suspend
+    .globl l8_arena_resume
+l8_arena_resume:
+    b .Larm_arena_region_pop
+    .globl l8_region_unwind
+l8_region_unwind:
+    mov x6, x0
+    b .Larm_arena_unwind
+    .globl l8_region_depth
+l8_region_depth:
+    stp x9, x30, [sp, #-16]!
+    bl .Larm_arena_state_address
+    ldr x0, [x15, #32]
+    ldr x0, [x0]
+    ldp x9, x30, [sp], #16
+    ret
+.Larm_arena_state_address:
+    adrp x15, l8_arena_state
+    add x15, x15, :lo12:l8_arena_state
+    ret
+.Larm_arena_map:
+    stp x9, x30, [sp, #-16]!
+    mov x1, x0
+    mov x0, #0
+    mov x2, #3
+    mov x3, #34
+    mov x4, #-1
+    mov x5, #0
+    bl mmap
+    cmn x0, #1
+    b.ne 1f
+    mov x0, #0
+1:
+    ldp x9, x30, [sp], #16
+    ret
+.Larm_arena_unmap:
+    b munmap
+.Larm_arena_fail:
+    mov x0, #1
+    b exit

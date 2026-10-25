@@ -60,6 +60,18 @@
 .globl l8_opt_str_eq
 .globl l8_cstr
 .globl l8_bytes
+.globl l8_arena_new
+.globl l8_arena_drop
+.globl l8_arena_live
+.globl l8_own_enter
+.globl l8_own_commit
+.globl l8_borrow_enter
+.globl l8_alloc_enter
+.globl l8_arena_suspend
+.globl l8_arena_resume
+.globl l8_reserve_bytes
+.globl l8_region_depth
+.globl l8_region_unwind
 
 .section .bss
 .align 8
@@ -77,7 +89,11 @@ l8_handler_top: .skip 8
 # Nested region marks (heap_ptr at each enter). Raise pops down to the
 # catcher's snapshot so a caught exception still rewinds those heaps.
 l8_region_n: .skip 8
-l8_region_marks: .skip 512
+# Frames are 32 bytes: kind, a, b, saved chunk. Kinds: 0 region, 1 own, 2 allocate,
+# 3 borrow, 4 suspend. 64 frames.
+l8_region_marks: .skip 2048
+l8_arena_current: .skip 8
+l8_arena_count: .skip 8
 # region_n at each try_begin, parallel to the handler stack (jmp_buf stays 72)
 l8_try_rn: .skip 8
 l8_try_regions: .skip 512
@@ -393,10 +409,295 @@ l8_time:
     syscall
     ret
 
-# long l8_heap_mark(void) — current bump pointer
+# long l8_heap_mark(void) — bump of the current allocation destination
 l8_heap_mark:
+    mov l8_arena_current(%rip), %rax
+    test %rax, %rax
+    jz 1f
+    mov 8(%rax), %rax
+    ret
+1:
     mov heap_ptr(%rip), %rax
     ret
+
+l8_region_depth:
+    mov l8_region_n(%rip), %rax
+    ret
+
+# Runtime recovery for native callbacks abandoned by a signal or exception.
+l8_region_unwind:
+    push %rbx
+    mov %rdi, %rbx
+1:
+    mov l8_region_n(%rip), %rax
+    cmp %rbx, %rax
+    jbe 2f
+    call l8_region_pop
+    jmp 1b
+2:
+    pop %rbx
+    ret
+
+# Frame stack. l8_frame_push(kind, a, b) clobbers caller-saved regs.
+l8_frame_push:
+    mov %rcx, %r8
+    mov l8_region_n(%rip), %rax
+    cmp $63, %rax
+    ja 1f
+    lea l8_region_marks(%rip), %rcx
+    mov %rax, %r11
+    shl $5, %r11
+    add %r11, %rcx
+    mov %rdi, 0(%rcx)
+    mov %rsi, 8(%rcx)
+    mov %rdx, 16(%rcx)
+    mov %r8, 24(%rcx)
+    add $1, %rax
+    mov %rax, l8_region_n(%rip)
+    ret
+1:
+    mov $1, %rdi
+    mov $60, %rax
+    syscall
+
+.Larena_msg_borrowed:
+    .byte 97, 114, 101, 110, 97, 32, 105, 115, 32, 98, 111, 114, 114, 111, 119, 101, 100, 10
+.Larena_msg_empty:
+    .byte 97, 114, 101, 110, 97, 32, 105, 115, 32, 101, 109, 112, 116, 121, 10
+
+l8_arena_fail_borrowed:
+    mov $1, %rdi
+    lea .Larena_msg_borrowed(%rip), %rsi
+    mov $18, %rdx
+    mov $1, %rax
+    syscall
+    mov $1, %rdi
+    mov $60, %rax
+    syscall
+
+l8_arena_fail_empty:
+    mov $1, %rdi
+    lea .Larena_msg_empty(%rip), %rsi
+    mov $15, %rdx
+    mov $1, %rax
+    syscall
+    mov $1, %rdi
+    mov $60, %rax
+    syscall
+
+# mmap(size) -> rax, or 0. Size in rdi. Anonymous private.
+l8_arena_mmap:
+    mov %rdi, %rsi
+    xor %rdi, %rdi
+    mov $3, %rdx
+    mov $34, %r10
+    mov $-1, %r8
+    xor %r9, %r9
+    mov $9, %rax
+    syscall
+    cmp $-4096, %rax
+    ja 1f
+    ret
+1:
+    xor %rax, %rax
+    ret
+
+# void l8_arena_free(header). Borrow count must be zero.
+l8_arena_free:
+    push %rbx
+    mov %rdi, %rbx
+    test %rbx, %rbx
+    jz 2f
+    mov 0(%rbx), %rax
+    test %rax, %rax
+    jne l8_arena_fail_borrowed
+    mov 24(%rbx), %rdi
+1:
+    test %rdi, %rdi
+    jz 3f
+    mov 0(%rdi), %r11
+    mov 8(%rdi), %rsi
+    push %r11
+    mov $11, %rax
+    syscall
+    pop %rdi
+    jmp 1b
+3:
+    mov %rbx, %rdi
+    mov $4096, %rsi
+    mov $11, %rax
+    syscall
+    mov l8_arena_count(%rip), %rax
+    sub $1, %rax
+    mov %rax, l8_arena_count(%rip)
+2:
+    pop %rbx
+    ret
+
+# owned header *l8_arena_new(void)
+l8_arena_new:
+    push %rbx
+    mov $4096, %rdi
+    call l8_arena_mmap
+    test %rax, %rax
+    jz 1f
+    mov %rax, %rbx
+    movq $0, 0(%rbx)
+    movq $0, 32(%rbx)
+    mov $65536, %rdi
+    call l8_arena_mmap
+    test %rax, %rax
+    jz 2f
+    movq $0, 0(%rax)
+    movq $65536, 8(%rax)
+    mov %rax, 24(%rbx)
+    lea 16(%rax), %rcx
+    mov %rcx, 8(%rbx)
+    lea 65536(%rax), %rcx
+    mov %rcx, 16(%rbx)
+    mov l8_arena_count(%rip), %rax
+    add $1, %rax
+    mov %rax, l8_arena_count(%rip)
+    mov %rbx, %rax
+    pop %rbx
+    ret
+2:
+    mov %rbx, %rdi
+    mov $4096, %rsi
+    mov $11, %rax
+    syscall
+    xor %rax, %rax
+1:
+    pop %rbx
+    ret
+
+# long l8_arena_live(void)
+l8_arena_live:
+    mov l8_arena_count(%rip), %rax
+    ret
+
+# Reserve zeroed bytes without touching every page. Owned destinations track
+# the mapping as a full chunk; the next allocation starts a fresh chunk.
+l8_reserve_bytes:
+    push %rbx
+    push %r12
+    push %r13
+    mov %rdi, %r12
+    test %r12, %r12
+    jl 2f
+    mov $9223372036854771712, %rax
+    cmp %rax, %r12
+    ja 2f
+    lea 4119(%r12), %r13
+    and $-4096, %r13
+    mov l8_arena_current(%rip), %rbx
+    mov %r13, %rdi
+    call l8_arena_mmap
+    test %rax, %rax
+    jz 2f
+    mov %r13, 8(%rax)
+    mov %r12, 16(%rax)
+    test %rbx, %rbx
+    jz 1f
+    mov 24(%rbx), %rdx
+    mov %rdx, 0(%rax)
+    mov %rax, 24(%rbx)
+    lea 0(%rax), %rdx
+    add %r13, %rdx
+    mov %rdx, 8(%rbx)
+    mov %rdx, 16(%rbx)
+1:
+    add $24, %rax
+    jmp 3f
+2:
+    xor %rax, %rax
+3:
+    pop %r13
+    pop %r12
+    pop %rbx
+    ret
+
+# void l8_arena_drop(header) — null is a no-op
+l8_arena_drop:
+    test %rdi, %rdi
+    jz 1f
+    call l8_arena_free
+1:
+    ret
+
+# void l8_own_enter(header)
+l8_own_enter:
+    mov l8_arena_current(%rip), %rsi
+    mov %rsi, %rdx
+    mov %rdi, %rsi
+    mov %rdi, l8_arena_current(%rip)
+    mov $1, %rdi
+    jmp l8_frame_push
+
+# void l8_own_commit(header, root) — pop the own frame without freeing
+l8_own_commit:
+    mov %rsi, 32(%rdi)
+    mov l8_region_n(%rip), %rax
+    test %rax, %rax
+    jz 1f
+    sub $1, %rax
+    mov %rax, l8_region_n(%rip)
+    lea l8_region_marks(%rip), %rcx
+    shl $5, %rax
+    add %rax, %rcx
+    mov 16(%rcx), %rax
+    mov %rax, l8_arena_current(%rip)
+1:
+    ret
+
+# void l8_borrow_enter(header)
+l8_borrow_enter:
+    test %rdi, %rdi
+    jz l8_arena_fail_empty
+    mov 0(%rdi), %rax
+    add $1, %rax
+    mov %rax, 0(%rdi)
+    mov %rdi, %rsi
+    xor %rdx, %rdx
+    mov $3, %rdi
+    jmp l8_frame_push
+
+# void l8_alloc_enter(header)
+l8_alloc_enter:
+    test %rdi, %rdi
+    jz l8_arena_fail_empty
+    mov l8_arena_current(%rip), %rdx
+    mov %rdi, l8_arena_current(%rip)
+    mov %rdi, %rsi
+    mov $2, %rdi
+    jmp l8_frame_push
+
+# void l8_arena_suspend(void) — process heap across a native call. Keeps args and rax.
+l8_arena_suspend:
+    push %rax
+    push %rdi
+    push %rsi
+    push %rdx
+    push %rcx
+    push %r8
+    push %r9
+    mov l8_arena_current(%rip), %rdx
+    movq $0, l8_arena_current(%rip)
+    xor %rsi, %rsi
+    mov $4, %rdi
+    call l8_frame_push
+    pop %r9
+    pop %r8
+    pop %rcx
+    pop %rdx
+    pop %rsi
+    pop %rdi
+    pop %rax
+    ret
+
+# void l8_arena_resume(void) — preserves rax
+l8_arena_resume:
+    jmp l8_region_pop
 
 # long l8_heap_used(void) — bytes allocated from the bump base
 l8_heap_used:
@@ -410,38 +711,83 @@ l8_heap_reset:
     mov %rdi, heap_ptr(%rip)
     ret
 
-# void l8_region_push(long mark) — record a region enter
+# void l8_region_push(long mark) — checkpoint the current destination
 l8_region_push:
-    mov l8_region_n(%rip), %rax
-    cmp $63, %rax
-    ja 1f
-    lea l8_region_marks(%rip), %rcx
-    mov %rax, %rdx
-    shl $3, %rdx
-    add %rdx, %rcx
-    mov %rdi, 0(%rcx)
-    add $1, %rax
-    mov %rax, l8_region_n(%rip)
-    ret
+    mov l8_arena_current(%rip), %rsi
+    xor %rcx, %rcx
+    test %rsi, %rsi
+    jz 1f
+    mov 24(%rsi), %rcx
 1:
-    mov $1, %rdi
-    mov $60, %rax
-    syscall
+    mov %rdi, %rdx
+    xor %rdi, %rdi
+    jmp l8_frame_push
 
-# void l8_region_pop(void) — leave one region and rewind
+# void l8_region_pop(void) — leave one frame. Preserves rax.
+# Own frames abandoned here are freed. Borrow frames release.
 l8_region_pop:
+    push %rax
     mov l8_region_n(%rip), %rax
     test %rax, %rax
-    jz 1f
+    jz 9f
     sub $1, %rax
     mov %rax, l8_region_n(%rip)
     lea l8_region_marks(%rip), %rcx
-    mov %rax, %rdx
-    shl $3, %rdx
-    add %rdx, %rcx
-    mov 0(%rcx), %rdi
-    mov %rdi, heap_ptr(%rip)
+    shl $5, %rax
+    add %rax, %rcx
+    mov 0(%rcx), %rax
+    mov 8(%rcx), %rsi
+    mov 16(%rcx), %rdx
+    cmp $0, %rax
+    je .Lpop_region
+    cmp $1, %rax
+    je .Lpop_own
+    cmp $3, %rax
+    je .Lpop_borrow
+    mov %rdx, l8_arena_current(%rip)
+    jmp 9f
+.Lpop_region:
+    test %rsi, %rsi
+    jz 1f
+    push %rbx
+    push %r12
+    push %r13
+    mov %rsi, %rbx
+    mov %rdx, %r12
+    mov 24(%rcx), %r13
+2:
+    mov 24(%rbx), %rdi
+    cmp %r13, %rdi
+    je 3f
+    mov 0(%rdi), %rax
+    mov %rax, 24(%rbx)
+    mov 8(%rdi), %rsi
+    mov $11, %rax
+    syscall
+    jmp 2b
+3:
+    mov %r12, 8(%rbx)
+    mov 8(%r13), %rax
+    add %r13, %rax
+    mov %rax, 16(%rbx)
+    pop %r13
+    pop %r12
+    pop %rbx
+    jmp 9f
 1:
+    mov %rdx, heap_ptr(%rip)
+    jmp 9f
+.Lpop_own:
+    mov %rdx, l8_arena_current(%rip)
+    mov %rsi, %rdi
+    call l8_arena_free
+    jmp 9f
+.Lpop_borrow:
+    mov 0(%rsi), %rcx
+    sub $1, %rcx
+    mov %rcx, 0(%rsi)
+9:
+    pop %rax
     ret
 
 # void *l8_exc_malloc(long size) — bump down from heap_end so region rewind
@@ -460,8 +806,12 @@ l8_exc_malloc:
     mov $0, %rax
     ret
 
-# void *malloc(long size) — bump allocator, 8-byte aligned
+# void *malloc(long size) — bump allocator, 8-byte aligned.
+# An owned arena, when current, bumps its own chunks.
 malloc:
+    mov l8_arena_current(%rip), %rax
+    test %rax, %rax
+    jne .Lmalloc_arena
     mov heap_ptr(%rip), %rax
     add $7, %rdi
     and $-8, %rdi
@@ -473,6 +823,57 @@ malloc:
     ret
 1:
     mov $0, %rax
+    ret
+.Lmalloc_arena:
+    push %rbx
+    push %r12
+    mov %rax, %rbx
+    add $7, %rdi
+    and $-8, %rdi
+    mov 8(%rbx), %rax
+    mov %rax, %rcx
+    add %rdi, %rcx
+    mov 16(%rbx), %r11
+    cmp %r11, %rcx
+    ja .Lmalloc_arena_grow
+    mov %rcx, 8(%rbx)
+    pop %r12
+    pop %rbx
+    ret
+.Lmalloc_arena_grow:
+    mov %rdi, %r12
+    mov %r12, %rcx
+    add $16, %rcx
+    cmp $65536, %rcx
+    jae 2f
+    mov $65536, %rcx
+2:
+    add $4095, %rcx
+    and $-4096, %rcx
+    push %rcx
+    mov %rcx, %rdi
+    call l8_arena_mmap
+    pop %rcx
+    test %rax, %rax
+    jz 3f
+    mov 24(%rbx), %rdx
+    mov %rdx, 0(%rax)
+    mov %rcx, 8(%rax)
+    mov %rax, 24(%rbx)
+    lea 16(%rax), %rdx
+    mov %rdx, %r11
+    add %r12, %rdx
+    mov %rdx, 8(%rbx)
+    add %rcx, %rax
+    mov %rax, 16(%rbx)
+    mov %r11, %rax
+    pop %r12
+    pop %rbx
+    ret
+3:
+    xor %rax, %rax
+    pop %r12
+    pop %rbx
     ret
 
 # long len(*i8 s) — length prefix at s-8 (for length-prefixed literals / strdup)
@@ -748,17 +1149,12 @@ l8_raise:
 .Lraise_unw:
     mov l8_region_n(%rip), %rax
     cmp %r8, %rax
-    ja .Lraise_unw_pop
-    jmp .Lraise_unw_done
-.Lraise_unw_pop:
-    sub $1, %rax
-    mov %rax, l8_region_n(%rip)
-    lea l8_region_marks(%rip), %rcx
-    mov %rax, %rdx
-    shl $3, %rdx
-    add %rdx, %rcx
-    mov 0(%rcx), %r9
-    mov %r9, heap_ptr(%rip)
+    jbe .Lraise_unw_done
+    push %rdi
+    push %r8
+    call l8_region_pop
+    pop %r8
+    pop %rdi
     jmp .Lraise_unw
 .Lraise_unw_done:
     # pop this handler
