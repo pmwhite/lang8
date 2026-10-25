@@ -84,11 +84,7 @@
 //                                               where its car is)
 //   to the others:        "SEAT gone"           when it leaves
 import { DurableObject } from "cloudflare:workers";
-
-// How many can be in a room (the game has as many seats for people:
-// HUMAN_SEATS in programs/race/net.l8; the rest of its seats are the
-// computer drivers').
-const SEATS = 8;
+import { HUMAN_SEATS as SEATS } from "../race/protocol.js";
 
 // What a device may say: where its car is (a few whole numbers), a name,
 // and a time.

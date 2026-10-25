@@ -161,10 +161,16 @@ $(BUILD)/recipes: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 
 recipes: $(BUILD)/recipes
 
-$(BUILD)/race: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+$(BUILD)/race: l8c3 $(PROGRAMS) $(RUNTIME) web/race/protocol.js | $(OK)
 	@$(STEP) 'race' sh -c '$(call build,l8c3,programs/race/main.l8)'
 
 race: $(BUILD)/race
+
+$(BUILD)/race-protocol: l8c3 tools/race_protocol.l8 programs/race/protocol.l8 $(STDLIB) | $(OK)
+	@./l8c3 build tools/race_protocol.l8 -o $@
+
+web/race/protocol.js: $(BUILD)/race-protocol
+	@$(BUILD)/race-protocol > $@.tmp && mv -f $@.tmp $@
 
 $(BUILD)/better: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'better' sh -c '$(call build,l8c3,programs/better/main.l8)'
@@ -394,7 +400,7 @@ $(BUILD)/better.wasm: l8c3 $(PROGRAMS) | $(OK)
 $(BUILD)/race.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'race wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/race/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
-$(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD)/race.wasm $(BUILD)/cad.wasm $(BUILD)/recipes.wasm $(BUILD)/better.wasm $(WEB_FILES) $(STDLIB) | $(OK)
+$(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD)/race.wasm $(BUILD)/cad.wasm $(BUILD)/recipes.wasm $(BUILD)/better.wasm web/race/protocol.js $(WEB_FILES) $(STDLIB) | $(OK)
 	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game $(WEB_SITE)/skate $(WEB_SITE)/race $(WEB_SITE)/cad $(WEB_SITE)/recipes $(WEB_SITE)/better $(WEB_SITE)/people && \
 		cp web/index.html web/*.js $(WEB_SITE)/ && cp web/examples/*.l8 $(WEB_SITE)/examples/ && \
 		cp $(STDLIB) $(WEB_SITE)/stdlib/ && cp $(BUILD)/l8.wasm $(WEB_SITE)/ && \

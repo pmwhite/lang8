@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 8. Shared protocol facts copied manually
-
-Status: open; related style rule approved.
-Location: `programs/race/net.l8` — HUMAN_SEATS, around line 267.
-
-Observation: The eight-human-seat limit is repeated in web/race/race.js:HUMAN_SEATS and web/race-room/worker.js:SEATS.
-
-Follow-up: Give the shared protocol limit one authoritative definition and derive/generate the definitions consumed across languages.
-
 ## 9. Remote mutation hidden by a lookup name
 
 Status: open; related style rule approved.

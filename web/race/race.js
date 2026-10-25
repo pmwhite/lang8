@@ -8,6 +8,7 @@
 import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "../game/platform.js";
 import { saveLocalText as store } from "../local-storage.js";
+import { HUMAN_SEATS } from "./protocol.js";
 
 const canvas = document.getElementById("screen");
 const overlay = document.getElementById("overlay");
@@ -39,7 +40,6 @@ const NET_NAME = 2n ** 54n, NET_DONE = 2n ** 55n, NET_FAR = 2n ** 56n, NET_CONFI
 // The seats of people, and after them those of the computer drivers that
 // race with them (driven on the device whose race it is: see
 // HUMAN_SEATS, in programs/race/net.l8), and their names.
-const HUMAN_SEATS = 8;
 const BOT_NAMES = ["Vera", "Otto", "Mab", "Finn", "Ines", "Tobe", "Zuri"];
 // A race called while the page is hidden (the phone's screen off, the tab
 // behind another, another app in front) is not taken up till the page is
