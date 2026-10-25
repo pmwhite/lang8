@@ -27,7 +27,7 @@ async function run(path, resumable) {
 
 const a = await run(process.argv[2], true);
 const b = await run(process.argv[3], false);
-if (a.output !== b.output || a.status !== b.status || a.status !== 7 || a.pauses !== 12) {
+if (a.output !== b.output || a.status !== b.status || a.status !== 7 || a.pauses !== 14) {
   console.error("resumable run differs:", JSON.stringify(a), JSON.stringify(b));
   process.exit(1);
 }

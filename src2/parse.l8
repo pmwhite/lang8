@@ -629,6 +629,13 @@ tokenize(data: []i8@new, used: int) noregion raises Error: *Token@new {
             t = new_token(ident_kind(text, start, end), s, n, start);
             cur.next = t;
             cur = t
+        } else if (compound_token(data, current, used) != TokKind.Eof) {
+            kind: TokKind = compound_token(data, current, used);
+            width: int = if (kind == TokKind.ShlAssign || kind == TokKind.ShrAssign) 3 else 2;
+            t = new_token(kind, &data[current], width, current);
+            cur.next = t;
+            cur = t;
+            pos = current + width
         } else if (c == ':' && data[pos + 1] == ':') {
             t = new_token(TokKind.ColonColon, &data[pos], 2, pos);
             cur.next = t;
@@ -723,6 +730,31 @@ tokenize(data: []i8@new, used: int) noregion raises Error: *Token@new {
     cur.next = t;
     tag_qualify_tokens(head.next);
     head.next
+}
+
+compound_token(data: []i8, at: int, used: int): TokKind {
+    if (at + 1 >= used) return TokKind.Eof;
+    c: i8 = data[at];
+    if (at + 2 < used && data[at + 2] == '=') {
+        if (c == '<' && data[at + 1] == '<') return TokKind.ShlAssign;
+        if (c == '>' && data[at + 1] == '>') return TokKind.ShrAssign
+    }
+    if (data[at + 1] != '=') return TokKind.Eof;
+    match c {
+        '+' -> TokKind.AddAssign;
+        '-' -> TokKind.SubAssign;
+        '*' -> TokKind.MulAssign;
+        '/' -> TokKind.DivAssign;
+        '%' -> TokKind.ModAssign;
+        '&' -> TokKind.AndAssign;
+        '|' -> TokKind.OrAssign;
+        '^' -> TokKind.XorAssign;
+        _ -> TokKind.Eof
+    }
+}
+
+is_compound_assignment(kind: TokKind): bool {
+    kind == TokKind.AddAssign || kind == TokKind.SubAssign || kind == TokKind.MulAssign || kind == TokKind.DivAssign || kind == TokKind.ModAssign || kind == TokKind.AndAssign || kind == TokKind.OrAssign || kind == TokKind.XorAssign || kind == TokKind.ShlAssign || kind == TokKind.ShrAssign
 }
 
 expected_token_text(kind: TokKind) raises Error: []i8 {
@@ -1066,7 +1098,7 @@ new_binary(op: BinOp, lhs: *Expr@new, rhs: *Expr@new): *Expr@new {
 }
 
 new_assign(lhs: *Expr@new, rhs: *Expr@new): *Expr@new {
-    n: *Expr = mk_expr(ExprKind.Assign { lhs: lhs, rhs: rhs });
+    n: *Expr = mk_expr(ExprKind.Assign { lhs: lhs, rhs: rhs, compound: null });
     n.pos = lhs.pos;
     n.file = lhs.file;
     n.toklen = lhs.toklen;
@@ -1402,8 +1434,8 @@ leave_scope() raises Error {
     scope_locals = null
 }
 
-new_obj(name: []i8@new, is_local: bool) noregion: *Obj@new {
-    o: *Obj = new Obj {
+new_unbound_obj(name: []i8@new, is_local: bool): *Obj@new {
+    new Obj {
         name: name,
         is_local: is_local,
         is_func: false,
@@ -1436,7 +1468,11 @@ new_obj(name: []i8@new, is_local: bool) noregion: *Obj@new {
         lead: null,
         trail: null,
         wasm_slot: 0
-    };
+    }
+}
+
+new_obj(name: []i8@new, is_local: bool) noregion: *Obj@new {
+    o: *Obj = new_unbound_obj(name, is_local);
     if (is_local) {
         o.scope_depth = scope_depth;
         if (region_depth == 0) o.storage_life = 1 else o.storage_life = region_depth + 1;
@@ -2070,7 +2106,7 @@ loop_kills() noregion {
             if (depth < 0 || depth == 0 && braced && k == TokKind.RBrace) return
         } else if (depth == 0 && (k == TokKind.Semi || k == TokKind.Else)) return;
         if (k == TokKind.Ident && len(t.qualifier) == 0 && prev != TokKind.Dot) {
-            if (t.next.kind == TokKind.Assign || prev == TokKind.Amp) {
+            if (t.next.kind == TokKind.Assign || is_compound_assignment(t.next.kind) || prev == TokKind.Amp) {
                 v: ?*Obj = find_var(intern(source, t.pos, t.len));
                 if (v != null && v.is_local) kill_var_facts(v)
             }
@@ -3335,7 +3371,7 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             match q.lhs.kind {
                 Var _p -> {
                     saveu: bool = count_var_use;
-                    count_var_use = false;
+                    count_var_use = q.compound != null;
                     add_type(q.lhs);
                     count_var_use = saveu
                 }
@@ -3369,8 +3405,20 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 }
                 _ -> lt = decay(q.lhs.ty)
             }
-            if (!assignable(lt, q.rhs)) error_have_expr_want("assignment type mismatch",
-                q.rhs, lt);
+            assigned: *Expr = q.rhs;
+            update: ?*CompoundAssignment = q.compound;
+            if (update != null) {
+                operation: *Expr = new_binary(update.op, q.lhs, q.rhs);
+                operation.pos = p.pos;
+                operation.file = p.file;
+                type_binary(operation, update.op, q.lhs, q.rhs);
+                assigned = operation;
+                value_type: *Type = storage or error("missing assignment type");
+                update.address.ty = ptr_to(value_type);
+                update.value.ty = value_type
+            }
+            if (!assignable(lt, assigned)) error_have_expr_want("assignment type mismatch",
+                assigned, lt);
             check_store(q.rhs, dest_life(q.lhs), q.lhs);
             if (is_tainted_expr(q.rhs)) {
                 match q.lhs.kind {
@@ -3938,6 +3986,31 @@ parse_assign() noregion raises Error: *Expr@new {
     if (tok.kind == TokKind.Assign) {
         tok = tok.next;
         return new_assign(n, parse_assign())
+    }
+    compound: bool = true;
+    op: BinOp = BinOp.Add;
+    match tok.kind {
+        AddAssign -> op = BinOp.Add;
+        SubAssign -> op = BinOp.Sub;
+        MulAssign -> op = BinOp.Mul;
+        DivAssign -> op = BinOp.Div;
+        ModAssign -> op = BinOp.Mod;
+        AndAssign -> op = BinOp.And;
+        OrAssign -> op = BinOp.Or;
+        XorAssign -> op = BinOp.Xor;
+        ShlAssign -> op = BinOp.Shl;
+        ShrAssign -> op = BinOp.Shr;
+        _ -> compound = false
+    }
+    if (compound) {
+        tok = tok.next;
+        address: *Obj = new_unbound_obj(".compound-address", true);
+        value: *Obj = new_unbound_obj(".compound-value", true);
+        assignment: *Expr = mk_expr(ExprKind.Assign { lhs: n, rhs: parse_assign(), compound: new CompoundAssignment { op: op, address: address, value: value } });
+        assignment.pos = n.pos;
+        assignment.file = n.file;
+        assignment.toklen = n.toklen;
+        return assignment
     }
     n
 }

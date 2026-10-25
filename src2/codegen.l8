@@ -784,6 +784,39 @@ cg_load_call_arg(a: *Expr, reg: int) noregion raises Error {
     if (!gen_simple_operand(a, reg)) error("internal: simple call argument")
 }
 
+// Capture the destination and old value in frame slots before evaluating rhs.
+// Both backends then use ordinary assignment and numeric operator lowering.
+type CompoundLowering = {
+    capture_address: *Expr;
+    capture_value: *Expr;
+    store: *Expr
+}
+
+lower_compound_assignment(
+    lhs: *Expr@new,
+    rhs: *Expr@new,
+    update: *CompoundAssignment@new,
+    offset: int
+): CompoundLowering@new {
+    update.address.offset = offset;
+    update.value.offset = offset + 8;
+    address: *Expr = new_addr(lhs);
+    address.ty = update.address.ty;
+    save_address: *Expr = new_assign(new_var_node(update.address), address);
+    save_address.ty = update.address.ty;
+    old: *Expr = new_deref(new_var_node(update.address));
+    old.ty = lhs.ty;
+    save_value: *Expr = new_assign(new_var_node(update.value), old);
+    save_value.ty = lhs.ty;
+    result: *Expr = new_binary(update.op, new_var_node(update.value), rhs);
+    result.ty = lhs.ty;
+    target: *Expr = new_deref(new_var_node(update.address));
+    target.ty = lhs.ty;
+    store: *Expr = new_assign(target, result);
+    store.ty = lhs.ty;
+    CompoundLowering { capture_address: save_address, capture_value: save_value, store: store }
+}
+
 gen_binop_setup(lhs: *Expr, rhs: *Expr) noregion raises Error {
     gen_expr(lhs);
     if (gen_simple_operand(rhs, 7)) return;
@@ -1520,6 +1553,15 @@ gen_expr(n: *Expr) noregion raises Error {
             return
         }
         Assign q -> {
+            update: ?*CompoundAssignment = q.compound;
+            if (update != null) {
+                lowered: CompoundLowering = lower_compound_assignment(q.lhs, q.rhs,
+                    update, cg_temp_offset(n));
+                gen_expr(lowered.capture_address);
+                gen_expr(lowered.capture_value);
+                gen_expr(lowered.store);
+                return
+            }
             match q.rhs.kind {
                 StructLit k -> {
                     lty: ?*Type = q.lhs.ty;
@@ -2562,7 +2604,10 @@ cg_temps_expr(e: ?*Expr, off: int) raises Error: int {
                 o)
         }
         Binary k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
-        Assign k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
+        Assign k -> {
+            total: int = cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
+            if (k.compound != null) cg_temp_slot(n, 16, total) else total
+        }
         LogAnd k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
         LogOr k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
         OrElse k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
@@ -2770,7 +2815,7 @@ cg_scalar_expr(n: ?*Expr): bool {
         Binary k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
         // Assigning a literal builds it in place, through rbx unless the
         // destination is a local, which is addressed through rbp.
-        Assign k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs) && (!cg_literal(k.rhs) || cg_local_literal_target(k.lhs,
+        Assign k -> k.compound == null && cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs) && (!cg_literal(k.rhs) || cg_local_literal_target(k.lhs,
             k.rhs));
         // Other literals are built in their rbp-addressed frame slots.
         StructLit k -> cg_scalar_inits(k.inits);

@@ -86,6 +86,12 @@ The index is an `int` starting at zero. Both bindings are local copies refreshed
 each iteration; assigning either does not change the collection or loop counter.
 The collection is evaluated once, and empty collections execute no iterations.
 
+Compound assignments `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=` and
+`>>=` use the corresponding numeric operator's type rules. They evaluate the
+destination once, read its old value, evaluate the right side, then store and
+produce the result. If the right side raises or exits the expression, no store
+occurs. Like `=`, assignment operators associate right to left.
+
 `build` sends typed compiler operations directly to the assembler's in-memory
 section, symbol, relocation, and instruction encoders. It parses only the static
 `runtime.s` input and imported native sources, then writes ET_EXEC directly from
