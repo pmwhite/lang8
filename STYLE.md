@@ -99,15 +99,18 @@ and mutation where practical.
 
 ## 10. Use tags to define deliberate API surfaces
 
-Give implementation declarations an internal tag, and add public tags only
-to declarations intended for consumers. Use a file-level internal tag with
-declaration-level public tags when a file mixes implementation and API.
+Prefer private implementation by default and make the public API explicit.
+Use a file-level internal tag, adding declaration-level public tags only to
+types and operations intended for consumers. Broader public visibility should
+be a deliberate choice.
 
 Group public tags around coherent capabilities. Do not expose implementation
 helpers merely to make a caller compile; first decide whether the dependency
 belongs in the API.
 
-An `_internal` suffix expresses intended use, not a security restriction.
+Public and private are conventions expressed through tag choices. An
+`_internal` suffix expresses intended use, not a security restriction; any
+caller can deliberately enable an internal tag.
 See [tags.md](tags.md) for the language's visibility rules.
 
 ## 11. Organize modules around coherent responsibilities and deliberate contracts
@@ -148,7 +151,7 @@ the components form a real module with a common contract.
 
 ## 14. Expose a type's representation only when it is part of the contract
 
-Keep implementation fields behind an internal tag when callers should
+Keep a type's representation behind an internal tag when callers should
 interact through operations. Expose the type's identity and supported
 operations through its public API tag.
 
