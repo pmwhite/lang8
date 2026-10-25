@@ -55,6 +55,8 @@ new_token(
 }
 
 ident_kind(s: []i8, off: int, end: int): TokKind {
+    if (name_eq_span("break", s, off, end - off)) return TokKind.Break;
+    if (name_eq_span("continue", s, off, end - off)) return TokKind.Continue;
     n: int = end - off;
     if (n < 2 || n > 9) return TokKind.Ident;
     if (end == off + 2) {
@@ -1142,8 +1144,8 @@ new_if(cond: *Expr@new, then: *Stmt@new, els: ?*Stmt@new): *Stmt@new {
     mk_stmt(StmtKind.If { cond: cond, then: then, els: els })
 }
 
-new_while(cond: *Expr@new, body: *Stmt@new): *Stmt@new {
-    mk_stmt(StmtKind.While { cond: cond, body: body })
+new_while(cond: *Expr@new, body: *Stmt@new, has_break: bool): *Stmt@new {
+    mk_stmt(StmtKind.While { cond: cond, body: body, has_break: has_break })
 }
 
 new_for(
@@ -2985,6 +2987,8 @@ match_result_ty(arms: ?*MatchArm) noregion raises Error: ?*Type@new {
 stmt_result_ty(s: ?*Stmt) noregion raises Error: ?*Type@new {
     if (s == null) return null;
     match s.kind {
+        Break -> ty_noreturn;
+        Continue -> ty_noreturn;
         ExprStmt k -> decay(k.lhs.ty);
         Return _p -> ty_noreturn;
         Raise _p -> ty_noreturn;
@@ -4018,6 +4022,26 @@ parse_brace_stmts() noregion raises Error: ?*Stmt@new {
     head
 }
 
+type ParseLoop = {
+    has_break: bool
+}
+
+type ParsedLoopBody = {
+    body: *Stmt;
+    has_break: bool
+}
+
+parse_loop: ?*ParseLoop = null;
+
+parse_loop_body() noregion raises Error: ParsedLoopBody@new {
+    outer: ?*ParseLoop = parse_loop;
+    loop: *ParseLoop = new ParseLoop { has_break: false };
+    parse_loop = loop;
+    body: *Stmt = parse_stmt();
+    parse_loop = outer;
+    ParsedLoopBody { body: body, has_break: loop.has_break }
+}
+
 parse_stmt() noregion raises Error: *Stmt@new {
     spos: int = tok.pos;
     s: *Stmt = parse_stmt_body();
@@ -4026,6 +4050,20 @@ parse_stmt() noregion raises Error: *Stmt@new {
 }
 
 parse_stmt_body() noregion raises Error: *Stmt@new {
+    if (tok.kind == TokKind.Break || tok.kind == TokKind.Continue) {
+        loop: ?*ParseLoop = parse_loop;
+        if (loop == null) {
+            if (tok.kind == TokKind.Break) error("break is only allowed inside a loop") else error("continue is only allowed inside a loop")
+        }
+        kind: StmtKind = StmtKind.Continue;
+        if (tok.kind == TokKind.Break) {
+            loop.has_break = true;
+            kind = StmtKind.Break
+        }
+        tok = tok.next;
+        skip_stmt_semi();
+        return mk_stmt(kind)
+    }
     if (at_expect()) {
         tok = tok.next;
         site: *ExpectSite = parse_expect_text();
@@ -4203,11 +4241,11 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         save2: ?*NarrowFrame = narrow_top;
         narrow_push_ne_nulls(cond2);
         enter_scope();
-        body: *Stmt = parse_stmt();
+        loop_body: ParsedLoopBody = parse_loop_body();
         leave_scope();
         narrow_reset(save2);
         kill_again(loop_killed, kill_n);
-        return new_while(cond2, body)
+        return new_while(cond2, loop_body.body, loop_body.has_break)
     }
     if (tok.kind == TokKind.For) {
         tok = tok.next;
@@ -4248,10 +4286,10 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
             if (it != null && (is_slice(it) || is_str(it) || is_array(it))) fitem.ty = type_base(it)
         }
         enter_scope();
-        fbody: *Stmt = parse_stmt();
+        fbody: ParsedLoopBody = parse_loop_body();
         leave_scope();
         leave_scope();
-        return new_for(fitem, fcoll, fidx, fn, fiter, fhi, fbody)
+        return new_for(fitem, fcoll, fidx, fn, fiter, fhi, fbody.body)
     }
     if (tok.kind == TokKind.Match) {
         tok = tok.next;
@@ -4341,6 +4379,7 @@ new_function(name: []i8@new): *Function@new {
 }
 
 parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@new {
+    parse_loop = null;
     fn: *Function = new_function(name);
     locals = null;
     scope_locals = null;
@@ -4846,6 +4885,7 @@ at_expect(): bool {
 // test "name" { body }. The body is an ordinary function with no parameters
 // that may raise any exception; only `l8 test` calls it.
 parse_test() noregion raises Error {
+    parse_loop = null;
     tpos: int = tok.pos;
     tok = tok.next;
     if (tok.val != 0) error("test name must be a one-line string");
@@ -5235,6 +5275,7 @@ parse_run_deferred() noregion raises Error {
 }
 
 parse_enter_deferred(item: *ParseDeferred@immortal) {
+    parse_loop = null;
     source = item.source;
     source_len = item.source_len;
     source_path = item.path;

@@ -479,6 +479,32 @@ wl_spill: int = 0;
 
 wl_region_depth: int = 0;
 
+type WasmLoop = {
+    break_label: int;
+    continue_label: int;
+    region_depth: int
+}
+
+wl_loop: ?*WasmLoop = null;
+
+wg_loop_body(body: *Stmt, break_label: int, continue_label: int) noregion raises Error {
+    outer: ?*WasmLoop = wl_loop;
+    wl_loop = new WasmLoop { break_label: break_label, continue_label: continue_label, region_depth: wl_region_depth };
+    wg_stmt(body);
+    wl_loop = outer
+}
+
+wg_loop_jump(stmt: *Stmt) raises Error {
+    loop: *WasmLoop = wl_loop or error("internal: loop jump outside a loop");
+    for _region in loop.region_depth..wl_region_depth w_call(wf_region_pop);
+    // A structured branch also leaves any intervening Wasm exception handlers.
+    match stmt.kind {
+        Break -> w_br(loop.break_label);
+        Continue -> w_br(loop.continue_label);
+        _ -> error("internal: expected loop jump")
+    }
+}
+
 wt_get(): int {
     i: int = wl_tmp_base + wl_tmp_top;
     wl_tmp_top = wl_tmp_top + 1;
@@ -1744,7 +1770,9 @@ wa_count_stmt(s: *Stmt): int {
             total
         }
         Region k -> wa_count_stmt(k.body);
-        Expect _ -> 0
+        Expect _ -> 0;
+        Break -> 0;
+        Continue -> 0
     }
 }
 
@@ -1947,7 +1975,9 @@ wg_for(
         w_op(89);
         w_br_if(done);
         if (resuming) wa_skip_end(saved2);
-        wg_stmt(body);
+        step: int = w_block();
+        wg_loop_body(body, done, step);
+        w_end();
         wg_load_var(item, ty_int);
         w_i64(1);
         w_op(124);
@@ -2013,7 +2043,9 @@ wg_for(
         wg_store_var(item, ity)
     }
     if (resuming) wa_skip_end(saved4);
-    wg_stmt(body);
+    step2: int = w_block();
+    wg_loop_body(body, done2, step2);
+    w_end();
     wg_load_var(iu, ty_int);
     w_i64(1);
     w_op(124);
@@ -2323,6 +2355,8 @@ wg_stmt(n: *Stmt) noregion raises Error {
 
 wg_stmt_code(n: *Stmt) noregion raises Error {
     match n.kind {
+        Break -> wg_loop_jump(n);
+        Continue -> wg_loop_jump(n);
         Return k -> wg_return(k.lhs);
         ExprStmt k -> {
             wg_expr(k.lhs);
@@ -2359,7 +2393,7 @@ wg_stmt_code(n: *Stmt) noregion raises Error {
             w_op(69);
             w_br_if(done);
             if (resuming) wa_skip_end(saved);
-            wg_stmt(k.body);
+            wg_loop_body(k.body, done, top);
             w_br(top);
             w_end();
             w_end()
@@ -2546,6 +2580,8 @@ wasm_mark_stmts(stmts: ?*Stmt) {
             }
             Region k -> wasm_mark_stmts(k.body);
             Expect _ -> { }
+            Break -> { }
+            Continue -> { }
         }
         s = s.next
     }
@@ -2610,6 +2646,7 @@ wasm_begin(fn: ?*Function@immortal, np: int) noregion {
     wl_rbp = 0;
     wl_spill = 0;
     wl_region_depth = 0;
+    wl_loop = null;
     wl_depth = 0;
     wl_async = false;
     wa_guarded = false;

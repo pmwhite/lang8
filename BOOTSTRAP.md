@@ -74,6 +74,13 @@ commands. See [`TESTING.md`](TESTING.md).
 `a[i]` checks its index at run time and exits with status 1 when it is out of
 range; `--unchecked-index` leaves the checks out. See [`BOUNDS.md`](BOUNDS.md).
 
+The development compiler supports `break` and `continue` in `while` and `for`
+bodies. They target the nearest enclosing loop, including from nested blocks,
+match arms and exception handlers. `continue` tests a `while` condition again;
+in a `for`, it advances to the next range value or collection element first.
+Both unwind regions and exception handlers exited by the jump, preserving those
+that enclose the loop. A `break` inside a nested loop exits only that loop.
+
 `build` sends typed compiler operations directly to the assembler's in-memory
 section, symbol, relocation, and instruction encoders. It parses only the static
 `runtime.s` input and imported native sources, then writes ET_EXEC directly from

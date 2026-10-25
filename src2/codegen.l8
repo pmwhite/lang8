@@ -2109,6 +2109,57 @@ emit_loop_compare(item: *Obj, bound: *Obj) noregion raises Error {
     cg_alu_rr(57, right, left)
 }
 
+type CodegenLoop = {
+    break_label: int;
+    continue_label: int;
+    region_depth: int;
+    try_depth: int;
+    push_count: int
+}
+
+cg_loop: ?*CodegenLoop = null;
+
+cg_try_depth: int = 0;
+
+gen_loop_body(body: *Stmt, break_label: int, continue_label: int) noregion raises Error {
+    outer: ?*CodegenLoop = cg_loop;
+    cg_loop = new CodegenLoop {
+        break_label: break_label,
+        continue_label: continue_label,
+        region_depth: cg_region_depth,
+        try_depth: cg_try_depth,
+        push_count: cg_push_count
+    };
+    gen_stmt(body);
+    cg_loop = outer
+}
+
+gen_loop_jump(stmt: *Stmt) noregion raises Error {
+    loop: *CodegenLoop = cg_loop or error("internal: loop jump outside a loop");
+    for _handler in loop.try_depth..cg_try_depth cg_call("l8_try_end");
+    for _region in loop.region_depth..cg_region_depth cg_call("l8_region_pop");
+    // An expression may have saved registers or reserved arguments before the
+    // jump. Restore them at run time, retaining the model for other code paths.
+    saved_count: int = cg_push_count;
+    saved_offset: int = cg_rsp_off;
+    if (saved_count > len(cg_push_regs)) error("too many temporaries across a loop jump");
+    while (cg_push_count > loop.push_count) {
+        entry: int = cg_push_regs[cg_push_count - 1];
+        if (entry >= 0) cg_pop(entry) else cg_alu_imm(0, 0 - entry, 4)
+    }
+    match stmt.kind {
+        Break -> cg_jump_id(0 - 1, loop.break_label);
+        Continue -> cg_jump_id(0 - 1, loop.continue_label);
+        _ -> error("internal: expected loop jump")
+    }
+    for index in loop.push_count..saved_count {
+        entry: int = cg_push_regs[index];
+        if (entry >= 0) cg_saved_adjust(entry, 1)
+    }
+    cg_push_count = saved_count;
+    cg_rsp_off = saved_offset
+}
+
 emit_loop_increment(item: *Obj) noregion raises Error {
     if (item.cg_register as int > 1) cg_alu_imm(0, 1, item.cg_register as int) else {
         emit_load_var(item, ty_int);
@@ -2119,6 +2170,8 @@ emit_loop_increment(item: *Obj) noregion raises Error {
 
 gen_stmt(n: *Stmt) noregion raises Error {
     match n.kind {
+        Break -> gen_loop_jump(n);
+        Continue -> gen_loop_jump(n);
         Return k -> {
             lhs: ?*Expr = k.lhs;
             if (lhs != null) {
@@ -2174,17 +2227,21 @@ gen_stmt(n: *Stmt) noregion raises Error {
             // Test at the bottom: each iteration takes one branch, not two.
             lb: int = new_label();
             ltest: int = new_label();
+            lend: int = new_label();
             cg_jump_id(0 - 1, ltest);
             cg_label_id(lb);
-            gen_stmt(k.body);
+            gen_loop_body(k.body, lend, ltest);
             cg_label_id(ltest);
             gen_cond(k.cond, lb, true);
+            cg_label_id(lend);
             return
         }
         For k -> {
             // Loops test at the bottom; entry jumps to the first test.
             lb3: int = new_label();
             lt3: int = new_label();
+            lend3: int = new_label();
+            lstep3: int = new_label();
             hu3: ?*Expr = k.hi;
             if (hu3 != null) {
                 gen_expr(k.iter);
@@ -2193,11 +2250,13 @@ gen_stmt(n: *Stmt) noregion raises Error {
                 emit_store_var(k.n, ty_int);
                 cg_jump_id(0 - 1, lt3);
                 cg_label_id(lb3);
-                gen_stmt(k.body);
+                gen_loop_body(k.body, lend3, lstep3);
+                cg_label_id(lstep3);
                 emit_loop_increment(k.item);
                 cg_label_id(lt3);
                 emit_loop_compare(k.item, k.n);
                 cg_jump_id(12, lb3);
+                cg_label_id(lend3);
                 return
             }
             co2: ?*Obj = k.coll;
@@ -2229,11 +2288,13 @@ gen_stmt(n: *Stmt) noregion raises Error {
                     load_mem(ity);
                     emit_store_var(k.item, ity)
                 }
-                gen_stmt(k.body);
+                gen_loop_body(k.body, lend3, lstep3);
+                cg_label_id(lstep3);
                 emit_loop_increment(iu2);
                 cg_label_id(lt3);
                 emit_loop_compare(iu2, k.n);
                 cg_jump_id(2, lb3);
+                cg_label_id(lend3);
                 return
             }
             gen_expr(k.iter);
@@ -2257,11 +2318,13 @@ gen_stmt(n: *Stmt) noregion raises Error {
                 load_mem(ity);
                 emit_store_var(k.item, ity)
             }
-            gen_stmt(k.body);
+            gen_loop_body(k.body, lend3, lstep3);
+            cg_label_id(lstep3);
             emit_loop_increment(iu2);
             cg_label_id(lt3);
             emit_loop_compare(iu2, k.n);
             cg_jump_id(2, lb3);
+            cg_label_id(lend3);
             return
         }
         Match k -> {
@@ -2292,7 +2355,9 @@ gen_stmt(n: *Stmt) noregion raises Error {
             cg_call("l8_try_begin");
             cg_alu_imm(7, 0, 0);
             cg_jump_id(5, lcatch);
+            cg_try_depth = cg_try_depth + 1;
             gen_stmt(k.body);
+            cg_try_depth = cg_try_depth - 1;
             cg_call("l8_try_end");
             cg_jump_id(0 - 1, ltryend);
             cg_label_id(lcatch);
@@ -2541,6 +2606,8 @@ cg_temps_stmts(stmts: ?*Stmt, off: int) raises Error: int {
             }
             Region k -> o = cg_temps_stmts(k.body, o);
             Expect _ -> { }
+            Break -> { }
+            Continue -> { }
         }
         q = q.next
     }
@@ -2941,6 +3008,8 @@ emit_text() noregion raises Error {
             current_fn = fn;
             current_return_lab = new_label();
             cg_region_depth = 0;
+            cg_try_depth = 0;
+            cg_loop = null;
             cg_global(fn.link_name);
             cg_label(fn.link_name);
             cg_func_entry();
