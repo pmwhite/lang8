@@ -81,6 +81,11 @@ in a `for`, it advances to the next range value or collection element first.
 Both unwind regions and exception handlers exited by the jump, preserving those
 that enclose the loop. A `break` inside a nested loop exits only that loop.
 
+Collection loops may bind both position and value: `for index, value in items`.
+The index is an `int` starting at zero. Both bindings are local copies refreshed
+each iteration; assigning either does not change the collection or loop counter.
+The collection is evaluated once, and empty collections execute no iterations.
+
 `build` sends typed compiler operations directly to the assembler's in-memory
 section, symbol, relocation, and instruction encoders. It parses only the static
 `runtime.s` input and imported native sources, then writes ET_EXEC directly from
