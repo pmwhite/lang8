@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 12. Broad tag activation for a narrower capability
-
-Status: open; related style rule approved.
-Location: `programs/better/pace.l8` — use_tag std, skate; and math helper calls.
-
-Observation: Enabling skate makes unrelated imported declarations available unqualified alongside math helpers.
-
-Follow-up: Use qualified references for isolated dependencies or a coherent public API tag for pervasive use. Coordinate with case 10; tags are not namespaces.
-
 ## 13. Consumers repeat implementation composition
 
 Status: open; related style rule approved.
