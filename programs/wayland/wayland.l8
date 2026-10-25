@@ -8,6 +8,25 @@ import "keyboard.l8";
 
 import "cursor.l8";
 
+use_tag wayland_internal;
+
+// Application descriptors only; the adapter adds the display socket itself.
+type WLPollFD = {
+    fd: i32;
+    events: int;
+    revents: int
+}
+
+// Linux pollfd packs the two 16-bit masks after the descriptor.
+tag wayland_internal
+type WLPollNativeFD = {
+    fd: i32;
+    masks: i32
+}
+
+tag wayland_internal
+extern wl_poll_native(fds: *WLPollNativeFD, count: int, timeout: i32): int = l8_poll;
+
 // All retained callback data is allocated in the immortal heap by wl_window_open.
 // Keyboard text is buffered here; callbacks never enter application code.
 type WLKey = {
@@ -810,4 +829,31 @@ wl_window_finish(w: *WLWindow, revents: int) {
         if (wl_display_read_events(w.display) < 0i32) w.closed = true
     } else wl_display_cancel_read(w.display);
     if ((revents & 56) != 0 || wl_display_dispatch_pending(w.display) < 0i32) w.closed = true
+}
+
+// Own the complete prepare/poll/finish sequence, with operation-local storage.
+// Return Linux poll's count (including the display), or negative errno. EINTR
+// is returned after cancelling the prepared read so the caller can retry.
+wl_window_poll(w: *WLWindow, descriptors: []WLPollFD, timeout: i32): int {
+    for index in 0..len(descriptors) descriptors[index].revents = 0;
+    if (w.closed) return -5;
+    region {
+        native: []WLPollNativeFD = new WLPollNativeFD[len(descriptors) + 1](WLPollNativeFD { fd: -1i32, masks: 0i32 });
+        for index in 0..len(descriptors) {
+            native[index + 1].fd = descriptors[index].fd;
+            native[index + 1].masks = (descriptors[index].events & 65535) trunc i32
+        }
+        native[0].fd = wl_display_get_fd(w.display);
+        events: int = wl_window_prepare(w);
+        if (events < 0) return -5;
+        native[0].masks = events trunc i32;
+        status: int = wl_poll_native(&native[0], len(native), timeout);
+        display_events: int = 0;
+        if (status >= 0) display_events = native[0].masks as int >> 16 & 65535;
+        wl_window_finish(w, display_events);
+        if (status >= 0) {
+            for index in 0..len(descriptors) descriptors[index].revents = native[index + 1].masks as int >> 16 & 65535
+        }
+        status
+    }
 }

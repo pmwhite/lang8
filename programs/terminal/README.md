@@ -79,7 +79,8 @@ locale lookup, and error reporting; the graphical executable is dynamically link
 [`../wayland/`](../wayland/README.md) owns the Wayland connection, typed L8
 listeners, xdg-shell lifecycle, EGL context, and xkbcommon input. Configure events
 are acknowledged before attaching buffers. Frame callbacks pace drawing, and the
-Wayland socket is polled alongside the PTY with paired prepare/read/cancel calls.
+Wayland socket is polled alongside the PTY through `wl_window_poll`, which owns
+the paired prepare/read/cancel calls, including timeout and interruption.
 Closing the compositor connection also closes the PTY and reaps the child.
 Server-side decorations are requested when xdg-decoration is available; otherwise
 window management uses the compositor's shortcuts. Buffers currently use scale 1

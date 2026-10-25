@@ -17,7 +17,24 @@ last acknowledged configure; `changed` requests a redraw and `closed` requests
 shutdown. The library requests server-side decorations if supported. The terminal
 in `../terminal/` is a complete example with a PTY and animated renderer.
 
-Integrate `wl_display_get_fd(window.display)` into the application's poll loop:
+For an ordinary poll loop, use `wl_window_poll(window, descriptors, timeout)`.
+Pass a slice of `WLPollFD { fd: i32, events: int, revents: int }` containing
+only application descriptors; the adapter adds the display socket itself.
+Set `events` to Linux poll masks, such as 1 for readable or 5 for readable
+and writable. It clears and then fills `revents`, handles display flush
+backpressure, and completes every prepared read before returning, including
+timeout and interruption. Its result is poll's readiness count (including
+the display), zero on timeout, or negative Linux errno; -4 is interruption
+and -5 is display preparation failure. Check `window.closed` as well.
+
+The adapter uses a region for one native descriptor array per call, reclaimed
+before return. Consume keys, run `wl_window_repeat`, and choose a timeout
+bounded by the next repeat or redraw before calling it. Drawing and other
+dispatch operations are safe after it returns. The terminal demonstrates a
+PTY descriptor alongside the display using this interface.
+
+For custom event-loop integration, the low-level interface remains available.
+Integrate `wl_display_get_fd(window.display)` into that loop:
 
 1. Dispatch pending events and consume the window's bounded `keys` ring.
 2. Call `wl_window_repeat(window, wl_mono_ms())` for keyboard repeats; cap the poll
