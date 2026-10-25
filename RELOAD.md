@@ -208,9 +208,18 @@ requesting screenshots during a reload: its screenshot and module download
 share a buffer. The current host keeps those separate and cancels replaced
 requests, ignoring their late callbacks.
 
-Decoded instances currently remain on the native host's bump heap (the
-Darwin runtime reserves 256 MiB). A long session can exhaust it. The host
-logs its heap use and defers further reloads once 160 MiB is used, leaving
-room for decoding and transfer rather than letting the allocator terminate
-the app. Close and reopen the app to continue; reclaiming old instances is
-still needed for unbounded reload sessions.
+The native host owns each decoded instance in an independent arena, including
+its input bytes, interpreter stacks, and reserved linear-memory mapping.
+Transfer reports and download handling use lexical scratch regions. Binding
+validates a replacement before publishing its imports and callback target; a
+decode, allocation, or binding failure leaves the previous instance active.
+Once published, a trap in the new build is reported on that build.
+
+Callbacks borrow the current instance. Reloads are deferred while a module
+callback or another reload is running. Replacing an inactive instance drops its
+arena and unmaps its memory. The initial instance can remain suspended inside
+`UIApplicationMain`; its arena stays alive until that call returns. Thus normal
+reload sessions retain the current instance and that initial suspended instance,
+plus a candidate during replacement. There is no process-heap threshold requiring
+a restart after a fixed number of reloads. External UIKit resources still need
+the program's normal explicit cleanup.

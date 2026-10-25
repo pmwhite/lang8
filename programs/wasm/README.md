@@ -12,7 +12,7 @@ instances, calls, memory and the transfer of persistent state.
 | `interp.l8` | The interpreter: each function decoded once into words (an operation and its immediates, branches resolved to a target and a stack height), then run in a loop; frames, operands and exception handlers of its own; memory one mapped region read as bytes and as words |
 | `sys.l8` | The standard imports (`web/README.md`, "Host interface"), natively: files, output, clocks, the environment, `qsort` through the module's comparator, the `l8 test` protocol on fd 3; helpers for a host's own imports (`wasm_str_at`, `wasm_new_bytes`, `wasm_alloc`) |
 | `persist.l8` | Persistent globals across instances: the manifest, which old value a new type can take, and the copy (`wasm_transfer`), as `web/reload.js` does it |
-| `native.s` | What L8 cannot say: memory that never moves (mmap), float bit casts, a call of a native function by address with integer and float arguments, and 1024 callback trampolines (x86-64 Linux; `native.arm64-darwin.s` for iOS) |
+| `native.s` | What L8 cannot say: a word view of mapped bytes, float bit casts, a call of a native function by address with integer and float arguments, and 1024 callback trampolines (x86-64 Linux; `native.arm64-darwin.s` for iOS) |
 | `proxy.l8` | A host that answers imports with native code by the module's `l8imports` section: numbers, floats, pointers into the module's memory made native (and back, in a callback's arguments), function values as trampolines (by name, so they outlive a reload); registered functions first, the module's runtime's own imports to sys.l8, then the resolver (dlsym: the platform's and the program's own functions, which the linker exports), then sys.l8 |
 | `run.l8` | `wasmrun module.wasm [args...]`: a module run from the command line, as `node web/run.mjs` runs one |
 | `ios/host.l8` | The hot reload host for an iPhone (RELOAD.md): the app's program as a module from the development server, run with its imports proxied, each build a reload |
@@ -36,11 +36,26 @@ wasm_sys_bind(inst);                                     // or wasm_proxy_bind
 status: int = wasm_start(inst);                          // _start; or wasm_call_export
 ```
 
-Binding is explicit and allocates nothing, and the interpreter's run path
-needs no `noregion`, so that an instance can be made, bound and run from
-a C callback (UIKit's): a host keeps the instance it runs as an address
-(`instance_address`, `instance_at` in proxy.l8), since a pointer in a
-global would need the allocation marked immortal.
+Binding is explicit. Proxy binding validates imports in a scratch region before
+publishing numeric addresses and ABI descriptions; a format failure leaves the
+previous binding intact. The interpreter's run path needs no `noregion`, so an
+instance can be made, bound and run from a C callback.
+
+For reclaimable instances, construct the decoder and interpreter inside `own`
+and copy any borrowed input bytes into that arena first. The native
+`l8_reserve_bytes` runtime entry point reserves zeroed, nonmoving linear memory
+and links its mapping to the current arena; dropping the owner unmaps it along
+with the decoded instance. Outside an owned arena the mapping has process
+lifetime. This entry point is a trusted native runtime adapter, not a portable
+Wasm import.
+
+`ios/host.l8` keeps an optional owned handle and installs
+`proxy_callback_dispatch` to borrow that handle before calling
+`proxy_callback_instance`. The proxy preserves the borrow during native calls
+and releases scope frames if fault recovery abandons a callback. A host that
+uses owned instances must dispatch callbacks this way. The legacy
+`instance_address`/`instance_at` path is for process-lifetime instances and
+trusted recovery code; a raw address does not keep an arena alive.
 
 A host import gets the arguments as ints, and a str or slice argument is
 an address in `inst.mem8` with its length 8 bytes before it. `wasm_exit`
@@ -56,7 +71,9 @@ the host calls it again with the state set to 2 (`tests/reload.l8`).
 Every compiler fixture runs through it (`l8 test --wasm --runner
 .build/wasmrun`), the compiler built as a module rebuilds itself under it
 byte for byte (7 s, against a quarter of a second under Node's JIT and a
-fifth natively), and `tests/reload.l8` carries the reload fixture.
+fifth natively), and `tests/reload.l8` carries the reload fixture. It also
+constructs and drops 200 native instances, checking that arenas and process-heap
+scratch are reclaimed.
 
 ## On an iPhone
 

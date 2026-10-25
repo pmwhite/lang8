@@ -76,7 +76,22 @@ catch_faults() {
 trap_said(msg: str): int {
     try {
         write(1, "trap: ");
-        write(1, msg);
+        line: []i8 = bytes(msg);
+        count: int = len(line);
+        // Callback duration depends on scheduling, not the proxy contract.
+        prefix: str = "done in ms ";
+        duration: bool = count >= len(prefix);
+        if (duration) {
+            for index in 0..len(prefix) {
+                if (line[index] != prefix[index]) duration = false
+            }
+        }
+        if (duration) {
+            end: int = count;
+            while (end > len(prefix) && line[end - 1] >= '0' && line[end - 1] <= '9') end = end - 1;
+            if (end < count && line[end - 1] == ' ') count = end - 1
+        }
+        write_bytes_n(1, line, count);
         write(1, "\n")
     } with IoError _e -> { }
     0
@@ -130,6 +145,39 @@ px_many(
     a + 10 * b + 100 * c + 1000 * d + 10000 * e + 100000 * f + 1000000 * g + 10000000 * h
 }
 
+active: ?owned *WasmInstance = null;
+
+dispatch(index: int, args: []int, native_scope: int): int {
+    borrow active {
+        return proxy_callback_instance(active, index, args, native_scope)
+    }
+}
+
+extern proxy_test_arena_live(): int = l8_arena_live;
+
+check_binding_failure(path: str) raises WasmFormat, WasmNoMemory {
+    previous: int = proxy_current;
+    bound: int = proxy_bound;
+    address: int = pi_address[0];
+    candidate: owned *WasmInstance = own {
+        wasm_instantiate(wasm_decode(wasm_read_file(path)), 64, &wasm_proxy_host)
+    };
+    borrow candidate {
+        at: int = wasm_custom(candidate.m, "l8imports");
+        if (at < 0) wr_fail("proxy fixture has no native import metadata");
+        candidate.m.bytes[at] = 0i8;
+        rejected: bool = false;
+        try {
+            wasm_proxy_bind(candidate)
+        } with WasmFormat _error -> {
+            rejected = true
+        }
+        if (!rejected) wr_fail("invalid native metadata was accepted")
+    }
+    drop candidate;
+    if (proxy_current != previous || proxy_bound != bound || pi_address[0] != address) wr_fail("failed binding replaced the active instance")
+}
+
 main(argc: int, argv: []str) noregion raises IoError: int {
     if (argc < 2) {
         eprint("usage: wasm-proxytest proxy_mod.wasm");
@@ -150,16 +198,25 @@ main(argc: int, argv: []str) noregion raises IoError: int {
     args: []str = new str[1]("proxy");
     sys_set_args(args);
     try {
-        inst: *WasmInstance = wasm_instantiate(wasm_decode(wasm_read_file(argv[1])),
-            64, &wasm_proxy_host);
-        wasm_proxy_bind(inst);
-        status: int = wasm_start(inst);
-        if (wasm_trapped(inst)) {
-            write(1, "ended by a trap: ");
-            write(1, wasm_trap_message(inst));
-            write(1, "\n");
-            return 0
+        drop active;
+        active = own {
+            wasm_instantiate(wasm_decode(wasm_read_file(argv[1])), 64, &wasm_proxy_host)
+        };
+        proxy_callback_dispatch = &dispatch;
+        status: int = 0;
+        borrow active {
+            wasm_proxy_bind(active);
+            check_binding_failure(argv[1]);
+            status = wasm_start(active);
+            if (wasm_trapped(active)) {
+                write(1, "ended by a trap: ");
+                write(1, wasm_trap_message(active));
+                write(1, "\n");
+                status = 0
+            }
         }
+        drop active;
+        if (proxy_test_arena_live() != 0) wr_fail("callback recovery retained an arena");
         status
     } with WasmFormat e -> {
         write(2, "proxytest: ");

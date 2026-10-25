@@ -115,8 +115,22 @@ w_register_class(cls: int): int {
 }
 
 // ---- the module ----
-// The instance running, as an address (a callback sets it at a reload).
-host_inst: int = 0;
+// The first main() can remain suspended inside UIApplicationMain. Keep that
+// owner's arena until it returns; later instances are reclaimed on replacement.
+host_active: ?owned *WasmInstance = null;
+
+host_startup_retired: ?owned *WasmInstance = null;
+
+host_reloading: bool = false;
+
+host_reload_pending: bool = false;
+
+host_callback(index: int, args: []int, native_scope: int): int {
+    if (host_active == null) return 0;
+    borrow host_active {
+        return proxy_callback_instance(host_active, index, args, native_scope)
+    }
+}
 
 say(s: str) {
     try {
@@ -200,13 +214,15 @@ post_log(line: []i8, n: int) {
 
 // The module's l8_std_write: written, and fds 1 and 2 sent on.
 log_write(fd: int, p: int, n: int): int {
-    r: int = sys_write_raw(fd, p, n);
-    if ((fd == 1 || fd == 2) && n > 0 && n < 65536) {
-        b: []i8 = new i8[n](0i8);
-        _m: int = memcpy_into(b, p, n);
-        post_log(b, n)
+    region {
+        r: int = sys_write_raw(fd, p, n);
+        if ((fd == 1 || fd == 2) && n > 0 && n < 65536) {
+            b: []i8 = new i8[n](0i8);
+            _m: int = memcpy_into(b, p, n);
+            post_log(b, n)
+        }
+        r
     }
-    r
 }
 
 trapped(msg: str): int {
@@ -254,70 +270,98 @@ say_int(s: str, n: int) {
     } with IoError _e -> { }
 }
 
-// An instance of the module in bytes, bound.
-host_instantiate(bytes: []i8@new) raises WasmFormat, WasmNoMemory: *WasmInstance@new {
-    inst: *WasmInstance = wasm_instantiate(wasm_decode(bytes), 512, &wasm_proxy_host);
-    wasm_proxy_bind(inst);
-    inst
+// Copy the input into the instance's arena, including the decoder's borrowed
+// views. Its linear-memory mapping belongs to the same explicit owner.
+host_instantiate(bytes: []i8) raises WasmFormat, WasmNoMemory: owned *WasmInstance {
+    own {
+        copy: []i8 = new i8[len(bytes)](0i8);
+        memcpy(copy, 0, bytes, 0, len(bytes));
+        wasm_instantiate(wasm_decode(copy), 512, &wasm_proxy_host)
+    }
 }
 
 // The first run: main, which on an iPhone calls UIApplicationMain and
 // never returns.
-host_run(bytes: []i8@new) {
+host_run(bytes: []i8) {
+    candidate: ?owned *WasmInstance = null;
     try {
-        inst: *WasmInstance = host_instantiate(bytes);
-        host_inst = instance_address(inst);
-        say("running");
-        status: int = wasm_start(inst);
-        if (wasm_trapped(inst)) {
-            say("trap:");
-            say(wasm_trap_message(inst))
+        candidate = host_instantiate(bytes);
+        borrow candidate {
+            wasm_proxy_bind(candidate)
         }
-        say_int("the module ended with status", status)
+        drop host_active;
+        host_active = move candidate;
+        borrow host_active {
+            say("running");
+            status: int = wasm_start(host_active);
+            if (wasm_trapped(host_active)) {
+                say("trap:");
+                say(wasm_trap_message(host_active))
+            }
+            say_int("the module ended with status", status)
+        }
+        drop host_active;
+        drop host_startup_retired
     } with WasmFormat e -> {
         say("the module cannot be read:");
         say(e.msg)
     } with WasmNoMemory -> {
         say("no memory for the module")
     }
+    drop candidate
 }
 
 // A reload: the new build's instance takes the persistent globals, its
 // ordinary globals are initialized, and its reload() makes the app again.
-extern host_heap_used(): int = l8_heap_used;
-
-host_reload(bytes: []i8@new) {
-    if (host_inst == 0) return;
-    // Decoded instances currently remain on the native bump heap. The
-    // Darwin runtime has 256 MiB: leave 96 MiB for decoding, binding and
-    // transfer instead of letting its allocator terminate the app.
-    used: int = host_heap_used();
-    say_int("native heap MiB", used / 1048576);
-    if (used >= 160 * 1048576) {
-        say("reload deferred: native heap is nearly full; close and reopen the app to continue");
+host_reload(bytes: []i8) {
+    if (host_active == null) return;
+    if (cb_under_way != 0 || host_reloading) {
+        host_reload_pending = true;
+        say("reload deferred: the module is still running");
         return
     }
-    old: *WasmInstance = instance_at(host_inst);
+    host_reloading = true;
+    candidate: ?owned *WasmInstance = null;
     try {
-        inst: *WasmInstance = host_instantiate(bytes);
-        t: *Transfer = wasm_transfer(old, inst);
-        for i in 0..t.nlines say(t.lines[i]);
-        say_int("persistent globals carried:", t.carried + t.migrated);
-        host_inst = instance_address(inst);
-        _g: int = wasm_call_export(inst, "l8_init_globals", 0, 0, 0, 0, 0);
-        if (wasm_export_function(inst.m, "reload") >= 0) {
-            _r: int = wasm_call_export(inst, "reload", 0, 0, 0, 0, 0);
-            if (wasm_trapped(inst)) {
-                say("reload trapped:");
-                say(wasm_trap_message(inst))
-            } else say("reloaded")
-        } else say("the module has no reload(): its state is carried, but nothing is shown again until the app restarts")
+        candidate = host_instantiate(bytes);
+        suspended: bool = false;
+        borrow host_active {
+            suspended = host_active.depth != 0;
+            borrow candidate {
+                region {
+                    t: *Transfer = wasm_transfer(host_active, candidate);
+                    for i in 0..t.nlines say(t.lines[i]);
+                    say_int("persistent globals carried:", t.carried + t.migrated);
+                    wasm_proxy_bind(candidate)
+                }
+            }
+        }
+        previous: ?owned *WasmInstance = move host_active;
+        host_active = move candidate;
+        if (suspended) {
+            drop host_startup_retired;
+            host_startup_retired = move previous
+        } else
+            drop previous;
+        borrow host_active {
+            _g: int = wasm_call_export(host_active, "l8_init_globals", 0, 0, 0, 0,
+                0);
+            if (wasm_export_function(host_active.m, "reload") >= 0) {
+                _r: int = wasm_call_export(host_active, "reload", 0, 0, 0, 0, 0);
+                if (wasm_trapped(host_active)) {
+                    say("reload trapped:");
+                    say(wasm_trap_message(host_active))
+                } else say("reloaded")
+            } else say("the module has no reload(): its state is carried, but nothing is shown again until the app restarts")
+        }
     } with WasmFormat e -> {
         say("the build cannot be read:");
         say(e.msg)
     } with WasmNoMemory -> {
         say("no memory for the build")
     }
+    drop candidate;
+    host_reloading = false
 }
 
 // ---- faults as traps ----
@@ -771,7 +815,14 @@ extern msg_timer(
 ): int = objc_msgSend;
 
 host_retry(_self: int, _cmd: int, _timer: int): int {
-    if (build_task == 0) wait_for_build();
+    region {
+        if (build_task == 0) {
+            if (host_reload_pending) {
+                host_reload_pending = false;
+                start_task(2, "/build.wasm")
+            } else wait_for_build()
+        }
+    }
     0
 }
 
@@ -782,7 +833,9 @@ retry_commands_later() {
 }
 
 host_retry_commands(_self: int, _cmd: int, _timer: int): int {
-    if (ctl_task == 0) wait_for_command();
+    region {
+        if (ctl_task == 0) wait_for_command()
+    }
     0
 }
 
@@ -793,50 +846,52 @@ host_done(
     task: int,
     error: int
 ): int {
-    status: int = 0;
-    response: int = msg(task, sel("response"));
-    if (error == 0 && response != 0) status = msg(response, sel("statusCode"));
-    if (task == ctl_task && ctl_task != 0) {
-        ctl_task = 0;
-        if (status == 200) {
-            run_commands();
-            wait_for_command()
-        } else retry_commands_later();
-        return 0
-    }
-    if (task != build_task || build_task == 0) return 0;
-    build_task = 0;
-    kind: int = task_kind;
-    task_kind = 0;
-    if (kind == 1) {
-        if (status == 200) {
-            build: int = json_int("\"build\":");
-            if (build > since) {
-                since = build;
-                if (json_true("\"ok\":")) {
-                    say_int("build", build);
-                    start_task(2, "/build.wasm");
-                    return 0
-                }
-                say_int("build failed on the server:", build)
-            }
-            wait_for_build()
-        } else {
-            say_int("the server did not answer; status", status);
-            // (The setting may have changed; again in a while, by a timer:
-            // never a sleep on the main thread, which is UIKit's.)
-            read_server();
-            retry_later()
+    region {
+        status: int = 0;
+        response: int = msg(task, sel("response"));
+        if (error == 0 && response != 0) status = msg(response, sel("statusCode"));
+        if (task == ctl_task && ctl_task != 0) {
+            ctl_task = 0;
+            if (status == 200) {
+                run_commands();
+                wait_for_command()
+            } else retry_commands_later();
+            return 0
         }
-    } else if (kind == 2) {
-        if (status == 200 && task_got_n > 8) {
-            module: []i8 = new i8[task_got_n](0i8);
-            memcpy(module, 0, task_got, 0, task_got_n);
-            host_reload(module)
-        } else say_int("the build could not be fetched; status", status);
-        wait_for_build()
+        if (task != build_task || build_task == 0) return 0;
+        build_task = 0;
+        kind: int = task_kind;
+        task_kind = 0;
+        if (kind == 1) {
+            if (status == 200) {
+                build: int = json_int("\"build\":");
+                if (build > since) {
+                    since = build;
+                    if (json_true("\"ok\":")) {
+                        say_int("build", build);
+                        start_task(2, "/build.wasm");
+                        return 0
+                    }
+                    say_int("build failed on the server:", build)
+                }
+                wait_for_build()
+            } else {
+                say_int("the server did not answer; status", status);
+                // (The setting may have changed; again in a while, by a timer:
+                // never a sleep on the main thread, which is UIKit's.)
+                read_server();
+                retry_later()
+            }
+        } else if (kind == 2) {
+            if (status == 200 && task_got_n > 8) {
+                module: []i8 = new i8[task_got_n](0i8);
+                memcpy(module, 0, task_got, 0, task_got_n);
+                host_reload(module)
+            } else say_int("the build could not be fetched; status", status);
+            if (host_reload_pending) retry_later() else wait_for_build()
+        }
+        0
     }
-    0
 }
 
 // A GET of path before the app runs (NSURLSession needs no run loop for a
@@ -958,6 +1013,7 @@ main(argc: int, argv: []str) noregion: int {
     // platform's functions and this program's own (the runtime's too: the
     // compiler's linker exports every global).
     proxy_set_resolver(&resolve);
+    proxy_callback_dispatch = &host_callback;
     _x: int = NSSetUncaughtExceptionHandler(&on_exception);
     proxy_bind("objc_allocateClassPair", addr_3(&w_allocate_class));
     proxy_bind("objc_registerClassPair", addr_1(&w_register_class));

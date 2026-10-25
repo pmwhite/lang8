@@ -3,36 +3,9 @@
 # no scaled addressing). native.arm64-darwin.s is the same for iOS.
 .section .text
 
-# wasm_mem_map(size): []i8 -- size bytes of zeroed memory that never move
-# (mmap, reserved but not committed), as an L8 byte slice: its length is
-# the 8 bytes before it. wasm_mem_words gives a second view of the same
-# memory as []int, starting 8 bytes in (its length word is the slice's
-# first 8 bytes, which a module never uses). 0 when it cannot be had.
-.globl wasm_mem_map
-wasm_mem_map:
-    push %rbx
-    mov %rdi, %rbx
-    mov $9, %rax
-    mov $0, %rdi
-    mov %rbx, %rsi
-    add $16, %rsi
-    mov $3, %rdx
-    mov $16418, %r10
-    mov $-1, %r8
-    mov $0, %r9
-    syscall
-    cmp $-4095, %rax
-    jae .Lmap_failed
-    mov %rbx, 8(%rax)
-    add $16, %rax
-    pop %rbx
-    ret
-.Lmap_failed:
-    mov $0, %rax
-    pop %rbx
-    ret
-
-# wasm_mem_words(m: []i8): []int
+# wasm_mem_words(m: []i8): []int -- view of l8_reserve_bytes storage,
+# starting eight bytes in. A module never uses those first eight bytes,
+# which hold the word view's length.
 .globl wasm_mem_words
 wasm_mem_words:
     mov -8(%rdi), %rax

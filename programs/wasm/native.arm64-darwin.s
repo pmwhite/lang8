@@ -5,36 +5,7 @@
     .section __TEXT,__text,regular,pure_instructions
     .p2align 2
 
-// wasm_mem_map(size): []i8 -- size bytes of zeroed memory that never move
-// (an anonymous mapping, committed as touched), as an L8 byte slice: its
-// length is the 8 bytes before it. 0 when it cannot be had.
-    .globl _wasm_mem_map
-_wasm_mem_map:
-    stp x29, x30, [sp, #-32]!
-    mov x29, sp
-    str x19, [sp, #16]
-    mov x19, x0
-    mov x0, #0
-    add x1, x19, #16
-    mov x2, #3
-    mov x3, #0x1002
-    mov x4, #-1
-    mov x5, #0
-    bl _mmap
-    cmn x0, #1
-    b.eq Lmap_failed
-    str x19, [x0, #8]
-    add x0, x0, #16
-    ldr x19, [sp, #16]
-    ldp x29, x30, [sp], #32
-    ret
-Lmap_failed:
-    mov x0, #0
-    ldr x19, [sp, #16]
-    ldp x29, x30, [sp], #32
-    ret
-
-// wasm_mem_words(m: []i8): []int -- a view of the same memory as words,
+// wasm_mem_words(m: []i8): []int -- a view of l8_reserve_bytes as words,
 // 8 bytes in (its length word is the slice's first 8 bytes).
     .globl _wasm_mem_words
 _wasm_mem_words:

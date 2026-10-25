@@ -133,75 +133,92 @@ proxy_abi_import(name: []i8): bool {
         "l8_test_index") || streq(name, "l8_test_record") || streq(name, "l8_test_expect")
 }
 
-// The l8imports section: the kinds of import i's parameters and result,
-// by its index, into the tables.
-proxy_kinds(m: *WasmModule@new, i: int, nparams: int) raises WasmFormat {
-    for k in 0..PX_PARAMS pi_kinds[i * PX_PARAMS + k] = IK_INT trunc i8;
-    pi_result[i] = IK_INT;
+// Binding is prepared in scratch storage. A format failure leaves the current
+// instance's imports and callback target intact.
+type ProxyBindingDraft = {
+    addresses: []int;
+    system: []bool;
+    results: []int;
+    kinds: []i8
+}
+
+proxy_parse_kinds(m: *WasmModule@new, draft: *ProxyBindingDraft) raises WasmFormat {
     at: int = wasm_custom(m, "l8imports");
     if (at < 0) return;
-    r: *WasmReader = new WasmReader { b: m.bytes, at: at, end: wasm_custom_end(m,
+    reader: *WasmReader = new WasmReader { b: m.bytes, at: at, end: wasm_custom_end(m,
         "l8imports") };
-    if (wr_uleb(r) != 2) return;
-    n: int = wr_uleb(r);
-    for _i in 0..n {
-        index: int = wr_uleb(r);
-        _iname: []i8 = wr_name(r);
-        np: int = wr_uleb(r);
-        same: bool = index == i && np == nparams;
-        for k in 0..np {
-            kind: int = wr_byte(r);
-            if (same && k < PX_PARAMS) pi_kinds[i * PX_PARAMS + k] = kind trunc i8
+    if (wr_uleb(reader) != 2) wr_fail("unsupported native import metadata version");
+    count: int = wr_uleb(reader);
+    seen: []bool = new bool[len(m.imports)](false);
+    for _entry in 0..count {
+        index: int = wr_uleb(reader);
+        _name: []i8 = wr_name(reader);
+        if (index < 0 || index >= len(m.imports)) wr_fail("native import metadata index is out of range");
+        if (seen[index]) wr_fail("duplicate native import metadata");
+        seen[index] = true;
+        parameters: int = wr_uleb(reader);
+        if (parameters != len(m.sigs[m.imports[index].sig].params)) wr_fail("native import parameter count does not match its signature");
+        if (parameters > PX_PARAMS) wr_fail("too many parameters for the native proxy");
+        for parameter in 0..parameters {
+            kind: int = wr_byte(reader);
+            if (kind < IK_INT || kind > IK_COUNTED) wr_fail("unknown native import parameter kind");
+            draft.kinds[index * PX_PARAMS + parameter] = kind trunc i8
         }
-        res: int = wr_byte(r);
-        if (same) {
-            pi_result[i] = res;
-            return
-        }
+        result: int = wr_byte(reader);
+        if (result < IK_INT || result > IK_COUNTED) wr_fail("unknown native import result kind");
+        draft.results[index] = result
     }
 }
 
-// Bind inst's imports: before it runs, and again for each instance that
-// runs (a reload's). The standard imports are bound too, and callbacks go
-// to inst.
-wasm_proxy_bind(inst: *WasmInstance@new) raises WasmFormat {
-    if (!proxy_callbacks_on) {
-        _s: int = wasm_native_set_callback(&proxy_callback);
-        proxy_callbacks_on = true
-    }
-    wasm_sys_bind(inst);
-    proxy_current = instance_address(inst);
+// Prepare every binding before publishing any of them. Names and readers are
+// operation-local; only native addresses and numeric ABI descriptions survive.
+wasm_proxy_bind(inst: *WasmInstance) raises WasmFormat {
     m: *WasmModule = inst.m;
-    n: int = len(m.imports);
-    if (n > PX_MAX) wr_fail("too many imports for the proxy");
-    for i in 0..n {
-        name: []i8 = m.imports[i].name;
-        np: int = len(m.sigs[m.imports[i].sig].params);
-        // Registered functions first; the imports that are the module's
-        // runtime's (they build values in its memory) go to the standard
-        // host; everything else is native, as if the module were (the
-        // resolver); what it does not find, the standard host may know.
-        pi_address[i] = proxy_find(name);
-        pi_sys[i] = false;
-        if (pi_address[i] == 0 && proxy_abi_import(name)) pi_sys[i] = true else if (pi_address[i] == 0) {
-            resolver: ?fn(name: str): int = proxy_resolver;
-            if (resolver != null) {
-                // As the native link binds it: the runtime's shim of the
-                // name (l8rt_open translates Linux's flags, say) before
-                // the platform's own.
-                shim: []i8 = new i8[5 + len(name)](0i8);
-                memcpy(shim, 0, bytes("l8rt_"), 0, 5);
-                memcpy(shim, 5, name, 0, len(name));
-                pi_address[i] = resolver(cstr(shim));
-                if (pi_address[i] == 0) pi_address[i] = resolver(cstr(name))
+    count: int = len(m.imports);
+    if (count > PX_MAX) wr_fail("too many imports for the proxy");
+    region {
+        draft: ProxyBindingDraft = ProxyBindingDraft {
+            addresses: new int[count](0),
+            system: new bool[count](false),
+            results: new int[count](IK_INT),
+            kinds: new i8[count * PX_PARAMS](IK_INT trunc i8)
+        };
+        proxy_parse_kinds(m, &draft);
+        for index in 0..count {
+            name: []i8 = m.imports[index].name;
+            if (len(m.sigs[m.imports[index].sig].params) > PX_PARAMS) wr_fail("too many parameters for the native proxy");
+            address: int = proxy_find(name);
+            system: bool = false;
+            if (address == 0 && proxy_abi_import(name)) system = true else if (address == 0) {
+                resolver: ?fn(name: str): int = proxy_resolver;
+                if (resolver != null) {
+                    shim: []i8 = new i8[5 + len(name)](0i8);
+                    memcpy(shim, 0, bytes("l8rt_"), 0, 5);
+                    memcpy(shim, 5, name, 0, len(name));
+                    address = resolver(cstr(shim));
+                    if (address == 0) address = resolver(cstr(name))
+                }
+                if (address == 0 && sys_kind_of(name) != SYS_NONE) system = true
             }
-            if (pi_address[i] == 0 && wasm_sys_knows(inst, i)) pi_sys[i] = true
+            draft.addresses[index] = address;
+            draft.system[index] = system
         }
-        proxy_kinds(m, i, np)
+        if (!proxy_callbacks_on) {
+            _set: int = wasm_native_set_callback(&proxy_callback);
+            proxy_callbacks_on = true
+        }
+        for index in 0..count {
+            pi_address[index] = draft.addresses[index];
+            pi_sys[index] = draft.system[index];
+            pi_result[index] = draft.results[index];
+            for parameter in 0..PX_PARAMS pi_kinds[index * PX_PARAMS + parameter] = draft.kinds[index * PX_PARAMS + parameter]
+        }
+        wasm_sys_bind(inst);
+        proxy_base = wasm_memory_address(inst.mem8);
+        proxy_max = len(inst.mem8);
+        proxy_bound = inst.id;
+        proxy_current = instance_address(inst)
     }
-    proxy_base = wasm_memory_address(inst.mem8);
-    proxy_max = len(inst.mem8);
-    proxy_bound = inst.id
 }
 
 // ---- callbacks ----
@@ -257,6 +274,15 @@ proxy_trampoline_for(inst: *WasmInstance, ti: int): int {
     wasm_trampoline(k2)
 }
 
+extern proxy_region_depth(): int = l8_region_depth;
+
+extern proxy_region_unwind(depth: int): int = l8_region_unwind;
+
+// An owning host installs this dispatcher and borrows its active instance
+// before calling proxy_callback_instance. The legacy binding path remains
+// available to hosts whose instances have process lifetime.
+proxy_callback_dispatch: ?fn(k: int, args: []int, native_scope: int): int = null;
+
 proxy_callback(
     k: int,
     a0: int,
@@ -265,12 +291,25 @@ proxy_callback(
     a3: int,
     a4: int
 ): int {
-    // (The arguments past the fifth, before anything can call back again.)
     a5: int = wasm_callback_extra(0);
     a6: int = wasm_callback_extra(1);
     a7: int = wasm_callback_extra(2);
-    if (proxy_current == 0) return 0;
-    inst: *WasmInstance = instance_at(proxy_current);
+    native_scope: int = proxy_region_depth();
+    region {
+        args: []int = [a0, a1, a2, a3, a4, a5, a6, a7];
+        dispatch: ?fn(k: int, args: []int, native_scope: int): int = proxy_callback_dispatch;
+        if (dispatch != null) return dispatch(k, args, native_scope);
+        if (proxy_current == 0) return 0;
+        return proxy_callback_instance(instance_at(proxy_current), k, args, native_scope)
+    }
+}
+
+proxy_callback_instance(
+    inst: *WasmInstance,
+    k: int,
+    raw_args: []int,
+    native_scope: int
+): int {
     if (tramp_inst[k] != inst.id) {
         m: *WasmModule = inst.m;
         ni: int = len(m.imports);
@@ -290,6 +329,7 @@ proxy_callback(
     // The instance as it is at entry, for a recovery.
     d: int = cb_under_way;
     if (d < 64) {
+        cb_scope[d] = native_scope;
         cb_k[d] = k;
         cb_frames[d] = inst.nframes;
         cb_sp[d] = inst.sp;
@@ -313,8 +353,8 @@ proxy_callback(
     }
     // A pointer into the module's memory (an element qsort compares, say)
     // comes back as the module's address.
-    args: []int = [proxy_unmap(a0), proxy_unmap(a1), proxy_unmap(a2), proxy_unmap(a3),
-        proxy_unmap(a4), proxy_unmap(a5), proxy_unmap(a6), proxy_unmap(a7)];
+    args: []int = new int[len(raw_args)](0);
+    for index in 0..len(raw_args) args[index] = proxy_unmap(raw_args[index]);
     np: int = 0;
     r: int = 0;
     try {
@@ -363,6 +403,8 @@ cb_under_way: int = 0;
 
 cb_k: []int = new int[64](0);
 
+cb_scope: []int = new int[64](0);
+
 cb_frames: []int = new int[64](0);
 
 cb_sp: []int = new int[64](0);
@@ -393,6 +435,7 @@ wasm_proxy_recover(what: str): bool {
     inst.trapped = false;
     inst.exiting = false;
     cb_under_way = d - 1;
+    proxy_region_unwind(cb_scope[d - 1]);
     _a: int = wasm_callback_abandon();
     false
 }
@@ -484,7 +527,11 @@ wasm_proxy_host(
         }
     }
     ret_float: int = if (pi_result[imp] == IK_FLOAT) 1 else 0;
+    native_scope: int = proxy_region_depth();
     r: int = wasm_native_call(address, proxy_ints, nints, proxy_floats, nfloats, ret_float);
+    // Abandoning a native call skips its intervening L8 return paths. Clear
+    // any scopes those paths would have released before using the instance.
+    proxy_region_unwind(native_scope);
     if (wasm_abandoned() != 0) {
         iname: []i8 = inst.m.imports[imp].name;
         told: []i8 = new i8[25 + len(iname)](0i8);
