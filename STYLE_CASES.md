@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 16. Coherent concepts flattened into argument lists
-
-Status: open; related style rule approved.
-Location: `programs/block-game/block-game-render.l8` — draw_frame, around line 3827.
-
-Observation: The interface has 106 parameters spanning shader bindings, mesh resources, camera, world data and animation.
-
-Follow-up: Design meaningful interface types for concepts that share purpose/lifetime/invariants. Preserve cohesive rendering; avoid an indiscriminate context object or a mechanical argument-count limit.
-
 ## 17. Previous saved state destroyed before successful replacement
 
 Status: open; related style rule approved.
