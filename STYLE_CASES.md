@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 7. Illegal lifecycle combinations
-
-Status: open; related style rule approved.
-Location: `programs/better/record.l8` — rec_on, rec_paused, rec_begin, rec_pause, rec_end.
-
-Observation: Independent flags permit a paused-without-recording combination and require coordinated updates.
-
-Follow-up: Design a representation that makes invalid combinations unrepresentable; Idle/Recording/Paused is a candidate. Preserve independent physical movement state and inspect finishing/resume/persistence behavior before refactoring.
-
 ## 8. Shared protocol facts copied manually
 
 Status: open; related style rule approved.
