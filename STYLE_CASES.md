@@ -9,15 +9,6 @@ Style rules 1–24 have been approved. The application/compiler cases below rema
 only documentation has been changed during the style-guide loop. Locations are snapshots;
 use the named symbols if line numbers move. Update this log as new cases are found or resolved.
 
-## 3. Silent buffer truncation
-
-Status: open; related style rule approved.
-Location: `programs/bible/core/host.l8` — hs_url_byte, around line 626.
-
-Observation: A full URL buffer silently discards additional bytes. programs/bible/core/json.l8:json_put similarly stops advancing at capacity.
-
-Follow-up: Give buffer exhaustion an explicit outcome and propagate it. Review multibyte JSON writes so incomplete output is not treated as valid.
-
 ## 4. Opaque boolean mode arguments
 
 Status: open; related style rule approved.
