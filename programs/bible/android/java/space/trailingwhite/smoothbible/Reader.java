@@ -460,7 +460,12 @@ final class Reader extends ListView {
       TextView tv = old instanceof TextView ? (TextView) old : new TextView(getContext());
       int m = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, look.margin,
           getResources().getDisplayMetrics());
-      tv.setPadding(m, (int) (m * 0.8f), m, (int) (m * 0.8f));
+      // (The text's column never wider than the look's: wider margins on a
+      // wide window.)
+      float em = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, look.textSp(),
+          getResources().getDisplayMetrics());
+      int side = Math.max(m, (int) ((parent.getWidth() - look.column * em) / 2));
+      tv.setPadding(side, (int) (m * 0.8f), side, (int) (m * 0.8f));
       tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, look.textSp());
       tv.setLineSpacing(0, look.spacing);
       tv.setTextColor(look.ink);

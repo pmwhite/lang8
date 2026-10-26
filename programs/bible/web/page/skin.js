@@ -279,12 +279,16 @@ function readLook(w) {
   s.setProperty("--lh", look.spacing);
   s.setProperty("--margin", look.margin + "px");
   s.setProperty("--body", FONTS[w.num(13)] || FONTS[0]);
+  s.setProperty("--column", (w.num(20) || 34000) / 1000 + "em");
   s.background = c(6);
   look.accent = c(10);
   document.documentElement.classList.toggle("dark", look.dark);
   document.documentElement.classList.toggle("red", look.red);
   $('meta[name="theme-color"]').content = c(6);
 }
+
+// The credits core says (credit K WORDS LINK ADDRESS LABEL), by K.
+const credits = new Map();
 
 // The highlights' washes now, by the color a mark line names each with
 // (core's highlights line: SWATCH WASH STRENGTH...).
@@ -602,6 +606,9 @@ function line(w) {
     case "highlights":
       readHighlights(w);
       break;
+    case "credit":
+      credits.set(w.num(1), { words: w.field(1), link: w.field(2), address: w.field(3), label: w.field(4) });
+      break;
     case "look":
       readLook(w);
       break;
@@ -698,13 +705,13 @@ function line(w) {
       toast("Added to Memory");
       break;
     case "back":
-      capsule.show(w.field(1));
+      capsule.show(w.field(1), w.field(2), w.num(1));
       break;
     case "say":
       voice.say(w.num(1), w.num(2), w.num(3) / 1000 || 1, w.field(1), w.field(2));
       break;
     case "player":
-      player.show(w.field(1), w.field(2), w.field(3) !== "0", w.field(4), w.field(5));
+      player.show(w.field(1), w.field(2), w.field(3) !== "0", w.field(4), w.field(5), w.field(6), w.field(7));
       break;
     case "audio_play":
       sound.play(w.num(1), w.num(3), w.num(4), w.num(5) / 1000 || 1, w.field(1));
@@ -1675,9 +1682,11 @@ const panel = {
       }
       if (sec.rows.length) frag.appendChild(box);
       if (sec.footer) frag.appendChild(el("p", "footer", sec.footer));
-      if (sec.credit === 1) {
-        const a = el("a", "credit", "(ESV) · esv.org");
-        a.href = "https://www.esv.org";
+      const credit = credits.get(sec.credit);
+      if (credit) {
+        const a = el("a", "credit", credit.words + credit.link);
+        a.setAttribute("aria-label", credit.label);
+        a.href = credit.address;
         a.target = "_blank";
         a.rel = "noopener";
         frag.appendChild(a);
@@ -2279,16 +2288,18 @@ const capsule = {
     });
     document.body.appendChild(this.box);
   },
-  show(words) {
+  // (back MS SCREENS WORDS HINT: shown for MS.)
+  show(words, hint, ms) {
     clearTimeout(this.timer);
     if (!words) {
       this.box.hidden = true;
       return;
     }
     this.box.textContent = `‹ ${words}`;
-    this.box.setAttribute("aria-label", `Go back to ${words}`);
+    this.box.setAttribute("aria-label", words);
+    this.box.setAttribute("aria-description", hint);
     this.box.hidden = false;
-    this.timer = setTimeout(() => (this.box.hidden = true), 12000);
+    this.timer = setTimeout(() => (this.box.hidden = true), ms);
   },
 };
 
@@ -2314,13 +2325,13 @@ const player = {
     button("stop", "Stop Listening", "x", "listenstop");
     document.body.appendChild(this.box);
   },
-  show(title, state, playing, reader, version) {
+  show(title, state, playing, reader, version, button, buttonSymbol) {
     this.session(title, playing, reader, version);
     $(".pt", this.box).textContent = title;
     $(".ps", this.box).textContent = state;
     this.playing = playing;
-    this.toggle.replaceChildren(icon(playing ? "pause" : "play"));
-    this.toggle.setAttribute("aria-label", playing ? "Pause" : "Play");
+    this.toggle.replaceChildren(symbol(buttonSymbol) ?? "");
+    this.toggle.setAttribute("aria-label", button);
     this.box.hidden = false;
   },
   hide() {

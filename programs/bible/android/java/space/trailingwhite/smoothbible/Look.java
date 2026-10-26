@@ -28,7 +28,8 @@ final class Look {
       accent = 0xFF9C3A2C, rule = 0xFF1E1C19, glossLine = 0x521E1C19;
 
   // look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS
-  // (GLOSS: the rule's strength under a glossed word, thousandths)
+  // FONT THEME CHOSEN HAIRLINE SELECTION SHEET CELL COLUMN (GLOSS: the
+  // rule's strength under a glossed word, thousandths)
   void read(Wire w) {
     size = w.num(1) / 1000f;
     spacing = w.num(2) / 1000f;
@@ -43,7 +44,15 @@ final class Look {
     rule = color(w.word(11));
     glossLine = alpha(rule, w.num(12) / 1000f);
     font = w.num(13);
+    column = w.num(20) > 0 ? w.num(20) / 1000f : 34;
   }
+
+  // The widest the text's column is (em: the look line's COLUMN).
+  float column = 34;
+
+  // The credits core says (credit K WORDS LINK ADDRESS LABEL): each its
+  // fields, by K.
+  final java.util.HashMap<Integer, Wire> credits = new java.util.HashMap<>();
 
   // The highlights' washes now, by the color a mark line names each with.
   final java.util.HashMap<String, Integer> washes = new java.util.HashMap<>();

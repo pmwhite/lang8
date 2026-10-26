@@ -811,7 +811,8 @@ public final class Bible extends Activity {
             : android.view.HapticFeedbackConstants.CLOCK_TICK);
         break;
       case "back": {
-        // (The capsule: back to the place left, for 12 s.)
+        // (back MS SCREENS WORDS HINT: the capsule, back to the place
+        // left, for MS.)
         String words = w.field(1);
         capsule.removeCallbacks(capsuleAway);
         if (words.isEmpty()) {
@@ -826,7 +827,8 @@ public final class Bible extends Activity {
         capsule.setTextColor(look.ink);
         capsule.setElevation(dp(4));
         capsule.setVisibility(View.VISIBLE);
-        capsule.postDelayed(capsuleAway, 12000);
+        capsule.setContentDescription(words + ". " + w.field(2));
+        capsule.postDelayed(capsuleAway, w.num(1));
         break;
       }
       case "place":
@@ -844,7 +846,7 @@ public final class Bible extends Activity {
         playerState.setText(w.field(2));
         playing = !w.field(3).equals("0");
         playerToggle.setText(playing ? "\u23F8\uFE0E" : "\u25B6\uFE0E");
-        playerToggle.setContentDescription(playing ? "Pause" : "Play");
+        playerToggle.setContentDescription(w.field(6));
         player.setBackgroundColor(look.bg);
         playerTitle.setTextColor(look.ink);
         playerState.setTextColor(look.faint);
@@ -969,6 +971,9 @@ public final class Bible extends Activity {
         break;
       case "highlights":
         look.readHighlights(w);
+        break;
+      case "credit":
+        look.credits.put(w.num(1), w);
         break;
       case "look":
         look.read(w);

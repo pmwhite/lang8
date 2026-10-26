@@ -325,7 +325,7 @@ A screen, from core:
 | `page`, `grid` | its rows a page's paragraphs; its rows square buttons, their VALUE their words |
 | `empty` SYMBOL TITLE LINE | what it shows with no rows |
 | `button` TITLE, then `command` ACTION ARG TITLE FLAGS | its button at the top and its menu (`x`: destructive) |
-| `section` HEADER FOOTER BUTTON ACTION SUFFIX CREDIT COLUMNS | a section: a button in its header doing ACTION; faint words after its header; CREDIT 1 the ESV's under it; COLUMNS a grid's columns' names |
+| `section` HEADER FOOTER BUTTON ACTION SUFFIX CREDIT COLUMNS | a section: a button in its header doing ACTION; faint words after its header; CREDIT the credit under it (0 none; each said at `start` by a `credit` line); COLUMNS a grid's columns' names |
 | `row` ... | a row (below) |
 | `cell` ACTION ARG SCRIPT TEXT SUB COUNT LABEL TR FLAGS ACTIONS | after its row, a grid's cell or a tile: its words in a script (0 none: a faint "—"), what it does, its count, what a screen reader says, and its tap (ACTION 0: none); a tile's transliteration and what it hides (`UI_TILE_`), and the actions a screen reader offers |
 
@@ -391,8 +391,9 @@ plus 1), `remind_time MINUTES`, `open_settings`, `searched`, `audio_source`,
 `voice`, `cellular`, `download`, `download_delete`, `practice_audio ACTION
 ARG` (Speak on core's Practice), `felt KIND` (something to feel: 0 a grade
 given, 1 a wrong letter typed), `announce` WORDS (for a screen reader alone:
-a word missed), `toast SYMBOL` WORDS (a toast's words, and its symbol: 0
-plus, 1 a check, 2 the brain, 3 the carried ribbon), `study_verse C V`,
+a word missed), `toast SYMBOL ICON` WORDS (a toast's words, and its
+symbol: 0 plus, 1 a check, 2 the brain, 3 the carried ribbon; ICON the
+symbol's name, `-` for the ribbon's glyph in the carried ribbon's color), `study_verse C V`,
 `study_moved C V` (Study beside the reader moved to another verse: the
 reader follows), `beside OPEN C V` (whether Study is wanted beside the
 reader, and its verse, C -1 never: at `start` as it was left, so a skin
@@ -405,7 +406,9 @@ panel's verse), `command K MENU NAME MODS` TITLE (each of the keyboard's
 commands, at `start` and again as its title changes: its menu, 0 Go, 1
 View, 2 none; its key and modifiers, as `key` sends them; Show Study or
 Hide Study), `commands MASK` (those that act now, bit K, written as that
-changes), `studyable 1|0` (the answer to `studyable`), `copy`,
+changes), `credit K` WORDS LINK ADDRESS LABEL (at `start`: a section's
+credit K, its words then a link to ADDRESS, and what a screen reader
+says of it), `studyable 1|0` (the answer to `studyable`), `copy`,
 `share`, `share_image` (Share as Image's card, above), `highlighted`,
 `bookmarked`, `clear_selection`, `tray`, `tray_away`.
 

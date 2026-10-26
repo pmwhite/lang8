@@ -750,7 +750,8 @@ final class Panel extends FrameLayout {
           items.add(r);
         }
         if (!sec.footer.isEmpty()) items.add(new Footer(sec.footer));
-        if (sec.credit == 1) items.add(new Credit());
+        Wire credit = look.credits.get(sec.credit);
+        if (credit != null) items.add(new Credit(credit));
       }
       notifyDataSetChanged();
     }
@@ -834,16 +835,18 @@ final class Panel extends FrameLayout {
         return t;
       }
       if (o instanceof Credit) {
-        // (The ESV's: "(ESV)", a link to esv.org.)
+        // (Its words, then its link.)
+        Wire credit = ((Credit) o).line;
         TextView t = new TextView(c);
-        t.setText("(ESV) · esv.org");
+        t.setText(credit.field(1) + credit.field(2));
+        t.setContentDescription(credit.field(4));
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         t.setTextColor(look.accent);
         t.setPadding(dp(20), dp(4), dp(20), dp(12));
         t.setOnClickListener(v -> {
           try {
             getContext().startActivity(new android.content.Intent(
-                android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://www.esv.org")));
+                android.content.Intent.ACTION_VIEW, android.net.Uri.parse(credit.field(3))));
           } catch (RuntimeException e) {
             // (No browser.)
           }
@@ -1548,7 +1551,14 @@ final class Panel extends FrameLayout {
     }
   }
 
-  private static final class Credit {}
+  // A section's credit (core's credit line: K WORDS LINK ADDRESS LABEL).
+  private static final class Credit {
+    final Wire line;
+
+    Credit(Wire line) {
+      this.line = line;
+    }
+  }
 
   private static final class Intro {
     final CharSequence text;
