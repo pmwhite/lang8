@@ -726,6 +726,7 @@ is_stack_addr(n: ?*Expr): bool {
 
 is_tainted_obj(o: ?*Obj): bool {
     if (o == null) return false;
+    if (o.is_tainted) return true;
     f: ?*InitFrame = taint_top;
     while (f != null) {
         if (f.var == o) return true;
@@ -813,15 +814,47 @@ io_allows_stack(name: []i8): bool {
     streq(name, "write") || streq(name, "read")
 }
 
-// A match payload or for element is a shallow copy. A region or arena source
-// must lend that life to the copy; otherwise a pointer in it escapes as immortal.
+// A parameter named by a copied value. Region and arena lives stay on `life`;
+// a parameter id stays here so it is not joined with an unrelated heap pointer.
+carried_life_of(n: ?*Expr) raises Error: int {
+    if (n == null || !type_has_pointers(n.ty)) return 0;
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return 0;
+            if (is_current_param(v) && life_is_param(v.life)) return v.life;
+            v.carried_life
+        }
+        Deref k -> carried_life_of(k.lhs);
+        MemberAccess k -> carried_life_of(k.lhs);
+        Index k -> carried_life_of(k.lhs);
+        As k -> carried_life_of(k.lhs);
+        Trunc k -> carried_life_of(k.lhs);
+        _ -> 0
+    }
+}
+
+// A match payload or for element is a shallow copy. The copy keeps a region,
+// arena, parameter, or local-address lifetime; otherwise a pointer in it
+// escapes as immortal.
 note_copied_life(src: *Expr, slot: ?*Obj) raises Error {
     if (slot == null) return;
     local: *Obj = slot;
     if (!type_has_pointers(local.ty)) return;
     life: int = expr_life(src);
-    if (!life_is_region(life) && !life_is_arena(life)) return;
-    local.life = life_meet(local.life, life)
+    tainted: bool = is_tainted_expr(src) || is_stack_addr(src);
+    if (life_is_region(life) || life_is_arena(life)) local.life = life_meet(local.life,
+        life);
+    if (tainted || life == LIFE_SELF) {
+        use: int = life;
+        if (use == LIFE_IMM || life_is_param(use)) use = LIFE_SELF;
+        local.life = life_meet(local.life, use);
+        local.is_tainted = true
+    }
+    carried: int = life;
+    if (!life_is_param(carried)) carried = carried_life_of(src);
+    if (life_is_param(carried)) local.carried_life = life_meet(local.carried_life,
+        carried)
 }
 
 life_meet(a: int, b: int) raises Error: int {
@@ -1155,7 +1188,18 @@ note_params_in_expr(n: ?*Expr, dest: int) raises Error {
                 return
             }
             q: ?*Obj = find_param_by_life(v.life);
-            if (q != null) constrain_param_to_dest(q, dest)
+            if (q != null) {
+                constrain_param_to_dest(q, dest);
+                return
+            }
+            // A match or for copy names the parameter without taking its life
+            // id, which does not compare with heap pointers stored later.
+            // @new and @immortal already name a heap lifetime. The bootstrap
+            // compiler stores those copies into its own immortal AST.
+            carried: ?*Obj = find_param_by_life(v.carried_life);
+            if (carried != null && (dest == LIFE_IMM || life_is_arena(dest)) && !streq(carried.life_bound,
+                "new") && !life_bound_immortal(carried.life_bound)) constrain_param_to_dest(carried,
+                dest)
         }
         Addr k -> note_params_in_address(k.lhs, dest);
         Deref k -> note_params_in_expr(k.lhs, dest);
