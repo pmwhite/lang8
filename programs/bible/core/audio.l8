@@ -143,17 +143,49 @@ audio_url(s: int, c: int) {
         au_str(src_ids[s]);
         au_byte(47);
         ob_name(s, c)
-    } else if (s == SRC_HENSON && hp_n > c && hp_at[c] >= 0) {
-        au_str(HENSON_BASE);
-        for i in hp_at[c]..hp_end[c] au_byte(hp_buf[i] as int)
+    } else if (s == SRC_HENSON) {
+        borrow henson_paths as paths {
+            if (c < paths.count && paths.at[c] >= 0) {
+                au_str(HENSON_BASE);
+                for i in paths.at[c]..paths.end[c] au_byte(paths.file[i] as int)
+            }
+        }
     }
 }
+
+// The kept file chapter c of source s is held in (core/held.l8's), into
+// au: audio-SRC-BOOK-C.mp3 (audio-souer-JHN-3.mp3).
+audio_kept_name(s: int, c: int) {
+    au_n = 0;
+    au_str("audio-");
+    au_str(src_ids[s]);
+    au_byte(45);
+    for i in 0..3 au_byte(book_codes[ch_book[c]][i] as int);
+    au_byte(45);
+    au_digits(ch_num[c], 1);
+    au_str(".mp3")
+}
+
+// Where chapter c of source s is played from, into au: its kept file
+// (kept:NAME, a skin's own place for it) if it is held, its address online
+// if not, or none (au_n 0).
+audio_address(s: int, c: int) {
+    if (src_cacheable(s) && c >= 0 && c < chapters && audio_cache_find(s, c) >= 0) {
+        audio_kept_name(s, c);
+        name_n: int = au_n;
+        for i in 0..name_n au_name[i] = au[i];
+        au_n = 0;
+        au_str("kept:");
+        for i in 0..name_n au_byte(au_name[i] as int)
+    } else audio_url(s, c)
+}
+
+au_name: []i8 = new i8[512](0i8);
 
 // The name a chapter's file is kept under: BOOK-C.mp3 (JHN-3.mp3).
 audio_file_name(c: int) {
     au_n = 0;
-    p: int = book_line[ch_book[c]] + 1;
-    for i in 0..3 au_byte(bsb[p + i] as int);
+    for i in 0..3 au_byte(book_codes[ch_book[c]][i] as int);
     au_byte(45);
     au_digits(ch_num[c], 1);
     au_str(".mp3")
@@ -161,41 +193,57 @@ audio_file_name(c: int) {
 
 // ---- eBible.org's paths (data/audio/henson.paths): BOOK C PATH SIZE a
 // line, in Bible order ----
-hp_buf: []i8 = new i8[1](0i8);
+// The file and where each chapter's path is in it (-1: none), for its
+// first count chapters: a dataset of its own, replaced whole when the file
+// comes again.
+type HensonPaths = {
+    file: []i8;
+    at: []int;
+    end: []int;
+    count: int
+}
 
-hp_n: int = 0;
+henson_paths: ?owned *HensonPaths = henson_paths_made(new i8[1](0i8), 0);
 
-hp_at: []int = new int[1200](-1);
+// The paths file (source's first n bytes) indexed, in place of the one
+// before; each line's book and chapter checked against the BSB's.
+henson_paths_came(source: []i8, n: int) {
+    drop henson_paths;
+    henson_paths = henson_paths_made(source, n)
+}
 
-hp_end: []int = new int[1200](0);
-
-// The paths file indexed (how many chapters it has; each line's book and
-// chapter checked against the BSB's).
-henson_paths_load(buf: []i8@immortal, n: int): int {
-    hp_buf = buf;
-    hp_n = 0;
-    for c in 0..1200 hp_at[c] = -1;
-    p: int = 0;
-    c: int = 0;
-    while (p < n && c < chapters) {
-        e: int = p;
-        while (e < n && buf[e] as int != 10) e = e + 1;
-        // BOOK, tab, chapter, tab, path, tab, size.
-        f2: int = au_tab_after(buf, p, e);
-        f3: int = au_tab_after(buf, f2, e);
-        f4: int = au_tab_after(buf, f3, e);
-        if (f4 <= e && au_same_book(buf, p, c) && au_num_at(buf, f2, f3 - 1) == ch_num[c]) {
-            hp_at[c] = f3;
-            // (Two paths: the first, the one align.py kept.)
-            q: int = f3;
-            while (q < f4 - 1 && buf[q] as int != 32) q = q + 1;
-            hp_end[c] = q;
-            c = c + 1
+henson_paths_made(source: []i8, n: int): owned *HensonPaths {
+    own {
+        paths: *HensonPaths = new HensonPaths {
+            file: new i8[n + 1](0i8),
+            at: new int[chapters](-1),
+            end: new int[chapters](0),
+            count: 0
+        };
+        memcpy(paths.file, 0, source, 0, n);
+        buf: []i8 = paths.file;
+        p: int = 0;
+        c: int = 0;
+        while (p < n && c < chapters) {
+            e: int = p;
+            while (e < n && buf[e] as int != 10) e = e + 1;
+            f2: int = au_tab_after(buf, p, e);
+            f3: int = au_tab_after(buf, f2, e);
+            f4: int = au_tab_after(buf, f3, e);
+            if (f4 <= e && au_same_book(buf, p, c) && au_num_at(buf, f2, f3 - 1) == ch_num[c]) {
+                paths.at[c] = f3;
+                q: int = f3;
+                while (q < f4 - 1 && buf[q] as int != 32) q = q + 1;
+                paths.end[c] = q;
+                c = c + 1
+            }
+            p = e + 1
         }
-        p = e + 1
+        paths.count = c;
+        paths
     }
-    hp_n = c;
-    c
+    // BOOK, tab, chapter, tab, path, tab, size.
+    // (Two paths: the first, the one align.py kept.)
 }
 
 au_tab_after(b: []i8, p: int, e: int): int {
@@ -205,9 +253,8 @@ au_tab_after(b: []i8, p: int, e: int): int {
 }
 
 au_same_book(b: []i8, p: int, c: int): bool {
-    q: int = book_line[ch_book[c]] + 1;
     for i in 0..3
-        if (b[p + i] != bsb[q + i]) return false;
+        if (b[p + i] != book_codes[ch_book[c]][i]) return false;
     b[p + 3] as int == 9
 }
 
@@ -224,140 +271,66 @@ au_num_at(b: []i8, p: int, e: int): int {
 }
 
 // ---- verse timings (data/audio/<id>.tim, DESIGN.md §12.2.1) ----
-// Each timed source's file, and each chapter's line in it: where its
-// numbers start (-1: no line), its flag, duration (centiseconds) and size
-// (bytes).
+// Each timed source's chapters: their flag, duration (centiseconds) and
+// size (bytes), and their verses' starts (the line's numbers, from
+// first_time, time_count of them, in times): numbers read from its file
+// when it comes, a dataset of their own, replaced whole when it comes
+// again (the file's bytes not kept).
 TIM_OK: int = 0;
 
 TIM_CHAPTER: int = 1;
 
 TIM_MISSING: int = 2;
 
-tim_buf: [][]i8 = new []i8[4](new i8[0](0i8));
+type Timings = {
+    ready: bool;
+    flags: []int;
+    durations: []int;
+    sizes: []int;
+    first_time: []int;
+    time_count: []int;
+    times: []int
+}
 
-tim_ready: []bool = new bool[4](false);
+timings: []?owned *Timings = timings_begin();
 
-tim_nums: [][]int = new []int[4](new int[0](0));
+timings_begin(): []?owned *Timings@new {
+    all: []?owned *Timings = new ?owned *Timings[4](null);
+    for s in 0..len(all) all[s] = timings_made(new i8[1](0i8), 0, false);
+    all
+}
 
-tim_flag_of: [][]int = new []int[4](new int[0](0));
+// Source s's timing file (source's first n bytes) read, in place of the
+// one before: a line a chapter (in any order; a line for a book or
+// chapter the text has not is skipped).
+timings_came(s: int, source: []i8, n: int) {
+    if (s < 0 || s > 3) return;
+    drop timings[s];
+    timings[s] = timings_made(source, n, true)
+}
 
-tim_dur: [][]int = new []int[4](new int[0](0));
-
-tim_size: [][]int = new []int[4](new int[0](0));
-
-tim_end: [][]int = new []int[4](new int[0](0));
-
-// Each source's own arrays, made with the program, so that loading
-// allocates nothing.
-tm0a: []int = new int[1200](-1);
-
-tm0b: []int = new int[1200](2);
-
-tm0c: []int = new int[1200](0);
-
-tm0d: []int = new int[1200](0);
-
-tm0e: []int = new int[1200](0);
-
-tm1a: []int = new int[1200](-1);
-
-tm1b: []int = new int[1200](2);
-
-tm1c: []int = new int[1200](0);
-
-tm1d: []int = new int[1200](0);
-
-tm1e: []int = new int[1200](0);
-
-tm2a: []int = new int[1200](-1);
-
-tm2b: []int = new int[1200](2);
-
-tm2c: []int = new int[1200](0);
-
-tm2d: []int = new int[1200](0);
-
-tm2e: []int = new int[1200](0);
-
-tm3a: []int = new int[1200](-1);
-
-tm3b: []int = new int[1200](2);
-
-tm3c: []int = new int[1200](0);
-
-tm3d: []int = new int[1200](0);
-
-tm3e: []int = new int[1200](0);
-
-tim_arrays(s: int) {
-    if (s == 0) {
-        tim_nums[0] = tm0a;
-        tim_flag_of[0] = tm0b;
-        tim_dur[0] = tm0c;
-        tim_size[0] = tm0d;
-        tim_end[0] = tm0e
-    } else if (s == 1) {
-        tim_nums[1] = tm1a;
-        tim_flag_of[1] = tm1b;
-        tim_dur[1] = tm1c;
-        tim_size[1] = tm1d;
-        tim_end[1] = tm1e
-    } else if (s == 2) {
-        tim_nums[2] = tm2a;
-        tim_flag_of[2] = tm2b;
-        tim_dur[2] = tm2c;
-        tim_size[2] = tm2d;
-        tim_end[2] = tm2e
-    } else {
-        tim_nums[3] = tm3a;
-        tim_flag_of[3] = tm3b;
-        tim_dur[3] = tm3c;
-        tim_size[3] = tm3d;
-        tim_end[3] = tm3e
+timings_made(source: []i8, n: int, ready: bool): owned *Timings {
+    own {
+        most: int = 1;
+        for i in 0..n
+            if (source[i] as int == 32 || source[i] as int == 9) most = most + 1;
+        tm: *Timings = new Timings {
+            ready: ready,
+            flags: new int[chapters](TIM_MISSING),
+            durations: new int[chapters](0),
+            sizes: new int[chapters](0),
+            first_time: new int[chapters](0),
+            time_count: new int[chapters](0),
+            times: new int[most](0)
+        };
+        tim_lines(tm, source, n);
+        tm
     }
+    // (How many numbers its lines hold, at most: one a space or tab.)
 }
 
-// Source s's timing file indexed: a line a chapter (in any order; a line
-// for a book or chapter the text has not is skipped). How many chapters
-// had lines.
-tim_load(s: int, buf: []i8@immortal, n: int): int {
-    if (s < 0 || s > 3) return 0;
-    tim_arrays(s);
-    tim_buf[s] = buf;
-    nums: []int = tim_nums[s];
-    flags: []int = tim_flag_of[s];
-    for c in 0..1200 {
-        nums[c] = -1;
-        flags[c] = TIM_MISSING;
-        tim_dur[s][c] = 0;
-        tim_size[s][c] = 0
-    }
-    tim_ready[s] = true;
-    tim_lines(s, buf, n, false)
-}
-
-// Lines of another file over source s's (a test's, CI's fixture): theirs
-// win, their numbers read from buf; a size of 0 keeps the one there was.
-tim_alt: [][]i8 = new []i8[4](new i8[0](0i8));
-
-TIM_ALT: int = 1099511627776;
-
-tim_overlay(s: int, buf: []i8@immortal, n: int): int {
-    if (s < 0 || s > 3 || !tim_ready[s]) return 0;
-    tim_alt[s] = buf;
-    ts_s = -1;
-    tim_lines(s, buf, n, true)
-}
-
-tim_lines(
-    s: int,
-    buf: []i8,
-    n: int,
-    alt: bool
-): int {
-    nums: []int = tim_nums[s];
-    flags: []int = tim_flag_of[s];
-    got: int = 0;
+tim_lines(tm: *Timings, buf: []i8, n: int) {
+    k: int = 0;
     p: int = 0;
     while (p < n) {
         e: int = p;
@@ -373,21 +346,33 @@ tim_lines(
                 fe: int = if (f6 <= e) f6 - 1 else e;
                 flag: int = if (au_word_at(buf, f5, fe, "ok")) TIM_OK else if (au_word_at(buf,
                     f5, fe, "chapter")) TIM_CHAPTER else TIM_MISSING;
-                flags[c] = flag;
-                tim_dur[s][c] = au_num_at(buf, f3, f4 - 1);
-                size: int = au_num_at(buf, f4, f5 - 1);
-                if (size > 0 || !alt) tim_size[s][c] = size;
-                nums[c] = -1;
+                tm.flags[c] = flag;
+                tm.durations[c] = au_num_at(buf, f3, f4 - 1);
+                tm.sizes[c] = au_num_at(buf, f4, f5 - 1);
+                tm.first_time[c] = k;
+                tm.time_count[c] = 0;
                 if (flag != TIM_MISSING && f6 <= e) {
-                    nums[c] = (if (alt) f6 + TIM_ALT else f6);
-                    tim_end[s][c] = e
+                    // (Its numbers, as they are: a bad one ends them, with
+                    // none taken, as a chapter without timings.)
+                    q: int = f6;
+                    good: bool = true;
+                    while (q < e && good) {
+                        r: int = q;
+                        while (r < e && buf[r] as int != 32) r = r + 1;
+                        x: int = au_num_at(buf, q, r);
+                        if (x < 0) good = false else {
+                            tm.times[k + tm.time_count[c]] = x;
+                            tm.time_count[c] = tm.time_count[c] + 1
+                        }
+                        q = r + 1
+                    }
+                    if (!good) tm.time_count[c] = 0;
+                    k = k + tm.time_count[c]
                 }
-                got = got + 1
             }
         }
         p = e + 1
     }
-    got
 }
 
 au_word_at(
@@ -406,10 +391,9 @@ au_word_at(
 au_line_chapter(b: []i8, p: int, e: int): int {
     if (p + 4 > e || b[p + 3] as int != 9) return -1;
     for bk in 0..books {
-        q: int = book_line[bk] + 1;
         same: bool = true;
         for i in 0..3
-            if (b[p + i] != bsb[q + i]) same = false;
+            if (b[p + i] != book_codes[bk][i]) same = false;
         if (same) {
             f2: int = p + 4;
             f3: int = au_tab_after(b, f2, e);
@@ -424,16 +408,24 @@ au_line_chapter(b: []i8, p: int, e: int): int {
 // Chapter c's flag for source s (missing, for a source without timings or
 // a chapter without a line).
 tim_flag(s: int, c: int): int {
-    if (s < 0 || s > 3 || !tim_ready[s] || c < 0 || c >= chapters) return TIM_MISSING;
-    tim_flag_of[s][c]
+    if (s < 0 || s > 3 || c < 0 || c >= chapters) return TIM_MISSING;
+    borrow timings[s] as tm {
+        if (tm.ready) tm.flags[c] else TIM_MISSING
+    }
 }
 
 tim_duration(s: int, c: int): int {
-    if (tim_flag(s, c) == TIM_MISSING) 0 else tim_dur[s][c]
+    if (tim_flag(s, c) == TIM_MISSING) return 0;
+    borrow timings[s] as tm {
+        tm.durations[c]
+    }
 }
 
 tim_bytes(s: int, c: int): int {
-    if (tim_flag(s, c) == TIM_MISSING) 0 else tim_size[s][c]
+    if (tim_flag(s, c) == TIM_MISSING) return 0;
+    borrow timings[s] as tm {
+        tm.sizes[c]
+    }
 }
 
 // Chapter c's starts (absolute centiseconds) into ts: ts[0] verse 1's,
@@ -452,23 +444,17 @@ tim_starts(s: int, c: int): int {
     ts_s = s;
     ts_c = c;
     ts_n = 0;
-    if (tim_flag(s, c) == TIM_MISSING || tim_nums[s][c] < 0) return 0;
-    b: []i8 = if (tim_nums[s][c] >= TIM_ALT) tim_alt[s] else tim_buf[s];
-    p: int = tim_nums[s][c] % TIM_ALT;
-    e: int = tim_end[s][c];
-    acc: int = 0;
-    while (p < e && ts_n < len(ts)) {
-        q: int = p;
-        while (q < e && b[q] as int != 32) q = q + 1;
-        n: int = au_num_at(b, p, q);
-        if (n < 0) {
-            ts_n = 0;
-            return 0
+    if (tim_flag(s, c) == TIM_MISSING) return 0;
+    borrow timings[s] as tm {
+        acc: int = 0;
+        at: int = tm.first_time[c];
+        for i in 0..tm.time_count[c] {
+            if (ts_n < len(ts)) {
+                acc = (if (ts_n == 0) tm.times[at + i] else acc + tm.times[at + i]);
+                ts[ts_n] = acc;
+                ts_n = ts_n + 1
+            }
         }
-        acc = (if (ts_n == 0) n else acc + n);
-        ts[ts_n] = acc;
-        ts_n = ts_n + 1;
-        p = q + 1
     }
     ts_n
 }
@@ -603,10 +589,12 @@ estimate_time(chars_before: int, chars_all: int, duration: int): int {
     if (t < 0) 0 else t
 }
 
-// ---- the cache of chapters fetched ahead (index.tsv) ----
+// ---- the chapters held (core/held.l8's held.tsv) ----
 // Each chapter kept: its source, chapter, size and when it was last played
-// (or fetched); at most 500 MB in all, the least recently played let go
-// first; the chapter playing and the two after it never.
+// (or fetched: ac_clock's count); those of books downloaded (dl_*) kept
+// for good, the others fetched ahead and at most 500 MB in all, the least
+// recently played let go first; the chapter playing and the two after it
+// never.
 AC_MOST: int = 4096;
 
 AC_LIMIT: int = 524288000;
@@ -620,6 +608,9 @@ ac_c: []int = new int[4096](0);
 ac_bytes: []int = new int[4096](0);
 
 ac_used: []int = new int[4096](0);
+
+// The next use's count (one past the greatest kept).
+ac_clock: int = 1;
 
 audio_cache_find(s: int, c: int): int {
     for i in 0..ac_n
@@ -662,9 +653,17 @@ audio_cache_remove(i: int) {
     ac_n = ac_n - 1
 }
 
+// Whether entry i is a chapter of a book downloaded (not the cache's to
+// let go).
+audio_cache_downloaded(i: int): bool {
+    dl_index(ac_src[i], ch_book[ac_c[i]]) >= 0
+}
+
+// What the chapters fetched ahead take (bytes).
 audio_cache_total(): int {
     n: int = 0;
-    for i in 0..ac_n n = n + ac_bytes[i];
+    for i in 0..ac_n
+        if (!audio_cache_downloaded(i)) n = n + ac_bytes[i];
     n
 }
 
@@ -681,7 +680,7 @@ audio_cache_victim(limit: int, s: int, playing: int): int {
     if (audio_cache_total() <= limit) return -1;
     best: int = -1;
     for i in 0..ac_n {
-        if (!audio_cache_pinned(i, s, playing) && (best < 0 || ac_used[i] < ac_used[best])) best = i
+        if (!audio_cache_pinned(i, s, playing) && !audio_cache_downloaded(i) && (best < 0 || ac_used[i] < ac_used[best])) best = i
     }
     best
 }
@@ -693,8 +692,7 @@ audio_cache_format(out: []i8): int {
     for i in 0..ac_n {
         for k in src_ids[ac_src[i]] n = au_put_byte(out, n, k as int);
         n = au_put_byte(out, n, 9);
-        q: int = book_line[ch_book[ac_c[i]]] + 1;
-        for x in 0..3 n = au_put_byte(out, n, bsb[q + x] as int);
+        for x in 0..3 n = au_put_byte(out, n, book_codes[ch_book[ac_c[i]]][x] as int);
         n = au_put_byte(out, n, 9);
         n = au_put_num(out, n, ch_num[ac_c[i]]);
         n = au_put_byte(out, n, 9);
@@ -875,7 +873,7 @@ dl_book_at(p: int): int {
     for b in 0..books {
         same: bool = true;
         for i in 0..3
-            if (bsb[book_line[b] + 1 + i] != fbuf[p + i]) same = false;
+            if (book_codes[b][i] != fbuf[p + i]) same = false;
         if (same) return b
     }
     -1
@@ -887,7 +885,7 @@ downloads_format() {
     for i in 0..dl_n {
         fput_str(src_ids[dl_src[i]]);
         fput(9);
-        for x in 0..3 fput(bsb[book_line[dl_book[i]] + 1 + x] as int);
+        for x in 0..3 fput(book_codes[dl_book[i]][x] as int);
         fput(10)
     }
 }
@@ -955,7 +953,7 @@ audio_source_of(
 // Verse v's estimated time in chapter c's recording (centiseconds; its
 // length duration): its share of the chapter's spoken words.
 audio_estimate_verse_time(c: int, v: int, duration: int): int {
-    if (duration <= 0 || ch_start[c] < 0) return 0;
+    if (duration <= 0 || !text_holds(text_cur, c)) return 0;
     before: int = 0;
     all: int = 0;
     for x in 1..ch_verses[c] + 1 {

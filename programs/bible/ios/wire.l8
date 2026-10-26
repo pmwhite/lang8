@@ -1,0 +1,580 @@
+tag bible_ios;
+
+use_tag std, ios, bible, bible_wire;
+
+// The iPhone's end of the line protocol (SKINS.md): lines to core's host
+// (core/host.l8), as the terminal's and Android's are sent, and core's
+// lines read in order. A screen or a chapter the skin needs at once (a
+// list's rows, a chapter's row) is asked for and taken out of what core
+// says next; everything else is handled as it comes (ios/effects.l8).
+import "../../ios/objc.l8";
+
+import "../core/wire.l8";
+
+extern exit(code: int): noreturn;
+
+wire_fail(what: str): noreturn {
+    raw::raw_write(2, "Smooth Bible: ");
+    raw::raw_write(2, what);
+    raw::raw_write(2, "\n");
+    exit(1)
+}
+
+// ---- to core ----
+to_core: []i8 = new i8[1048576](0i8);
+
+to_core_n: int = 0;
+
+to_core_byte(k: int) {
+    if (to_core_n >= len(to_core)) wire_fail("a line to core is too long");
+    to_core[to_core_n] = k trunc i8;
+    to_core_n = to_core_n + 1
+}
+
+to_core_str(s: str) {
+    for c in s to_core_byte(c as int)
+}
+
+to_core_int(n: int) {
+    if (n < 0) {
+        to_core_byte(45);
+        to_core_int(-n);
+        return
+    }
+    if (n >= 10) to_core_int(n / 10);
+    to_core_byte(48 + n % 10)
+}
+
+// A space and a number.
+to_core_arg(n: int) {
+    to_core_byte(32);
+    to_core_int(n)
+}
+
+// Words as a field: a newline, a tab and a backslash escaped.
+to_core_text(data: []i8, b: int, e: int) {
+    for i in b..e {
+        k: int = data[i] as int;
+        if (k == 92) to_core_str("\\\\") else if (k == 10) to_core_str("\\n") else if (k == 9) to_core_str("\\t") else to_core_byte(k)
+    }
+}
+
+text_buf: []i8 = new i8[262144](0i8);
+
+// An NSString's words as a field.
+to_core_ns(s: int) {
+    if (s == 0) return;
+    if (msg1(s, sel("lengthOfBytesUsingEncoding:"), 4) > len(text_buf)) wire_fail("words to core are too long");
+    n: int = nsstring_into(s, text_buf);
+    to_core_text(text_buf, 0, n)
+}
+
+// The line ended, and given to core (with any before it).
+to_core_end() {
+    to_core_byte(10);
+    feed()
+}
+
+// Lines given to core's host, one at a time (the files it asks for come
+// apart from them: ios/platform.l8's asks_pump); what core says read,
+// unless it is already being read or a request waits for its answer.
+feeding: bool = false;
+
+feed() {
+    if (feeding) return;
+    feeding = true;
+    while (to_core_n > 0) {
+        n: int = to_core_n;
+        for i in 0..n hs_inbox[i] = to_core[i];
+        to_core_n = 0;
+        p: int = 0;
+        for i in 0..n {
+            if (hs_inbox[i] as int == 10) {
+                hs_line(p, i);
+                p = i + 1
+            }
+        }
+        hs_after()
+    }
+    feeding = false;
+    lines_take()
+}
+
+// One-line commands.
+send0(word: str) {
+    to_core_str(word);
+    to_core_end()
+}
+
+send1(word: str, a: int) {
+    to_core_str(word);
+    to_core_arg(a);
+    to_core_end()
+}
+
+send2(word: str, a: int, b: int) {
+    to_core_str(word);
+    to_core_arg(a);
+    to_core_arg(b);
+    to_core_end()
+}
+
+// ---- from core ----
+from_core_buf: []i8 = new i8[16777216](0i8);
+
+from_core_n: int = 0;
+
+from_core_at: int = 0;
+
+from_core(data: []i8, start: int, count: int) {
+    if (count > len(from_core_buf) - from_core_n) wire_fail("core said too much at once");
+    for i in 0..count from_core_buf[from_core_n + i] = data[start + i];
+    from_core_n = from_core_n + count
+}
+
+// Whether the lines are being read, and how many requests wait for their
+// answers (the lines are not read meanwhile).
+taking: bool = false;
+
+waiting: int = 0;
+
+line_end_at(at: int): int {
+    e: int = at;
+    while (e < from_core_n && from_core_buf[e] as int != 10) e = e + 1;
+    e
+}
+
+// A line's fields (one line at a time: taking keeps them from being
+// reused while one is handled).
+wire_line_starts: []int = new int[48](0);
+
+wire_line_ends: []int = new int[48](0);
+
+// A screen's lines: its id's kind and group noted (its rows are asked for
+// when a list shows them: model); the tray's (screen 0) read at once.
+lines_take() {
+    if (taking || waiting > 0) return;
+    taking = true;
+    while (from_core_at < from_core_n) {
+        at: int = from_core_at;
+        e: int = line_end_at(at);
+        if (e >= from_core_n) wire_fail("core's line has no end");
+        from_core_at = e + 1;
+        if (wl_at(at, e, "screen")) {
+            end: int = block_end(at);
+            if (end < 0) wire_fail("a screen has no end");
+            id: int = screen_note(at, e);
+            if (id == 0) {
+                if (!wire_decode_span(&tray_ui, from_core_buf, at, end)) wire_fail("the tray could not be read")
+            } else uk_stale = true;
+            from_core_at = end
+        } else if (wl_at(at, e, "chapter")) {
+            end: int = block_end(at);
+            if (end < 0) wire_fail("a chapter has no end");
+            reader_store(from_core_buf, at, end);
+            from_core_at = end
+        } else {
+            line: WireLine = WireLine {
+                data: from_core_buf,
+                starts: wire_line_starts,
+                ends: wire_line_ends,
+                count: 0,
+                end: e
+            };
+            wire_line(&line, at, e);
+            core_line(line)
+        }
+    }
+    from_core_n = 0;
+    from_core_at = 0;
+    taking = false
+}
+
+wl_at(at: int, e: int, word: str): bool {
+    if (e - at < len(word)) return false;
+    for i in 0..len(word)
+        if (from_core_buf[at + i] != word[i]) return false;
+    e - at == len(word) || from_core_buf[at + len(word)] as int == 32 || from_core_buf[at + len(word)] as int == 9
+}
+
+// Where the block beginning at at ends (past its end line), or -1.
+block_end(at: int): int {
+    p: int = at;
+    while (p < from_core_n) {
+        e: int = line_end_at(p);
+        if (e >= from_core_n) return -1;
+        if (e - p == 3 && wl_at(p, e, "end")) return e + 1;
+        p = e + 1
+    }
+    -1
+}
+
+// ---- asking: a line whose answer is wanted now ----
+// The answer's block (its first line's word), taken out of what core says
+// and copied into answer_buf (answer_n bytes); false if core said none.
+answer_buf: []i8 = new i8[4194304](0i8);
+
+answer_n: int = 0;
+
+ask_mark: int = 0;
+
+ask_begin() {
+    waiting = waiting + 1;
+    ask_mark = from_core_n
+}
+
+ask_end(word: str): bool {
+    found: bool = false;
+    p: int = ask_mark;
+    answer_n = 0;
+    while (!found && p < from_core_n) {
+        e: int = line_end_at(p);
+        if (e >= from_core_n) p = from_core_n else if (wl_at(p, e, word)) {
+            end: int = block_end(p);
+            if (end > 0) {
+                n: int = end - p;
+                if (n > len(answer_buf)) wire_fail("core's answer is too long");
+                for i in 0..n answer_buf[i] = from_core_buf[p + i];
+                answer_n = n;
+                for i in end..from_core_n from_core_buf[i - n] = from_core_buf[i];
+                from_core_n = from_core_n - n;
+                found = true
+            } else p = from_core_n
+        } else p = e + 1
+    }
+    waiting = waiting - 1;
+    // (What core said besides, read after this turn: not in the middle of a
+    // list's asking for its rows.)
+    if (!taking && from_core_n > 0) lines_soon();
+    found
+}
+
+lines_timer: int = 0;
+
+lines_soon() {
+    if (lines_timer != 0 || app_obj == 0) return;
+    lines_timer = after_common(0.0f64, "linesTake:")
+}
+
+lines_take_later(_self: int, _cmd: int, _timer: int): int {
+    lines_timer = 0;
+    lines_take();
+    0
+}
+
+add_wire_methods(app: int) {
+    add_method1(app, sel("linesTake:"), &lines_take_later, "v@:@")
+}
+
+// ---- core's screens shown: each one's kind and group, by id ----
+uk_ui: WireScreen = wire_screen();
+
+// The tray's model (screen 0, as select and tapverse write it).
+tray_ui: WireScreen = wire_screen();
+
+uk_wire_ids: []int = new int[24](-1);
+
+uk_wire_kinds: []int = new int[24](0);
+
+uk_wire_groups: []int = new int[24](0);
+
+uk_wire_slot(id: int): int {
+    for index in 0..len(uk_wire_ids)
+        if (uk_wire_ids[index] == id) return index;
+    -1
+}
+
+// A screen's first line (screen ID KIND ARG GROUP) noted: its id.
+screen_note(at: int, e: int): int {
+    line: WireLine = WireLine {
+        data: from_core_buf,
+        starts: wire_line_starts,
+        ends: wire_line_ends,
+        count: 0,
+        end: e
+    };
+    wire_line(&line, at, e);
+    id: int = wire_word_number(line, 1);
+    if (id == 0) return 0;
+    slot: int = uk_wire_slot(id);
+    if (slot < 0) {
+        for index in 0..len(uk_wire_ids) {
+            if (slot < 0 && (uk_wire_ids[index] < 0 || uk_slot_of_id(uk_wire_ids[index]) < 0)) slot = index
+        }
+    }
+    if (slot < 0) wire_fail("too many screens at once");
+    uk_wire_ids[slot] = id;
+    uk_wire_kinds[slot] = wire_word_number(line, 2);
+    uk_wire_groups[slot] = wire_word_number(line, 4);
+    id
+}
+
+// ---- the screens' commands (ios/skin.l8's) ----
+uk_wire_fail(): noreturn {
+    wire_fail("invalid or oversized skin protocol message")
+}
+
+uk_wire_begin(command: str) {
+    to_core_str(command)
+}
+
+uk_wire_argument(value: int) {
+    to_core_arg(value)
+}
+
+uk_wire_byte(value: i8) {
+    to_core_byte(value as int)
+}
+
+uk_wire_bytes(data: []i8, begin: int, end: int) {
+    to_core_text(data, begin, end)
+}
+
+uk_wire_send() {
+    to_core_end()
+}
+
+uk_wire_single(command: str, value: int) {
+    uk_wire_begin(command);
+    uk_wire_argument(value);
+    uk_wire_send()
+}
+
+uk_wire_pair(command: str, first: int, second: int) {
+    uk_wire_begin(command);
+    uk_wire_argument(first);
+    uk_wire_argument(second);
+    uk_wire_send()
+}
+
+uk_wire_act(
+    id: int,
+    action: int,
+    arg: int,
+    value: int
+) {
+    uk_wire_begin("act");
+    uk_wire_argument(id);
+    uk_wire_argument(action);
+    uk_wire_argument(arg);
+    uk_wire_argument(value);
+    uk_wire_send()
+}
+
+uk_wire_text(
+    id: int,
+    action: int,
+    arg: int,
+    data: []i8,
+    begin: int,
+    end: int
+) {
+    uk_wire_begin("text");
+    uk_wire_argument(id);
+    uk_wire_argument(action);
+    uk_wire_argument(arg);
+    uk_wire_byte(' ');
+    uk_wire_bytes(data, begin, end);
+    uk_wire_send()
+}
+
+uk_wire_query(
+    id: int,
+    data: []i8,
+    begin: int,
+    end: int
+) {
+    uk_wire_begin("query");
+    uk_wire_argument(id);
+    uk_wire_byte(' ');
+    uk_wire_bytes(data, begin, end);
+    uk_wire_send()
+}
+
+uk_wire_submit(id: int) {
+    uk_wire_begin("submit");
+    uk_wire_argument(id);
+    uk_wire_send()
+}
+
+uk_wire_model(id: int): bool {
+    ask_model(id, -1, -1)
+}
+
+uk_wire_row_model(id: int, section: int, row: int): bool {
+    ask_model(id, section, row)
+}
+
+// The line begun (uk_wire_begin) sent, and the screen core writes for it
+// read into uk_ui (the title's menu).
+uk_wire_request_model(): bool {
+    ask_begin();
+    to_core_end();
+    if (!ask_end("screen")) return false;
+    if (!wire_decode_span(&uk_ui, answer_buf, 0, answer_n)) uk_wire_fail();
+    uk_stale = true;
+    true
+}
+
+// What core said, read (a command's effects), and the navigation it was
+// for let go.
+uk_effects() {
+    lines_take();
+    uk_nav = 0
+}
+
+// Screen id's model (its rows from section and row, a lazy section's
+// window: -1 none), decoded into uk_ui.
+ask_model(id: int, section: int, row: int): bool {
+    ask_begin();
+    to_core_str("model");
+    to_core_arg(id);
+    if (section >= 0) {
+        to_core_arg(section);
+        to_core_arg(row)
+    }
+    to_core_end();
+    if (!ask_end("screen")) return false;
+    if (!wire_decode_span(&uk_ui, answer_buf, 0, answer_n)) wire_fail("a screen could not be read");
+    uk_stale = false;
+    true
+}
+
+// Chapter c's lines, asked for and stored (ios/reader.l8).
+ask_chapter(c: int): bool {
+    ask_begin();
+    send1("want", c);
+    if (!ask_end("chapter")) return false;
+    reader_store(answer_buf, 0, answer_n);
+    true
+}
+
+// A line's answer, a line of its own (studyable 1|0): its first number
+// (-1: none said).
+ask_line(word: str): int {
+    found: int = -1;
+    p: int = ask_mark;
+    while (found < 0 && p < from_core_n) {
+        e: int = line_end_at(p);
+        if (e >= from_core_n) p = from_core_n else if (wl_at(p, e, word)) {
+            q: int = p + len(word);
+            while (q < e && from_core_buf[q] as int == 32) q = q + 1;
+            found = 0;
+            while (q < e && from_core_buf[q] as int >= 48 && from_core_buf[q] as int <= 57) {
+                found = found * 10 + from_core_buf[q] as int - 48;
+                q = q + 1
+            }
+            n: int = e + 1 - p;
+            for i in e + 1..from_core_n from_core_buf[i - n] = from_core_buf[i];
+            from_core_n = from_core_n - n
+        } else p = e + 1
+    }
+    waiting = waiting - 1;
+    if (!taking && from_core_n > 0) lines_soon();
+    found
+}
+
+// ---- a line's fields ----
+// Field f's words (unescaped) as an NSString (0: none).
+field_ns(line: WireLine, f: int): int {
+    n: int = field_into(line, f, text_buf);
+    if (n < 0) 0 else nsstring_of(text_buf, n)
+}
+
+// Field f's words (unescaped) into out: how many bytes (-1: no field).
+field_into(line: WireLine, f: int, out: []i8): int {
+    if (f >= line.count) return -1;
+    n: int = 0;
+    at: int = line.starts[f];
+    while (at < line.ends[f]) {
+        k: int = line.data[at] as int;
+        if (k == 92 && at + 1 < line.ends[f]) {
+            at = at + 1;
+            k = line.data[at] as int;
+            if (k == 110) k = 10 else if (k == 116) k = 9
+        }
+        if (n >= len(out)) wire_fail("core's words are too long to read");
+        out[n] = k trunc i8;
+        n = n + 1;
+        at = at + 1
+    }
+    n
+}
+
+// Word w of the first field (0 the line's word) as a number; whether it
+// is there.
+word_n(line: WireLine, w: int): int {
+    wire_word_number(line, w)
+}
+
+has_word(line: WireLine, w: int): bool {
+    at: int = line.starts[0];
+    for _i in 0..w {
+        while (at < line.ends[0] && line.data[at] as int != 32) at = at + 1;
+        if (at >= line.ends[0]) return false;
+        at = at + 1
+    }
+    at < line.ends[0]
+}
+
+// A hex color word (RRGGBB, or RRGGBBAA) as a UIColor (autoreleased; 0
+// for "-").
+word_color(line: WireLine, w: int): int {
+    at: int = line.starts[0];
+    for _i in 0..w {
+        while (at < line.ends[0] && line.data[at] as int != 32) at = at + 1;
+        if (at < line.ends[0]) at = at + 1
+    }
+    e: int = at;
+    while (e < line.ends[0] && line.data[e] as int != 32) e = e + 1;
+    hex_color_at(line.data, at, e)
+}
+
+hex_color_at(data: []i8, at: int, e: int): int {
+    if (e - at < 6) return 0;
+    v: []int = hex_parts;
+    for i in 0..4 v[i] = 255;
+    for i in 0..(e - at) / 2 {
+        if (i < 4) v[i] = hex_digit(data[at + 2 * i] as int) * 16 + hex_digit(data[at + 2 * i + 1] as int)
+    }
+    msg_rect(cls("UIColor"), sel("colorWithRed:green:blue:alpha:"), v[0] as f64 / 255.0f64,
+        v[1] as f64 / 255.0f64, v[2] as f64 / 255.0f64, v[3] as f64 / 255.0f64)
+}
+
+hex_parts: []int = new int[4](0);
+
+hex_digit(k: int): int {
+    if (k >= 48 && k <= 57) return k - 48;
+    if (k >= 65 && k <= 70) return k - 55;
+    if (k >= 97 && k <= 102) return k - 87;
+    0
+}
+
+// ---- the skin's own words: a scratch buffer, never core's ----
+tb: []i8 = new i8[65536](0i8);
+
+tb_n: int = 0;
+
+tb_byte(k: int) {
+    if (tb_n >= len(tb)) wire_fail("the skin's words are too long");
+    tb[tb_n] = k trunc i8;
+    tb_n = tb_n + 1
+}
+
+tb_str(s: str) {
+    for c in s tb_byte(c as int)
+}
+
+tb_int(n: int) {
+    if (n < 0) {
+        tb_byte(45);
+        tb_int(-n);
+        return
+    }
+    if (n >= 10) tb_int(n / 10);
+    tb_byte(48 + n % 10)
+}
+
+tb_ns(): int {
+    nsstring_of(tb, tb_n)
+}

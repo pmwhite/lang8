@@ -10,8 +10,9 @@ use_tag std;
 // suggested. Type takes first letters, each word's key letter, one retry,
 // then a miss. What a skin draws is the state here: the step, the level,
 // the words practised (px_a0 to px_a1) and how each shows (px_hidden, the
-// helps and misses, the word being typed, the verse heard). Each action
-// says what changed in px_changed (PX_CH_), for the skin to show.
+// helps and misses, the word being typed, the verse heard). A grade is
+// felt (`felt 0`), a wrong letter too (`felt 1`), a miss announced to a
+// screen reader (`announce` WORDS).
 import "skin.l8";
 
 import "memory.l8";
@@ -112,46 +113,10 @@ px_wash: int = -1;
 
 px_turn: int = -1;
 
-// What an action changed, for the skin: the words' looks; the buttons; a
-// passage begun (its text laid out anew); the end; a card begun (a
-// skin's); the keys put away; playback stopped; the words practised to be
-// brought into sight; the word typed kept in sight; a felt tick.
-PX_CH_PAINT: int = 1;
+// What the skin makes felt (`felt KIND`): a grade given, a wrong letter.
+PX_FELT_GRADE: int = 0;
 
-PX_CH_TOOLS: int = 2;
-
-PX_CH_BEGIN: int = 4;
-
-PX_CH_END: int = 8;
-
-PX_CH_CARD: int = 16;
-
-PX_CH_KEYS_DOWN: int = 32;
-
-PX_CH_STOP: int = 64;
-
-PX_CH_SCROLL: int = 128;
-
-PX_CH_SCROLL_CUR: int = 256;
-
-PX_CH_HAPTIC: int = 512;
-
-PX_CH_WRONG: int = 1024;
-
-// (A word missed while typed: its words in fbuf, "Missed: everyone".)
-PX_CH_MISS: int = 2048;
-
-// A card's answer shown (its words cross-fading in), and a word read
-// spoken (a skin that speaks).
-PX_CH_ANSWER: int = 4096;
-
-PX_CH_SPEAK: int = 8192;
-
-px_changed: int = 0;
-
-px_ch(bits: int) {
-    px_changed = px_changed | bits
-}
+PX_FELT_WRONG: int = 1;
 
 // The text of passage i ready (memory.l8's mt: the host's version's words,
 // an ESV passage's once it has come): 1 if it is.
@@ -174,20 +139,13 @@ PXS_NEW: int = 4;
 // Whether a session is going (until its skin says it is gone: px_closed).
 px_live: bool = false;
 
-px_start(how: int, arg: int) {
+px_start(language: *LanguageData, how: int, arg: int) {
     if (px_live) return;
-    n: int = if (how == PXS_ONE) px_queue_one(arg) else if (how == PXS_CARDS) px_queue_cards(arg) else if (how == PXS_READING) px_queue_reading(arg) else if (how == PXS_NEW) px_queue_new() else px_queue_today();
+    n: int = if (how == PXS_ONE) px_queue_one(arg) else if (how == PXS_CARDS) px_queue_cards(arg) else if (how == PXS_READING) px_queue_reading(language,
+        arg) else if (how == PXS_NEW) px_queue_new() else px_queue_today();
     if ((how == PXS_ONE || how == PXS_NEW) && n == 0) return;
-    // (None at all: the end's words at once. The host's own sheet, or
-    // core's screen.)
-    // (SK_NUM_OWN_VIEW: the iPhone's sheet, ios/practice.l8, drawn from
-    // this state.)
-    if (sk_num_of(SK_NUM_OWN_VIEW, SCR_PRACTICE) == 1) {
-        ui_effect("practice_session", n, how);
-        return
-    }
-    px_session(n);
-    px_changed = 0;
+    // (None at all: the end's words at once, on core's screen.)
+    px_session(language, n);
     sk_open(SCR_PRACTICE, 0, false)
 }
 
@@ -213,8 +171,10 @@ px_text(i: int): bool {
     if (v >= 0) return v == 1;
     if (i < 0 || i >= mq_n) return false;
     t: int = mq_ver[i];
-    if (t < 0 || t >= len(tx_ready) || t == TEXT_ESV || t == TEXT_PIN || !tx_ready[t]) return false;
-    memory_layout_from(text_source(t), mq_c1[i], mq_v1[i], mq_c2[i], mq_v2[i], mq_id[i]);
+    if (t == TEXT_ESV || t == TEXT_PIN || !text_ready(t)) return false;
+    borrow texts[t] as text {
+        memory_layout_from(text, mq_c1[i], mq_v1[i], mq_c2[i], mq_v2[i], mq_id[i])
+    }
     mw_n > 0
 }
 
@@ -239,7 +199,7 @@ px_entry_ok(e: int): bool {
 // ---- a session ----
 // A session of the first n of px_q (with px_back) begun; first line
 // whether the one-time line shows.
-px_session(n: int) {
+px_session(language: *LanguageData, n: int) {
     px_live = true;
     px_qn = n;
     px_at = 0;
@@ -253,8 +213,7 @@ px_session(n: int) {
     crd_ask_at = -1;
     for x in 0..n
         if (x < len(crd_ret)) crd_ret[x] = RET_FIRST;
-    px_changed = 0;
-    px_begin()
+    px_begin(language)
 }
 
 // Today's passages (the Library's Practice), into px_q (the host adds its
@@ -337,8 +296,8 @@ px_count_words(spoken: bool): bool {
 }
 
 // ---- a passage begun ----
-px_begin() {
-    px_ch(PX_CH_STOP | PX_CH_BEGIN | PX_CH_TOOLS);
+px_begin(language: *LanguageData) {
+    pxw_stop();
     px_turn = -1;
     px_wash = -1;
     while (px_at < px_qn && !px_entry_ok(px_q[px_at])) px_at = px_at + 1;
@@ -349,8 +308,7 @@ px_begin() {
     // (A card, or a word to read.)
     if (px_q[px_at] < 0) {
         px_i = -1;
-        px_card_begin(px_q[px_at]);
-        px_ch(PX_CH_CARD);
+        px_card_begin(language, px_q[px_at]);
         return
     }
     i: int = mem_index(px_q[px_at]);
@@ -368,8 +326,7 @@ px_begin() {
         if (k >= mpt_n) k = mpt_n - 1;
         if (k > 0) px_set(PX_WARMUP, LV_LETTERS, 0, mpt_w0[k], k) else px_set(PX_NEW,
             LV_FULL, mpt_w0[0], mpt_w1[0], 0)
-    } else px_set(PX_REVIEW, mq_level[i], 0, mw_n, 0);
-    px_ch(PX_CH_PAINT)
+    } else px_set(PX_REVIEW, mq_level[i], 0, mw_n, 0)
 }
 
 // The step set: its level, its words, the part; nothing shown yet.
@@ -406,8 +363,7 @@ px_show_word(w: int) {
     if (w < 0 || w >= mw_n || px_hidden(w) == 0) return;
     px_shown[w] = true;
     px_help[w] = true;
-    if (w == px_cur) px_cur = px_next_word(w + 1);
-    px_ch(PX_CH_PAINT)
+    if (w == px_cur) px_cur = px_next_word(w + 1)
 }
 
 // Verse x's hidden words shown (each a help); whether it had any.
@@ -452,7 +408,6 @@ px_show_verse(x: int): bool {
     }
     if (!any) return false;
     if (px_cur >= 0 && px_shown[px_cur]) px_cur = px_next_word(px_cur);
-    px_ch(PX_CH_PAINT);
     true
 }
 
@@ -480,7 +435,6 @@ px_set_level(lv: int) {
         mq_level[px_i] = lv;
         sk_kept(SK_KEPT_MEMORY)
     }
-    px_ch(PX_CH_PAINT | PX_CH_TOOLS)
 }
 
 // ---- the main button ----
@@ -498,11 +452,11 @@ px_main_title(): str {
 }
 
 // Next (a level on), Check, or what comes after Check.
-px_main() {
+px_main(language: *LanguageData) {
     // (A card: Next after a new one's first showing or a word read, else
     // Check.)
     if (px_step == PX_CARD_NEW || px_step == PX_READ_DONE) {
-        px_card_next();
+        px_card_next(language);
         return
     }
     if (px_step == PX_CARD || px_step == PX_READ) {
@@ -520,7 +474,6 @@ px_main() {
     if (px_step == PX_WARMUP_DONE) {
         k: int = px_part;
         px_set(PX_NEW, LV_FULL, mpt_w0[k], mpt_w1[k], k);
-        px_after_step();
         return
     }
     if (px_step == PX_NEW_DONE) {
@@ -531,25 +484,22 @@ px_main() {
         sk_kept(SK_KEPT_MEMORY);
         if (k >= 1) {
             px_set(PX_JOINED, LV_BLANK, mpt_w0[k - 1], mpt_w1[k], k);
-            px_after_step();
             return
         }
         if (last) {
-            px_next_passage();
+            px_next_passage(language);
             return
         }
         px_set(PX_NEW, LV_FULL, mpt_w0[k + 1], mpt_w1[k + 1], k + 1);
-        px_after_step();
         return
     }
     if (px_step == PX_JOINED_DONE) {
         k: int = px_part;
         if (k + 1 >= mpt_n) {
-            px_next_passage();
+            px_next_passage(language);
             return
         }
-        px_set(PX_NEW, LV_FULL, mpt_w0[k + 1], mpt_w1[k + 1], k + 1);
-        px_after_step()
+        px_set(PX_NEW, LV_FULL, mpt_w0[k + 1], mpt_w1[k + 1], k + 1)
     }
 }
 
@@ -557,14 +507,7 @@ px_main() {
 px_again() {
     if (px_step != PX_NEW_DONE) return;
     k: int = px_part;
-    px_set(PX_NEW, LV_SOME, mpt_w0[k], mpt_w1[k], k);
-    px_after_step()
-}
-
-px_after_step() {
-    px_ch(PX_CH_PAINT | PX_CH_TOOLS);
-    // (A new part, or the two joined, brought into sight.)
-    if ((px_step == PX_NEW || px_step == PX_JOINED) && px_a1 > px_a0) px_ch(PX_CH_SCROLL)
+    px_set(PX_NEW, LV_SOME, mpt_w0[k], mpt_w1[k], k)
 }
 
 // Check: every word practised shown; then the judgement (review), Again
@@ -578,7 +521,7 @@ px_check() {
     px_cur = -1;
     if (px_step == PX_WARMUP) px_step = PX_WARMUP_DONE else if (px_step == PX_NEW) px_step = PX_NEW_DONE else if (px_step == PX_JOINED) px_step = PX_JOINED_DONE else if (px_step == PX_REVIEW) px_step = PX_REVIEW_DONE;
     if (px_step == PX_WARMUP_DONE) px_part = mq_learned[px_i];
-    px_ch(PX_CH_KEYS_DOWN | PX_CH_STOP | PX_CH_PAINT | PX_CH_TOOLS)
+    pxw_stop()
 }
 
 px_suggested(): int {
@@ -587,9 +530,9 @@ px_suggested(): int {
 
 // A grade: kept, and on to the next passage (a Not Yet comes once more at
 // the end).
-px_grade(g: int) {
+px_grade(language: *LanguageData, g: int) {
     if (px_step == PX_CARD_DONE) {
-        px_card_grade(g);
+        px_card_grade(language, g);
         return
     }
     if (px_step != PX_REVIEW_DONE || px_i < 0) return;
@@ -597,25 +540,25 @@ px_grade(g: int) {
     if (px_back[px_at]) memory_grade_again(px_i, g, px_helps(), px_misses(), time(0)) else _c: bool = memory_grade(px_i,
         g, sk_today_now(), px_helps(), px_misses(), time(0));
     sk_kept(SK_KEPT_MEMORY);
-    px_ch(PX_CH_HAPTIC);
+    ui_effect("felt", PX_FELT_GRADE, -1);
     if (g == G_NOTYET && !px_back[px_at] && px_qn < len(px_q)) {
         px_q[px_qn] = mq_id[px_i];
         px_back[px_qn] = true;
         px_qn = px_qn + 1
     }
-    px_next_passage()
+    px_next_passage(language)
 }
 
 // On: the next passage, or the end.
-px_next_passage() {
+px_next_passage(language: *LanguageData) {
     px_at = px_at + 1;
     px_first_line = false;
-    px_begin()
+    px_begin(language)
 }
 
 // The end: "That's all for today." and the next review.
 px_finish() {
-    px_ch(PX_CH_END | PX_CH_KEYS_DOWN | PX_CH_STOP | PX_CH_TOOLS);
+    pxw_stop();
     px_step = PX_END;
     px_i = -1
 }
@@ -660,8 +603,7 @@ px_typing_set(on: bool) {
 px_keys_set(up: bool) {
     px_keys_up = up;
     if (up && px_cur < 0) px_cur = px_next_word(px_a0);
-    if (!up) px_cur = -1;
-    px_ch(PX_CH_PAINT | PX_CH_TOOLS)
+    if (!up) px_cur = -1
 }
 
 // The first word practised from w not shown yet (-1: none).
@@ -687,7 +629,7 @@ px_type(k: int) {
         px_cur = px_next_word(w + 1)
     } else if (!px_wrong[w]) {
         px_wrong[w] = true;
-        px_ch(PX_CH_WRONG);
+        ui_effect("felt", PX_FELT_WRONG, -1);
         return
     } else {
         px_shown[w] = true;
@@ -696,13 +638,9 @@ px_type(k: int) {
         fbuf_n = 0;
         fput_str("Missed: ");
         for q in mw_k[w]..mw_h2[w] fput(mt[q] as int);
-        px_ch(PX_CH_MISS)
+        ui_effect_fbuf("announce")
     }
-    if (px_cur < 0) {
-        px_check();
-        return
-    }
-    px_ch(PX_CH_PAINT | PX_CH_SCROLL_CUR)
+    if (px_cur < 0) px_check()
 }
 
 // ---- cards and words to read (Â§14.3), in a session ----
@@ -733,12 +671,13 @@ crd_read_w: int = -1;
 // What a screen reader says of the card's word, into fbuf: a letter's
 // name, a word's transliteration, or the form read; before Check, what
 // is hidden ("agapaÅ. Hidden: meaning.").
-crd_spoken() {
+crd_spoken(language: *LanguageData) {
     fbuf_n = 0;
-    if (crd_k >= 0 && cd_kind[crd_k] != CK_WORD) fput_lt(cd_key[crd_k], LF_NAME) else if (crd_k >= 0) fput_lemma(crd_lang,
-        cd_key[crd_k], 1) else if (crd_read_w >= 0) {
-        form_of(crd_read_w);
-        fput_bytes(lforms, wf_b, wf_e)
+    if (crd_k >= 0 && cd_kind[crd_k] != CK_WORD) fput_lt(language, cd_key[crd_k],
+        LF_NAME) else if (crd_k >= 0) fput_lemma(language, crd_lang, cd_key[crd_k],
+        1) else if (crd_read_w >= 0) {
+        form_of(language, crd_read_w);
+        fput_bytes(language.forms, wf_b, wf_e)
     }
     if (!crd_checked) fput_str(if (crd_reading >= 0) w_hidden_tr else w_hidden_meaning)
 }
@@ -767,18 +706,18 @@ px_queue_cards(lang: int): int {
 }
 
 // Practise Reading: ten words (Â§14.3.3), a round at a time.
-px_queue_reading(lang: int): int {
+px_queue_reading(language: *LanguageData, lang: int): int {
     _l: int = sk_num_of(SK_NUM_LANG, 0);
     crd_reading = lang;
     crd_round = 0;
-    px_reading_words()
+    px_reading_words(language)
 }
 
-px_reading_words(): int {
-    learn_reading_words(crd_reading, crd_round * 10, time(0));
+px_reading_words(language: *LanguageData): int {
+    learn_reading_words(language, crd_reading, crd_round * 10, time(0));
     if (pr_n == 0 && crd_round > 0) {
         crd_round = 0;
-        learn_reading_words(crd_reading, 0, time(0))
+        learn_reading_words(language, crd_reading, 0, time(0))
     }
     for x in 0..pr_n {
         px_q[x] = -pr_w[x] - READ_CODE;
@@ -789,17 +728,17 @@ px_reading_words(): int {
 }
 
 // Again (at Practise Reading's end): the next ten.
-px_reading_again() {
+px_reading_again(language: *LanguageData) {
     if (px_step != PX_READ_END) return;
     crd_round = crd_round + 1;
-    px_qn = px_reading_words();
+    px_qn = px_reading_words(language);
     px_at = 0;
-    px_begin()
+    px_begin(language)
 }
 
 // Entry e begun: a card (its context found; a new one back once more at
 // the end, hidden, for a judgement), or a word to read.
-px_card_begin(e: int) {
+px_card_begin(language: *LanguageData, e: int) {
     if (crd_reading >= 0) {
         crd_read_w = px_entry_word(e);
         crd_k = -1;
@@ -834,7 +773,7 @@ px_card_begin(e: int) {
         crd_ret[px_qn] = RET_NEW;
         px_qn = px_qn + 1
     }
-    _c: bool = learn_context(k, time(0));
+    _c: bool = learn_context(language, k, time(0));
     crd_vi = ctx_vi;
     crd_w = ctx_w;
     if (crd_ask_at < 0 && cd_kind[k] == CK_WORD) crd_ask_at = px_at;
@@ -867,40 +806,35 @@ px_card_main_title(): str {
 px_card_check() {
     if (px_step != PX_CARD && px_step != PX_READ) return;
     crd_checked = true;
-    if (px_step == PX_READ) {
-        px_step = PX_READ_DONE;
-        px_ch(PX_CH_SPEAK)
-    } else px_step = PX_CARD_DONE;
-    px_ch(PX_CH_ANSWER | PX_CH_TOOLS)
+    if (px_step == PX_READ) px_step = PX_READ_DONE else px_step = PX_CARD_DONE
 }
 
 // A judgement: kept; Not Yet's card once more at the end.
-px_card_grade(g: int) {
+px_card_grade(language: *LanguageData, g: int) {
     if (px_step != PX_CARD_DONE || crd_k < 0) return;
     k: int = crd_k;
     ret: int = if (px_back[px_at]) RET_RETRY else crd_ret[px_at];
-    next: int = learn_judged(k, g, ret, sk_today_now(), time(0), crd_vi);
+    next: int = learn_judged(language, k, g, ret, sk_today_now(), time(0), crd_vi);
     sk_kept(SK_KEPT_CARDS);
-    px_ch(PX_CH_HAPTIC);
+    ui_effect("felt", PX_FELT_GRADE, -1);
     if (next == RET_RETRY && px_qn < len(px_q)) {
         px_q[px_qn] = -k - 1;
         px_back[px_qn] = true;
         crd_ret[px_qn] = RET_RETRY;
         px_qn = px_qn + 1
     }
-    px_card_next()
+    px_card_next(language)
 }
 
 // On: the next entry (a passage, a card, a word), or the end (Practise
 // Reading's: "That's 10 words. Again?").
-px_card_next() {
+px_card_next(language: *LanguageData) {
     crd_hint = false;
     if (crd_reading >= 0 && px_at + 1 >= px_qn) {
         px_step = PX_READ_END;
-        px_ch(PX_CH_END | PX_CH_TOOLS);
         return
     }
-    px_next_passage()
+    px_next_passage(language)
 }
 
 // ---- how each word looks (Â§13.3.4): the text as a skin paints it ----
@@ -1041,7 +975,7 @@ pxc_oe: []int = new int[2](0);
 pxc_on: int = 0;
 
 // Part's words into fbuf.
-px_card_part(part: int) {
+px_card_part(language: *LanguageData, part: int) {
     fbuf_n = 0;
     pxc_b = -1;
     pxc_e = -1;
@@ -1062,39 +996,40 @@ px_card_part(part: int) {
         }
     } else if (part == PXC_WORD) {
         if (reading) {
-            form_of(crd_read_w);
-            fput_bytes(lforms, wf_b, wf_e)
-        } else if (letter) fput_lt(i, LF_GLYPH) else if (word) fput_lemma(lang, cd_key[k],
-            0)
+            form_of(language, crd_read_w);
+            fput_bytes(language.forms, wf_b, wf_e)
+        } else if (letter) fput_lt(language, i, LF_GLYPH) else if (word) fput_lemma(language,
+            lang, cd_key[k], 0)
     } else if (part == PXC_TR) {
         if (reading) {
-            form_of(crd_read_w);
-            fput_bytes(lforms, wt_b, wt_e)
-        } else if (word) fput_lemma(lang, cd_key[k], 1)
+            form_of(language, crd_read_w);
+            fput_bytes(language.forms, wt_b, wt_e)
+        } else if (word) fput_lemma(language, lang, cd_key[k], 1)
     } else if (part == PXC_CAP) {
-        if (crd_vi >= 0 && !reading) fput_ref(v_chapter(crd_vi), v_num(crd_vi), 0)
+        if (crd_vi >= 0 && !reading) fput_ref(v_chapter(language, crd_vi), v_num(language,
+            crd_vi), 0)
     } else if (part == PXC_WINDOW) {
         if (letter) {
-            lt_example(i);
+            lt_example(language, i);
             fput_bytes(exm, 0, exm_n);
             pxc_b = exm_b;
             pxc_e = exm_e
         } else if (word && crd_vi >= 0 && crd_w >= 0) {
             // (Up to 12 words around the form, in the original's order;
             // "â€¦" where cut.)
-            learn_window(crd_vi, crd_w);
+            learn_window(language, crd_vi, crd_w);
             if (ow_from > 0) fput_str("\â\€\¦ ");
             for o in ow_from..ow_to {
-                w: int = word_at_order(crd_vi, o);
+                w: int = word_at_order(language, crd_vi, o);
                 if (w >= 0) {
-                    form_of(w);
+                    form_of(language, w);
                     if (o > ow_from) fput(32);
                     if (w == crd_w) pxc_b = fbuf_n;
-                    fput_bytes(lforms, wf_b, wf_e);
+                    fput_bytes(language.forms, wf_b, wf_e);
                     if (w == crd_w) pxc_e = fbuf_n
                 }
             }
-            if (ow_to < v_end(crd_vi) - v_first(crd_vi)) fput_str(" \â\€\¦")
+            if (ow_to < v_end(language, crd_vi) - v_first(language, crd_vi)) fput_str(" \â\€\¦")
         }
     } else if (part == PXC_ASK) {
         if (word && px_at == crd_ask_at) fput_str("What does it mean here?")
@@ -1102,35 +1037,35 @@ px_card_part(part: int) {
         // (A word: the BSB's words for it in this verse, else its gloss; a
         // letter: its name and sound.)
         if (letter) {
-            fput_lt(i, LF_NAME);
+            fput_lt(language, i, LF_NAME);
             if (cd_kind[k] == CK_LETTER) {
                 fput_str(" \Â\· ");
-                fput_lt_sound(i, sk_ln_pron(lang))
+                fput_lt_sound(language, i, sk_ln_pron(lang))
             }
-        } else if (word && !fput_words_here(crd_vi, crd_w)) {
+        } else if (word && !fput_words_here(language, crd_vi, crd_w)) {
             fbuf_n = 0;
-            px_card_gloss()
+            px_card_gloss(language)
         }
     } else if (part == PXC_HERE) {
         // (The sense here, as part of the answer; then UBS's meaning here,
         // quieter: "Here:" and the definition.)
         if (word) {
-            _h: bool = fput_sense_here(crd_vi, crd_w);
+            _h: bool = fput_sense_here(language, crd_vi, crd_w);
             had: bool = fbuf_n > 0;
-            m: int = w_meaning(crd_w);
+            m: int = w_meaning(language, crd_w);
             if (m > 0) {
                 pxc_b = fbuf_n;
                 if (had) fput(10) else fput_str("Here: ");
-                fput_meaning(m)
+                fput_meaning(language, m)
             }
         }
     } else if (part == PXC_VERSE) {
         if (!reading && crd_vi >= 0) {
-            study_load(crd_vi);
+            study_load(language, crd_vi);
             a: int = if (st_title > 0) st_title + 1 else 0;
             fput_bytes(st, a, st_n);
             if (crd_w >= 0) {
-                chunk_of(crd_w);
+                chunk_of(language, crd_w);
                 if (ch_e > ch_b && ch_b >= a) {
                     pxc_b = ch_b - a;
                     pxc_e = ch_e - a
@@ -1141,31 +1076,31 @@ px_card_part(part: int) {
         if (reading) fput_str("transliteration, a guide to the letters") else if (letter && cd_kind[k] == CK_JOINED) fput_str(if (lt_part[i] < 6) "joined to the front of a word" else "joined to the end of a word") else if (letter) {
             // (Its example, transliterated, and its meaning.)
             if (crd_w >= 0) {
-                form_of(crd_w);
-                fput_bytes(lforms, wt_b, wt_e);
+                form_of(language, crd_w);
+                fput_bytes(language.forms, wt_b, wt_e);
                 fput_str(": ")
             }
-            fput_lemma(lang, lt_key[i], 3)
-        } else if (word) fput_card_meta(lang, cd_key[k])
+            fput_lemma(language, lang, lt_key[i], 3)
+        } else if (word) fput_card_meta(language, lang, cd_key[k])
     } else if (part == PXC_RELATED) {
         // ("Related: Ï†Î¹Î»Î­Ï‰ to love, á¼€Î³Î¬Ï€Î· love": up to two words of its
         // family known, Â§10.4's list.)
         if (!word) return;
-        learn_related_known(lang, cd_key[k]);
+        learn_related_known(language, lang, cd_key[k]);
         if (rk_n == 0) return;
         fput_str("Related: ");
         for x in 0..rk_n {
             if (x > 0) fput_str(", ");
             if (x < len(pxc_ob)) pxc_ob[x] = fbuf_n;
             if (lang == 1) fput_rli();
-            fput_lemma(lang, rk_num[x], 0);
+            fput_lemma(language, lang, rk_num[x], 0);
             if (lang == 1) fput_pdi();
             if (x < len(pxc_oe)) {
                 pxc_oe[x] = fbuf_n;
                 pxc_on = x + 1
             }
             fput(32);
-            fput_lemma(lang, rk_num[x], 3)
+            fput_lemma(language, lang, rk_num[x], 3)
         }
     }
 }
@@ -1181,14 +1116,15 @@ px_card_part_shown(part: int): bool {
 
 // The lemma's gloss (its sense's, in this verse): where the verse has no
 // English for it.
-px_card_gloss() {
+px_card_gloss(language: *LanguageData) {
     k: int = crd_k;
     greek: bool = cd_lang[k] == 0;
-    e: int = if (crd_w >= 0) meaning_entry(greek, cd_key[k], w_sense(crd_w)) else -1;
-    if (e < 0) e = lex_first(greek, cd_key[k]);
+    e: int = if (crd_w >= 0) meaning_entry(language, greek, cd_key[k], w_sense(language,
+        crd_w)) else -1;
+    if (e < 0) e = lex_first(language, greek, cd_key[k]);
     if (e < 0) return;
-    lex_field(e, 3);
-    fput_gloss(lf_b, lf_e)
+    lex_field(language, e, 3);
+    fput_gloss(language, lf_b, lf_e)
 }
 
 // ---- the buttons at the foot (Â§13.3.5), as a skin lays them out ----
@@ -1304,7 +1240,7 @@ ACT_PX_SPEAK: int = 172;
 // Each byte of mt's UTF-16 place (for the links).
 pxl_u16: []int = new int[65537](0);
 
-sk_build_practice(id: int) {
+sk_build_practice(language: *LanguageData, id: int) {
     ui_begin(id, SCR_PRACTICE, 0, "");
     ui_set_confirm("Done", ACT_PX_DONE);
     if (px_i >= 0) _t: bool = px_text(px_i);
@@ -1318,7 +1254,7 @@ sk_build_practice(id: int) {
         ui_empty_title = ui_put_fbuf();
         px_end_words();
         ui_empty_line = ui_put_fbuf()
-    } else if (px_step >= PX_CARD && px_step <= PX_READ_DONE) sk_px_card() else if (px_i >= 0) sk_px_passage();
+    } else if (px_step >= PX_CARD && px_step <= PX_READ_DONE) sk_px_card(language) else if (px_i >= 0) sk_px_passage();
     px_tools();
     audio: bool = sk_num_of(SK_NUM_PRACTICE_AUDIO, 0) == 1;
     keys: bool = sk_num_of(SK_NUM_PRACTICE_KEYS, 0) == 1;
@@ -1406,6 +1342,9 @@ sk_px_passage() {
             ui_add_link(pxl_u16[b], pxl_u16[e], ACT_PX_VERSE, x)
         }
     }
+    // (In sight: the word being typed, else the words practised.)
+    if (px_keys_up && px_cur >= 0) ui_set_focus_words(pxl_u16[mw_b[px_cur]], pxl_u16[mw_e[px_cur]]) else if (px_a1 > px_a0) ui_set_focus_words(pxl_u16[mw_b[px_a0]],
+        pxl_u16[mw_e[px_a1 - 1]])
 }
 
 px_loading: str = "Loading\â\€\¦";
@@ -1424,37 +1363,42 @@ px_wait_words(esv: bool) {
 // A card: its word as the heading (its transliteration under it, once it
 // shows), "New" and the one-time line above; then its parts, each a
 // paragraph, the answer's once checked.
-sk_px_card() {
+sk_px_card(language: *LanguageData) {
     ui_title = ui_put(px_card_title());
     script: int = if (crd_lang == 0) RUN_GREEK else RUN_HEBREW;
-    px_card_part(PXC_WORD);
+    px_card_part(language, PXC_WORD);
     ui_hero = ui_put_fbuf();
     ui_hero_script = script;
-    px_card_part(PXC_TR);
+    px_card_part(language, PXC_TR);
     if (px_card_part_shown(PXC_TR)) ui_hero_sub = ui_put_fbuf();
-    px_card_part(PXC_TOP);
+    px_card_part(language, PXC_TOP);
     if (fbuf_n > 0 && px_card_part_shown(PXC_TOP)) ui_set_intro_fbuf();
     ui_plain = true;
     ui_page = true;
     ui_section("", "");
     faint: int = if (crd_lang == 0) RUN_GREEK_FAINT else RUN_HEBREW_FAINT;
     letter: bool = crd_k >= 0 && cd_kind[crd_k] != CK_WORD;
-    sk_px_part(PXC_CAP, RUN_FAINT, RUN_FAINT);
-    sk_px_part(PXC_WINDOW, if (letter) script else faint, if (letter) RUN_ACCENT else script);
-    sk_px_part(PXC_ASK, RUN_FAINT, RUN_FAINT);
+    sk_px_part(language, PXC_CAP, RUN_FAINT, RUN_FAINT);
+    sk_px_part(language, PXC_WINDOW, if (letter) script else faint, if (letter) RUN_ACCENT else script);
+    sk_px_part(language, PXC_ASK, RUN_FAINT, RUN_FAINT);
     if (!crd_checked) return;
-    sk_px_part(PXC_ANSWER, RUN_STRONG, RUN_STRONG);
-    sk_px_part(PXC_HERE, RUN_PLAIN, RUN_FAINT);
-    sk_px_part(PXC_VERSE, RUN_SCRIPTURE, RUN_STRONG);
-    sk_px_part(PXC_META, RUN_FAINT, RUN_FAINT);
-    sk_px_part(PXC_RELATED, RUN_FAINT, script)
+    sk_px_part(language, PXC_ANSWER, RUN_STRONG, RUN_STRONG);
+    sk_px_part(language, PXC_HERE, RUN_PLAIN, RUN_FAINT);
+    sk_px_part(language, PXC_VERSE, RUN_SCRIPTURE, RUN_STRONG);
+    sk_px_part(language, PXC_META, RUN_FAINT, RUN_FAINT);
+    sk_px_part(language, PXC_RELATED, RUN_FAINT, script)
 }
 
 // A card's part as a paragraph: its words in style, its stressed bytes in
 // stress (the sense here: its meaning from there on; related words: their
 // lemmas).
-sk_px_part(part: int, style: int, stress: int) {
-    px_card_part(part);
+sk_px_part(
+    language: *LanguageData,
+    part: int,
+    style: int,
+    stress: int
+) {
+    px_card_part(language, part);
     if (fbuf_n == 0) return;
     n: int = fbuf_n;
     for q in 0..n ui_pool_scratch[q] = fbuf[q];
@@ -1492,6 +1436,7 @@ ui_pool_scratch: []i8 = new i8[65536](0i8);
 
 // What a skin's tap on core's screen does.
 sk_px_act(
+    language: *LanguageData,
     at: int,
     action: int,
     arg: int,
@@ -1506,15 +1451,16 @@ sk_px_act(
         return
     }
     if (px_i >= 0) _t: bool = px_text(px_i);
-    if (action == ACT_PX_LEVEL) px_set_level(value) else if (action == ACT_PX_MAIN) px_main() else if (action == ACT_PX_AGAIN) px_again() else if (action == ACT_PX_GRADE) px_grade(arg) else if (action == ACT_PX_WORD) px_show_word(arg) else if (action == ACT_PX_VERSE) _v: bool = px_show_verse(arg) else if (action == ACT_PX_READ_AGAIN) px_reading_again() else if (action == ACT_PX_TYPE) {
+    if (action == ACT_PX_LEVEL) px_set_level(value) else if (action == ACT_PX_MAIN) px_main(language) else if (action == ACT_PX_AGAIN) px_again() else if (action == ACT_PX_GRADE) px_grade(language,
+        arg) else if (action == ACT_PX_WORD) px_show_word(arg) else if (action == ACT_PX_VERSE) _v: bool = px_show_verse(arg) else if (action == ACT_PX_READ_AGAIN) px_reading_again(language) else if (action == ACT_PX_TYPE) {
         px_typing_set(!px_keys_up);
         px_keys_set(!px_keys_up)
     } else if (action == ACT_PX_KEY) px_type(arg) else if (hs_on && (action == ACT_PX_LISTEN || action == ACT_PX_ECHO)) pxw_press(if (action == ACT_PX_LISTEN) 1 else 2) else ui_effect("practice_audio",
         action, arg);
-    // (What changed: all of it, made again.)
-    px_changed = 0;
+    // (What changed: all of it, made again; the words practised in sight.)
     sk_build(at);
-    ui_effect("update", id, -1)
+    ui_effect("update", id, -1);
+    ui_effect("reveal", id, -1)
 }
 
 // ---- a passage's words, for its row and details ----
@@ -1553,8 +1499,10 @@ mm_range_words(ver: int) {
         return
     }
     fbuf_n = 0;
-    if (ver < 0 || ver >= len(tx_ready) || !tx_ready[ver]) return;
-    memory_layout_from(text_source(ver), rg_c1, rg_v1, rg_c2, rg_v2, 1);
+    if (!text_ready(ver)) return;
+    borrow texts[ver] as text {
+        memory_layout_from(text, rg_c1, rg_v1, rg_c2, rg_v2, 1)
+    }
     fbuf_n = 0;
     if (mt_n > 0) fput_first_words(2000)
 }
@@ -1728,10 +1676,9 @@ pxw_verse(x: int) {
     if (pxa_player) {
         c: int = mv_c[x];
         last: int = if (listen) pxa_last_in_chapter(x) else x;
-        audio_url(pxa_src, c);
+        audio_address(pxa_src, c);
         if (au_n > 0) {
             pxw_tok = pxw_tok + 1;
-            if (!ui_wire) return;
             ui_effect("speech_stop", -1, -1);
             ui_str("audio_play ");
             ui_int(pxw_tok);
@@ -1759,12 +1706,13 @@ pxw_verse(x: int) {
         esv_pin_build(mq_id[px_i]);
         t = TEXT_PIN
     }
-    source: TextSource = ready_source(t);
-    for y in x..last + 1 {
-        _n: int = source_speak_text(&source, mv_c[y], mv_v[y]);
-        fbuf_n = 0;
-        fput_bytes(vt, 0, vt_n);
-        lw_say(PXW_SAY + y, mv_v[y])
+    borrow texts[text_or_current(t)] as source {
+        for y in x..last + 1 {
+            _n: int = source_speak_text(source, mv_c[y], mv_v[y]);
+            fbuf_n = 0;
+            fput_bytes(vt, 0, vt_n);
+            lw_say(PXW_SAY + y, mv_v[y])
+        }
     }
 }
 

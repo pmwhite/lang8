@@ -9,7 +9,8 @@ use_tag std;
 // the Gospels in 30 days, Old and New Together, and A Chapter a Day from a
 // chosen chapter, Â§11.1.2b), balanced by the BSB's words; the listed ones
 // (M'Cheyne's Calendar, Chronological) read from data/plans/<id>.txt,
-// which the platform hands over (plan_file_set) before the plans are made.
+// which the platform hands over (plan_file_read) before the
+// plans are made.
 // A plan's progress (plan.tsv's lines, read and written in fbuf as
 // store.l8's files are), kept by passage; a day's reminder; and a day as
 // the reader lays it out, a row a chapter's part (layout_day_row). Days
@@ -69,15 +70,25 @@ plan_listed(p: int): bool {
     p == PLAN_MCHEYNE || p == PLAN_CHRONO
 }
 
-// A listed plan's file, as the platform read it (kept: its name and
-// description are copied out of it, into pl_words).
-pl_file: [][]i8 = new []i8[7](new i8[0](0i8));
+// Each listed plan's file, as the platform read it (a dataset of its own;
+// its name and description are copied out of it, into pl_words): empty
+// until it comes.
+plan_files: []?owned *DataFile = plan_files_begin();
 
-pl_file_n: []int = new int[7](0);
+plan_files_begin(): []?owned *DataFile@new {
+    files: []?owned *DataFile = new ?owned *DataFile[7](null);
+    for p in 0..len(files) files[p] = data_file_empty();
+    files
+}
 
-plan_file_set(p: int, b: []i8@immortal, n: int) {
-    pl_file[p] = b;
-    pl_file_n[p] = n
+plan_file_read(
+    p: int,
+    id: int,
+    n: int,
+    read: fn(id: int, out: []i8)
+) {
+    drop plan_files[p];
+    plan_files[p] = data_file_read(id, n, read)
 }
 
 // A listed plan's @name and @blurb (bytes in pl_words), and how many of
@@ -167,18 +178,19 @@ pl_ends: []int = new int[366](0);
 // Each chapter's characters of words (T and W lines; a UTF-8 character
 // counted once) and verses, the BSB's.
 plan_weights() {
-    src: TextSource = ready_source(TEXT_BSB);
-    for c in 0..chapters {
-        n: int = 0;
-        p: int = src.starts[c];
-        while (p < src.ends[c]) {
-            e: int = record_line_end(src.data, src.size, p);
-            k: int = src.data[p] as int;
-            if (k == 84 || k == 87) n = n + record_chars(src.data, p + 1, e);
-            p = e + 1
+    borrow texts[text_or_current(TEXT_BSB)] as src {
+        for c in 0..chapters {
+            n: int = 0;
+            p: int = src.starts[c];
+            while (p < src.ends[c]) {
+                e: int = record_line_end(src.data, src.size, p);
+                k: int = src.data[p] as int;
+                if (k == 84 || k == 87) n = n + record_chars(src.data, p + 1, e);
+                p = e + 1
+            }
+            pl_chars[c] = n;
+            pl_last[c] = tx_ch_verses[src.version][c]
         }
-        pl_chars[c] = n;
-        pl_last[c] = src.verses[c]
     }
 }
 
@@ -208,24 +220,25 @@ plan_seq(a: int, b: int) {
 // verse, or a verse a heading comes before (poetry: or a stanza's break,
 // or an acrostic's letter).
 plan_verse_seq(a: int, b: int, by_count: bool) {
-    src: TextSource = ready_source(TEXT_BSB);
-    pu_n = 0;
-    for c in a..b {
-        p: int = src.starts[c];
-        mark: bool = true;
-        while (p < src.ends[c]) {
-            e: int = record_line_end(src.data, src.size, p);
-            k: int = src.data[p] as int;
-            if (k == 86 && pu_n < PL_UNITS) {
-                pu_c[pu_n] = c;
-                pu_v[pu_n] = record_key_at(src.data, src.size, p + 1);
-                pu_w[pu_n] = (if (by_count) 1 else 0);
-                pu_ok[pu_n] = mark;
-                pu_n = pu_n + 1;
-                mark = false
-            } else if ((k == 84 || k == 87) && pu_n > 0 && !by_count) pu_w[pu_n - 1] = pu_w[pu_n - 1] + record_chars(src.data,
-                p + 1, e) else if (k == 83 || by_count && (k == 95 || k == 65)) mark = true;
-            p = e + 1
+    borrow texts[text_or_current(TEXT_BSB)] as src {
+        pu_n = 0;
+        for c in a..b {
+            p: int = src.starts[c];
+            mark: bool = true;
+            while (p < src.ends[c]) {
+                e: int = record_line_end(src.data, src.size, p);
+                k: int = src.data[p] as int;
+                if (k == 86 && pu_n < PL_UNITS) {
+                    pu_c[pu_n] = c;
+                    pu_v[pu_n] = record_key_at(src.data, src.size, p + 1);
+                    pu_w[pu_n] = (if (by_count) 1 else 0);
+                    pu_ok[pu_n] = mark;
+                    pu_n = pu_n + 1;
+                    mark = false
+                } else if ((k == 84 || k == 87) && pu_n > 0 && !by_count) pu_w[pu_n - 1] = pu_w[pu_n - 1] + record_chars(src.data,
+                    p + 1, e) else if (k == 83 || by_count && (k == 95 || k == 65)) mark = true;
+                p = e + 1
+            }
         }
     }
 }
@@ -311,7 +324,7 @@ unit_follows(e: int): bool {
 
 book_coded(code: str): int {
     for b in 0..books
-        if (book_is(b, code)) return b;
+        if (book_code(b) == code) return b;
     -1
 }
 
@@ -459,8 +472,14 @@ passage_chapters(k: int): int {
 // could be read). Each line a day's number and its passages, tab apart;
 // # a comment; @id, @name, @blurb.
 plan_listed_make(p: int, day: int): int {
-    b: []i8 = pl_file[p];
-    n: int = pl_file_n[p];
+    borrow plan_files[p] as file {
+        plan_listed_make_of(file, p, day)
+    }
+}
+
+plan_listed_make_of(file: *DataFile, p: int, day: int): int {
+    b: []i8 = file.bytes;
+    n: int = file.size;
     pl_bad_lines[p] = 0;
     pl_name_b[p] = 0;
     pl_name_e[p] = 0;
@@ -515,7 +534,7 @@ pf_copy(b: []i8, i: int, e: int) {
 // A day's line, i to e of b: its number (it must be want), then 1 to 6
 // passages; as day index di. False (and nothing kept) if any is wrong.
 plan_line(
-    b: []i8@immortal,
+    b: []i8,
     i: int,
     e: int,
     di: int,
@@ -551,35 +570,33 @@ plan_line(
 
 // A passage written i to e of b: BOOK C, BOOK C-C2, BOOK C:V, BOOK C:V-V2,
 // BOOK C:V-C2:V2; onto the plans' (false if it is not one of the BSB's).
-plan_passage_text(b: []i8@immortal, i: int, e: int): bool {
+plan_passage_text(b: []i8, i: int, e: int): bool {
     if (e - i < 5 || b[i + 3] as int != 32) return false;
     bk: int = -1;
     for x in 0..books {
         same: bool = true;
         for y in 0..3
-            if (bsb[book_line[x] + 1 + y] != b[i + y]) same = false;
+            if (book_codes[x][y] != b[i + y]) same = false;
         if (same) bk = x
     }
     if (bk < 0) return false;
-    pp_b = b;
-    pp_i = i + 4;
-    pp_e = e;
-    c1: int = pp_num();
+    pp: PassageCursor = PassageCursor { b: b, i: i + 4, e: e };
+    c1: int = pp_num(&pp);
     v1: int = 0;
     c2: int = c1;
     v2: int = 0;
-    if (pp_is(58)) {
-        v1 = pp_num();
+    if (pp_is(&pp, 58)) {
+        v1 = pp_num(&pp);
         v2 = v1;
-        if (pp_is(45)) {
-            n: int = pp_num();
-            if (pp_is(58)) {
+        if (pp_is(&pp, 45)) {
+            n: int = pp_num(&pp);
+            if (pp_is(&pp, 58)) {
                 c2 = n;
-                v2 = pp_num()
+                v2 = pp_num(&pp)
             } else v2 = n
         }
-    } else if (pp_is(45)) c2 = pp_num();
-    if (pp_i != pp_e || c1 < 1 || c2 < c1 || c2 > book_count[bk]) return false;
+    } else if (pp_is(&pp, 45)) c2 = pp_num(&pp);
+    if (pp.i != pp.e || c1 < 1 || c2 < c1 || c2 > book_count[bk]) return false;
     a: int = book_first[bk] + c1 - 1;
     z: int = book_first[bk] + c2 - 1;
     if (v1 == 0) {
@@ -591,26 +608,29 @@ plan_passage_text(b: []i8@immortal, i: int, e: int): bool {
     true
 }
 
-pp_b: []i8 = new i8[0](0i8);
+// A passage being read: its bytes, where the reading is, and its end.
+type PassageCursor = {
+    b: []i8;
+    i: int;
+    e: int
+}
 
-pp_i: int = 0;
-
-pp_e: int = 0;
-
-pp_num(): int {
+// The number at the cursor (-1: none), read past.
+pp_num(pp: *PassageCursor): int {
     n: int = 0;
     any: bool = false;
-    while (pp_i < pp_e && pp_b[pp_i] as int >= 48 && pp_b[pp_i] as int <= 57 && n < 10000) {
-        n = n * 10 + pp_b[pp_i] as int - 48;
-        pp_i = pp_i + 1;
+    while (pp.i < pp.e && pp.b[pp.i] as int >= 48 && pp.b[pp.i] as int <= 57 && n < 10000) {
+        n = n * 10 + pp.b[pp.i] as int - 48;
+        pp.i = pp.i + 1;
         any = true
     }
     if (any) n else -1
 }
 
-pp_is(k: int): bool {
-    if (pp_i < pp_e && pp_b[pp_i] as int == k) {
-        pp_i = pp_i + 1;
+// Whether byte k is at the cursor (read past it if so).
+pp_is(pp: *PassageCursor, k: int): bool {
+    if (pp.i < pp.e && pp.b[pp.i] as int == k) {
+        pp.i = pp.i + 1;
         return true
     }
     false
@@ -681,8 +701,8 @@ fput_plan_name(p: int) {
 fput_day1_name(c: int) {
     if (c < 0) return;
     b: int = ch_book[c];
-    fput_bytes(bsb, book_name_start(b), book_name_end(b));
-    fput_str(if (book_is(b, "PSA")) ", a Psalm a Day" else ", a Chapter a Day")
+    fput_str(book_name(b));
+    fput_str(if (book_code(b) == "PSA") ", a Psalm a Day" else ", a Chapter a Day")
 }
 
 // Its description: "Romans 3â€“16, one chapter a day."
@@ -697,12 +717,12 @@ fput_plan_blurb(p: int) {
     }
     c: int = pl_day1_c[p];
     b: int = ch_book[c];
-    fput_bytes(bsb, book_name_start(b), book_name_end(b));
+    fput_str(book_name(b));
     fput(32);
     fput_int(ch_num[c]);
     fput_str("\â\€\“");
     fput_int(book_count[b]);
-    fput_str(if (book_is(b, "PSA")) ", one psalm a day." else ", one chapter a day.")
+    fput_str(if (book_code(b) == "PSA") ", one psalm a day." else ", one chapter a day.")
 }
 
 // Its id, as plan.tsv has it: year, mcheyne, day1-ROM-3.
@@ -713,7 +733,7 @@ fput_plan_id(p: int) {
     }
     c: int = pl_day1_c[p];
     fput_str("day1-");
-    for i in 0..3 fput(bsb[book_line[ch_book[c]] + 1 + i] as int);
+    for i in 0..3 fput(book_codes[ch_book[c]][i] as int);
     fput(45);
     fput_int(ch_num[c])
 }
@@ -731,7 +751,7 @@ field_day1(p: int): int {
     for b in 0..books {
         same: bool = true;
         for i in 0..3
-            if (bsb[book_line[b] + 1 + i] != fbuf[p + 5 + i]) same = false;
+            if (book_codes[b][i] != fbuf[p + 5 + i]) same = false;
         if (same) {
             if (n < 1 || n > book_count[b]) return -1;
             return book_first[b] + n - 1
@@ -778,7 +798,7 @@ fput_reading(k: int, spoken: bool) {
             fput_title(a);
             return
         }
-        fput_bytes(bsb, book_name_start(bk), book_name_end(bk));
+        fput_str(book_name(bk));
         fput(32);
         fput_int(ch_num[a]);
         fput_str(dash);
@@ -793,8 +813,7 @@ fput_reading(k: int, spoken: bool) {
         }
         return
     }
-    if (book_is(bk, "PSA")) fput_str("Psalms") else fput_bytes(bsb, book_name_start(bk),
-        book_name_end(bk));
+    if (book_code(bk) == "PSA") fput_str("Psalms") else fput_str(book_name(bk));
     fput(32);
     fput_int(ch_num[a]);
     fput(58);
@@ -836,7 +855,7 @@ fput_reading_in(
     after: bool = k > first && ch_book[pl_c1[k - 1]] == bk;
     before: bool = k + 1 < end && ch_book[pl_c1[k + 1]] == bk;
     if (!after) {
-        if (before && book_is(bk, "PSA") && passage_whole(k) && pl_c1[k] == pl_c2[k]) {
+        if (before && book_code(bk) == "PSA" && passage_whole(k) && pl_c1[k] == pl_c2[k]) {
             fput_str("Psalms ");
             fput_int(ch_num[pl_c1[k]])
         } else fput_reading(k, spoken);
@@ -1450,7 +1469,7 @@ day_row_ends(r: int): bool {
 // preview); then the chapter's part.
 dy_label: []i8 = new i8[256](0i8);
 
-layout_day_row(ctx: *ChapterLayout, r: int) {
+layout_day_row(source: *TextData, ctx: *ChapterLayout, r: int) {
     k: int = dy_k[r];
     c: int = dy_c[r];
     // Format labels before writing the chapter destination.
@@ -1496,7 +1515,7 @@ layout_day_row(ctx: *ChapterLayout, r: int) {
     ctx.lay_v1 = dy_v1[r];
     ctx.lay_v2 = dy_v2[r];
     ctx.lay_passage = begins;
-    layout_append(ctx, c);
+    layout_append(source, ctx, c);
     ctx.lay_v1 = 0;
     ctx.lay_v2 = 0;
     ctx.lay_passage = false

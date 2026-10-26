@@ -52,7 +52,7 @@ These commands build artifacts; they do not run UI tests.
 ## Source layout
 
 - `core/`: shared data, app state, persistence, screen models and actions.
-- `ios/`: UIKit views and platform services, including the native reader.
+- `ios/`: UIKit skin and platform services on core's host, including the native reader.
 - `android/`: L8 host and Java skin using Android framework widgets.
 - `web/main.l8`: shared core's WebAssembly host.
 - `web/page/`: JavaScript skin, CSS, service worker, fonts, site builder and server.
@@ -61,7 +61,7 @@ These commands build artifacts; they do not run UI tests.
 - `site/`: static home, contact and privacy pages and images.
 - `data/`: translations, study data, plans, the user manual and verse timings.
 - `tools/`: source-data converters, audio aligner and native wire utility.
-- `demo/`: local demo audio fixture; iOS demo entry points remain in `ios/demo*.l8`.
+- `demo/`: a local audio fixture (sine tones with known verse timings).
 
 See [DESIGN.md](DESIGN.md) for the app's current architecture,
 [SKINS.md](SKINS.md) for the platform contract, [WEB.md](WEB.md) for web

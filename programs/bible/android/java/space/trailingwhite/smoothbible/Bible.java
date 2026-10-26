@@ -236,7 +236,88 @@ public final class Bible extends Activity {
     Native.send("files " + dir.getAbsolutePath());
     Native.start();
     Native.send("api https://smoothbible.com/api/v1/");
+    watchNetwork();
     if (Native.ready) ready();
+  }
+
+  // The network's kind, said to core's host as it changes (core/held.l8's
+  // NET_: 0 none, 1 not metered, 2 metered).
+  private int networkSaid = -1;
+
+  private void watchNetwork() {
+    android.net.ConnectivityManager cm = getSystemService(android.net.ConnectivityManager.class);
+    if (cm == null) return;
+    try {
+      cm.registerDefaultNetworkCallback(new android.net.ConnectivityManager.NetworkCallback() {
+        @Override
+        public void onCapabilitiesChanged(android.net.Network n, android.net.NetworkCapabilities c) {
+          networkIs(c.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED) ? 1 : 2);
+        }
+
+        @Override
+        public void onLost(android.net.Network n) {
+          networkIs(0);
+        }
+      }, new android.os.Handler(android.os.Looper.getMainLooper()));
+    } catch (RuntimeException e) {
+      // (No callback: the host takes the network as not metered.)
+    }
+  }
+
+  private void networkIs(int kind) {
+    if (kind == networkSaid) return;
+    networkSaid = kind;
+    Native.send("network " + kind);
+  }
+
+  // Where an address core says to play is: kept:NAME (a chapter core
+  // holds) its kept file's path, or "" if it is gone (the player fails, and
+  // core plays it from online); else the address itself.
+  private String playable(String url) {
+    if (!url.startsWith("kept:")) return url;
+    File f = new File(getFilesDir(), url.substring(5));
+    return f.exists() ? f.getAbsolutePath() : "";
+  }
+
+  // A recording fetched into a kept file (core's HostIO.fetch): into
+  // http/fetch-ID.part, renamed to its kept name once the answer is 200;
+  // how much has come said every quarter megabyte.
+  private void fetchGet(int id, String url, String name) {
+    File part = new File(getFilesDir(), "http/fetch-" + id + ".part");
+    File kept = new File(getFilesDir(), name);
+    new Thread(() -> {
+      int status = 0;
+      long size = 0;
+      try {
+        java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+        c.setRequestProperty("X-Smooth-Bible", "android (1)");
+        c.setConnectTimeout(20000);
+        c.setReadTimeout(30000);
+        status = c.getResponseCode();
+        long total = c.getContentLengthLong();
+        if (status == 200) {
+          try (InputStream in = c.getInputStream(); OutputStream o = new FileOutputStream(part)) {
+            byte[] b = new byte[65536];
+            long told = 0;
+            for (int k; (k = in.read(b)) > 0; ) {
+              o.write(b, 0, k);
+              size += k;
+              if (size - told >= 262144) {
+                told = size;
+                Native.send("fetching " + id + " " + size + " " + Math.max(total, 0));
+              }
+            }
+          }
+          if (size <= 0 || !part.renameTo(kept)) size = 0;
+        }
+        c.disconnect();
+      } catch (Exception e) {
+        status = 0;
+        size = 0;
+      }
+      if (size == 0) part.delete();
+      Native.send("fetched " + id + " " + status + " " + size);
+    }).start();
   }
 
   // Core's host ready (the reader's version and what is kept read): the
@@ -538,6 +619,11 @@ public final class Bible extends Activity {
       } else if (word.equals("focus")) {
         building.focus = w.num(1);
         building.focusSelect = w.num(2) == 1;
+        // (Mode 4: the row's words FROM to TO, UTF-16, kept in sight.)
+        if (w.num(2) == 4) {
+          building.focusFrom = w.num(3);
+          building.focusTo = w.num(4);
+        }
       } else if (word.equals("intro")) {
         building.intro = w.field(1);
         building.introRuns = Screen.runs(w.field(2));
@@ -635,6 +721,9 @@ public final class Bible extends Activity {
       case "refill":
         panel.update(w.num(1));
         break;
+      case "reveal":
+        panel.reveal(w.num(1));
+        break;
       case "pop":
         panel.back();
         break;
@@ -713,6 +802,14 @@ public final class Bible extends Activity {
       case "toast":
         android.widget.Toast.makeText(this, w.field(1), android.widget.Toast.LENGTH_SHORT).show();
         break;
+      case "announce":
+        getWindow().getDecorView().announceForAccessibility(w.field(1));
+        break;
+      case "felt":
+        getWindow().getDecorView().performHapticFeedback(w.num(1) == 1
+            ? android.view.HapticFeedbackConstants.LONG_PRESS
+            : android.view.HapticFeedbackConstants.CLOCK_TICK);
+        break;
       case "back": {
         // (The capsule: back to the place left, for 12 s.)
         String words = w.field(1);
@@ -735,7 +832,7 @@ public final class Bible extends Activity {
       case "place":
         // (The reader to a place: chapter, verse, how far into it.)
         panel.dismiss();
-        reader.jump(w.num(1), w.num(2) / 1000);
+        reader.jump(w.num(1), w.num(2));
         break;
       case "say":
         if (voice == null) voice = new Voice(this);
@@ -765,7 +862,7 @@ public final class Bible extends Activity {
         break;
       case "audio_play":
         if (voice != null) voice.stop();
-        sound.play(w.num(1), w.num(3), w.num(4), w.num(5) > 0 ? w.num(5) / 1000f : 1, w.field(1));
+        sound.play(w.num(1), w.num(3), w.num(4), w.num(5) > 0 ? w.num(5) / 1000f : 1, playable(w.field(1)));
         break;
       case "audio_stop":
         sound.stop();
@@ -792,6 +889,9 @@ public final class Bible extends Activity {
       }
       case "http_get":
         httpGet(w.num(1), w.word(2));
+        break;
+      case "fetch_get":
+        fetchGet(w.num(1), w.word(2), w.word(3));
         break;
       case "notify_ask":
         notifyAsk(w.num(1));

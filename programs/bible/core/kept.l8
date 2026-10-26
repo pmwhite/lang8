@@ -84,7 +84,146 @@ kept_save_prefs() {
 kept_load_prefs() {
     kp_set("settings.txt");
     kp_read();
-    prefs_parse()
+    if (fbuf_n == 0) kept_import_legacy() else prefs_parse()
+}
+
+// ---- what an older build kept its own way (legacy.txt) ----
+// A platform whose older builds kept settings in a store of its own writes
+// them once, while no settings.txt is kept, as lines: `NAME VALUE` for a
+// setting (the chapter as its number plus one; lastHighlight a color's
+// name), `voice NAME` (the voice chosen), `search WORDS` (a recent search,
+// newest first) and `planReminder 0|1` (1.0's plan's reminder). Core makes
+// them its own files, its plans' list too, and deletes it.
+kept_import_legacy() {
+    kp_set("legacy.txt");
+    kp_read();
+    if (fbuf_n == 0) return;
+    remind: bool = false;
+    begin_lines();
+    while (next_line()) {
+        sp: int = fpos;
+        while (sp < line_e && fbuf[sp] as int != 32) sp = sp + 1;
+        k: int = prefs_known_at(fpos, sp);
+        if (k >= 0 && prefs_known[k] == "lastHighlight") {
+            for i in 0..len(hl_names)
+                if (kp_legacy_value_is(sp + 1, hl_names[i])) set_pref("lastHighlight",
+                    i)
+        } else if (k >= 0) {
+            v: int = kp_legacy_number(sp + 1);
+            if (kp_legacy_ok) set_pref(prefs_known[k], if (prefs_known[k] == "chapter") v - 1 else v)
+        } else if (kp_legacy_name_is(sp, "planReminder")) remind = kp_legacy_number(sp + 1) == 1 && kp_legacy_ok
+    }
+    kept_save_prefs();
+    kp_legacy_values("voice");
+    if (fbuf_n > 0) {
+        kp_set("voice.txt");
+        kp_write()
+    }
+    kp_legacy_values("search");
+    if (fbuf_n > 0) {
+        kp_set("searches.txt");
+        kp_write()
+    }
+    kept_import_plans(remind);
+    kp_set("legacy.txt");
+    gone: fn() = kept_store.remove;
+    gone()
+}
+
+// Whether the line's name (fpos to e) is name.
+kp_legacy_name_is(e: int, name: str): bool {
+    if (e - fpos != len(name)) return false;
+    for i in 0..len(name)
+        if (fbuf[fpos + i] != name[i]) return false;
+    true
+}
+
+// Whether the line's value (from p) is s.
+kp_legacy_value_is(p: int, s: str): bool {
+    if (line_e - p != len(s)) return false;
+    for i in 0..len(s)
+        if (fbuf[p + i] != s[i]) return false;
+    true
+}
+
+// The line's value (from p) as a whole number; kp_legacy_ok if it is one.
+kp_legacy_ok: bool = false;
+
+kp_legacy_number(p: int): int {
+    neg: bool = p < line_e && fbuf[p] as int == 45;
+    q: int = if (neg) p + 1 else p;
+    kp_legacy_ok = q < line_e;
+    n: int = 0;
+    for x in q..line_e {
+        d: int = fbuf[x] as int;
+        if (d < 48 || d > 57) kp_legacy_ok = false else n = n * 10 + d - 48
+    }
+    if (neg) -n else n
+}
+
+// legacy.txt read again, and the values of its lines named name kept in
+// fbuf, a line each (each no longer than its line, so written over it).
+kp_legacy_values(name: str) {
+    kp_set("legacy.txt");
+    kp_read();
+    w: int = 0;
+    begin_lines();
+    while (next_line()) {
+        sp: int = fpos;
+        while (sp < line_e && fbuf[sp] as int != 32) sp = sp + 1;
+        if (kp_legacy_name_is(sp, name) && sp + 1 < line_e) {
+            for x in sp + 1..line_e {
+                fbuf[w] = fbuf[x];
+                w = w + 1
+            }
+            fbuf[w] = 10i8;
+            w = w + 1
+        }
+    }
+    fbuf_n = w
+}
+
+// The plans followed, as plans.txt lists them, when it isn't kept yet:
+// 1.0's plan.tsv first made plan-1.tsv (with its reminder), then each
+// plan-N.tsv there (an older build found them by name).
+KP_PLANS_PROBED: int = 64;
+
+kept_import_plans(remind: bool) {
+    kp_set("plans.txt");
+    kp_read();
+    if (fbuf_n > 0) return;
+    kp_set("plan.tsv");
+    kp_read();
+    if (fbuf_n > 0) {
+        plan_migrate(remind);
+        kp_set_plan(1);
+        kp_write();
+        kp_set("plan.tsv");
+        gone: fn() = kept_store.remove;
+        gone();
+        if (pref_get("planNext") < 2) {
+            set_pref("planNext", 2);
+            kept_save_prefs()
+        }
+    }
+    // (As many as kept_load_plans reads.)
+    n: int = 0;
+    for p in 1..KP_PLANS_PROBED + 1 {
+        kp_set_plan(p);
+        kp_read();
+        if (fbuf_n > 0 && n < len(kp_nums)) {
+            kp_nums[n] = p;
+            n = n + 1
+        }
+    }
+    if (n == 0) return;
+    fbuf_n = 0;
+    for j in 0..n {
+        fput_int(kp_nums[j]);
+        fput(10)
+    }
+    kp_set("plans.txt");
+    kp_write()
 }
 
 // ---- saving ----
@@ -126,7 +265,13 @@ kept_write(what: int) {
         mev_n = 0;
         mlog_n = 0
     } else if (what == SK_KEPT_CARDS) {
-        format_cards();
+        // (The cards are read only once the language data is here, so
+        // none can have changed before it: nothing written, rather than no
+        // cards over those kept.)
+        if (!language_ready()) return;
+        borrow language_data {
+            format_cards(language_data)
+        }
         kp_set("cards.tsv");
         kp_write();
         mev_n = 0;
@@ -168,7 +313,7 @@ kept_write(what: int) {
 
 // ---- loading ----
 // Everything kept, read (a bad line skipped): the plans followed once the
-// plans are made (their days: plan_file_set's first); the cards once Learn
+// plans are made (their days: plan_file_read's first); the cards once Learn
 // has its data (kept_load_cards, then).
 kept_load() {
     kp_set("highlights.tsv");
@@ -185,7 +330,7 @@ kept_load() {
     parse_history();
     kp_set("ribbons.tsv");
     kp_read();
-    parse_ribbons();
+    if (fbuf_n == 0) kept_migrate_readings() else parse_ribbons();
     kp_set("memory.tsv");
     kp_read();
     parse_memory();
@@ -200,6 +345,23 @@ kept_load() {
     kp_searches();
     kept_load_cards();
     kept_load_plans()
+}
+
+// Round 6's readings (readings.tsv, an iPhone's), made ribbons once when
+// there are no ribbons yet; the file kept as readings-r6.tsv.
+kept_migrate_readings() {
+    kp_set("readings.tsv");
+    kp_read();
+    if (fbuf_n == 0) return;
+    kp_set("readings-r6.tsv");
+    kp_write();
+    _made: int = migrate_readings(time(0));
+    format_ribbons();
+    kp_set("ribbons.tsv");
+    kp_write();
+    kp_set("readings.tsv");
+    gone: fn() = kept_store.remove;
+    gone()
 }
 
 kp_line: []i8 = new i8[256](0i8);
@@ -235,10 +397,14 @@ sk_mm_fetch(i: int) {
 }
 
 kept_load_cards() {
-    if (!lang_ready) return;
+    if (!language_ready()) return;
     kp_set("cards.tsv");
     kp_read();
-    if (fbuf_n > 0) parse_cards(sk_today_now());
+    if (fbuf_n > 0) {
+        borrow language_data {
+            parse_cards(language_data, sk_today_now())
+        }
+    }
     mev_n = 0;
     cdl_n = 0
 }
@@ -296,7 +462,7 @@ sk_export() {
 kp_set_esv(c: int) {
     kp_set("esv-");
     for x in 0..3 {
-        kp_name[kp_name_n] = bsb_code_byte(ch_book[c], x) trunc i8;
+        kp_name[kp_name_n] = book_code_byte(ch_book[c], x) trunc i8;
         kp_name_n = kp_name_n + 1
     }
     kp_name[kp_name_n] = 45i8;

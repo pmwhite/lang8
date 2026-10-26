@@ -189,7 +189,7 @@ The running host can also be driven through that server:
 ```sh
 node web/devctl.mjs shot                   # prints the saved PNG's path
 node web/devctl.mjs scroll 600             # points, in the first scroll view
-node web/devctl.mjs notify space.trailingwhite.smoothbible.demo3
+node web/devctl.mjs notify NAME            # posts a Darwin notification
 node web/devctl.mjs reload
 node web/devctl.mjs log
 ```
@@ -197,8 +197,8 @@ node web/devctl.mjs log
 These commands use `http://localhost:8777` by default (`--server URL`
 chooses another). A freshly launched host synchronizes its command cursor
 instead of replaying commands from the previous run. Build and command
-revisions advance across server restarts. Bible's demo mode requires
-`L8_DEMO` at launch; it and diagnostics survive a reload. Its notification
+revisions advance across server restarts. Bible's diagnostics need
+`L8_DEMO` or `L8_TIMING` at launch and survive a reload. Its notification
 observers use the persistent delegate's identity, so rebuilding the reader
 replaces their registrations instead of accumulating callbacks.
 

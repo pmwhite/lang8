@@ -1,0 +1,650 @@
+tag bible_ios;
+
+use_tag std, ios, bible, bible_wire;
+
+// The iPhone as a platform for core's host (core/host.l8), as the
+// terminal's and Android's are: the data files from the app's bundle,
+// what is kept as files in Application Support/SmoothBible, a GET by
+// NSURLSession (a recording's into a kept file, by a download task), the
+// network's kind as it changes, and core's lines given to the skin
+// (ios/wire.l8). What an older build kept in the user's defaults is moved
+// into core's files once.
+import "../../ios/objc.l8";
+
+import "../core/host.l8";
+
+extern NSSearchPathForDirectoriesInDomains(directory: int, mask: int, expand: int): int;
+
+extern add_method5(
+    cls: int,
+    selector: int,
+    imp: fn(self: int, cmd: int, a: int, b: int, c: int, d: int, e: int): int,
+    types: str
+): int = class_addMethod;
+
+extern SCNetworkReachabilityCreateWithAddress(allocator: int, address: []i8): int;
+
+extern SCNetworkReachabilityGetFlags(target: int, flags: []i8): int;
+
+extern SCNetworkReachabilitySetCallback(target: int, callout: fn(target: int, flags: int, info: int),
+    context: int): int;
+
+extern SCNetworkReachabilityScheduleWithRunLoop(target: int, run_loop: int, mode: int): int;
+
+extern CFRunLoopGetMain(): int;
+
+// ---- what is kept, as files ----
+kept_dir: int = 0;
+
+kept_dir_path(): int {
+    if (kept_dir != 0) return kept_dir;
+    dirs: int = NSSearchPathForDirectoriesInDomains(14, 1, 1);
+    base: int = msg(dirs, sel("firstObject"));
+    if (base == 0) base = NSHomeDirectory();
+    kept_dir = keep(msg1(base, sel("stringByAppendingPathComponent:"), nsstring("SmoothBible")));
+    msg4(msg(cls("NSFileManager"), sel("defaultManager")), sel("createDirectoryAtPath:withIntermediateDirectories:attributes:error:"),
+        kept_dir, 1, 0, 0);
+    kept_dir
+}
+
+kept_path_of(name: int): int {
+    msg1(kept_dir_path(), sel("stringByAppendingPathComponent:"), name)
+}
+
+// The file core names (kp_name), as a path.
+kept_path(): int {
+    kept_path_of(nsstring_of(kp_name, kp_name_n))
+}
+
+// A file at path into fbuf (fbuf_n 0: none). A file larger than fbuf is
+// not read at all: a part of one would be taken for the whole.
+read_path_into_fbuf(path: int) {
+    fbuf_n = 0;
+    data: int = msg1(cls("NSData"), sel("dataWithContentsOfFile:"), path);
+    if (data == 0) return;
+    n: int = msg(data, sel("length"));
+    if (n > len(fbuf)) {
+        note_num("bible: kept file too large to read, bytes ", n);
+        return
+    }
+    if (n > 0) memcpy_from(fbuf, msg(data, sel("bytes")), n);
+    fbuf_n = n
+}
+
+write_fbuf_to(path: int): bool {
+    data: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(fbuf),
+        fbuf_n);
+    (msg2(data, sel("writeToFile:atomically:"), path, 1) & 255) != 0
+}
+
+ios_kept_read() {
+    read_path_into_fbuf(kept_path())
+}
+
+ios_kept_write() {
+    if (!write_fbuf_to(kept_path())) ios_save_failed()
+}
+
+ios_kept_append() {
+    path: int = kept_path();
+    data: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(fbuf),
+        fbuf_n);
+    h: int = msg1(cls("NSFileHandle"), sel("fileHandleForWritingAtPath:"), path);
+    if (h == 0) {
+        if ((msg2(data, sel("writeToFile:atomically:"), path, 1) & 255) == 0) ios_save_failed();
+        return
+    }
+    msg(h, sel("seekToEndOfFile"));
+    msg1(h, sel("writeData:"), data);
+    msg(h, sel("closeFile"))
+}
+
+ios_kept_remove() {
+    msg2(msg(cls("NSFileManager"), sel("defaultManager")), sel("removeItemAtPath:error:"),
+        kept_path(), 0)
+}
+
+// A write that failed: said once, as a toast that stays (the phone full).
+save_failed_said: bool = false;
+
+ios_save_failed() {
+    note("bible: a kept file could not be written");
+    if (save_failed_said) return;
+    save_failed_said = true;
+    toast_symbol(nsstring("Couldn\â\€\™t save. Check your iPhone\â\€\™s storage."),
+        "exclamationmark.triangle", 4.0f64)
+}
+
+kept_file_exists(name: str): bool {
+    (msg1(msg(cls("NSFileManager"), sel("defaultManager")), sel("fileExistsAtPath:"),
+        kept_path_of(nsstring(name))) & 255) != 0
+}
+
+// ---- the data files, from the bundle ----
+// Asked for by id (core's names: "bsb", "lang/words.bin"); answered a turn
+// of the run loop later, one at a time, so that the reader comes up while
+// the rest is read. A name is found in the bundle by its last part (the
+// bundle's resources are flat), or with .txt (a version's).
+ASK_MOST: int = 128;
+
+ask_names: []i8 = new i8[128 * 64](0i8);
+
+ask_name_n: []int = new int[128](0);
+
+ask_queue: []int = new int[128](0);
+
+ask_queue_n: int = 0;
+
+ios_ask(id: int, name: str) {
+    if (id < 0 || id >= ASK_MOST) wire_fail("core asked for a file by an id out of range");
+    if (ask_queue_n >= len(ask_queue)) wire_fail("core asked for too many files at once");
+    if (len(name) > 64) wire_fail("core asked for a file by too long a name");
+    for i in 0..len(name) ask_names[id * 64 + i] = name[i];
+    ask_name_n[id] = len(name);
+    ask_queue[ask_queue_n] = id;
+    ask_queue_n = ask_queue_n + 1;
+    asks_pump_soon()
+}
+
+bundle_path(id: int): int {
+    start: int = id * 64;
+    end: int = start + ask_name_n[id];
+    leaf: int = start;
+    for i in start..end
+        if (ask_names[i] as int == 47) leaf = i + 1;
+    resources: int = msg(msg(cls("NSBundle"), sel("mainBundle")), sel("resourcePath"));
+    name: int = nsstring_at(bytes_address(ask_names) + leaf, end - leaf);
+    path: int = msg1(resources, sel("stringByAppendingPathComponent:"), name);
+    fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+    if ((msg1(fm, sel("fileExistsAtPath:"), path) & 255) != 0) return path;
+    with_txt: int = msg1(path, sel("stringByAppendingString:"), nsstring(".txt"));
+    if ((msg1(fm, sel("fileExistsAtPath:"), with_txt) & 255) != 0) return with_txt;
+    0
+}
+
+extern open_fd(path: int, flags: int, mode: int): int = open;
+
+extern close_fd(fd: int): int = close;
+
+extern lseek(fd: int, offset: int, whence: int): int;
+
+// The size of the file at path (-1: it isn't there). (By seeking to its
+// end: no file attributes read, so none of its times, which the privacy
+// manifest would have to give a reason for.)
+path_bytes(path: int): int {
+    fd: int = open_fd(msg(path, sel("fileSystemRepresentation")), 0, 0);
+    if (fd < 0) return -1;
+    n: int = lseek(fd, 0, 2);
+    _c: int = close_fd(fd);
+    n
+}
+
+// The file at path read into out (as much as fits).
+path_read(path: int, out: []i8) {
+    fd: int = open_fd(msg(path, sel("fileSystemRepresentation")), 0, 0);
+    if (fd < 0) return;
+    n: int = 0;
+    more: bool = true;
+    while (more && n < len(out)) {
+        got: int = read(fd, out, n, len(out) - n);
+        if (got <= 0) more = false else n = n + got
+    }
+    _c: int = close_fd(fd)
+}
+
+asks_timer: int = 0;
+
+asks_pump_soon() {
+    if (asks_timer != 0 || app_obj == 0) return;
+    asks_timer = after_common(0.0f64, "asksPump:")
+}
+
+// The next ask answered, as every platform answers one: `got ID SIZE` (-1:
+// not in the bundle); core's host then reads it (ios_file).
+asks_pump(_self: int, _cmd: int, _timer: int): int {
+    asks_timer = 0;
+    if (ask_queue_n == 0) return 0;
+    id: int = ask_queue[0];
+    for i in 1..ask_queue_n ask_queue[i - 1] = ask_queue[i];
+    ask_queue_n = ask_queue_n - 1;
+    path: int = bundle_path(id);
+    size: int = if (path != 0) path_bytes(path) else -1;
+    if (size < 0) note("bible: a data file is not in the bundle");
+    to_core_str("got ");
+    to_core_int(id);
+    to_core_byte(32);
+    to_core_int(size);
+    to_core_end();
+    asks_pump_soon();
+    0
+}
+
+// ---- the network ----
+HTTP_MOST: int = 8;
+
+http_ids: []int = new int[8](-1);
+
+http_tasks: []int = new int[8](0);
+
+http_bodies: []int = new int[8](0);
+
+// Each answer's body (an NSMutableData, kept) until core takes it, by id.
+http_answer_ids: []int = new int[8](-1);
+
+http_answer_data: []int = new int[8](0);
+
+http_session: int = 0;
+
+http_class: int = 0;
+
+session(): int {
+    if (http_session != 0) return http_session;
+    config: int = msg(cls("NSURLSessionConfiguration"), sel("ephemeralSessionConfiguration"));
+    msg_set_f(config, sel("setTimeoutIntervalForRequest:"), 12.0f64);
+    msg1(config, sel("setRequestCachePolicy:"), 1);
+    msg1(config, sel("setURLCache:"), 0);
+    delegate: int = msg(msg(msg(http_class, sel("alloc")), sel("init")), sel("autorelease"));
+    http_session = keep(msg3(cls("NSURLSession"), sel("sessionWithConfiguration:delegate:delegateQueue:"),
+        config, delegate, msg(cls("NSOperationQueue"), sel("mainQueue"))));
+    http_session
+}
+
+// The app's version and build, as the site's Worker is told them.
+app_version_header(): int {
+    info: int = msg(msg(cls("NSBundle"), sel("mainBundle")), sel("infoDictionary"));
+    v: int = msg1(info, sel("objectForKey:"), nsstring("CFBundleShortVersionString"));
+    b: int = msg1(info, sel("objectForKey:"), nsstring("CFBundleVersion"));
+    msg1(msg1(msg1(if (v != 0) v else nsstring("1.0"), sel("stringByAppendingString:"),
+        nsstring(" (")), sel("stringByAppendingString:"), if (b != 0) b else nsstring("1")),
+        sel("stringByAppendingString:"), nsstring(")"))
+}
+
+http_failed(id: int) {
+    to_core_str("http ");
+    to_core_int(id);
+    to_core_str(" 0 0");
+    to_core_end()
+}
+
+ios_http(id: int, b: []i8, n: int) {
+    slot: int = -1;
+    for i in 0..HTTP_MOST
+        if (http_tasks[i] == 0 && slot < 0) slot = i;
+    url: int = msg1(cls("NSURL"), sel("URLWithString:"), nsstring_of(b, n));
+    if (slot < 0 || url == 0) {
+        http_failed(id);
+        return
+    }
+    request: int = msg1(cls("NSMutableURLRequest"), sel("requestWithURL:"), url);
+    msg2(request, sel("setValue:forHTTPHeaderField:"), app_version_header(), nsstring("X-Smooth-Bible"));
+    task: int = msg1(session(), sel("dataTaskWithRequest:"), request);
+    if (task == 0) {
+        http_failed(id);
+        return
+    }
+    http_ids[slot] = id;
+    http_tasks[slot] = keep(task);
+    http_bodies[slot] = make("NSMutableData");
+    msg(task, sel("resume"))
+}
+
+http_slot(task: int): int {
+    for i in 0..HTTP_MOST
+        if (task != 0 && http_tasks[i] == task) return i;
+    -1
+}
+
+http_received(
+    _self: int,
+    _cmd: int,
+    _session: int,
+    task: int,
+    data: int
+): int {
+    i: int = http_slot(task);
+    if (i >= 0) msg1(http_bodies[i], sel("appendData:"), data);
+    0
+}
+
+http_completed(
+    _self: int,
+    _cmd: int,
+    _session: int,
+    task: int,
+    error: int
+): int {
+    if (task != 0 && task == fetch_task) {
+        fetch_completed(error);
+        return 0
+    }
+    i: int = http_slot(task);
+    if (i < 0) return 0;
+    id: int = http_ids[i];
+    body: int = http_bodies[i];
+    status: int = if (error == 0) msg(msg(task, sel("response")), sel("statusCode")) else 0;
+    http_tasks[i] = 0;
+    http_bodies[i] = 0;
+    http_ids[i] = -1;
+    release(task);
+    // (Its body kept for core, in place of any earlier answer to the id.)
+    k: int = -1;
+    for j in 0..HTTP_MOST
+        if (http_answer_ids[j] == id) k = j;
+    if (k < 0) {
+        for j in 0..HTTP_MOST
+            if (http_answer_data[j] == 0 && k < 0) k = j
+    }
+    size: int = 0;
+    if (k >= 0) {
+        release(http_answer_data[k]);
+        http_answer_ids[k] = id;
+        http_answer_data[k] = body;
+        size = msg(body, sel("length"))
+    } else release(body);
+    to_core_str("http ");
+    to_core_int(id);
+    to_core_byte(32);
+    to_core_int(status);
+    to_core_byte(32);
+    to_core_int(size);
+    to_core_end();
+    0
+}
+
+// ---- recordings fetched into kept files (HostIO.fetch) ----
+// One at a time (core asks so), by a download task of a session of its
+// own: its file moved to its kept name once the answer is 200, and kept out
+// of backups (a copy of what is online).
+fetch_session_obj: int = 0;
+
+fetch_task: int = 0;
+
+fetch_id: int = -1;
+
+fetch_name: int = 0;
+
+// The file's size once it is moved (0: not moved).
+fetch_moved: int = 0;
+
+fetch_status: int = 0;
+
+fetch_session(): int {
+    if (fetch_session_obj != 0) return fetch_session_obj;
+    config: int = msg(cls("NSURLSessionConfiguration"), sel("defaultSessionConfiguration"));
+    msg1(config, sel("setWaitsForConnectivity:"), 0);
+    msg_set_f(config, sel("setTimeoutIntervalForRequest:"), 30.0f64);
+    delegate: int = msg(msg(msg(http_class, sel("alloc")), sel("init")), sel("autorelease"));
+    fetch_session_obj = keep(msg3(cls("NSURLSession"), sel("sessionWithConfiguration:delegate:delegateQueue:"),
+        config, delegate, msg(cls("NSOperationQueue"), sel("mainQueue"))));
+    fetch_session_obj
+}
+
+fetch_said(id: int, status: int, bytes: int) {
+    to_core_str("fetched ");
+    to_core_int(id);
+    to_core_byte(32);
+    to_core_int(status);
+    to_core_byte(32);
+    to_core_int(bytes);
+    to_core_end()
+}
+
+ios_fetch(
+    id: int,
+    url: []i8,
+    url_n: int,
+    name: []i8,
+    name_n: int
+) {
+    address: int = msg1(cls("NSURL"), sel("URLWithString:"), nsstring_of(url, url_n));
+    if (fetch_task != 0 || address == 0) {
+        fetch_said(id, 0, 0);
+        return
+    }
+    task: int = msg1(fetch_session(), sel("downloadTaskWithURL:"), address);
+    if (task == 0) {
+        fetch_said(id, 0, 0);
+        return
+    }
+    fetch_id = id;
+    fetch_task = keep(task);
+    fetch_name = keep(nsstring_of(name, name_n));
+    fetch_moved = 0;
+    fetch_status = 0;
+    msg(task, sel("resume"))
+}
+
+// The download's file (gone once this returns): moved where it is kept.
+fetch_did_finish(
+    _self: int,
+    _cmd: int,
+    _session: int,
+    task: int,
+    location: int
+): int {
+    if (task != fetch_task || task == 0) return 0;
+    fetch_status = msg(msg(task, sel("response")), sel("statusCode"));
+    if (fetch_status != 200) return 0;
+    fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+    to: int = kept_path_of(fetch_name);
+    msg2(fm, sel("removeItemAtPath:error:"), to, 0);
+    to_url: int = msg1(cls("NSURL"), sel("fileURLWithPath:"), to);
+    if ((msg3(fm, sel("moveItemAtURL:toURL:error:"), location, to_url, 0) & 255) == 0) return 0;
+    _b: int = msg3(to_url, sel("setResourceValue:forKey:error:"), nsnumber_int(1),
+        objc_const("NSURLIsExcludedFromBackupKey"), 0);
+    fetch_moved = path_size(to);
+    0
+}
+
+fetch_did_write(
+    _self: int,
+    _cmd: int,
+    _session: int,
+    task: int,
+    _wrote: int,
+    total: int,
+    expected: int
+): int {
+    if (task != fetch_task || task == 0) return 0;
+    to_core_str("fetching ");
+    to_core_int(fetch_id);
+    to_core_byte(32);
+    to_core_int(total);
+    to_core_byte(32);
+    to_core_int(if (expected > 0) expected else 0);
+    to_core_end();
+    0
+}
+
+// Its end (http_completed's, for the fetch's task).
+fetch_completed(error: int) {
+    id: int = fetch_id;
+    release(fetch_task);
+    release(fetch_name);
+    fetch_task = 0;
+    fetch_name = 0;
+    fetch_id = -1;
+    network_said();
+    ok: bool = error == 0 && fetch_status == 200 && fetch_moved > 0;
+    fetch_said(id, if (error == 0) fetch_status else 0, if (ok) fetch_moved else 0)
+}
+
+path_size(path: int): int {
+    fd: int = open_fd(msg(path, sel("fileSystemRepresentation")), 0, 0);
+    if (fd < 0) return 0;
+    n: int = lseek(fd, 0, 2);
+    _c: int = close_fd(fd);
+    if (n < 0) 0 else n
+}
+
+// ---- the network's kind (core/held.l8's NET_), said as it changes ----
+// (Of the zero address, 0.0.0.0: "any network, and is it cellular", with
+// no host name looked up on the main thread.)
+reach: int = 0;
+
+reach_flags: []i8 = new i8[8](0i8);
+
+// A sockaddr_in: sin_len 16, sin_family AF_INET (2), port and address 0.
+reach_zero: []i8 = new i8[16](0i8);
+
+network_last: int = -1;
+
+// Reachable (2), and not needing a connection made first (4, unless made
+// on demand); cellular (1 << 18), always taken as metered.
+network_kind(flags: int): int {
+    if ((flags & 2) == 0) NET_NONE else if ((flags & 262144) != 0) NET_METERED else NET_FREE
+}
+
+network_tell(kind: int) {
+    if (kind == network_last) return;
+    network_last = kind;
+    to_core_str("network ");
+    to_core_int(kind);
+    to_core_end()
+}
+
+network_said() {
+    if (reach == 0) return;
+    for i in 0..8 reach_flags[i] = 0i8;
+    if ((SCNetworkReachabilityGetFlags(reach, reach_flags) & 255) == 0) return;
+    flags: int = 0;
+    for i in 0..4 flags = flags | (reach_flags[i] as int & 255) << 8 * i;
+    network_tell(network_kind(flags))
+}
+
+network_changed(_target: int, flags: int, _info: int) {
+    network_tell(network_kind(flags & 4294967295))
+}
+
+network_watch() {
+    reach_zero[0] = 16i8;
+    reach_zero[1] = 2i8;
+    reach = SCNetworkReachabilityCreateWithAddress(0, reach_zero);
+    if (reach == 0) return;
+    _c: int = SCNetworkReachabilitySetCallback(reach, &network_changed, 0);
+    _s: int = SCNetworkReachabilityScheduleWithRunLoop(reach, CFRunLoopGetMain(),
+        objc_const("NSRunLoopCommonModes"));
+    network_said()
+}
+
+// Answer id (a request's body: the files are mapped) into out, and let go.
+ios_file(id: int, out: []i8): int {
+    // (A data file asked for: read from the bundle.)
+    if (id >= 0 && id < ASK_MOST) {
+        path: int = bundle_path(id);
+        if (path == 0) return 0;
+        path_read(path, out);
+        return path_bytes(path)
+    }
+    data: int = 0;
+    for j in 0..HTTP_MOST {
+        if (http_answer_ids[j] == id && http_answer_data[j] != 0) {
+            data = http_answer_data[j];
+            http_answer_data[j] = 0;
+            http_answer_ids[j] = -1
+        }
+    }
+    if (data == 0) return 0;
+    n: int = msg(data, sel("length"));
+    if (n > len(out)) wire_fail("core's room for a file is less than the file");
+    if (n > 0) memcpy_from(out, msg(data, sel("bytes")), n);
+    release(data);
+    n
+}
+
+// ---- what an older build kept in the user's defaults ----
+// Written once as legacy.txt (core/kept.l8's kept_import_legacy makes it
+// core's), while neither it nor settings.txt is kept: each whole number
+// by its name, lastHighlight's color, the voice chosen (by its identifier
+// then, by its name now), the recent searches and 1.0's plan's reminder.
+legacy_marks: []str = ["sizeStep", "theme", "version", "chapter", "recentSearches",
+    "planReminder"];
+
+legacy_export() {
+    if (kept_file_exists("settings.txt") || kept_file_exists("legacy.txt")) return;
+    d: int = msg(cls("NSUserDefaults"), sel("standardUserDefaults"));
+    any: bool = false;
+    for key in legacy_marks
+        if (msg1(d, sel("objectForKey:"), nsstring(key)) != 0) any = true;
+    if (!any) return;
+    out: int = msg(make("NSMutableString"), sel("autorelease"));
+    all: int = msg(d, sel("dictionaryRepresentation"));
+    keys: int = msg(all, sel("allKeys"));
+    number: int = cls("NSNumber");
+    for i in 0..msg(keys, sel("count")) {
+        key: int = msg1(keys, sel("objectAtIndex:"), i);
+        value: int = msg1(all, sel("objectForKey:"), key);
+        if ((msg1(value, sel("isKindOfClass:"), number) & 255) != 0) legacy_line(out,
+            key, msg(value, sel("stringValue")))
+    }
+    lh: int = msg1(d, sel("stringForKey:"), nsstring("lastHighlight"));
+    if (lh != 0) legacy_line(out, nsstring("lastHighlight"), lh);
+    voice_id: int = msg1(d, sel("stringForKey:"), nsstring("listenVoiceID"));
+    if (voice_id != 0) {
+        speech_frameworks();
+        v: int = msg1(cls("AVSpeechSynthesisVoice"), sel("voiceWithIdentifier:"),
+            voice_id);
+        if (v != 0) legacy_line(out, nsstring("voice"), msg(v, sel("name")))
+    }
+    searches: int = msg1(d, sel("arrayForKey:"), nsstring("recentSearches"));
+    if (searches != 0)
+        for i in 0..msg(searches, sel("count")) legacy_line(out, nsstring("search"),
+            msg1(searches, sel("objectAtIndex:"), i));
+    msg4(out, sel("writeToFile:atomically:encoding:error:"), kept_path_of(nsstring("legacy.txt")),
+        1, 4, 0);
+    note("bible: the defaults written for core")
+}
+
+// NAME VALUE, a line (a value with a line's end in it left out).
+legacy_line(out: int, name: int, value: int) {
+    if (value == 0 || (msg1(value, sel("containsString:"), nsstring("\n")) & 255) != 0) return;
+    msg1(out, sel("appendString:"), name);
+    msg1(out, sel("appendString:"), nsstring(" "));
+    msg1(out, sel("appendString:"), value);
+    msg1(out, sel("appendString:"), nsstring("\n"))
+}
+
+// ---- begun ----
+platform_begin() {
+    kept_store = KeptStore {
+        read: &ios_kept_read,
+        write: &ios_kept_write,
+        append: &ios_kept_append,
+        remove: &ios_kept_remove
+    };
+    host_io = HostIO {
+        ask: &ios_ask,
+        http: &ios_http,
+        file: &ios_file,
+        fetch: &ios_fetch,
+        say: &from_core
+    };
+    legacy_export();
+    sk_device = (if (is_ipad()) "iPad" else "iPhone");
+    sk_device_prose = sk_device;
+    sk_fonts = font_names;
+    sk_is_ios = true;
+    hs_start();
+    to_core_str("api https://smoothbible.com/api/v1/");
+    to_core_end();
+    network_watch()
+}
+
+add_platform_methods(app: int) {
+    add_method1(app, sel("asksPump:"), &asks_pump, "v@:@")
+}
+
+make_platform_classes() {
+    http_class = objc_allocateClassPair(cls("NSObject"), "L8Net", 0);
+    add_method3(http_class, sel("URLSession:dataTask:didReceiveData:"), &http_received,
+        "v@:@@@");
+    add_method3(http_class, sel("URLSession:task:didCompleteWithError:"), &http_completed,
+        "v@:@@@");
+    add_method3(http_class, sel("URLSession:downloadTask:didFinishDownloadingToURL:"),
+        &fetch_did_finish, "v@:@@@");
+    add_method5(http_class, sel("URLSession:downloadTask:didWriteData:totalBytesWritten:totalBytesExpectedToWrite:"),
+        &fetch_did_write, "v@:@@qqq");
+    add_protocol(http_class, "NSURLSessionDownloadDelegate");
+    add_protocol(http_class, "NSURLSessionDataDelegate");
+    objc_registerClassPair(http_class)
+}

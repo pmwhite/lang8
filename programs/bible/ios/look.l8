@@ -1,6 +1,6 @@
 tag bible_ios;
 
-use_tag std, ios, bible;
+use_tag std, ios, bible, bible_wire;
 
 // Smooth Bible's look: the themes (a table of colors, applied by hand
 // wherever a color is used, since dynamic colors take a block), the fonts
@@ -47,7 +47,7 @@ extern UIGraphicsGetImageFromCurrentImageContext(): int;
 
 extern UIGraphicsEndImageContext(): int;
 
-// ---- settings ----
+// ---- the look, as core says it (its look line) ----
 // The theme chosen (0 Auto, 1 Paper, 2 White, 3 Sepia, 4 Night, 5 Black),
 // and the one it is now (Auto is Paper in light mode, Night in dark).
 set_theme: int = 0;
@@ -55,15 +55,15 @@ set_theme: int = 0;
 theme: int = 1;
 
 // The font (0 New York, 1 Iowan, 2 Charter, 3 Georgia, 4 San Francisco),
-// the text size's step (0 to 7, on top of the phone's), the line spacing
-// (compact, normal, relaxed) and margins (narrow, normal, wide).
+// the text's size (a multiple of the phone's), its lines' height (a
+// multiple) and the margins (points).
 set_font: int = 0;
 
-set_size: int = 2;
+look_size: f64 = 1.0f64;
 
-set_spacing: int = 1;
+look_spacing: f64 = 1.5f64;
 
-set_margins: int = 1;
+look_margin: f64 = 24.0f64;
 
 font_names: []str = ["New York", "Iowan", "Charter", "Georgia", "San Francisco"];
 
@@ -107,13 +107,6 @@ is_dark(): bool {
     theme >= 4
 }
 
-hex_digit(k: int): int {
-    if (k >= 48 && k <= 57) return k - 48;
-    if (k >= 65 && k <= 70) return k - 55;
-    if (k >= 97 && k <= 102) return k - 87;
-    0
-}
-
 // A color written as RRGGBB, with an alpha (autoreleased).
 color_hex(s: str, alpha: f64): int {
     if (len(s) < 6) return 0;
@@ -147,14 +140,31 @@ swap_color(old: int, new_color: int): int {
     keep(new_color)
 }
 
-// The theme that Auto is, with the phone in dark mode or not.
+// Whether the phone is in its dark mode (core's Auto follows it: dark).
 system_dark(): bool {
     traits: int = msg(msg(cls("UIScreen"), sel("mainScreen")), sel("traitCollection"));
     msg(traits, sel("userInterfaceStyle")) == 2
 }
 
-resolve_theme() {
-    theme = theme_now(set_theme, system_dark())
+// look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS
+// FONT THEME CHOSEN: kept; whether it changed.
+look_line(line: WireLine): bool {
+    size: f64 = word_n(line, 1) as f64 / 1000.0f64;
+    spacing: f64 = word_n(line, 2) as f64 / 1000.0f64;
+    margin: f64 = word_n(line, 3) as f64;
+    red: bool = word_n(line, 5) == 1;
+    font: int = clamp(word_n(line, 13), 0, len(font_names) - 1);
+    th: int = clamp(word_n(line, 14), 0, len(t_bg) - 1);
+    chosen: int = clamp(word_n(line, 15), 0, len(t_bg) - 1);
+    same: bool = size == look_size && spacing == look_spacing && margin == look_margin && red == red_letter && font == set_font && th == theme && chosen == set_theme;
+    look_size = size;
+    look_spacing = spacing;
+    look_margin = margin;
+    red_letter = red;
+    set_font = font;
+    theme = th;
+    set_theme = chosen;
+    !same
 }
 
 // Use the system's grouped palette in White and Night, as opaque colors.
@@ -249,12 +259,16 @@ k_xref: str = "L8Ref";
 
 k_chapter_note: str = "L8ChapterNote";
 
-// The words of Jesus in the accent (DESIGN.md §8.8; off at first).
+// The words of Jesus in the accent (DESIGN.md §8.8).
 red_letter: bool = false;
 
 body_desc: int = 0;
 
 fonts: []int = new int[STYLES](0);
+
+// A verse's number in a chapter set a verse a line (larger: it stands in
+// its margin).
+verse_lines_font: int = 0;
 
 // Whether small capitals are made by hand (smaller capitals, spaced): for
 // fonts without small capitals of their own.
@@ -266,15 +280,15 @@ caps_by_hand: bool = false;
 // Hebrew's, lay_rtl), past one and two ATTRS_SET. Verse-line layouts
 // have their own three sets so independent layout options cannot share
 // paragraph attributes by mistake.
-ATTRS_SET: int = STYLES * 32;
+ATTRS_SET: int = (STYLES + 3) * 32;
 
-paras: []int = new int[STYLES * 192](0);
+paras: []int = new int[(STYLES + 3) * 192](0);
 
-attrs: []int = new int[STYLES * 192](0);
+attrs: []int = new int[(STYLES + 3) * 192](0);
 
-layout_attrs_set(ctx: *ChapterLayout): int {
-    base: int = if (ctx.lay_rtl) 2 * ATTRS_SET else if (ctx.lay_orig) ATTRS_SET else 0;
-    base + (if (ctx.lay_verse_lines) 3 * ATTRS_SET else 0)
+layout_attrs_set(flags: int): int {
+    base: int = if ((flags & LAY_RTL) != 0) 2 * ATTRS_SET else if ((flags & LAY_ORIG) != 0) ATTRS_SET else 0;
+    base + (if ((flags & LAY_LINES) != 0) 3 * ATTRS_SET else 0)
 }
 
 // The Hebrew and Greek's fonts (§14.11.3): Greek in New York at the
@@ -308,10 +322,14 @@ new_york_bold(size: f64): int {
 }
 
 // A style's font: the Hebrew's own for the original's words in a Hebrew
-// chapter.
-layout_font_of(ctx: *ChapterLayout, style: int): int {
-    if (ctx.lay_rtl && (style == STYLE_ORIG || style == STYLE_ORIG_GL)) return orig_fonts[0];
-    if (ctx.lay_rtl && (style == STYLE_OTITLE || style == STYLE_OTITLE_GL)) return orig_fonts[1];
+// chapter; core's runs of its own lines (the ESV's) in the body's.
+layout_font_of(flags: int, style: int): int {
+    rtl: bool = (flags & LAY_RTL) != 0;
+    if (rtl && (style == STYLE_ORIG || style == STYLE_ORIG_GL)) return orig_fonts[0];
+    if (rtl && (style == STYLE_OTITLE || style == STYLE_OTITLE_GL)) return orig_fonts[1];
+    if (style == STYLE_VERSE && (flags & LAY_LINES) != 0) return verse_lines_font;
+    if (style == RUN_SMALL) return fonts[STYLE_NOTE];
+    if (style < 0 || style >= STYLES) return fonts[STYLE_BODY];
     fonts[style]
 }
 
@@ -431,11 +449,14 @@ make_look() {
     }
     make_body_desc();
     metrics: int = msg1(cls("UIFontMetrics"), sel("metricsForTextStyle:"), objc_const("UIFontTextStyleBody"));
-    em = round_half(msg_f_f(metrics, sel("scaledValueForValue:"), 19.0f64) * size_steps[set_size]);
+    em = round_half(msg_f_f(metrics, sel("scaledValueForValue:"), 19.0f64) * look_size);
     for i in 0..len(fonts) release(fonts[i]);
+    release(verse_lines_font);
     fonts[STYLE_BODY] = keep(body(em));
     fonts[STYLE_VERSE] = keep(msg_ff(cls("UIFont"), sel("monospacedDigitSystemFontOfSize:weight:"),
-        em * (if (lay_verse_lines) 0.62f64 else 0.58f64), 0.3f64));
+        em * 0.58f64, 0.3f64));
+    verse_lines_font = keep(msg_ff(cls("UIFont"), sel("monospacedDigitSystemFontOfSize:weight:"),
+        em * 0.62f64, 0.3f64));
     fonts[STYLE_BOOK] = keep(body(em * 2.0f64));
     fonts[STYLE_NUMERAL] = keep(light(em * 2.6f64));
     fonts[STYLE_NUMERAL1] = keep(light(em * 2.0f64));
@@ -507,20 +528,24 @@ is_heading_style(style: int): bool {
 // The paragraph style of a style's runs in a paragraph of kind para (right
 // to left, in a Hebrew chapter: lay_rtl; the apparatus always left to
 // right, its Hebrew isolated).
-layout_para_for(ctx: *ChapterLayout, style_in: int, para: int): int {
-    // (A heading's reference is set as the rest of its line.)
-    style: int = if (style_in == STYLE_XREF) STYLE_REF else style_in;
+layout_para_for(flags: int, style_in: int, para: int): int {
+    // (A heading's reference is set as the rest of its line; core's runs of
+    // its own lines, the ESV's, as the body's.)
+    style: int = if (style_in == STYLE_XREF) STYLE_REF else if (style_in < 0 || style_in >= STYLES) STYLE_BODY else style_in;
+    lay_rtl: bool = (flags & LAY_RTL) != 0;
+    lay_orig: bool = (flags & LAY_ORIG) != 0;
+    lay_lines: bool = (flags & LAY_LINES) != 0;
     app: bool = style == STYLE_APPARATUS || style == STYLE_APP_ENTRY;
-    rtl: bool = ctx.lay_rtl && !app;
+    rtl: bool = lay_rtl && !app;
     // (The original's paragraphs one style whatever their runs: a
     // paragraph takes its first character's, often a verse's number.)
-    base: int = if (is_heading_style(style)) style else if (app) STYLE_APPARATUS else if (style == STYLE_OTITLE || style == STYLE_OTITLE_GL) STYLE_OTITLE else if (is_orig_style(style) || ctx.lay_orig) STYLE_ORIG else STYLE_BODY;
-    at: int = base * 32 + para % 32 + layout_attrs_set(ctx);
+    base: int = if (is_heading_style(style)) style else if (app) STYLE_APPARATUS else if (style == STYLE_OTITLE || style == STYLE_OTITLE_GL) STYLE_OTITLE else if (is_orig_style(style) || lay_orig) STYLE_ORIG else STYLE_BODY;
+    at: int = base * 32 + para % 32 + layout_attrs_set(flags);
     if (paras[at] != 0) return paras[at];
     kind: int = para % KINDS;
     gap: f64 = if ((para & KINDS) != 0) em * 0.8f64 else 0.0f64;
     // (Hebrew's points need room: 1.5, whatever the spacing.)
-    lh: f64 = if (ctx.lay_rtl && !is_heading_style(style) && !app) 1.5f64 else spacings[set_spacing];
+    lh: f64 = if (lay_rtl && !is_heading_style(style) && !app) 1.5f64 else look_spacing;
     p: int = 0;
     if (app) {
         // (The apparatus: 6 pt below its paragraph, faint, a paragraph's
@@ -555,7 +580,7 @@ layout_para_for(ctx: *ChapterLayout, style_in: int, para: int): int {
             0, em * 1.6f64, msg(cls("NSDictionary"), sel("dictionary"))), sel("autorelease"));
         msg1(p, sel("setTabStops:"), nsarray(tab_pair, 2));
         msg_set_f(p, sel("setDefaultTabInterval:"), em * 1.6f64)
-    } else if (ctx.lay_verse_lines && (kind == PARA_Q1 || kind == PARA_Q2)) {
+    } else if (lay_lines && (kind == PARA_Q1 || kind == PARA_Q2)) {
         // (A verse's next line of poetry, under its words.)
         first: f64 = em * (if (kind == PARA_Q1) 1.6f64 else 2.8f64);
         p = para_style(0, first, first + em * 1.2f64, gap, if (kind == PARA_Q1) 0.0f64 else 0.0f64,
@@ -585,6 +610,7 @@ layout_para_for(ctx: *ChapterLayout, style_in: int, para: int): int {
 }
 
 color_for(style: int): int {
+    if (style == RUN_ACCENT) return c_accent;
     if (style == STYLE_BODY || style == STYLE_CAPS || style == STYLE_BOOK || style == STYLE_SUPPLIED || style == STYLE_ORIG || style == STYLE_ORIG_GL) return c_ink;
     if (style == STYLE_OTITLE || style == STYLE_OTITLE_GL) return c_heading;
     if (style == STYLE_JESUS || style == STYLE_JESUS_CAPS || style == STYLE_JESUS_SUPPLIED) return if (red_letter) c_accent else c_ink;
@@ -594,26 +620,24 @@ color_for(style: int): int {
     c_faint
 }
 
-layout_attrs_sp(
-    ctx: *ChapterLayout,
-    style: int,
-    para: int,
-    r: int
-): int {
-    link: bool = style == STYLE_NOTE || style == STYLE_XREF || style == STYLE_PASSAGE || style == STYLE_APP_ENTRY;
-    at: int = style * 32 + para % 32 + layout_attrs_set(ctx);
-    if (!link && attrs[at] != 0) return attrs[at];
+// A run's attributes: its style's in a paragraph of kind para, in a
+// chapter laid out as flags say (LAY_).
+layout_attrs_sp(flags: int, style: int, para: int): int {
+    // (Core's runs of its own lines, the ESV's: kept past the text's.)
+    slot: int = if (style == RUN_FAINT) STYLES else if (style == RUN_ACCENT) STYLES + 1 else if (style == RUN_SMALL) STYLES + 2 else if (style < 0 || style >= STYLES) STYLE_BODY else style;
+    at: int = slot * 32 + para % 32 + layout_attrs_set(flags);
+    if (attrs[at] != 0) return attrs[at];
     n: int = 0;
     keys[n] = k_font;
-    values[n] = layout_font_of(ctx, style);
+    values[n] = layout_font_of(flags, style);
     n = n + 1;
     keys[n] = k_color;
     values[n] = color_for(style);
     n = n + 1;
     keys[n] = k_para;
-    values[n] = layout_para_for(ctx, style, para);
+    values[n] = layout_para_for(flags, style, para);
     n = n + 1;
-    if (style == STYLE_VERSE && ctx.lay_verse_lines) { } else if (style == STYLE_VERSE || style == STYLE_NOTE) {
+    if (style == STYLE_VERSE && (flags & LAY_LINES) != 0) { } else if (style == STYLE_VERSE || style == STYLE_NOTE) {
         keys[n] = k_baseline;
         values[n] = nsnumber_f(em * (if (style == STYLE_VERSE) 0.36f64 else 0.38f64));
         n = n + 1
@@ -624,29 +648,14 @@ layout_attrs_sp(
         values[n] = nsnumber_f(em * kern);
         n = n + 1
     }
-    if (style == STYLE_ORIG_GL || style == STYLE_OTITLE_GL) {
-        // (A word glossed: a dotted underline in the rule's color, thin.)
-        keys[n] = k_underline;
-        values[n] = nsnumber_int(257);
-        n = n + 1;
-        keys[n] = k_underline_color;
-        values[n] = c_gloss_line;
-        n = n + 1
-    }
     if (is_orig_style(style) || style == STYLE_APP_ENTRY) {
         // (Read by VoiceOver in Hebrew or Greek: an installed voice.)
         keys[n] = objc_const("UIAccessibilitySpeechAttributeLanguage");
-        values[n] = nsstring(if (style == STYLE_APP_ENTRY) "en" else if (ctx.lay_rtl) "he" else "el");
+        values[n] = nsstring(if (style == STYLE_APP_ENTRY) "en" else if ((flags & LAY_RTL) != 0) "he" else "el");
         n = n + 1
     }
-    if (link) {
-        xr: bool = style == STYLE_XREF || style == STYLE_PASSAGE;
-        keys[n] = nsstring(if (xr) k_xref else if (style == STYLE_APP_ENTRY) k_gloss else k_link);
-        values[n] = msg1(cls("NSNumber"), sel("numberWithLong:"), if (xr) ctx.run_arg[r] * 16777216 + ctx.run_arg2[r] else ctx.run_arg[r]);
-        n = n + 1
-    }
-    d: int = nsdictionary(keys, values, n);
-    if (!link) attrs[at] = keep(d);
+    d: int = keep(nsdictionary(keys, values, n));
+    attrs[at] = d;
     d
 }
 
@@ -665,9 +674,4 @@ symbol(
     if (image != 0 && color != 0) image = msg2(image, sel("imageWithTintColor:renderingMode:"),
         color, 1);
     image
-}
-
-// Attributes read the layout's language, options, and link arguments.
-layout_attrs_for(ctx: *ChapterLayout, r: int): int {
-    layout_attrs_sp(ctx, ctx.run_style[r], ctx.run_para[r], r)
 }

@@ -1,9 +1,10 @@
 # Platform skins
 
 Core owns app behavior and screen models. Each platform supplies
-presentation and services. Web, Android and terminal use the line-based
-host; iOS also integrates core directly from native UIKit views. This
-file describes the models and protocol used by the current implementations.
+presentation and services. Every platform (the web, Android, the terminal
+and iOS) runs core on core's host (`core/host.l8`) and talks to it only in
+the line protocol: core has no platform's own path. This file describes the
+models and protocol used by the current implementations.
 
 ## Layers
 
@@ -46,30 +47,51 @@ a concrete implementation: `web/main.l8` (the platform) and
 - `kept_store = KeptStore { read, write, append, remove }`: one named file
   (`kp_name`) read into `fbuf`, written from it, added to, deleted
   (`core/kept.l8` names them and says what goes in each).
-- `host_io = HostIO { ask, http, file, say }`: a data file asked for by
-  name (the site's `data/` names: `bsb` ... `ylt`, `orig.txt`, `lang/*`,
-  `help.txt`, `xrefs.bin`, `mhcc.txt`, `audio/*.tim`,
-  `audio/henson.paths`), a GET, a file or answer's bytes, lines to the
-  skin.
+- `host_io = HostIO { ask, http, file, fetch, say }`: a data file asked
+  for by name (the site's `data/` names: `bsb` ... `ylt`, `orig.txt`,
+  `lang/*`, `help.txt`, `xrefs.bin`, `mhcc.txt`, `audio/*.tim`,
+  `audio/henson.paths`), a GET, a file or answer's bytes, a recording
+  fetched into a kept file, lines to the skin. `fetch` (a GET into the
+  kept file named, written whole only when the answer is 200, and kept out
+  of backups) may be `null` where a platform cannot keep recordings; core
+  then offers no Downloads.
 - `hs_start()`, then what the platform is: `sk_device` (its name: "Device",
   "Phone"), `sk_follows_text_size`, `sk_fonts` (its reader's faces, in the
   settings' order), `hs_notify_off` (where notifications are turned back
   on, if not its Settings).
-- A loop: wait for lines, take them into `hs_inbox` (the web's `bw_take`), `hs_lines(n)`,
-  `hs_after()`. Kept allocations happen only here, never in a callback.
+- Its lines, into `hs_inbox` (the web's `bw_take`), then `hs_lines(n)` and
+  `hs_after()`: from a loop that waits for them, or from its callbacks (the
+  iPhone's, where every line comes in one). A data file asked for is
+  answered `got ID SIZE`; core's host then reads it through `file`
+  straight into the dataset it is part of.
 - Its own lines in: `got ID SIZE` (a data file came; -1 none), `http ID
-  STATUS SIZE` (an answer came), `api BASE` (the site's `/api/v1/`).
+  STATUS SIZE` (an answer came), `api BASE` (the site's `/api/v1/`),
+  `fetching ID GOT TOTAL` (a fetch's bytes so far, TOTAL 0 unknown; as
+  often as it likes), `fetched ID STATUS BYTES` (its end: STATUS the
+  answer's, 0 none; BYTES the kept file's size), `network KIND` (as it
+  changes: 0 none, 1 not metered, 2 metered; until it is said, not
+  metered). Core's host keeps the chapters held and the books asked for
+  (`core/held.l8`), fetching one chapter at a time.
+- Core's data are datasets (`core/datafile.l8`, `TextData` in
+  `core/text.l8`, `LanguageData` in `core/lang.l8`, the Manual, the
+  plans' files, the recordings' timings and paths, the original's words):
+  each made in an arena of its own when its file comes, replaced whole
+  (the one before let go) when it comes again, and read only borrowed, for
+  what an operation does. Nothing a skin is given points into them.
 
 **2. The skin draws** what core describes:
 
 - Screens: `screen` ... `end` with every row kind, and these `CUSTOM_`
   kinds where the plain row won't do: `CUSTOM_SWATCHES` (colors to choose),
   `CUSTOM_CARD` (Share as Image's card, drawn at its pixels),
-  `CUSTOM_FONT` (each font in its own face), `CUSTOM_HIT` (a verse found).
+  `CUSTOM_FONT` (each font in its own face), `CUSTOM_HIT` (a verse found;
+  its value `HIT_GREEK` or `HIT_HEBREW` for the original's words).
   The others may show as their kind's row. Their placement: `present`,
   `push`, `present_over`, `panel`, `update`, `refill`, `retext`, `blur`,
-  `focus`, `pop`, `pop_to`, `close`, `dismiss`; the skin's own Back says
-  `closed ID`.
+  `focus`, `reveal`, `pop`, `pop_to`, `close`, `dismiss`; the skin's own
+  Back says `closed ID`. `reveal ID` brings the focus row's words (`focus
+  N 4 FROM TO`) into sight, scrolling as little as it can: none if they
+  are in sight already.
 - The reader: `reader`, then `chapter`, `span`, `verse`, `link` and `mark`
   lines as it asks (`want C`); `look`, `title`, `version`, `jump`, `goto`,
   `place`, `relayout`, `page`; `selection`, `carried`, `hearing`, `back`,
@@ -87,7 +109,7 @@ a concrete implementation: `web/main.l8` (the platform) and
 | Begin, and its appearance | `start W H DENSITY DARK TZ`, `version ABBR`, `dark`, `away` |
 | Taps | `tap`, `act`, `query`, `scope`, `text`, `submit`, `tapverse`, `tapnone`, `trayact`, `word`, `footnote`, `preview`, `esvact`, `versestudy`, `back` |
 | Keys | `key NAME MODS` |
-| Recordings | `audio_play`, `audio_stop` → `audiotime`, `audioended`, `audiofailed` |
+| Recordings | `audio_play`, `audio_stop` → `audiotime`, `audioended`, `audiofailed`; an address `kept:NAME` is the kept file NAME (a chapter core holds), and one that isn't there fails, so core plays it from online |
 | Its voice | `voices` (once); `say`, `speech_stop` → `spoke`, `spoken` |
 | Listening's controls | `listen_pause`, `listen_resume`, `listen_stop`, `follow`; `listenplay`, `listenpause`, `listenprev`, `listennext`, `listenstop` (its own player's too: a lock screen's) |
 | Time | `timer TOK MS` → `timer TOK` |
@@ -95,22 +117,22 @@ a concrete implementation: `web/main.l8` (the platform) and
 | Reminders | `notify_ask` → `notifyok`; `notify_clear`, `notify`; one opened → `reminded` |
 | Sharing | `copy`, `share`, `share_image`, `savefile`, `url` |
 
-**4. A skin on core's host never gets** the lines for a host with views or
-state of its own (the iPhone's): `open`, `plan_today`, `plan_details`,
-`plan_stopped`, `marked`, `ribbon_added`, `ribbon_open`, `ribbon_moved`,
-`ribbon_color`, `ribbon_toast`, `read_in`, `practice_session`,
-`practice_audio`, `preview`, `footnote`, `study_moved`, `esv_want`,
-`esv_search`, `searched`, `mm_fetch`, `pins_changed`, `export`, `remind`,
-`remind_time`, `audio_source`, `voice`, `cellular`, `download`,
-`download_delete`, `settings`, `chosen`; nor `open_settings` where the
-platform gives `hs_notify_off` (where notifications are turned back on:
-the web's); else it opens the platform's notification settings
-(Android's). It may ignore any line it doesn't know.
+**4. A skin may ignore any line it doesn't know.** Some only say what
+changed (`plan_stopped`, `marked`, `ribbon_color`, `chosen`, `searched`,
+`remind`, `remind_time`, `voice`, `audio_source`, `cellular`); core's host
+does `esv_want`, `esv_search`, `mm_fetch`, `pins_changed`, `export`,
+`settings`, `download` and `download_delete` itself, so they come only from
+a core without it
+(`tools/skin_text.l8`). `open_settings` comes where the platform doesn't
+give `hs_notify_off` (where notifications are turned back on: the web's):
+it opens the platform's notification settings (Android's, the iPhone's).
 
 What core's host turns on for its skins: ribbons and plans, Listen, Keep
 Screen On, reminders, Share as Image, the Manual and Acknowledgements.
-Downloads (`sk_has_downloads`) need a platform that keeps recordings; the
-web's can't (their hosts don't allow pages to read them), so it streams.
+Downloads (`sk_has_downloads`) need a platform whose `HostIO` has `fetch`;
+the web's fetches through the site's Worker (`/api/v1/audio/relay`: the
+recordings' hosts don't let pages read them) and keeps them in the
+browser's cache (`sb-held`), each played from a blob address.
 
 ## Screens as data
 
@@ -215,11 +237,6 @@ models, words and rules:
    (`core/tray.l8`'s commands), a word's popover (`core/word.l8`), toasts
    (`toast`).
 
-The iPhone keeps richer versions of some of core's screens (its own
-Practice sheet, day's reader, preview, footnote popover, jumps), each
-drawn from core's state and saying so through `SK_NUM_OWN_VIEW` and
-`SK_NUM_OWN_JUMPS`.
-
 Share as Image is core's composer (`core/share.l8`'s `SCR_SHARE`) for a
 skin that draws cards (`sk_has_card`; core's host says so): Share on
 verses that fit a card opens it (else it shares their words). Its shape
@@ -238,10 +255,8 @@ centered, and draws them at the card's pixels. Share Image says
 page's share of a PNG, else a download).
 
 A reference's preview is core's (`core/preview.l8`: its verses, each
-chapter's first and last, at most 80, the words around them): a skin with
-its own (the iPhone's, in the reader's typesetting with its highlights;
-`SK_NUM_OWN_VIEW` of `SCR_PASSAGE`) draws that plan; any other gets core's
-screen, a page of the verses in the reader's styles and Open in Reader.
+chapter's first and last, at most 80, the words around them): a screen, a
+page of the verses in the reader's styles and Open in Reader.
 
 ## Practice
 
@@ -252,7 +267,7 @@ card's state, Practise Reading's rounds, and the end. Every opener (the
 Library, a passage's row, the tray's Memorize, a language's cards,
 Practise Reading, Learn 8 Letters) is core's `px_start`.
 
-A skin without its own Practice gets core's screen (`SCR_PRACTICE`): the
+Every skin draws core's screen (`SCR_PRACTICE`): the
 passage as a page's paragraph whose runs are each word's look
 (`RUN_PRACTICE` plus a look: its color, clear, ink, learned or faint; its
 underline, the rule, the accent, half the accent or the accent dotted,
@@ -262,15 +277,6 @@ count at the bar's left; the step's buttons; a card's face as a hero and
 paragraphs; the end as its empty words. A skin that plays a passage and
 speaks a card says so (`SK_NUM_PRACTICE_AUDIO`), and one that takes typed
 letters (`SK_NUM_PRACTICE_KEYS`); their buttons are left out otherwise.
-
-The iPhone draws Practice in its own sheet (`SK_NUM_OWN_VIEW` of
-`SCR_PRACTICE`: core
-says `practice_session N HOW` once the session is queued), from the same
-state: each action of core's says what changed (`px_changed`'s `PX_CH_`
-bits: the words' looks, the buttons, a passage or card begun, the end,
-the keys put away, playback stopped, a scroll, a tick felt), the words'
-looks are core's runs (`px_looks`), the buttons core's list (`px_tools`),
-and a card's words core's, part by part (`px_card_part`).
 
 ## Settings
 
@@ -283,8 +289,8 @@ text (`name value` lines), or maps them to its platform's store.
 
 Android's skin is Java and the web's is JavaScript; both talk to core
 in lines (UTF-8, `\n`-ended; fields split by tabs, a field's tab, newline and
-backslash written `\t`, `\n`, `\\`). An L8 skin (the iPhone's) uses the same
-records in memory and needs no wire. `core/skin.l8` reads the skin's lines
+backslash written `\t`, `\n`, `\\`). The iPhone's UIKit renderer decodes these
+messages into its own screen storage using `core/wire.l8`. `core/skin.l8` reads the skin's lines
 (`sk_line`) and writes its answers into `ui_out`; `tools/skin_text.l8` is
 the whole wire on a terminal, for developing core without a phone:
 
@@ -301,8 +307,8 @@ A screen, from core:
 
 | Line | Meaning |
 |---|---|
-| `screen ID KIND ARG` TITLE SEARCH | a screen built; then the lines below, its `section`, `row` and `cell` lines, then `end` |
-| `focus N [MODE]` | the screen opens at its Nth row (of all, from 0), at the top; MODE 1 selected and in the middle, 2 in the middle, 3 at the top and washed (a Manual's part gone to by a link) |
+| `screen ID KIND ARG GROUP` TITLE SEARCH | a screen built; GROUP 0 is the sheet, 1 the side panel; then the lines below, its `section`, `row` and `cell` lines, then `end` |
+| `focus N [MODE]` | the screen opens at its Nth row (of all, from 0), at the top; MODE 1 selected and in the middle, 2 in the middle, 3 at the top and washed (a Manual's part gone to by a link); `focus N 4 FROM TO`: the row's words FROM to TO (UTF-16) are to be kept in sight, which the `reveal` effect asks for (Practice's words practised, the word being typed) |
 | `intro` TEXT RUNS QUOTE | words above the first section (a plan's description; the language page's); QUOTE 1, a quote (an accent's bar beside it) |
 | `left` ACTION TITLE ICON STYLE | a button at the left of the bar, in place of Back (a note's Cancel; Practice's count, inert) |
 | `hero` WORD SCRIPT SUB LINE RUNS | a word as the heading: large in its script (`RUN_GREEK`, `RUN_HEBREW`), its transliteration, a line under them |
@@ -368,32 +374,31 @@ Other lines from core:
 | `refill ID FADE` | screen ID made again as its field is typed in (FADE 1: a cross-fade) |
 | `retext ID`, `blur ID` | the field to show the screen's words; the keyboard put away |
 | `reader N` | the reader has N chapters |
-| `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA`, `verse V A B`, `link A B KIND ARG` (a footnote's mark, KIND 0, ARG its place; a reference, 1, ARG the reference; a word of the original's, 2) and `mark V HEX BOOKMARK NOTE` lines (a verse's highlight's color, `-` none; bookmarked; noted), then `end` |
+| `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA`, `verse V A B`, `link A B KIND ARG` (a footnote's mark, KIND 0, ARG its place; a reference, 1, ARG the reference; a word of the original's, 2), `gloss A B` (a word of the original glossed under its paragraph) and `mark V HEX BOOKMARK NOTE` lines (a verse's highlight's color, `-` none; bookmarked; noted; verse 0 the chapter's own note, marked after its label), then `end`. A `layout ORIG RTL VERSELINES OPENER LABEL` line after the first says whether the chapter is the original's, set right to left, a verse a line, and where its opener and its label end (UTF-16; 0 none); a `name` TITLE line names it as the bar does. A skin ignores the lines it does not know |
 | `jump C V`, `goto C V`, `relayout` | the reader moved; the screens away, then moved; every chapter to be asked for again |
-| `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT` | all a skin needs of look.l8: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument) |
+| `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT THEME CHOSEN` | all a skin needs of look.l8: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument); THEME the theme it is (look.l8's index, for a skin keeping its tables' other colors: selections, sheets, highlights' washes), CHOSEN the one chosen (0 Auto) |
 | `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation |
 | `url` ADDRESS | a page outside the app to open |
-| `place C V*1000+FRAC`, `back` WORDS | the reader to a place (a ribbon's, the way back's); the capsule's words (none: away). A skin with jumps of its own (`SK_NUM_OWN_JUMPS`: the iPhone) does `core/jump.l8`'s steps itself and gets `goto`, `ribbon_open`, `ribbon_added` instead |
+| `place C V FRAC`, `back` WORDS | the reader to a place (a ribbon's, the way back's); the capsule's words (none: away) |
 | `awake MS` | Keep Screen On: the screen kept on MS more (after a `rest`, a tap), or let go now (0: a sheet opened, the setting off). A skin offers the setting with `sk_has_keep_on` |
 | `settings` | a setting changed that doesn't lay the text out again |
 
 The host's effects (what only a platform can do; a skin without one ignores
-it): `open WHAT` (a screen still the platform's own: core/skin.l8's
-`OPEN_`), `listen`, `ribbon_added ID`, `ribbon_open I`, `ribbon_color ID`,
-`chosen OWNER`, `marked SLOT DAY`, `plan_start P`, `plan_stop P`, `plan_today
-SLOT`, `plan_details SLOT`, `remind WHO ON` (a reminder's switch: WHO 0
-Memory's, else a plan's slot plus 1), `remind_time MINUTES`, `open_settings`,
-`searched`, `esv_search PAGE`, `esv_want C`, `audio_source`, `voice`,
-`cellular`, `download`, `download_delete`, `export`, `memorize C V` and
-`mm_added VERSION` (an ESV passage, whose verses the host keeps; any
-other version's is added by core, which toasts Added to Memory),
-`mm_version`, `mm_delete`, `practice_session N HOW` (a host
-with its own Practice), `practice_audio ACTION ARG` (Listen, Echo, Speak
-on core's Practice), `toast SYMBOL` WORDS (a toast's words, and its
-symbol: 0 plus, 1 a check, 2 the brain), `read_in CV RIBBON`
-(the reader in the Hebrew and Greek), `study_verse`, `copy`, `share`,
-`share_image` (Share as Image's card, above),
-`highlighted`, `bookmarked`, `clear_selection`, `tray`, `tray_away`.
+it): `ribbon_color ID`, `chosen OWNER`, `marked SLOT DAY`, `plan_stopped`,
+`remind WHO ON` (a reminder's switch: WHO 0 Memory's, else a plan's slot
+plus 1), `remind_time MINUTES`, `open_settings`, `searched`, `audio_source`,
+`voice`, `cellular`, `download`, `download_delete`, `practice_audio ACTION
+ARG` (Speak on core's Practice), `felt KIND` (something to feel: 0 a grade
+given, 1 a wrong letter typed), `announce` WORDS (for a screen reader alone:
+a word missed), `toast SYMBOL` WORDS (a toast's words, and its symbol: 0
+plus, 1 a check, 2 the brain, 3 the carried ribbon), `study_verse C V`,
+`study_moved C V` (Study beside the reader moved to another verse: the
+reader follows), `beside OPEN C V` (at `start`: whether Study beside the
+reader was left open, and the verse it showed, C -1 never; core keeps
+them, from `panel`, the panel's verse and `closegroup 1`, so a skin with
+that panel opens it again where it fits), `studyable 1|0` (the answer to `studyable`), `copy`,
+`share`, `share_image` (Share as Image's card, above), `highlighted`,
+`bookmarked`, `clear_selection`, `tray`, `tray_away`.
 
 From the skin:
 
@@ -407,6 +412,14 @@ From the skin:
 | `text ID ACTION ARG TEXT` | a `field` row's words: its action with them |
 | `submit ID` | Return (Go) in screen ID's field |
 | `closed ID` | the skin closed screen ID (and those over it) |
+| `open KIND ARG PUSH`, `panel KIND ARG` | open a core screen from a platform entry point; PUSH 1 pushes it, 0 presents it; `panel` opens it beside the reader |
+| `openplan PLAN DAY SELECT PUSH` | open a plan's days at DAY, with that day selected when SELECT is 1 |
+| `anchor ID` | keep the navigation stack through ID, closing screens above it before pushing from that controller |
+| `closegroup GROUP` | close the sheet's screens (0) or the side panel's screens (1) |
+| `panelvisible 0/1` | tell core whether Study beside the reader is currently visible, including when the platform temporarily detaches its panel |
+| `model ID [SECTION ROW]` | return the screen's current description without a presentation effect; with windowed rows, include the requested lazy row |
+| `windowrows 0/1` | choose full lazy sections (the default) or their counts with rows fetched on demand; available to every skin |
+| `editmenu COMMAND` | perform one of core's text-selection menu commands on the current selection |
 | `want C` | chapter C's text, to show |
 | `place C V FRAC` | the reader's top: chapter, verse, thousandths of an em into it |
 | `dark 0/1` | the system's appearance changed |
@@ -418,11 +431,13 @@ From the skin:
 | `select C V...` | the verses selected, whole (none: the tray away), for a skin that keeps its own selection |
 | `trayact ACTION V`, `titlemenu`, `menuact ACTION ARG` | a tray's button; the title's menu's model, as screen 0; one of its items |
 | `versestudy C V` | verse C:V's Study, as core's screen (a skin's answer to `study_verse`) |
-| `spoke C V MS`, `spoken C V`, `listenstop` | the skin's voice began (MS its clock: following waits 8 s after a finger moves the reader) and finished saying verse C:V (0 the chapter's title), or was stopped: a skin without its own Listen (`SK_NUM_OWN_LISTEN`) speaks what core's session gives it (`say C V` WORDS, `player` TITLE STATE PLAYING READER VERSION (also for the platform's own player: a lock screen's, a headset's; its buttons `listenplay`, `listenpause`, `listenprev`, `listennext`, `listenstop`), `follow C V`, `listen_stop`) |
+| `spoke C V MS`, `spoken C V`, `listenstop` | the skin's voice began (MS its clock: following waits 8 s after a finger moves the reader) and finished saying verse C:V (0 the chapter's title), or was stopped: a skin speaks what core's session gives it (`say C V` WORDS, `player` TITLE STATE PLAYING READER VERSION (also for the platform's own player: a lock screen's, a headset's; its buttons `listenplay`, `listenpause`, `listenprev`, `listennext`, `listenstop`), `follow C V`, `listen_stop`) |
 | `rest C V FRAC END ENDS_HI MS`, `moving MS`, `tick MS`, `jumped KIND` | the reader at rest (chapter, verse, thousandths of an em; its end on the screen; the last chapter whose end is; the skin's clock), begun to move (a finger's scroll), the time core asked for (`wake MS`), a jump (0 with a way back, 1 the capsule's, 2 neither): `core/reading.l8` counts chapters read (20 s at rest, end seen), moves the carried ribbon, and puts a chapter dwelt in 20 s onto the history |
 | `back` | the capsule tapped: core goes back (`place`), or opens the plan's day it came from |
-| `key NAME MODS` | a hardware keyboard's key (NAME its character, or `left`, `up`, `down`, `space`, `return`; MODS 1 ⌘ or Ctrl, 2 Shift, 4 Alt): `core/keys.l8` makes it a command and does it where it acts — Go To, Search, Library, Settings, chapters, Back, Listen, a page (`page 1` down, `page 0` up: the skin scrolls a screen less three lines), a plan's day's Mark Read and Next, Practice's Check and grades. The iPhone makes them `UIKeyCommand`s itself |
-| `footnote C P`, `preview REF` | a footnote's mark tapped (its place P in chapter C), a reference tapped: core's footnote (`core/footnote.l8`) or preview, or the host's own (`SK_NUM_OWN_VIEW`) |
+| `key NAME MODS` | a hardware keyboard's key (NAME its character, or `left`, `up`, `down`, `space`, `return`; MODS 1 ⌘ or Ctrl, 2 Shift, 4 Alt): `core/keys.l8` makes it a command and does it where it acts — Go To, Search, Library, Settings, chapters, Back, Listen, a page (`page 1` down, `page 0` up: the skin scrolls a screen less three lines), a plan's day's Mark Read and Next, Practice's Check and grades. The iPhone's `UIKeyCommand`s send them, offered where `core/keys.l8`'s `kc_allowed` says |
+| `footnote C P`, `preview REF` | a footnote's mark tapped (its place P in chapter C), a reference tapped: core's footnote (`core/footnote.l8`) or preview |
+| `studyable C A B`, `studyat C A B` | whether the words at UTF-16 A to B of chapter C's text have a word to study (core says `studyable 1` or `0`: a skin's menu offers Study), and that word's Study opened |
+| `link ADDRESS` | a link into the app opened (`bsb://JHN/3/16`): the reader there |
 | `refresh` | what core's screens show has changed (the host's own state): each made again |
 
 A host in L8 (android/main.l8) reads files and keeps the settings for core
@@ -439,10 +454,11 @@ calls `sk_use_version` again.
 
 ## The iPhone as a skin
 
-`ios/skin.l8` draws core's screens in the app's own lists: eight slots in
-the table registry (`ios/tables.l8`) whose rows come from core's records,
-not the wire (`ui_wire` is off, and effects queue in `ui_effects`). A row's
-action goes to core (`sk_act`); its effects are done the iPhone's way
+`ios/skin.l8` draws core's screens in the app's own lists: twelve slots in
+the table registry (`ios/tables.l8`). `ios/wire.l8` sends encoded commands
+to the protocol dispatcher, decodes screens into independently owned storage,
+and consumes presentation effects from the returned lines. A row's
+action is `act ID ACTION ARG VALUE`; its effects are done the iPhone's way
 (`push` into the navigation the action came from, `present` as a sheet,
 `update` a cross-fade and reload, a row deleted with the system's animation
 when that is all that changed, `dismiss`). The platform's work stays the
@@ -450,6 +466,20 @@ app's: core's version switch is the iPhone's `switch_version`. Core's screens
 are the app's own controller class (`L8CoreList`), made again as they come
 back from a screen pushed over them; Go To's and Search's are the app's own
 classes for their focus and keyboard.
+
+For a lazy section, the iPhone requests `windowrows 1`. After the section's
+header, core sends `lazy COUNT ROW`: COUNT is its logical row count; ROW is
+-1 when no row was requested, otherwise the zero-based row whose ordinary
+`row` and `cell` lines follow. `model ID SECTION ROW` returns a fresh screen
+with that row included. UIKit can therefore request visible concordance rows
+without calling core's lazy-row builder or retaining its construction buffers.
+Skins that use the default full sections continue receiving every row.
+
+Core drains complete lines through the host's output receiver as its buffer
+fills. A large screen can span multiple batches; a batch boundary does not
+end a screen. Hosts must consume or copy each batch before returning. A
+single line that cannot fit, or a full buffer without a receiver, fails
+explicitly instead of reporting truncated output as a complete screen.
 
 Every list is core's (2026-10-22): Go To (its ribbons and plans too),
 Search (the ESV's results too: the iPhone asks its server, core keeps and
@@ -497,10 +527,7 @@ tray's: `versestudy`), word studies, the Manual's pages and Learn work,
 and the cards are kept. Reading Plans work there from core: following a plan
 (its file plan-N.tsv, their numbers in plans.txt; `SK_KEPT_PLANS`), its
 days, core's day's reader (`SCR_DAY`: its passages, Mark Read, the day's
-end), Day Done. A skin with a day's reader of its own (the iPhone's)
-says so (`SK_NUM_OWN_VIEW` of `SCR_DAY`, and of `SCR_PLAN`, `SCR_DAY1`,
-`SCR_MANUAL`, `SCR_VOICE` for its own sheets) and gets the effects
-instead.
+end), Day Done.
 
 Since 2026-10-22 its host is core's (`core/host.l8`), as the web's is: its
 L8 (`android/main.l8`) is only the platform's primitives, read from the

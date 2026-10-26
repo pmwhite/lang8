@@ -24,6 +24,8 @@ final class Screen {
   String intro = "";
   int[] introRuns = new int[0];
   boolean focusSelect;
+  // The focus row's words kept in sight (UTF-16, FROM to TO; -1: none).
+  int focusFrom = -1, focusTo = -1;
   // A word as its heading: the word, its script (a RUN_), its
   // transliteration, and a line under them (by its runs).
   String hero = "", heroSub = "", heroLine = "";

@@ -1,30 +1,21 @@
 tag bible_ios;
 
-use_tag std, ios, bible;
+use_tag std, ios, bible, bible_wire;
 
-// Verses selected and what can be done with them: the tray that floats up
-// (highlight in a color, copy, share, bookmark, note), the commands added to
-// the text's own edit menu, and the toast that says a copy was made. Also
-// jumps: the place jumped from kept, the capsule that goes back to it, and
-// the verse jumped to flashed.
+// Verses selected and what can be done with them, as core says: the tray
+// that floats up (its model core's screen 0: the reference, the colors,
+// copy, share, bookmark, note, study), the commands added to the text's own
+// edit menu, the toasts core says, the capsule back to the place a jump
+// left (core's back line), and the verse jumped to flashed.
 import "../../ios/objc.l8";
 
-import "../core/text.l8";
+import "../core/wire.l8";
+
+import "../core/tray.l8";
 
 extern NSLog(format: int): int;
 
-// ---- the selection: verses of one chapter ----
-sel_c: int = -1;
-
-sel_n: int = 0;
-
-sel_v: []int = new int[200](0);
-
-is_selected(v: int): bool {
-    for i in 0..sel_n
-        if (sel_v[i] == v) return true;
-    false
-}
+extern UIAccessibilityIsReduceMotionEnabled(): int;
 
 // Haptics: a tick for a selection, a light or medium tap, and success.
 haptic_select() {
@@ -46,43 +37,67 @@ haptic_success() {
     release(g)
 }
 
-// Verse v of chapter c selected, or not (a verse of another chapter starts
-// the selection again).
-toggle_verse(c: int, v: int) {
-    // (Core's: the selection's rules.)
-    uk_tray_build();
-    sel_toggle(c, v);
-    sel_from_core();
-    if (sk_sel_was >= 0) repaint(sk_sel_was);
-    haptic_select();
-    repaint(c);
-    if (sel_n > 0) {
-        show_tray();
-        // (Study beside the text shows the first verse selected.)
-        beside_follow()
-    } else hide_tray()
+reduce_motion(): bool {
+    (UIAccessibilityIsReduceMotionEnabled() & 255) != 0
 }
 
-// The selection as core has it, here.
-sel_from_core() {
-    sel_c = (if (sk_sel_n > 0) sk_sel_c else -1);
-    sel_n = sk_sel_n;
-    for i in 0..sel_n
-        if (i < len(sel_v)) sel_v[i] = sk_sel_v[i]
+// A layer's key path animated from a to b (a spring, or ease in and out
+// over t seconds).
+animate(
+    layer: int,
+    path: str,
+    a: f64,
+    b: f64,
+    spring: bool,
+    t: f64
+) {
+    anim: int = 0;
+    if (spring) {
+        anim = msg1(cls("CASpringAnimation"), sel("animationWithKeyPath:"), nsstring(path));
+        msg_set_f(anim, sel("setMass:"), 1.0f64);
+        msg_set_f(anim, sel("setStiffness:"), 300.0f64);
+        msg_set_f(anim, sel("setDamping:"), 30.0f64);
+        msg_set_f(anim, sel("setDuration:"), msg_f(anim, sel("settlingDuration")))
+    } else {
+        anim = msg1(cls("CABasicAnimation"), sel("animationWithKeyPath:"), nsstring(path));
+        msg_set_f(anim, sel("setDuration:"), t);
+        msg1(anim, sel("setTimingFunction:"), msg1(cls("CAMediaTimingFunction"), sel("functionWithName:"),
+            objc_const("kCAMediaTimingFunctionEaseInEaseOut")))
+    }
+    msg1(anim, sel("setFromValue:"), nsnumber_f(a));
+    msg1(anim, sel("setToValue:"), nsnumber_f(b));
+    msg2(layer, sel("addAnimation:forKey:"), anim, nsstring(path))
 }
 
-clear_selection() {
-    if (sel_n == 0) return;
-    c: int = sel_c;
-    sel_n = 0;
+// ---- the selection, as core says it (selection C V...) ----
+selection_line(line: WireLine) {
+    was: int = sel_c;
     sel_c = -1;
-    repaint(c);
-    hide_tray()
-}
-
-// fbuf as an NSString.
-fstring(): int {
-    nsstring_of(fbuf, fbuf_n)
+    sel_n = 0;
+    if (line.count > 1) {
+        at: int = line.starts[1];
+        e: int = line.ends[1];
+        first: bool = true;
+        while (at < e) {
+            while (at < e && line.data[at] as int == 32) at = at + 1;
+            if (at < e) {
+                b: int = at;
+                while (at < e && line.data[at] as int != 32) at = at + 1;
+                n: int = wire_integer(line.data, b, at);
+                if (first) sel_c = n else {
+                    if (sel_n >= len(sel_v)) wire_fail("core selected too many verses");
+                    sel_v[sel_n] = n;
+                    sel_n = sel_n + 1
+                }
+                first = false
+            }
+        }
+    }
+    if (sel_n == 0) sel_c = -1;
+    if (was >= 0 && was != sel_c) repaint(was);
+    if (sel_c >= 0) repaint(sel_c);
+    // (Study beside the text shows the first verse selected.)
+    if (sel_n > 0) beside_follow()
 }
 
 // ---- the tray ----
@@ -101,6 +116,8 @@ tray_actions: []int = new int[7](0);
 tray_effect: int = 0;
 
 tray_timer: int = 0;
+
+tray_bottom: int = 0;
 
 stack(axis: int, spacing: f64): int {
     s: int = make("UIStackView");
@@ -131,9 +148,8 @@ action_config_ns(title: int, name: int, color: int): int {
     msg1(config, sel("setImagePlacement:"), 1);
     msg_set_f(config, sel("setImagePadding:"), 4.0f64);
     // (Seven across: no room at the sides, so that the title has the
-    // button's width (the insets grow with the text size, and at the
-    // largest sizes clipped "Bookmark"); one line, the size fitted to the
-    // longest title, DESIGN.md §13.2.1.)
+    // button's width; one line, the size fitted to the longest title,
+    // DESIGN.md §13.2.1.)
     msg_rect(config, sel("setContentInsets:"), 6.0f64, 0.0f64, 6.0f64, 0.0f64);
     msg1(config, sel("setTitleLineBreakMode:"), 4);
     msg1(config, sel("setBaseForegroundColor:"), c_ink);
@@ -202,16 +218,14 @@ make_tray() {
         msg1(b, sel("setTag:"), i);
         msg3(b, sel("addTarget:action:forControlEvents:"), app_obj, sel("traySwatch:"),
             64);
-        // (Its spoken label core's: update_tray.)
         msg1(colors, sel("addArrangedSubview:"), b);
         hover(b);
         tray_swatches[i] = b
     }
     msg1(column, sel("addArrangedSubview:"), colors);
-    // Copy, share, bookmark and note.
+    // The actions (their titles, icons and labels core's: update_tray).
     actions: int = stack(0, 0.0f64);
     msg1(actions, sel("setDistribution:"), 1);
-    // (Their titles, icons and labels core's: update_tray.)
     for i in 0..len(tray_actions) {
         b: int = msg2(cls("UIButton"), sel("buttonWithConfiguration:primaryAction:"),
             action_config_ns(nsstring(""), nsstring("circle"), 0), 0);
@@ -235,14 +249,12 @@ make_tray() {
         msg(root, sel("trailingAnchor")), -12.0f64));
     msg1(tray_lead, sel("setActive:"), 1);
     msg1(tray_trail, sel("setActive:"), 1);
-    // (Its bottom kept: it moves up over the mini player while listening.)
+    // (Its bottom kept: it moves up over the player while listening.)
     tray_bottom = keep(msg1_f(msg(tray, sel("bottomAnchor")), sel("constraintEqualToAnchor:constant:"),
         msg(msg(root, sel("safeAreaLayoutGuide")), sel("bottomAnchor")), -8.0f64));
     msg1(tray_bottom, sel("setActive:"), 1);
     msg1(tray, sel("setHidden:"), 1)
 }
-
-tray_bottom: int = 0;
 
 style_tray() {
     if (tray == 0) return;
@@ -251,27 +263,23 @@ style_tray() {
     for i in 0..5 msg1(tray_swatches[i], sel("setBackgroundColor:"), c_swatch[i]);
     msg2(tray_swatches[5], sel("setImage:forState:"), symbol("circle.slash", 30.0f64,
         4, c_faint), 0);
-    if (tray_shown) update_tray()
+    if (tray_shown) tray_dress()
 }
 
 // The actions' titles' one size (DESIGN.md §13.2.1): 11 points, or the
 // largest from 11 down to 9, in half points, at which the longest title
 // fits its button with 2 points to spare; measured once for each width of
-// the tray. At the accessibility sizes a button gives its title about 4
-// points less than its width (130 clipped "Bookmark" at 9 even with no
-// insets), so the room is 4 points less there and the size may go to 8.
-// A state's longer title, Bookmarked or Memorizing, gets a size of its own
-// in its button, down to 80% of the one size (tray_title_fit).
+// the tray. At the accessibility sizes the room is 4 points less and the
+// size may go to 8. A state's longer title gets a size of its own in its
+// button, down to 80% of the one size (tray_title_fit).
 tray_title_size: f64 = 11.0f64;
 
 tray_fit_w: f64 = -1.0f64;
 
 tray_room: f64 = 0.0f64;
 
-// (The titles it is sized by: core/tray.l8's tray_fit_titles.)
 tray_measure: int = 0;
 
-// Title t's width at size points (t an NSString).
 tray_title_w(t: int, size: f64): f64 {
     if (tray_measure == 0) tray_measure = make("UILabel");
     msg1(tray_measure, sel("setFont:"), sans(size, 0.23f64));
@@ -304,19 +312,9 @@ tray_fit() {
         if (widest <= room) fits = true else size = size - 0.5f64
     }
     if (size < least) size = least;
-    tray_title_size = size;
-    if (diag_on) {
-        fbuf_n = 0;
-        fput_str("bible: tray titles at ");
-        fput_int((size * 10.0f64) as int);
-        fput_str(" tenths of a point, room ");
-        fput_int((room * 10.0f64) as int);
-        note_ns(fstring())
-    }
+    tray_title_size = size
 }
 
-// Title t's size: the one size, or (a state's longer title) the largest
-// below it, down to 80%, at which it fits.
 tray_title_fit(t: int): f64 {
     size: f64 = tray_title_size;
     least: f64 = tray_title_size * 0.8f64;
@@ -324,18 +322,22 @@ tray_title_fit(t: int): f64 {
     size
 }
 
+tray_text(t: UiText): int {
+    if (t.n == 0) 0 else nsstring_at(bytes_address(tray_ui.pool) + t.at, t.n)
+}
+
 // The tray as core's model of the verses selected says (core/tray.l8):
 // their reference, the color they share (checked), None while any is
 // highlighted, and each action's words, symbol, color, state and hints.
-update_tray() {
+tray_dress() {
+    if (tray == 0) return;
     tray_fit();
-    uk_tray_build();
-    msg1(tray_label, sel("setText:"), uk_text(ui_title));
-    if (ui_sections_n < 2) return;
-    sw: UiRow = ui_rows[ui_sections[0].first];
+    msg1(tray_label, sel("setText:"), tray_text(tray_ui.title));
+    if (tray_ui.sections_n < 2) return;
+    sw: UiRow = tray_ui.rows[tray_ui.sections[0].first];
     colors: int = 1;
     for x in sw.options.at..sw.options.at + sw.options.n
-        if (ui_pool[x] as int == 124) colors = colors + 1;
+        if (tray_ui.pool[x] as int == 124) colors = colors + 1;
     for i in 0..5 {
         msg2(tray_swatches[i], sel("setImage:forState:"), if (sw.value == i) symbol("checkmark",
             12.0f64, 7, msg(cls("UIColor"), sel("whiteColor"))) else 0, 0);
@@ -347,88 +349,51 @@ update_tray() {
     lb: int = sw.detail.at;
     k: int = 0;
     for x in sw.detail.at..sw.detail.at + sw.detail.n + 1 {
-        if (x == sw.detail.at + sw.detail.n || ui_pool[x] as int == 124) {
-            if (k < 6) msg1(tray_swatches[k], sel("setAccessibilityLabel:"), nsstring_at(bytes_address(ui_pool) + lb,
+        if (x == sw.detail.at + sw.detail.n || tray_ui.pool[x] as int == 124) {
+            if (k < 6) msg1(tray_swatches[k], sel("setAccessibilityLabel:"), nsstring_at(bytes_address(tray_ui.pool) + lb,
                 x - lb));
             k = k + 1;
             lb = x + 1
         }
     }
-    first: int = ui_sections[1].first;
-    for i in 0..ui_sections[1].n {
-        if (i < len(tray_actions)) {
-            row: UiRow = ui_rows[first + i];
-            b: int = tray_actions[i];
-            msg1(b, sel("setConfiguration:"), action_config_ns(uk_text(row.title),
-                uk_text(row.icon), if (row.tinted) c_accent else 0));
+    first: int = tray_ui.sections[1].first;
+    for i in 0..len(tray_actions) {
+        b: int = tray_actions[i];
+        msg1(b, sel("setHidden:"), if (i < tray_ui.sections[1].n) 0 else 1);
+        if (i < tray_ui.sections[1].n) {
+            row: UiRow = tray_ui.rows[first + i];
+            msg1(b, sel("setConfiguration:"), action_config_ns(tray_text(row.title),
+                tray_text(row.icon), if (row.tinted) c_accent else 0));
             msg1(b, sel("setEnabled:"), if (row.disabled) 0 else 1);
-            msg1(b, sel("setAccessibilityLabel:"), uk_text(if (row.label.n > 0) row.label else row.title));
-            msg1(b, sel("setAccessibilityHint:"), if (row.hint.n > 0) uk_text(row.hint) else 0)
+            msg1(b, sel("setAccessibilityLabel:"), tray_text(if (row.label.n > 0) row.label else row.title));
+            msg1(b, sel("setAccessibilityHint:"), if (row.hint.n > 0) tray_text(row.hint) else 0)
         }
     }
 }
 
-reduce_motion(): bool {
-    (UIAccessibilityIsReduceMotionEnabled() & 255) != 0
-}
-
-extern UIAccessibilityIsReduceMotionEnabled(): int;
-
-// A layer's key path animated from a to b (a spring, or ease in and out
-// over t seconds).
-animate(
-    layer: int,
-    path: str,
-    a: f64,
-    b: f64,
-    spring: bool,
-    t: f64
-) {
-    anim: int = 0;
-    if (spring) {
-        anim = msg1(cls("CASpringAnimation"), sel("animationWithKeyPath:"), nsstring(path));
-        msg_set_f(anim, sel("setMass:"), 1.0f64);
-        msg_set_f(anim, sel("setStiffness:"), 300.0f64);
-        msg_set_f(anim, sel("setDamping:"), 30.0f64);
-        msg_set_f(anim, sel("setDuration:"), msg_f(anim, sel("settlingDuration")))
-    } else {
-        anim = msg1(cls("CABasicAnimation"), sel("animationWithKeyPath:"), nsstring(path));
-        msg_set_f(anim, sel("setDuration:"), t);
-        msg1(anim, sel("setTimingFunction:"), msg1(cls("CAMediaTimingFunction"), sel("functionWithName:"),
-            objc_const("kCAMediaTimingFunctionEaseInEaseOut")))
-    }
-    msg1(anim, sel("setFromValue:"), nsnumber_f(a));
-    msg1(anim, sel("setToValue:"), nsnumber_f(b));
-    msg2(layer, sel("addAnimation:forKey:"), anim, nsstring(path))
-}
-
-show_tray() {
-    update_tray();
+// tray: core's model (screen 0) of the verses selected, shown.
+update_tray() {
+    tray_dress();
     hide_back();
     if (tray_shown) return;
     tray_shown = true;
     tray_timer = stop_timer(tray_timer);
     msg1(tray, sel("setHidden:"), 0);
-    root: int = window;
-    msg(root, sel("layoutIfNeeded"));
-    // (The day's Mark Read rides above it.)
-    mark_reposition();
+    msg(window, sel("layoutIfNeeded"));
     layer: int = msg(tray, sel("layer"));
     msg_set_f32(layer, sel("setOpacity:"), 1.0f64 as f32);
     if (reduce_motion()) {
         animate(layer, "opacity", 0.0f64, 1.0f64, false, 0.15f64);
         return
     }
-    note_frame("bible: tray y ", tray);
     h: f64 = view_height(tray);
     animate(layer, "transform.translation.y", h + 24.0f64, 0.0f64, true, 0.0f64);
     animate(layer, "opacity", 0.0f64, 1.0f64, false, 0.18f64)
 }
 
-hide_tray() {
+tray_away() {
     if (!tray_shown) return;
     tray_shown = false;
-    mark_reposition();
     layer: int = msg(tray, sel("layer"));
     msg_set_f32(layer, sel("setOpacity:"), 0.0f64 as f32);
     if (!reduce_motion()) animate(layer, "transform.translation.y", 0.0f64, view_height(tray) + 24.0f64,
@@ -445,93 +410,55 @@ tray_hidden(_self: int, _cmd: int, _timer: int): int {
 }
 
 tray_closed(_self: int, _cmd: int, _sender: int): int {
-    uk_tray_act(ACT_TRAY_CLOSE, 0);
+    send2("trayact", ACT_TRAY_CLOSE, 0);
     0
 }
 
-// A swatch: its color on every verse selected (or off, if they all had it:
-// core's).
+// A swatch: its color on every verse selected (or off: core's rules).
 tray_swatch(_self: int, _cmd: int, sender: int): int {
-    uk_tray_act(ACT_TRAY_COLOR, msg(sender, sel("tag")));
+    send2("trayact", ACT_TRAY_COLOR, msg(sender, sel("tag")));
     0
 }
 
-// Color (-1: none) on the first n verses of vs in chapter c, kept.
-apply_highlight(
-    c: int,
-    vs: []int,
-    n: int,
-    color: int
-) {
-    for i in 0..n set_highlight(c, vs[i], color);
-    save_highlights();
-    if (color >= 0) {
-        set_pref("lastHighlight", color);
-        uk_app_from_prefs()
-    }
-    haptic_impact(0);
-    repaint(c)
-}
+// The button a share's popover points at (the tray's Share).
+share_from: int = 0;
 
-// An action: core's (its row's in the tray's model).
+// An action: its row's in the tray's model.
 tray_action(_self: int, _cmd: int, sender: int): int {
     i: int = msg(sender, sel("tag"));
-    uk_tray_build();
-    if (ui_sections_n < 2 || i >= ui_sections[1].n) return 0;
-    action: int = ui_rows[ui_sections[1].first + i].action;
-    uk_share_from = sender;
-    uk_tray_act(action, 0);
-    uk_share_from = 0;
+    if (tray_ui.sections_n < 2 || i >= tray_ui.sections[1].n) return 0;
+    share_from = sender;
+    send2("trayact", tray_ui.rows[tray_ui.sections[1].first + i].action, 0);
+    share_from = 0;
     0
 }
 
-// Study, from the tray: beside the text where it fits, at the verse's
-// Words (the tray stays up, its Study reading Studying; §17.3.8); else a
-// sheet.
-tray_study(c: int, v: int) {
-    if (beside_fits()) {
-        if (!bs_shown) {
-            set_def_int("studySegment", 0);
-            open_study_verse(c, v)
-        }
-        update_tray();
-        return
-    }
-    clear_selection();
-    open_study_verse(c, v)
-}
-
-share_verses(
-    c: int,
-    vs: []int,
-    n: int,
-    from: int
-) {
-    if (n == 0) return;
-    fbuf_n = 0;
-    put_quote(c, vs, n);
-    text: int = fstring();
-    // (With Share as Image among its actions, DESIGN.md §10.5.)
-    share_keep(c, vs, n);
-    one[0] = text;
-    vc: int = msg2(msg(cls("UIActivityViewController"), sel("alloc")), sel("initWithActivityItems:applicationActivities:"),
-        nsarray(one, 1), share_activities());
-    pop: int = msg(vc, sel("popoverPresentationController"));
-    // (On an iPad, a popover from the tray's Share, or over the column.)
-    if (is_ipad()) share_source(vc, from) else if (pop != 0 && from != 0) msg1(pop,
-        sel("setSourceView:"), from);
-    bar_expand();
-    msg3(nav, sel("presentViewController:animated:completion:"), vc, 1, 0);
-    release(vc)
-}
-
-// ---- the toast ----
+// ---- toasts ----
 toast_label: int = 0;
 
 toast_timer: int = 0;
 
 toast(text: str) {
     toast_symbol(nsstring(text), "", 1.2f64)
+}
+
+// toast SYMBOL WORDS: core's, felt; the carried ribbon's in its color.
+toast_line(line: WireLine) {
+    symbol_i: int = word_n(line, 1);
+    words: int = field_ns(line, 1);
+    if (words == 0) return;
+    if (symbol_i == TOAST_CHECK) haptic_success() else haptic_impact(0);
+    if (symbol_i == TOAST_RIBBON) {
+        // (On the toast's ink: the carried ribbon's glyph, its foot a little
+        // under the baseline, as a symbol's is.)
+        glyph: int = msg2(ribbon_glyph(13.0f64), sel("imageWithTintColor:renderingMode:"),
+            if (carried_color != 0) carried_color else c_bg, 1);
+        glyph = msg_set_f(glyph, sel("imageWithBaselineOffsetFromBottom:"), 2.0f64);
+        toast_image(words, glyph, 1.6f64);
+        return
+    }
+    toast_symbol(words, toast_symbols[clamp(symbol_i, 0, len(toast_symbols) - 1)],
+        1.6f64)
 }
 
 // A toast of text (an NSString), after a symbol if one is named, for t
@@ -542,10 +469,9 @@ toast_symbol(text: int, name: str, t: f64) {
 
 // The same, after an image (0, none).
 toast_image(text: int, image: int, t: f64) {
-    // (Over whatever is up: in the window of the view controller on top that
-    // is staying, and above its presentations' views there, so a popover,
-    // such as the original's word, doesn't hide it: run 39573776932's 274.
-    // Not one being dismissed, whose view leaves with it: review r11-1.)
+    // (Over whatever is up and staying: in the window of the view
+    // controller on top, above its presentations' views, so a popover
+    // doesn't hide it.)
     root: int = window;
     top: int = 0;
     up: int = presented();
@@ -602,15 +528,6 @@ toast_image(text: int, image: int, t: f64) {
     toast_timer = after(t, "toastDone:")
 }
 
-// The toast taken away at once (the demo, before what it opens next).
-toast_clear() {
-    toast_timer = stop_timer(toast_timer);
-    if (toast_label == 0) return;
-    layer: int = msg(toast_label, sel("layer"));
-    msg(layer, sel("removeAllAnimations"));
-    msg_set_f32(layer, sel("setOpacity:"), 0.0f64 as f32)
-}
-
 toast_done(_self: int, _cmd: int, _timer: int): int {
     toast_timer = 0;
     layer: int = msg(toast_label, sel("layer"));
@@ -619,10 +536,7 @@ toast_done(_self: int, _cmd: int, _timer: int): int {
     0
 }
 
-// ---- the edit menu: the app's commands first ----
-// Whether the text view asked for the menu (the demo checks).
-menu_asked: bool = false;
-
+// ---- the edit menu: core's commands first ----
 // The text view and range of the text selected when the menu was asked for.
 em_tv: int = 0;
 
@@ -642,13 +556,6 @@ edit_menu(
 ): int {
     if (chapter_of_view(tv) < 0) return msg2(cls("UIMenu"), sel("menuWithTitle:children:"),
         nsstring(""), suggested);
-    if (!menu_asked) {
-        // (Once, to the console and the system log: so a long press on a
-        // device can be seen to reach it.)
-        note("bible: edit menu delegate");
-        if (diag_on) NSLog(nsstring("bible: edit menu delegate"))
-    }
-    menu_asked = true;
     em_tv = tv;
     em_loc = loc;
     em_len = length;
@@ -674,11 +581,10 @@ edit_menu_ranges(
     edit_menu(self, cmd, tv, loc, n, suggested)
 }
 
-// A menu of the app's commands (Study, where the words selected can be
+// A menu of core's commands (Study, where the words selected can be
 // studied; Highlight; Note), then the system's suggested ones.
 app_menu(suggested: int): int {
     n: int = 0;
-    // (Core's commands: Study where it can be, Highlight, Note.)
     if (menu_studyable()) {
         one[0] = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
             nsstring(em_titles[EM_STUDY]), 0, sel("bibleStudy:"), 0);
@@ -696,122 +602,85 @@ app_menu(suggested: int): int {
     msg2(m, sel("menuWithTitle:children:"), nsstring(""), children)
 }
 
-// The verses the text selected touches: into the selection (of its
-// chapter); false if none.
-command_verses(): bool {
-    rendering: *ReaderRendering = active_rendering();
+// The words selected, as core has the chapter's text: chapter, from, to.
+em_c: int = -1;
+
+em_a: int = 0;
+
+em_b: int = 0;
+
+em_units(): bool {
     if (em_tv == 0) return false;
+    em_c = chapter_of_view(em_tv);
+    if (em_c < 0 || !chapter_has_verses(em_c)) return false;
+    em_a = core_units(em_c, em_loc);
+    em_b = core_units(em_c, em_loc + (if (em_len > 0) em_len else 1));
+    true
+}
+
+// Whether the words selected have a word to study (core's answer).
+menu_studyable(): bool {
+    if (!em_units()) return false;
+    ask_begin();
+    to_core_str("studyable");
+    to_core_arg(em_c);
+    to_core_arg(em_a);
+    to_core_arg(em_b);
+    to_core_end();
+    ask_line("studyable") == 1
+}
+
+em_verses: []int = new int[200](0);
+
+// The verses the words selected touch, given to core as its selection,
+// and the menu's command done on them.
+command_on(cmd: int) {
+    if (em_tv == 0) return;
     c: int = chapter_of_view(em_tv);
-    if (c < 0) return false;
-    compute_ranges(c);
-    clear_selection();
-    sel_c = c;
-    sel_n = 0;
-    for i in 0..rendering.ranges.rv_count {
-        if (rendering.ranges.rv_b[i] < em_loc + em_len && rendering.ranges.rv_e[i] > em_loc && sel_n < len(sel_v)) {
-            sel_v[sel_n] = rendering.ranges.rv_num[i];
-            sel_n = sel_n + 1
-        }
-    }
+    if (c < 0) return;
+    n: int = verses_touched(c, em_loc, em_loc + em_len, em_verses);
     msg2(em_tv, sel("setSelectedRange:"), em_loc, 0);
     msg(em_tv, sel("resignFirstResponder"));
-    sel_n > 0
+    if (n == 0) return;
+    to_core_str("select");
+    to_core_arg(c);
+    for i in 0..n to_core_arg(em_verses[i]);
+    to_core_end();
+    send1("editmenu", cmd)
 }
 
-// Whether the text selected (em_tv, em_loc, em_len) has a word that can be
-// studied: then its verse and word are pick_vi and pick_word (lang.l8).
-menu_studyable(): bool {
-    // (Only the BSB's words are the original's: a KJV word cannot be
-    // mapped to them. Elsewhere the tray's Study is the way.)
-    // (The Hebrew and Greek's words are the original's too: a word picked
-    // there is its words.bin word, §14.11.4.)
-    if (em_tv == 0 || !em_study_version(text_cur)) return false;
-    c: int = chapter_of_view(em_tv);
-    if (c < 0) return false;
-    lang_load();
-    if (!lang_ready) return false;
-    compute_ranges(c);
-    b: int = byte_of_unit(em_loc);
-    layout: *ChapterLayout = &active_rendering().layout;
-    if (text_cur == TEXT_ORIG) return og_pick(layout, b) && v_aligned(pick_vi);
-    e: int = byte_of_unit(em_loc + (if (em_len > 0) em_len else 1));
-    if (!study_pick(layout, c, b, e)) return false;
-    pick_word >= 0 && v_aligned(pick_vi)
-}
-
-// The byte of the chapter laid out (out) at UTF-16 unit k of its text view
-// (the marks put in it not counted).
-byte_of_unit(k: int): int {
-    rendering: *ReaderRendering = active_rendering();
-    u: int = k;
-    shift: int = 0;
-    for j in 0..rendering.ranges.ev_n {
-        at: int = rendering.ranges.ev_pos[j] + shift;
-        if (k >= at + rendering.ranges.ev_len[j]) shift = shift + rendering.ranges.ev_len[j] else if (k >= at) u = rendering.ranges.ev_pos[j] + shift
-    }
-    u = u - shift;
-    if (u < 0) u = 0;
-    lo: int = 0;
-    hi: int = rendering.layout.out_n;
-    while (lo < hi) {
-        mid: int = (lo + hi) / 2;
-        if (rendering.ranges.u16_at[mid] < u) lo = mid + 1 else hi = mid
-    }
-    lo
-}
-
-// Study: the word study of the first word selected, as a sheet.
+// Study: the first word selected, core's Word Study.
 command_study(_self: int, _cmd: int, _sender: int): int {
-    if (!menu_studyable()) return 0;
-    vi: int = pick_vi;
-    w: int = pick_word;
-    if (em_tv != 0) {
-        msg2(em_tv, sel("setSelectedRange:"), em_loc, 0);
-        msg(em_tv, sel("resignFirstResponder"))
-    }
-    open_study_sheet(vi, w);
+    if (!em_units()) return 0;
+    msg2(em_tv, sel("setSelectedRange:"), em_loc, 0);
+    msg(em_tv, sel("resignFirstResponder"));
+    to_core_str("studyat");
+    to_core_arg(em_c);
+    to_core_arg(em_a);
+    to_core_arg(em_b);
+    to_core_end();
     0
 }
 
 command_highlight(_self: int, _cmd: int, _sender: int): int {
-    // (Core's tray's rules for the verses the words selected touch.)
-    if (command_verses()) {
-        uk_tray_act_on(EM_HIGHLIGHT);
-        sel_n = 0;
-        sel_c = -1
-    }
+    command_on(EM_HIGHLIGHT);
     0
 }
 
 command_note(_self: int, _cmd: int, _sender: int): int {
-    // (Core's tray's rules for the verses the words selected touch.)
-    if (command_verses()) {
-        uk_tray_act_on(EM_NOTE);
-        sel_n = 0;
-        sel_c = -1
-    }
+    command_on(EM_NOTE);
     0
 }
 
 command_copy(_self: int, _cmd: int, _sender: int): int {
-    // (Core's tray's rules for the verses the words selected touch.)
-    if (command_verses()) {
-        uk_tray_act_on(EM_COPY);
-        sel_n = 0;
-        sel_c = -1
-    }
+    command_on(EM_COPY);
     0
 }
 
 command_share(_self: int, _cmd: int, _sender: int): int {
-    // (Core's tray's rules for the verses the words selected touch.)
-    if (command_verses()) {
-        uk_share_from = em_tv;
-        uk_tray_act_on(EM_SHARE);
-        uk_share_from = 0;
-        sel_n = 0;
-        sel_c = -1
-    }
+    share_from = em_tv;
+    command_on(EM_SHARE);
+    share_from = 0;
     0
 }
 
@@ -823,7 +692,7 @@ add_commands(c: int) {
     add_method1(c, sel("bibleShare:"), &command_share, "v@:@")
 }
 
-// ---- jumps, and the way back ----
+// ---- the way back: the capsule (core's back WORDS) ----
 back: int = 0;
 
 back_shown: bool = false;
@@ -832,11 +701,14 @@ back_material: int = 0;
 
 back_timer: int = 0;
 
-// Where the reader arrived (the table's offset), and whether at a verse
-// (and which).
-arrival_y: f64 = 0.0f64;
+back_edge: int = 0;
 
-arrived_v: int = 0;
+// Its words now (0: none, the capsule away).
+back_text: int = 0;
+
+// Where the reader arrived (the table's offset), to let it go two screens
+// on.
+arrival_y: f64 = 0.0f64;
 
 make_back() {
     back = keep(msg2(cls("UIButton"), sel("buttonWithConfiguration:primaryAction:"),
@@ -853,8 +725,7 @@ make_back() {
     hover(back);
     msg1(window, sel("addSubview:"), back);
     // (iOS 26: the reader's bottom edge effect drawn under the capsule
-    // while it is shown, as under the system's floating controls, so the
-    // words it floats over soften rather than clash with its glass.)
+    // while it is shown, as under the system's floating controls.)
     if (cls("UIScrollEdgeElementContainerInteraction") != 0) {
         back_edge = keep(msg(make("UIScrollEdgeElementContainerInteraction"), sel("autorelease")));
         msg1(back_edge, sel("setEdge:"), 4);
@@ -862,27 +733,21 @@ make_back() {
     }
 }
 
-back_edge: int = 0;
-
-// The capsule's edge effect on the reader (shown) or off it.
 back_edge_on(on: bool) {
     if (back_edge == 0) return;
     msg1(back_edge, sel("setScrollView:"), if (on) table else 0)
 }
 
-// The capsule faded out: its edge effect gone with it (unless it came back).
 back_faded(_self: int, _cmd: int, _timer: int): int {
     if (!back_shown) back_edge_on(false);
     0
 }
 
-// The capsule's look, and its title: the place it goes back to.
+// The capsule's look, and its words.
 style_back() {
-    if (back == 0 || bk_n == 0) return;
-    // (Glass where there is glass; else a capsule of thick material behind
-    // a clear button.)
-    // (Glass tinted so it stands clear of the page in every theme: near
-    // white on the light themes, the ink's tone on the dark ones.)
+    if (back == 0 || back_text == 0) return;
+    // (Glass where there is glass, tinted so it stands clear of the page in
+    // every theme; else a capsule of thick material behind a clear button.)
     glass: bool = responds(cls("UIButtonConfiguration"), "prominentGlassButtonConfiguration");
     config: int = if (glass) msg(cls("UIButtonConfiguration"), sel("prominentGlassButtonConfiguration")) else msg(cls("UIButtonConfiguration"),
         sel("plainButtonConfiguration"));
@@ -894,19 +759,16 @@ style_back() {
     msg_rect(config, sel("setContentInsets:"), 0.0f64, 14.0f64, 0.0f64, 14.0f64);
     msg1(config, sel("setImage:"), symbol("chevron.left", 12.0f64, 6, 0));
     msg_set_f(config, sel("setImagePadding:"), 6.0f64);
-    // (Core's words: "Day 32", or the place; §16.0 decision 3.)
-    bk_title();
     keys[0] = k_font;
     values[0] = sans(14.0f64, 0.3f64);
     keys[1] = k_color;
     values[1] = c_ink;
     t: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
-        fstring(), nsdictionary(keys, values, 2));
+        back_text, nsdictionary(keys, values, 2));
     msg1(config, sel("setAttributedTitle:"), t);
     release(t);
     msg1(back, sel("setConfiguration:"), config);
-    fput_str("");
-    msg1(back, sel("setAccessibilityLabel:"), fstring());
+    msg1(back, sel("setAccessibilityLabel:"), back_text);
     msg1(back, sel("setAccessibilityHint:"), nsstring(bk_hint));
     l8_msg_hfa(hfa, back, sel("intrinsicContentSize"), 0, 0, 0);
     w: f64 = hfa[0];
@@ -928,9 +790,28 @@ style_back() {
     }
 }
 
+// back WORDS: the capsule with them (none: away).
+back_words(text: int) {
+    back_text = held(back_text, if (text != 0 && msg(text, sel("length")) > 0) text else 0);
+    if (back_text == 0) {
+        hide_back();
+        return
+    }
+    arrival_y = offset_y(table);
+    // (A sheet still going: the capsule once it has gone.)
+    if (presented() != 0) {
+        back_after_sheet = true;
+        style_back();
+        return
+    }
+    show_back()
+}
+
+back_after_sheet: bool = false;
+
 show_back() {
     style_back();
-    if (!bk_may_show(tray_shown, listen_shown, day_on)) return;
+    if (back_text == 0 || tray_shown || listen_shown) return;
     msg1(window, sel("bringSubviewToFront:"), back);
     msg1(back, sel("setHidden:"), 0);
     layer: int = msg(back, sel("layer"));
@@ -940,7 +821,6 @@ show_back() {
         0.25f64);
     back_shown = true;
     back_edge_on(true);
-    note_frame("bible: back y ", back);
     back_timer = stop_timer(back_timer);
     back_timer = after(BK_SHOW_S, "backTimeout:")
 }
@@ -957,175 +837,25 @@ hide_back() {
 
 back_timeout(_self: int, _cmd: int, _timer: int): int {
     back_timer = 0;
-    if (demo_on) return 0;
     hide_back();
     0
 }
 
-// The capsule goes when the reader has scrolled two screens from where
-// it arrived.
+// The capsule goes when the reader has scrolled BK_SCREENS screens from
+// where it arrived.
 back_scrolled(y: f64) {
     if (!back_shown) return;
     d: f64 = y - arrival_y;
     if (d < 0.0f64) d = -d;
-    if (d > BK_SCREENS * view_height(table)) hide_back();
-    if (d > 8.0f64) arrived_v = 0
+    if (d > BK_SCREENS * view_height(table)) hide_back()
 }
 
-// (The way back, bk_*, and what a jump does to it and the history:
-// core/back.l8's and core/jump.l8's.)
-// Where the reader is now, as a jump's origin (jp_o*, core's rule): the
-// place measured, the verse arrived at, a sheet's verse.
-origin_here() {
-    measure_place();
-    jp_pick(cur, place_v, place_frac, arrived_v, origin_c, origin_v);
-    origin_v = 0
-}
-
-// A jump's destination, onto the history (core's).
-history_here(c: int, v: int) {
-    uk_sync();
-    jp_arrived(c, v);
-    uk_effects()
-}
-
-// ---- dwelling: a chapter read for 20 s goes onto the history: core's
-// (core/reading.l8) ----
-// The verse a study sheet was opened on (its chapter), while it is shown.
-origin_c: int = -1;
-
-origin_v: int = 0;
-
-// A jump: to chapter c (at verse v, flashed, if v > 0), from a sheet, a
-// link or anywhere; the place left kept, and the capsule back to it shown.
-jump(c: int, v: int) {
-    if (c < 0 || c >= chapters) return;
-    // (From the day's reader: it goes down, and the way back is the day,
-    // not the reader's place; DESIGN.md §16.0 decision 3.)
-    if (day_on) {
-        clear_selection();
-        p: int = dd_plan;
-        d: int = dd_num;
-        day_jump_out();
-        uk_sync();
-        jp_jump_day(c, v, p, d);
-        rd_after();
-        show_bars(false);
-        arrive(c, v);
-        show_back();
-        return
-    }
-    // (Core's: the ribbon carried put down, before the reader moves,
-    // DESIGN.md §11.1.3 P1; the place left and the one arrived at.)
-    origin_here();
-    uk_sync();
-    jp_jump(c, v, jp_oc, jp_ov, jp_of, jp_oe);
-    rd_after();
-    ribbons_log();
-    clear_selection();
-    // (From a sheet: the capsule once the sheet has gone, from its
-    // controller's viewDidDisappear:.)
-    from_sheet: bool = presented() != 0;
-    dismiss_sheets();
-    show_bars(false);
-    arrive(c, v);
-    if (from_sheet) {
-        back_after_sheet = true;
-        style_back()
-    } else show_back()
-}
-
-back_after_sheet: bool = false;
-
-arrive(c: int, v: int) {
-    // (A place asked for: a glide stops for it; it moves no ribbon.)
-    stop_moving();
-    reading_jumped();
-    // (An ESV chapter not here yet: the verse found and flashed when it
-    // comes.)
-    if (text_cur == TEXT_ESV && ch_start[c] < 0) {
-        esv_jump_c = c;
-        esv_jump_v = v
-    }
-    if (v > 0) {
-        go_verse(c, v);
-        flash(c, v)
-    } else go_top(c);
-    arrival_y = offset_y(table);
-    arrived_v = v;
-    save_place();
-    settle_c = c;
-    settle_v = v;
-    settle_timer = stop_timer(settle_timer);
-    settle_timer = after(0.6f64, "jumpSettle:");
-    title_menus_fresh()
-}
-
-// A jump made again once a sheet has gone (the bars' and status bar's
-// insets change as it goes), unless the reader has scrolled since.
-settle_c: int = 0;
-
-settle_v: int = 0;
-
-settle_timer: int = 0;
-
-jump_settle(_self: int, _cmd: int, _timer: int): int {
-    rendering: *ReaderRendering = active_rendering();
-    settle_timer = 0;
-    y: f64 = offset_y(table);
-    d: f64 = y - arrival_y;
-    if (d < 0.0f64) d = -d;
-    if (d > 2.0f64 || (msg(table, sel("isTracking")) & 255) != 0) return 0;
-    if (settle_v > 0) go_verse(settle_c, settle_v) else go_top(settle_c);
-    arrival_y = offset_y(table);
-    save_place();
-    style_back();
-    note_num("bible: settled at ", settle_c);
-    note_num("bible:   top ", last_top as int);
-    note_num("bible:   row ", row_y(settle_c) as int);
-    tv: int = view_of(settle_c);
-    if (tv != 0) {
-        note_num("bible:   text offset ", offset_y(tv) as int);
-        note_num("bible:   measured ", if (range_rect(tv, rendering.openers[settle_c],
-            1)) hfa[1] as int else -1)
-    }
-    note_num("bible:   alpha x100 ", (msg_f(title_fader, sel("alpha")) * 100.0f64) as int);
-    title_menus_fresh();
-    0
-}
-
-// The capsule: back to where the reader was (and this place kept, to come
-// back to in turn).
+// The capsule: core goes back (its place line, and the capsule's next
+// words).
 back_tapped(_self: int, _cmd: int, _sender: int): int {
-    if (bk_n == 0) return 0;
-    // (Core's: the way back's newest, this place left in its turn, the
-    // ribbon put down and, once there, the one the jump undone put down
-    // picked up again: P4.)
-    origin_here();
-    uk_sync();
-    k: int = jp_back(jp_oc, jp_ov, jp_of, jp_oe);
-    if (k == 2) {
-        // (Back to a plan's day: its reader up again, where it was.)
-        uk_effects();
-        hide_back();
-        day_open(jp_to_c, jp_to_v, -1);
-        return 0
-    }
-    if (k == 0) return 0;
-    rd_after();
-    ribbons_log();
+    if (back_text == 0) return 0;
     stop_moving();
-    if (jp_to_exact) arrive(jp_to_c, jp_to_v) else {
-        reading_jumped();
-        go_place(jp_to_c, jp_to_v, jp_to_f);
-        arrival_y = offset_y(table);
-        arrived_v = 0;
-        save_place()
-    }
-    show_back();
-    jp_back_arrived();
-    rd_after();
-    title_menus_fresh();
+    send0("back");
     0
 }
 
@@ -1137,7 +867,7 @@ flash(c: int, v: int) {
     flash_v = v;
     repaint(c);
     flash_timer = stop_timer(flash_timer);
-    flash_timer = after(if (demo_on) 6.0f64 else 0.9f64, "flashDone:")
+    flash_timer = after(0.9f64, "flashDone:")
 }
 
 flash_done(_self: int, _cmd: int, _timer: int): int {
@@ -1166,14 +896,8 @@ add_select_methods(app: int) {
     add_method1(app, sel("backTimeout:"), &back_timeout, "v@:@");
     add_method1(app, sel("backFaded:"), &back_faded, "v@:@");
     add_method1(app, sel("flashDone:"), &flash_done, "v@:@");
-    add_method1(app, sel("jumpSettle:"), &jump_settle, "v@:@");
-    add_method1(app, sel("demoLater:"), &demo_later, "v@:@");
-    add_method1(app, sel("demoCheck:"), &demo_check, "v@:@");
-    add_method1(app, sel("demoTick:"), &demo_tick, "v@:@");
     add_method3(app, sel("textView:editMenuForTextInRanges:suggestedActions:"), &edit_menu_ranges,
         "@@:@@@");
-    add_method3(app, sel("editMenuInteraction:menuForConfiguration:suggestedActions:"),
-        &demo_menu, "@@:@@@");
     add_method4(app, sel("textView:editMenuForTextInRange:suggestedActions:"), &edit_menu,
         "@@:@{_NSRange=QQ}@")
 }

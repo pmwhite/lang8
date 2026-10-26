@@ -276,6 +276,44 @@ final class Panel extends FrameLayout {
     }
   }
 
+  // The focus row's words brought into sight, the list moving as little as
+  // it can (Practice's words practised, the word being typed). After the
+  // list lays out its rows again.
+  void reveal(int id) {
+    if (stack.isEmpty() || stack.get(stack.size() - 1) != id) return;
+    Screen s = screens.get(id);
+    if (s == null || s.focusFrom < 0 || rows.focusItem < 0) return;
+    int item = rows.focusItem, from = s.focusFrom, to = Math.max(s.focusFrom + 1, s.focusTo);
+    list.post(() -> {
+      int child = item - list.getFirstVisiblePosition();
+      if (child < 0 || child >= list.getChildCount()) {
+        // (Its row out of sight: brought in, then its words.)
+        list.setSelectionFromTop(item, dp(16));
+        list.post(() -> revealIn(item, from, to));
+        return;
+      }
+      revealIn(item, from, to);
+    });
+  }
+
+  private void revealIn(int item, int from, int to) {
+    int child = item - list.getFirstVisiblePosition();
+    if (child < 0 || child >= list.getChildCount()) return;
+    View v = list.getChildAt(child);
+    if (!(v instanceof TextView)) return;
+    android.text.Layout layout = ((TextView) v).getLayout();
+    if (layout == null) return;
+    int n = ((TextView) v).getText().length();
+    int top = v.getTop() + ((TextView) v).getTotalPaddingTop()
+        + layout.getLineTop(layout.getLineForOffset(Math.min(from, n)));
+    int bottom = v.getTop() + ((TextView) v).getTotalPaddingTop()
+        + layout.getLineBottom(layout.getLineForOffset(Math.min(to - 1, n)));
+    int margin = dp(16), by = 0;
+    if (top - margin < 0) by = top - margin;
+    else if (bottom + margin > list.getHeight()) by = Math.min(bottom + margin - list.getHeight(), top - margin);
+    if (by != 0) list.smoothScrollBy(by, 200);
+  }
+
   // When a row's field was last typed in, and the screen made again once
   // its typing rests.
   private long typed;

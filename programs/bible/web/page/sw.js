@@ -8,12 +8,14 @@
 // which draws the chapter from the text kept. Never kept: the site's
 // /api/ (the ESV, its recordings' addresses) and anything from elsewhere
 // (the recordings). A new build installs quietly and takes over the next
-// time the app is opened; its old files are let go then.
+// time the app is opened; its old files are let go then, but never the
+// recordings held (HELD: the page keeps them, as core says).
 const BUILD = "{{build}}";
 const SHELL = {{shell}};
 const DATA = "{{data}}";
 const KEEP = "sb-shell-" + BUILD;
 const KEEP_DATA = "sb-data-" + DATA;
+const HELD = "sb-held";
 
 // (The reader's own files all, or it doesn't install; the site's icons
 // if they come: an address that serves only /read/ has none.)
@@ -31,7 +33,7 @@ self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k.startsWith("sb-") && k !== KEEP && k !== KEEP_DATA).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith("sb-") && k !== KEEP && k !== KEEP_DATA && k !== HELD).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });

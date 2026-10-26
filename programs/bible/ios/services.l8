@@ -1,0 +1,1022 @@
+tag bible_ios;
+
+use_tag std, ios, bible, bible_wire;
+
+// What only the phone does, as core asks for it (SKINS.md): the device's
+// voice saying verses (say, spoke, spoken, voices), a recording played
+// (audio_play, audiotime, audioended, audiofailed), the floating player
+// and the lock screen's (player; listenplay, listenpause, listennext,
+// listenprev, listenstop), the screen kept on (awake), core's timers,
+// reminders (notify_ask, notify, notify_clear; notifyok, reminded), and
+// sharing, saving and pages outside the app. AVFoundation, MediaPlayer and
+// UserNotifications are loaded at their first use, not linked.
+import "../../ios/objc.l8";
+
+import "../../ios/block.l8";
+
+import "../core/wire.l8";
+
+extern NSTemporaryDirectory(): int;
+
+extern msg_f4u(
+    receiver: int,
+    selector: int,
+    t: f64,
+    a: int,
+    b: int,
+    c: int,
+    d: int
+): int = objc_msgSend;
+
+// The skin's clock (ms), as core is told it.
+clock_ms(): int {
+    (CACurrentMediaTime() * 1000.0f64) as int
+}
+
+// ---- the frameworks ----
+media_loaded: bool = false;
+
+speech_frameworks() {
+    if (cls("AVSpeechSynthesizer") == 0) _h: int = dlopen("/System/Library/Frameworks/AVFAudio.framework/AVFAudio",
+        1);
+    if (cls("AVPlayer") == 0) _h2: int = dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation",
+        1);
+    if (cls("MPRemoteCommandCenter") == 0) _h3: int = dlopen("/System/Library/Frameworks/MediaPlayer.framework/MediaPlayer",
+        1)
+}
+
+// The frameworks, the lock screen's commands and the session's
+// notifications: once, at the first Listen.
+media_load() {
+    if (media_loaded) return;
+    media_loaded = true;
+    speech_frameworks();
+    cc: int = msg(cls("MPRemoteCommandCenter"), sel("sharedCommandCenter"));
+    if (cc != 0) {
+        msg2(msg(cc, sel("playCommand")), sel("addTarget:action:"), app_obj, sel("remotePlay:"));
+        msg2(msg(cc, sel("pauseCommand")), sel("addTarget:action:"), app_obj, sel("remotePause:"));
+        msg2(msg(cc, sel("togglePlayPauseCommand")), sel("addTarget:action:"), app_obj,
+            sel("remoteToggle:"));
+        msg2(msg(cc, sel("nextTrackCommand")), sel("addTarget:action:"), app_obj,
+            sel("remoteNext:"));
+        msg2(msg(cc, sel("previousTrackCommand")), sel("addTarget:action:"), app_obj,
+            sel("remotePrevious:"));
+        // (Chapter skips on the lock screen, not 15-second ones.)
+        msg1(msg(cc, sel("skipForwardCommand")), sel("setEnabled:"), 0);
+        msg1(msg(cc, sel("skipBackwardCommand")), sel("setEnabled:"), 0)
+    }
+    center: int = msg(cls("NSNotificationCenter"), sel("defaultCenter"));
+    for k in 0..len(media_note_names) {
+        name: int = objc_const(media_note_names[k]);
+        if (name != 0) msg4(center, sel("addObserver:selector:name:object:"), app_obj,
+            sel(media_note_sels[k]), name, 0)
+    }
+}
+
+// Interruptions (a call): paused, not resumed by itself; headphones
+// unplugged: paused; a recording's end, or its failure.
+media_note_names: []str = ["AVAudioSessionInterruptionNotification", "AVAudioSessionRouteChangeNotification",
+    "AVPlayerItemDidPlayToEndTimeNotification", "AVPlayerItemFailedToPlayToEndTimeNotification"];
+
+media_note_sels: []str = ["mediaInterrupted:", "mediaRouteChanged:", "audioItemEnded:",
+    "audioItemFailed:"];
+
+// The audio session, for spoken audio that goes on with the screen locked.
+session_on() {
+    media_load();
+    session: int = msg(cls("AVAudioSession"), sel("sharedInstance"));
+    if (session == 0) return;
+    msg4(session, sel("setCategory:mode:options:error:"), objc_const("AVAudioSessionCategoryPlayback"),
+        objc_const("AVAudioSessionModeSpokenAudio"), 0, 0);
+    msg3(session, sel("setActive:withOptions:error:"), 1, 0, 0)
+}
+
+media_interrupted(_self: int, _cmd: int, notification: int): int {
+    info: int = msg(notification, sel("userInfo"));
+    if (info == 0) return 0;
+    kind: int = msg1(info, sel("objectForKey:"), objc_const("AVAudioSessionInterruptionTypeKey"));
+    if (kind != 0 && msg(kind, sel("integerValue")) == 1 && player_playing) send0("listenpause");
+    0
+}
+
+// (The old device unavailable, reason 2: paused, so the speaker does not
+// start.)
+media_route_changed(_self: int, _cmd: int, notification: int): int {
+    info: int = msg(notification, sel("userInfo"));
+    if (info == 0) return 0;
+    r: int = msg1(info, sel("objectForKey:"), objc_const("AVAudioSessionRouteChangeReasonKey"));
+    if (r != 0 && msg(r, sel("integerValue")) == 2 && player_playing) send0("listenpause");
+    0
+}
+
+// ---- the device's voice ----
+synth: int = 0;
+
+// The utterances said (a ring): each one's object, and its chapter and
+// verse as core named them.
+UT_RING: int = 512;
+
+ut_obj: []int = new int[512](0);
+
+ut_c: []int = new int[512](0);
+
+ut_v: []int = new int[512](0);
+
+ut_n: int = 0;
+
+synth_make() {
+    if (synth != 0) return;
+    session_on();
+    synth = make("AVSpeechSynthesizer");
+    msg1(synth, sel("setDelegate:"), app_obj)
+}
+
+// The device's English voices as core takes them (voices Q:LANG:NAME ...;
+// quality 2 the enhanced and premium ones), once, as the app begins.
+voices_tell() {
+    speech_frameworks();
+    all: int = msg(cls("AVSpeechSynthesisVoice"), sel("speechVoices"));
+    if (all == 0) return;
+    to_core_str("voices");
+    for i in 0..msg(all, sel("count")) {
+        v: int = msg1(all, sel("objectAtIndex:"), i);
+        to_core_byte(9);
+        to_core_int(if (msg(v, sel("quality")) >= 2) 2 else 1);
+        to_core_byte(58);
+        to_core_ns(msg(v, sel("language")));
+        to_core_byte(58);
+        to_core_ns(msg(v, sel("name")))
+    }
+    to_core_end()
+}
+
+// The voice named (the best of that name: an enhanced one over its compact
+// one), or 0: the device's own.
+voice_named(name: int): int {
+    if (name == 0 || msg(name, sel("length")) == 0) return 0;
+    all: int = msg(cls("AVSpeechSynthesisVoice"), sel("speechVoices"));
+    if (all == 0) return 0;
+    best: int = 0;
+    for i in 0..msg(all, sel("count")) {
+        v: int = msg1(all, sel("objectAtIndex:"), i);
+        if ((msg1(msg(v, sel("name")), sel("isEqualToString:"), name) & 255) != 0) {
+            if (best == 0 || msg(v, sel("quality")) > msg(best, sel("quality"))) best = v
+        }
+    }
+    best
+}
+
+// Core's rate (1 the voice's own, 0.85 slower, 1.25 faster) as the
+// synthesizer's (0.5 its own: 0.42 and 0.56 as slow and fast, as the app
+// has always read).
+speech_rate(rate: f64): f64 {
+    r: f64 = if (rate <= 1.0f64) 0.5f64 - (1.0f64 - rate) * 0.5333f64 else 0.5f64 + (rate - 1.0f64) * 0.24f64;
+    if (r < 0.1f64) 0.1f64 else if (r > 0.9f64) 0.9f64 else r
+}
+
+// say C V RATE WORDS VOICE: words to say, after those before.
+speech_say(line: WireLine) {
+    synth_make();
+    c: int = word_n(line, 1);
+    v: int = word_n(line, 2);
+    rate: f64 = word_n(line, 3) as f64 / 1000.0f64;
+    u: int = msg1(cls("AVSpeechUtterance"), sel("speechUtteranceWithString:"), field_ns(line,
+        1));
+    if (u == 0) return;
+    msg_set_f32(u, sel("setRate:"), speech_rate(if (rate > 0.0f64) rate else 1.0f64) as f32);
+    voice: int = voice_named(field_ns(line, 2));
+    if (voice != 0) msg1(u, sel("setVoice:"), voice);
+    msg_set_f(u, sel("setPostUtteranceDelay:"), if (v == 0) 0.35f64 else 0.12f64);
+    i: int = ut_n % UT_RING;
+    release(ut_obj[i]);
+    ut_obj[i] = keep(u);
+    ut_c[i] = c;
+    ut_v[i] = v;
+    ut_n = ut_n + 1;
+    msg1(synth, sel("speakUtterance:"), u)
+}
+
+ut_find(u: int): int {
+    k: int = ut_n - 1;
+    while (k >= 0 && k >= ut_n - UT_RING) {
+        if (ut_obj[k % UT_RING] == u) return k % UT_RING;
+        k = k - 1
+    }
+    -1
+}
+
+speech_began(
+    _self: int,
+    _cmd: int,
+    _synth: int,
+    u: int
+): int {
+    i: int = ut_find(u);
+    if (i < 0) return 0;
+    to_core_str("spoke");
+    to_core_arg(ut_c[i]);
+    to_core_arg(ut_v[i]);
+    to_core_arg(clock_ms());
+    to_core_end();
+    0
+}
+
+speech_finished(
+    _self: int,
+    _cmd: int,
+    _synth: int,
+    u: int
+): int {
+    i: int = ut_find(u);
+    if (i < 0) return 0;
+    ut_obj[i] = held(ut_obj[i], 0);
+    send2("spoken", ut_c[i], ut_v[i]);
+    0
+}
+
+speech_stop() {
+    if (synth == 0) return;
+    for i in 0..UT_RING ut_obj[i] = held(ut_obj[i], 0);
+    msg1(synth, sel("stopSpeakingAtBoundary:"), 0)
+}
+
+// ---- a recording ----
+audio_player: int = 0;
+
+audio_item: int = 0;
+
+// The play core asked for (its token, and where it ends: centiseconds, -1
+// the recording's end); where it begins, once the item is ready.
+audio_tok: int = -1;
+
+audio_to: int = -1;
+
+audio_from: int = 0;
+
+audio_rate: f64 = 1.0f64;
+
+audio_ready: bool = false;
+
+audio_paused: bool = false;
+
+audio_poll: int = 0;
+
+// (A CMTime read and passed: value, timescale | flags << 32, epoch.)
+cm: []int = new int[3](0);
+
+cm0: []int = new int[3](0);
+
+// audio_play TOK C FROM TO RATE URL.
+audio_play_line(line: WireLine) {
+    speech_stop();
+    audio_stop();
+    session_on();
+    url_text: int = field_ns(line, 1);
+    url: int = if (url_text != 0) msg1(cls("NSURL"), sel("URLWithString:"), url_text) else 0;
+    // (kept:NAME, a chapter core holds: its kept file, if it is there.)
+    kept: int = nsstring("kept:");
+    if (url_text != 0 && (msg1(url_text, sel("hasPrefix:"), kept) & 255) != 0) {
+        path: int = kept_path_of(msg1(url_text, sel("substringFromIndex:"), msg(kept,
+            sel("length"))));
+        there: bool = (msg1(msg(cls("NSFileManager"), sel("defaultManager")), sel("fileExistsAtPath:"),
+            path) & 255) != 0;
+        url = (if (there) msg1(cls("NSURL"), sel("fileURLWithPath:"), path) else 0)
+    }
+    audio_tok = word_n(line, 1);
+    audio_from = word_n(line, 3);
+    audio_to = (if (has_word(line, 4)) word_n(line, 4) else -1);
+    r: int = word_n(line, 5);
+    audio_rate = (if (r > 0) r as f64 / 1000.0f64 else 1.0f64);
+    audio_paused = false;
+    audio_ready = false;
+    if (url == 0) {
+        send1("audiofailed", audio_tok);
+        return
+    }
+    if (audio_player == 0) {
+        audio_player = make("AVPlayer");
+        msg1(audio_player, sel("setAutomaticallyWaitsToMinimizeStalling:"), 1);
+        msg1(audio_player, sel("setAllowsExternalPlayback:"), 0)
+    }
+    item: int = msg1(cls("AVPlayerItem"), sel("playerItemWithURL:"), url);
+    if (item == 0) {
+        send1("audiofailed", audio_tok);
+        return
+    }
+    msg1(item, sel("setAudioTimePitchAlgorithm:"), objc_const("AVAudioTimePitchAlgorithmTimeDomain"));
+    msg_set_f(item, sel("setPreferredForwardBufferDuration:"), 60.0f64);
+    audio_item = keep(item);
+    msg4(item, sel("addObserver:forKeyPath:options:context:"), app_obj, nsstring("status"),
+        1, 0);
+    msg1(audio_player, sel("replaceCurrentItemWithPlayerItem:"), item);
+    audio_poll = stop_timer(audio_poll);
+    audio_poll = msg_f4u(cls("NSTimer"), sel("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
+        0.25f64, app_obj, sel("audioPoll:"), 0, 1)
+}
+
+audio_stop() {
+    audio_poll = stop_timer(audio_poll);
+    if (audio_item != 0) {
+        msg2(audio_item, sel("removeObserver:forKeyPath:"), app_obj, nsstring("status"));
+        if (audio_player != 0) {
+            msg(audio_player, sel("pause"));
+            msg1(audio_player, sel("replaceCurrentItemWithPlayerItem:"), 0)
+        }
+        release(audio_item);
+        audio_item = 0
+    }
+    audio_ready = false
+}
+
+// A CMTime in an NSValue, as centiseconds (-1 if it is not a valid time).
+cm_read(val: int): int {
+    cm[0] = 0;
+    cm[1] = 0;
+    cm[2] = 0;
+    msg2(val, sel("getValue:size:"), ints_address(cm), 24);
+    scale: int = cm[1] & 4294967295;
+    flags: int = cm[1] >> 32 & 4294967295;
+    if (scale <= 0 || (flags & 1) == 0 || (flags & 16) != 0) return -1;
+    cm[0] * 100 / scale
+}
+
+audio_time(): int {
+    if (audio_player == 0 || audio_item == 0) return -1;
+    val: int = msg1(audio_player, sel("valueForKey:"), nsstring("currentTime"));
+    if (val == 0) -1 else cm_read(val)
+}
+
+audio_duration(): int {
+    if (audio_item == 0) return -1;
+    val: int = msg1(audio_item, sel("valueForKey:"), nsstring("duration"));
+    if (val == 0) -1 else cm_read(val)
+}
+
+audio_seek(t: int) {
+    cm[0] = t;
+    cm[1] = 100 | 1 << 32;
+    cm[2] = 0;
+    cm0[0] = 0;
+    cm0[1] = 1 | 1 << 32;
+    cm0[2] = 0;
+    // (Three CMTimes, each over 16 bytes: by address, on arm64.)
+    msg3(audio_player, sel("seekToTime:toleranceBefore:toleranceAfter:"), ints_address(cm),
+        ints_address(cm0), ints_address(cm0))
+}
+
+audio_play_now() {
+    if (audio_player == 0 || !audio_ready || audio_paused) return;
+    if (responds(audio_player, "setDefaultRate:")) msg_set_f32(audio_player, sel("setDefaultRate:"),
+        audio_rate as f32);
+    msg_set_f32(audio_player, sel("setRate:"), audio_rate as f32)
+}
+
+// KVO: the item ready (to its time, and playing), or failed.
+audio_observed(
+    _self: int,
+    _cmd: int,
+    _path: int,
+    object: int,
+    _change: int,
+    _context: int
+): int {
+    if (object == 0 || object != audio_item) return 0;
+    status: int = msg(object, sel("status"));
+    if (status == 1 && !audio_ready) {
+        audio_ready = true;
+        if (audio_from > 0) audio_seek(audio_from);
+        audio_play_now();
+        now_playing()
+    } else if (status == 2) {
+        tok: int = audio_tok;
+        audio_stop();
+        send1("audiofailed", tok)
+    }
+    0
+}
+
+audio_polled(_self: int, _cmd: int, _timer: int): int {
+    if (audio_item == 0 || !audio_ready) return 0;
+    t: int = audio_time();
+    if (t < 0) return 0;
+    if (audio_to >= 0 && t >= audio_to) {
+        tok: int = audio_tok;
+        audio_stop();
+        send1("audioended", tok);
+        return 0
+    }
+    if (!audio_paused) {
+        to_core_str("audiotime");
+        to_core_arg(audio_tok);
+        to_core_arg(t);
+        to_core_arg(audio_duration());
+        to_core_end()
+    }
+    0
+}
+
+audio_item_ended(_self: int, _cmd: int, note_obj: int): int {
+    if (audio_item == 0 || msg(note_obj, sel("object")) != audio_item) return 0;
+    tok: int = audio_tok;
+    audio_stop();
+    send1("audioended", tok);
+    0
+}
+
+audio_item_failed(_self: int, _cmd: int, note_obj: int): int {
+    if (audio_item == 0 || msg(note_obj, sel("object")) != audio_item) return 0;
+    tok: int = audio_tok;
+    audio_stop();
+    send1("audiofailed", tok);
+    0
+}
+
+// ---- listening paused, on again, stopped ----
+listen_pause() {
+    audio_paused = true;
+    if (audio_player != 0) msg(audio_player, sel("pause"));
+    if (synth != 0) msg1(synth, sel("pauseSpeakingAtBoundary:"), 0)
+}
+
+listen_resume() {
+    audio_paused = false;
+    audio_play_now();
+    if (synth != 0) msg(synth, sel("continueSpeaking"))
+}
+
+listen_stop() {
+    speech_stop();
+    audio_stop();
+    hearing(-1, 0);
+    player_hide();
+    center: int = msg(cls("MPNowPlayingInfoCenter"), sel("defaultCenter"));
+    if (center != 0) msg1(center, sel("setNowPlayingInfo:"), 0)
+}
+
+// ---- the player: a floating capsule at the bottom ----
+mp: int = 0;
+
+mp_effect: int = 0;
+
+mp_play: int = 0;
+
+mp_title: int = 0;
+
+mp_state: int = 0;
+
+mp_name: int = 0;
+
+mp_close: int = 0;
+
+listen_shown: bool = false;
+
+mp_timer: int = 0;
+
+MP_H: f64 = 48.0f64;
+
+// What core's last player line said: its words, whether it plays, who
+// reads and the version (for the lock screen).
+player_playing: bool = false;
+
+player_title: int = 0;
+
+player_state: int = 0;
+
+player_reader: int = 0;
+
+player_version: int = 0;
+
+make_player_view() {
+    if (mp != 0) return;
+    mp = make("UIView");
+    layer: int = msg(mp, sel("layer"));
+    msg1(layer, sel("setShadowColor:"), msg(msg(cls("UIColor"), sel("blackColor")),
+        sel("CGColor")));
+    msg_set_f32(layer, sel("setShadowOpacity:"), 0.15f64 as f32);
+    msg_set_f(layer, sel("setShadowRadius:"), 16.0f64);
+    msg_ff(layer, sel("setShadowOffset:"), 0.0f64, 4.0f64);
+    glass: int = cls("UIGlassEffect");
+    effect: int = if (glass != 0) make("UIGlassEffect") else msg1(cls("UIBlurEffect"),
+        sel("effectWithStyle:"), 9);
+    mp_effect = msg1(msg(cls("UIVisualEffectView"), sel("alloc")), sel("initWithEffect:"),
+        effect);
+    el: int = msg(mp_effect, sel("layer"));
+    msg_set_f(el, sel("setCornerRadius:"), MP_H / 2.0f64);
+    curve: int = objc_const("kCACornerCurveContinuous");
+    if (curve != 0) msg1(el, sel("setCornerCurve:"), curve);
+    msg1(mp_effect, sel("setClipsToBounds:"), 1);
+    msg1(mp, sel("addSubview:"), mp_effect);
+    content: int = msg(mp_effect, sel("contentView"));
+    mp_play = msg1(cls("UIButton"), sel("buttonWithType:"), 1);
+    msg3(mp_play, sel("addTarget:action:forControlEvents:"), app_obj, sel("listenPlayPause:"),
+        64);
+    msg1(content, sel("addSubview:"), mp_play);
+    // The name and the state, over a button that goes to the verse.
+    mp_name = msg1(cls("UIButton"), sel("buttonWithType:"), 0);
+    msg3(mp_name, sel("addTarget:action:forControlEvents:"), app_obj, sel("listenNameTapped:"),
+        64);
+    msg1(mp_name, sel("setAccessibilityHint:"), nsstring(w_player_hint));
+    msg1(content, sel("addSubview:"), mp_name);
+    mp_title = make("UILabel");
+    msg1(mp_title, sel("setFont:"), sans(15.0f64, 0.3f64));
+    msg1(mp_title, sel("setUserInteractionEnabled:"), 0);
+    msg1(mp_name, sel("addSubview:"), mp_title);
+    release(mp_title);
+    mp_state = make("UILabel");
+    msg1(mp_state, sel("setFont:"), sans(12.0f64, 0.0f64));
+    msg1(mp_state, sel("setUserInteractionEnabled:"), 0);
+    msg1(mp_name, sel("addSubview:"), mp_state);
+    release(mp_state);
+    mp_close = msg1(cls("UIButton"), sel("buttonWithType:"), 1);
+    msg2(mp_close, sel("setImage:forState:"), symbol("xmark", 13.0f64, 6, 0), 0);
+    msg1(mp_close, sel("setAccessibilityLabel:"), nsstring(w_stop_listening));
+    msg3(mp_close, sel("addTarget:action:forControlEvents:"), app_obj, sel("listenClose:"),
+        64);
+    msg1(content, sel("addSubview:"), mp_close);
+    for b in [mp_play, mp_name, mp_close] hover(b);
+    msg1(mp, sel("setHidden:"), 1);
+    msg1(window, sel("addSubview:"), mp)
+}
+
+// Its place (bottom center, 12 points above the safe area), its colors.
+layout_player() {
+    if (mp == 0) return;
+    root: int = window;
+    W: f64 = view_width(root);
+    H: f64 = view_height(root);
+    l8_msg_hfa(hfa, root, sel("safeAreaInsets"), 0, 0, 0);
+    bottom: f64 = hfa[2];
+    // (Under the column, at most 360 wide: §17.2.3.)
+    w: f64 = float_room(W) - 32.0f64;
+    if (w > 360.0f64) w = 360.0f64;
+    msg_rect(mp, sel("setFrame:"), float_cx(W) - w / 2.0f64, H - bottom - 12.0f64 - MP_H,
+        w, MP_H);
+    msg_rect(mp_effect, sel("setFrame:"), 0.0f64, 0.0f64, w, MP_H);
+    msg_rect(mp_play, sel("setFrame:"), 8.0f64, (MP_H - 36.0f64) / 2.0f64, 36.0f64,
+        36.0f64);
+    msg_rect(mp_close, sel("setFrame:"), w - 10.0f64 - 28.0f64, (MP_H - 28.0f64) / 2.0f64,
+        28.0f64, 28.0f64);
+    msg_rect(mp_name, sel("setFrame:"), 52.0f64, 0.0f64, w - 52.0f64 - 46.0f64, MP_H);
+    msg_rect(mp_title, sel("setFrame:"), 0.0f64, 6.0f64, w - 52.0f64 - 46.0f64, 20.0f64);
+    msg_rect(mp_state, sel("setFrame:"), 0.0f64, 26.0f64, w - 52.0f64 - 46.0f64, 16.0f64);
+    msg1(mp_play, sel("setTintColor:"), c_ink);
+    msg1(mp_close, sel("setTintColor:"), c_ink);
+    msg1(mp_close, sel("setBackgroundColor:"), msg(cls("UIColor"), sel("systemFillColor")));
+    msg_set_f(msg(mp_close, sel("layer")), sel("setCornerRadius:"), 14.0f64);
+    msg1(mp_title, sel("setTextColor:"), c_ink);
+    msg1(mp_state, sel("setTextColor:"), c_faint)
+}
+
+// player TITLE STATE PLAYING READER VERSION: the capsule up, as it says.
+player_line(line: WireLine) {
+    media_load();
+    player_title = held(player_title, field_ns(line, 1));
+    state: int = field_ns(line, 2);
+    playing: bool = wire_number(line, 3) == 1;
+    player_reader = held(player_reader, field_ns(line, 4));
+    player_version = held(player_version, field_ns(line, 5));
+    make_player_view();
+    layout_player();
+    msg1(mp_title, sel("setText:"), player_title);
+    changed: bool = player_state == 0 || state == 0 || (msg1(player_state, sel("isEqualToString:"),
+        state) & 255) == 0;
+    if (changed && listen_shown) fade_layer(msg(mp_state, sel("layer")), 0.2f64);
+    player_state = held(player_state, state);
+    msg1(mp_state, sel("setText:"), player_state);
+    if (playing != player_playing && listen_shown) fade_layer(msg(mp_play, sel("layer")),
+        0.15f64);
+    player_playing = playing;
+    msg2(mp_play, sel("setImage:forState:"), symbol(lp_play_symbol(playing), 20.0f64,
+        6, 0), 0);
+    msg1(mp_play, sel("setAccessibilityLabel:"), nsstring(lp_play_label(playing)));
+    // "John 3:14, Bob Souer"
+    a: int = msg(make("NSMutableString"), sel("autorelease"));
+    if (player_title != 0) msg1(a, sel("appendString:"), player_title);
+    msg1(a, sel("appendString:"), nsstring(", "));
+    if (player_state != 0) msg1(a, sel("appendString:"), player_state);
+    msg1(mp_name, sel("setAccessibilityLabel:"), a);
+    now_playing();
+    player_show()
+}
+
+// The player rising (as the tray does), the capsule back out of its way,
+// and the tray above it.
+player_show() {
+    if (listen_shown) return;
+    listen_shown = true;
+    hide_back();
+    tray_raise(true);
+    mp_timer = stop_timer(mp_timer);
+    msg1(mp, sel("setHidden:"), 0);
+    msg1(window, sel("bringSubviewToFront:"), mp);
+    layer: int = msg(mp, sel("layer"));
+    msg_set_f32(layer, sel("setOpacity:"), 1.0f64 as f32);
+    if (reduce_motion()) {
+        animate(layer, "opacity", 0.0f64, 1.0f64, false, 0.15f64);
+        return
+    }
+    animate(layer, "transform.translation.y", MP_H + 24.0f64, 0.0f64, true, 0.0f64);
+    animate(layer, "opacity", 0.0f64, 1.0f64, false, 0.18f64)
+}
+
+player_hide() {
+    player_playing = false;
+    if (!listen_shown) return;
+    listen_shown = false;
+    tray_raise(false);
+    layer: int = msg(mp, sel("layer"));
+    msg_set_f32(layer, sel("setOpacity:"), 0.0f64 as f32);
+    if (!reduce_motion()) animate(layer, "transform.translation.y", 0.0f64, MP_H + 24.0f64,
+        false, 0.2f64);
+    animate(layer, "opacity", 1.0f64, 0.0f64, false, 0.2f64);
+    mp_timer = stop_timer(mp_timer);
+    mp_timer = after(0.22f64, "listenHidden:")
+}
+
+listen_hidden(_self: int, _cmd: int, _timer: int): int {
+    mp_timer = 0;
+    if (!listen_shown && mp != 0) msg1(mp, sel("setHidden:"), 1);
+    0
+}
+
+// The tray's place: 60 points higher while the player is up (moved with
+// the tray's spring, if it is showing).
+tray_raise(up: bool) {
+    if (tray_bottom == 0) return;
+    msg_set_f(tray_bottom, sel("setConstant:"), if (up) -68.0f64 else -8.0f64);
+    msg(window, sel("layoutIfNeeded"));
+    if (tray_shown && !reduce_motion()) animate(msg(tray, sel("layer")), "transform.translation.y",
+        if (up) 60.0f64 else -60.0f64, 0.0f64, true, 0.0f64)
+}
+
+listen_play_pause(_self: int, _cmd: int, _b: int): int {
+    send0(if (player_playing) "listenpause" else "listenplay");
+    0
+}
+
+listen_close(_self: int, _cmd: int, _b: int): int {
+    send0("listenstop");
+    0
+}
+
+// The player's name: the reader to the verse heard.
+listen_name_tapped(_self: int, _cmd: int, _b: int): int {
+    stop_moving();
+    if (speak_c >= 0) reader_place(speak_c, speak_v, 0);
+    0
+}
+
+// ---- the lock screen's ----
+remote_play(_self: int, _cmd: int, _event: int): int {
+    send0("listenplay");
+    0
+}
+
+remote_pause(_self: int, _cmd: int, _event: int): int {
+    send0("listenpause");
+    0
+}
+
+remote_toggle(_self: int, _cmd: int, _event: int): int {
+    send0(if (player_playing) "listenpause" else "listenplay");
+    0
+}
+
+remote_next(_self: int, _cmd: int, _event: int): int {
+    send0("listennext");
+    0
+}
+
+remote_previous(_self: int, _cmd: int, _event: int): int {
+    send0("listenprev");
+    0
+}
+
+// What the lock screen shows (§12.3.7): core's title, the reader, the
+// version, the artwork; for a recording, its length and time; the rate.
+np_keys: []int = new int[8](0);
+
+np_values: []int = new int[8](0);
+
+np_artwork: int = 0;
+
+now_playing() {
+    center: int = msg(cls("MPNowPlayingInfoCenter"), sel("defaultCenter"));
+    if (center == 0 || player_title == 0) return;
+    n: int = 0;
+    np_keys[n] = objc_const("MPMediaItemPropertyTitle");
+    np_values[n] = player_title;
+    n = n + 1;
+    if (player_reader != 0) {
+        np_keys[n] = objc_const("MPMediaItemPropertyArtist");
+        np_values[n] = player_reader;
+        n = n + 1
+    }
+    if (player_version != 0) {
+        np_keys[n] = objc_const("MPMediaItemPropertyAlbumTitle");
+        np_values[n] = player_version;
+        n = n + 1
+    }
+    recording: bool = audio_item != 0;
+    if (recording) {
+        duration: int = audio_duration();
+        elapsed: int = audio_time();
+        if (duration > 0) {
+            np_keys[n] = objc_const("MPMediaItemPropertyPlaybackDuration");
+            np_values[n] = nsnumber_f(duration as f64 / 100.0f64);
+            n = n + 1
+        }
+        if (elapsed >= 0) {
+            np_keys[n] = objc_const("MPNowPlayingInfoPropertyElapsedPlaybackTime");
+            np_values[n] = nsnumber_f(elapsed as f64 / 100.0f64);
+            n = n + 1
+        }
+    }
+    np_keys[n] = objc_const("MPNowPlayingInfoPropertyPlaybackRate");
+    np_values[n] = nsnumber_f(if (!player_playing) 0.0f64 else if (recording) audio_rate else 1.0f64);
+    n = n + 1;
+    if (np_artwork == 0) {
+        bundle: int = msg(cls("NSBundle"), sel("mainBundle"));
+        path: int = msg2(bundle, sel("pathForResource:ofType:"), nsstring("nowplaying"),
+            nsstring("png"));
+        img: int = if (path != 0) msg1(cls("UIImage"), sel("imageWithContentsOfFile:"),
+            path) else 0;
+        // (The deprecated initializer: it takes no block.)
+        if (img != 0) np_artwork = msg1(msg(cls("MPMediaItemArtwork"), sel("alloc")),
+            sel("initWithImage:"), img)
+    }
+    if (np_artwork != 0) {
+        np_keys[n] = objc_const("MPMediaItemPropertyArtwork");
+        np_values[n] = np_artwork;
+        n = n + 1
+    }
+    for k in 0..n
+        if (np_keys[k] == 0) return;
+    msg1(center, sel("setNowPlayingInfo:"), nsdictionary(np_keys, np_values, n))
+}
+
+// ---- the screen kept on (Keep Screen On) ----
+idle_disabled: bool = false;
+
+idle_timer: int = 0;
+
+set_idle_disabled(on: bool) {
+    if (on == idle_disabled) return;
+    idle_disabled = on;
+    msg1(msg(cls("UIApplication"), sel("sharedApplication")), sel("setIdleTimerDisabled:"),
+        if (on) 1 else 0)
+}
+
+// awake MS: the screen kept on so long more, or let go now (0).
+keep_awake(ms: int) {
+    idle_timer = stop_timer(idle_timer);
+    if (ms <= 0) {
+        set_idle_disabled(false);
+        return
+    }
+    set_idle_disabled(true);
+    idle_timer = after(ms as f64 / 1000.0f64, "idleTimeout:")
+}
+
+idle_timeout(_self: int, _cmd: int, _timer: int): int {
+    idle_timer = 0;
+    set_idle_disabled(false);
+    0
+}
+
+// ---- core's timers: timer TOK MS, told when it is up ----
+timer_line(tok: int, ms: int) {
+    _t: int = msg_f4u(cls("NSTimer"), sel("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
+        (if (ms > 0) ms else 0) as f64 / 1000.0f64, app_obj, sel("coreTimer:"), nsnumber_int(tok),
+        0)
+}
+
+core_timer(_self: int, _cmd: int, timer: int): int {
+    send1("timer", msg(msg(timer, sel("userInfo")), sel("longValue")));
+    0
+}
+
+// ---- reminders ----
+notify_center(): int {
+    if (cls("UNUserNotificationCenter") == 0) _h: int = dlopen("/System/Library/Frameworks/UserNotifications.framework/UserNotifications",
+        1);
+    c: int = cls("UNUserNotificationCenter");
+    if (c == 0) 0 else msg(c, sel("currentNotificationCenter"))
+}
+
+// The answer to an authorization request, from the block, on a queue of
+// the system's: one store that says both whether it came and what it is
+// (1 plus the answer), so the main thread, polling it, reads it whole.
+auth_answered: int = 0;
+
+// The block's invoke (DESIGN.md §10.2.3). It runs on a background queue:
+// it must not allocate, send a message, or touch a region.
+auth_done(_block: int, granted: int, _error: int): int {
+    auth_answered = 1 + (granted & 255);
+    0
+}
+
+auth_block: int = 0;
+
+auth_who: int = 0;
+
+auth_ticks: int = 0;
+
+auth_timer: int = 0;
+
+// notify_ask WHO: the phone's permission asked for (a prompt the first
+// time), answered as notifyok WHO 1|0.
+notify_ask(who: int) {
+    center: int = notify_center();
+    if (center == 0) {
+        send2("notifyok", who, 0);
+        return
+    }
+    if (auth_block == 0) auth_block = global_block(&auth_done);
+    auth_who = who;
+    auth_answered = 0;
+    auth_ticks = 0;
+    msg2(center, sel("requestAuthorizationWithOptions:completionHandler:"), 6, auth_block);
+    auth_timer = stop_timer(auth_timer);
+    auth_timer = after(0.2f64, "authTick:")
+}
+
+auth_tick(_self: int, _cmd: int, _timer: int): int {
+    auth_timer = 0;
+    a: int = auth_answered;
+    if (a == 0) {
+        auth_ticks = auth_ticks + 1;
+        if (auth_ticks < 600) auth_timer = after(0.2f64, "authTick:");
+        return 0
+    }
+    send2("notifyok", auth_who, a - 1);
+    0
+}
+
+notify_clear() {
+    center: int = notify_center();
+    if (center != 0) msg(center, sel("removeAllPendingNotificationRequests"))
+}
+
+nf_keys: []int = new int[4](0);
+
+nf_values: []int = new int[4](0);
+
+// notify AT PLAN MEMORY TITLE BODY: a reminder at AT (seconds since 1970),
+// naming the plan's file (0 none) and Memory (1).
+notify_line(line: WireLine) {
+    center: int = notify_center();
+    if (center == 0) return;
+    at: int = word_n(line, 1);
+    content: int = msg(make("UNMutableNotificationContent"), sel("autorelease"));
+    msg1(content, sel("setTitle:"), field_ns(line, 1));
+    msg1(content, sel("setBody:"), field_ns(line, 2));
+    nf_keys[0] = nsstring("plan");
+    nf_values[0] = nsnumber_int(word_n(line, 2));
+    nf_keys[1] = nsstring("memory");
+    nf_values[1] = nsnumber_int(word_n(line, 3));
+    msg1(content, sel("setUserInfo:"), nsdictionary(nf_keys, nf_values, 2));
+    msg1(content, sel("setSound:"), msg(cls("UNNotificationSound"), sel("defaultSound")));
+    msg1(content, sel("setThreadIdentifier:"), nsstring("daily"));
+    date: int = msg_set_f(cls("NSDate"), sel("dateWithTimeIntervalSince1970:"), at as f64);
+    // (Year, month, day, hour and minute, in the phone's calendar.)
+    parts: int = msg2(msg(cls("NSCalendar"), sel("currentCalendar")), sel("components:fromDate:"),
+        124, date);
+    trigger: int = msg2(cls("UNCalendarNotificationTrigger"), sel("triggerWithDateMatchingComponents:repeats:"),
+        parts, 0);
+    tb_n = 0;
+    tb_str("daily-");
+    tb_int(at);
+    request: int = msg3(cls("UNNotificationRequest"), sel("requestWithIdentifier:content:trigger:"),
+        tb_ns(), content, trigger);
+    msg2(center, sel("addNotificationRequest:withCompletionHandler:"), request, 0)
+}
+
+// A reminder opened: core told (reminded PLAN MEMORY), once it is ready.
+notify_obj: int = 0;
+
+pending_plan: int = -1;
+
+pending_memory: int = 0;
+
+notify_setup() {
+    center: int = notify_center();
+    if (center == 0) return;
+    k: int = objc_allocateClassPair(cls("NSObject"), "L8Notify", 0);
+    add_method3(k, sel("userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:"),
+        &notify_opened, "v@:@@@?");
+    add_protocol(k, "UNUserNotificationCenterDelegate");
+    objc_registerClassPair(k);
+    notify_obj = make("L8Notify");
+    msg1(center, sel("setDelegate:"), notify_obj)
+}
+
+notify_opened(
+    _self: int,
+    _cmd: int,
+    _center: int,
+    response: int,
+    handler: int
+): int {
+    info: int = msg(msg(msg(msg(response, sel("notification")), sel("request")), sel("content")),
+        sel("userInfo"));
+    plan: int = if (info != 0) msg1(info, sel("objectForKey:"), nsstring("plan")) else 0;
+    mem: int = if (info != 0) msg1(info, sel("objectForKey:"), nsstring("memory")) else 0;
+    pending_plan = (if (plan != 0) msg(plan, sel("longValue")) else 0);
+    pending_memory = (if (mem != 0) msg(mem, sel("longValue")) else 0);
+    reminded_tell();
+    call_block(handler);
+    0
+}
+
+reminded_tell() {
+    if (pending_plan < 0 || !core_begun) return;
+    send2("reminded", pending_plan, pending_memory);
+    pending_plan = -1
+}
+
+// The Settings app, at the app's own page (notifications allowed again).
+open_system_settings() {
+    app: int = msg(cls("UIApplication"), sel("sharedApplication"));
+    url: int = msg1(cls("NSURL"), sel("URLWithString:"), objc_const("UIApplicationOpenSettingsURLString"));
+    msg3(app, sel("openURL:options:completionHandler:"), url, nsdictionary(keys, values,
+        0), 0)
+}
+
+// ---- sharing, saving, a page outside the app ----
+share_one: []int = new int[1](0);
+
+// The share sheet, for items (an NSArray), from the tray (or over the
+// column, on an iPad).
+share_items(items: int) {
+    vc: int = msg2(msg(cls("UIActivityViewController"), sel("alloc")), sel("initWithActivityItems:applicationActivities:"),
+        items, 0);
+    if (is_ipad()) share_source(vc, 0) else {
+        pop: int = msg(vc, sel("popoverPresentationController"));
+        if (pop != 0) msg1(pop, sel("setSourceView:"), msg(nav, sel("view")))
+    }
+    bar_expand();
+    host: int = top_presented();
+    msg3(if (host != 0) host else nav, sel("presentViewController:animated:completion:"),
+        vc, 1, 0);
+    release(vc)
+}
+
+share_text(text: int) {
+    if (text == 0) return;
+    share_one[0] = text;
+    share_items(nsarray(share_one, 1))
+}
+
+// savefile NAME TEXT: the words as a file of that name, given to the share
+// sheet (Save to Files among its actions).
+save_file(name: int, text: int) {
+    if (name == 0 || text == 0) return;
+    path: int = msg1(NSTemporaryDirectory(), sel("stringByAppendingPathComponent:"),
+        name);
+    msg4(text, sel("writeToFile:atomically:encoding:error:"), path, 1, 4, 0);
+    share_one[0] = msg1(cls("NSURL"), sel("fileURLWithPath:"), path);
+    share_items(nsarray(share_one, 1))
+}
+
+// A page in Safari's own view, over everything.
+open_web(url_text: int) {
+    if (url_text == 0) return;
+    u: int = msg1(cls("NSURL"), sel("URLWithString:"), url_text);
+    if (cls("SFSafariViewController") == 0) _h: int = dlopen("/System/Library/Frameworks/SafariServices.framework/SafariServices",
+        1);
+    sf: int = cls("SFSafariViewController");
+    if (sf == 0 || u == 0) return;
+    vc: int = msg1(msg(sf, sel("alloc")), sel("initWithURL:"), u);
+    top: int = top_presented();
+    msg3(if (top != 0) top else nav, sel("presentViewController:animated:completion:"),
+        vc, 1, 0);
+    release(vc)
+}
+
+add_service_methods(app: int) {
+    add_method1(app, sel("idleTimeout:"), &idle_timeout, "v@:@");
+    add_method1(app, sel("coreTimer:"), &core_timer, "v@:@");
+    add_method1(app, sel("authTick:"), &auth_tick, "v@:@");
+    add_method2(app, sel("speechSynthesizer:didStartSpeechUtterance:"), &speech_began,
+        "v@:@@");
+    add_method2(app, sel("speechSynthesizer:didFinishSpeechUtterance:"), &speech_finished,
+        "v@:@@");
+    add_method4(app, sel("observeValueForKeyPath:ofObject:change:context:"), &audio_observed,
+        "v@:@@@^v");
+    add_method1(app, sel("audioPoll:"), &audio_polled, "v@:@");
+    add_method1(app, sel("audioItemEnded:"), &audio_item_ended, "v@:@");
+    add_method1(app, sel("audioItemFailed:"), &audio_item_failed, "v@:@");
+    add_method1(app, sel("mediaInterrupted:"), &media_interrupted, "v@:@");
+    add_method1(app, sel("mediaRouteChanged:"), &media_route_changed, "v@:@");
+    add_method1(app, sel("remotePlay:"), &remote_play, "q@:@");
+    add_method1(app, sel("remotePause:"), &remote_pause, "q@:@");
+    add_method1(app, sel("remoteToggle:"), &remote_toggle, "q@:@");
+    add_method1(app, sel("remoteNext:"), &remote_next, "q@:@");
+    add_method1(app, sel("remotePrevious:"), &remote_previous, "q@:@");
+    add_method1(app, sel("listenPlayPause:"), &listen_play_pause, "v@:@");
+    add_method1(app, sel("listenClose:"), &listen_close, "v@:@");
+    add_method1(app, sel("listenNameTapped:"), &listen_name_tapped, "v@:@");
+    add_method1(app, sel("listenHidden:"), &listen_hidden, "v@:@");
+    add_protocol(app, "AVSpeechSynthesizerDelegate")
+}

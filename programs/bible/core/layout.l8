@@ -6,9 +6,8 @@ import "text.l8";
 
 // A chapter's destination, options, and scratch state. Each independent
 // reader owns one; its buffers can be reused without allocating per chapter.
-// The source and original-language tables are borrowed for rendering.
+// The text laid out is given to each layout (a borrowed TextData), not held.
 type ChapterLayout = {
-    source: TextSource;
     // The chapter as runs in out's first out_n bytes: a divider (but before
     // Genesis 1); its book's name if the book begins here, then its number
     // (a book of one chapter has only the name); otherwise its label (JOHN,
@@ -89,9 +88,7 @@ type ChapterLayout = {
 // Allocate an independent destination in the caller's region. Options
 // begin with the reader's current settings and can then be changed locally.
 chapter_layout(): ChapterLayout@new {
-    source: TextSource = text_source(text_cur);
     ChapterLayout {
-        source: source,
         out: new i8[262144](0i8),
         out_n: 0,
         runs: 0,
@@ -145,8 +142,7 @@ chapter_layout(): ChapterLayout@new {
 
 // Render a complete chapter without selecting its version or touching
 // any other layout. For a passage, set lay_v1, lay_v2, and lay_passage.
-layout_chapter_from(source: TextSource@ctx, ctx: *ChapterLayout, c: int) {
-    ctx.source = source;
+layout_chapter_from(source: *TextData, ctx: *ChapterLayout, c: int) {
     ctx.out_n = 0;
     ctx.runs = 0;
     ctx.verse_count = 0;
@@ -157,25 +153,10 @@ layout_chapter_from(source: TextSource@ctx, ctx: *ChapterLayout, c: int) {
     ctx.lay_prev_i = 0;
     ctx.og_acc_line = -1;
     ctx.og_acc_w = 0;
-    layout_append(ctx, c)
+    layout_append(source, ctx, c)
 }
 
 // Book labels come from the rendered version, not the selected one.
-source_book_name_start(source: *TextSource, b: int): int {
-    source.book_lines[b] + 5
-}
-
-source_book_name_end(source: *TextSource, b: int): int {
-    record_line_end(source.data, source.size, source.book_lines[b])
-}
-
-source_book_is(source: *TextSource, b: int, code: str): bool {
-    p: int = source.book_lines[b] + 1;
-    for i in 0..len(code)
-        if (source.data[p + i] != code[i]) return false;
-    true
-}
-
 // Resolve a heading's book name without changing parse_ref's result or
 // scratch buffers. Exact aliases win; otherwise allow a full-name prefix.
 heading_book(data: []i8, p: int, e: int): int {
@@ -237,14 +218,32 @@ lay_str(ctx: *ChapterLayout, s: str) {
 }
 
 // The source's bytes from p to e.
-lay_bytes(ctx: *ChapterLayout, p: int, e: int) {
-    for i in p..e lay_byte(ctx, ctx.source.data[i] as int)
+lay_bytes(
+    source: *TextData,
+    ctx: *ChapterLayout,
+    p: int,
+    e: int
+) {
+    for i in p..e lay_byte(ctx, source.data[i] as int)
 }
 
 // The source's bytes from p to e, in capitals.
-lay_upper(ctx: *ChapterLayout, p: int, e: int) {
+lay_upper(
+    source: *TextData,
+    ctx: *ChapterLayout,
+    p: int,
+    e: int
+) {
     for i in p..e {
-        k: int = ctx.source.data[i] as int;
+        k: int = source.data[i] as int;
+        lay_byte(ctx, if (k >= 97 && k <= 122) k - 32 else k)
+    }
+}
+
+// Words in capitals.
+lay_upper_str(ctx: *ChapterLayout, s: str) {
+    for c in s {
+        k: int = c as int;
         lay_byte(ctx, if (k >= 97 && k <= 122) k - 32 else k)
     }
 }
@@ -258,16 +257,18 @@ lay_int(ctx: *ChapterLayout, n: int) {
 // their capitals after the first as small capitals (the words of Jesus in
 // their own styles).
 lay_words(
+    source: *TextData,
     ctx: *ChapterLayout,
     p: int,
     e: int,
     para: int,
     jesus: bool
 ) {
-    lay_words_as(ctx, p, e, para, jesus, false)
+    lay_words_as(source, ctx, p, e, para, jesus, false)
 }
 
 lay_words_as(
+    source: *TextData,
     ctx: *ChapterLayout,
     p: int,
     e: int,
@@ -280,24 +281,24 @@ lay_words_as(
     i: int = p;
     // (The space that joins His words to the narration before them is the
     // narration's, not His: only the words take the red letter.)
-    if (jesus && i < e && ctx.source.data[i] as int == 32) {
+    if (jesus && i < e && source.data[i] as int == 32) {
         lay_begin(ctx, STYLE_BODY, para, 0);
-        while (i < e && ctx.source.data[i] as int == 32) {
+        while (i < e && source.data[i] as int == 32) {
             lay_byte(ctx, 32);
             i = i + 1
         }
     }
     lay_begin(ctx, plain, para, 0);
     while (i < e) {
-        n: int = record_divine_at(ctx.source.data, i, e);
+        n: int = record_divine_at(source.data, i, e);
         if (n > 0) {
-            lay_byte(ctx, ctx.source.data[i] as int);
+            lay_byte(ctx, source.data[i] as int);
             lay_begin(ctx, caps, para, 0);
-            lay_bytes(ctx, i + 1, i + n);
+            lay_bytes(source, ctx, i + 1, i + n);
             lay_begin(ctx, plain, para, 0);
             i = i + n
         } else {
-            lay_byte(ctx, ctx.source.data[i] as int);
+            lay_byte(ctx, source.data[i] as int);
             i = i + 1
         }
     }
@@ -337,12 +338,12 @@ verse_on(ctx: *ChapterLayout) {
     if (ctx.verse_count > 0) ctx.verse_end[ctx.verse_count - 1] = ctx.out_n
 }
 
-layout_append(ctx: *ChapterLayout, c: int) {
-    ctx.lay_placeholder = ctx.source.starts[c] < 0;
+layout_append(source: *TextData, ctx: *ChapterLayout, c: int) {
+    ctx.lay_placeholder = source.starts[c] < 0;
     b: int = ch_book[c];
     // (The Hebrew and Greek: its words one by one, from the chapter's first;
     // the Hebrew right to left.)
-    ctx.lay_orig = ctx.source.version == TEXT_ORIG && og_n > 0 && c < len(og_ch_first);
+    ctx.lay_orig = source.version == TEXT_ORIG && og_n > 0 && c < len(og_ch_first);
     ctx.lay_rtl = ctx.lay_orig && b < 39;
     ctx.ow_n = 0;
     ctx.ap_n = 0;
@@ -358,29 +359,26 @@ layout_append(ctx: *ChapterLayout, c: int) {
     if (first && !ctx.lay_passage) {
         lay_begin(ctx, STYLE_BOOK, PARA_CENTER, 0);
         ctx.opener_at = ctx.out_n;
-        lay_bytes(ctx, source_book_name_start(&ctx.source, b), source_book_name_end(&ctx.source,
-            b));
+        lay_str(ctx, book_name(b));
         ctx.label_end = ctx.out_n;
         lay_byte(ctx, 10)
     }
     // (A major section, as Psalms' BOOK I, comes before the chapter it
     // begins with.)
-    p: int = ctx.source.starts[c];
-    while (p < ctx.source.ends[c] && (ctx.source.data[p] as int == 77 || ctx.source.data[p] as int == 109)) {
-        e: int = record_line_end(ctx.source.data, ctx.source.size, p);
+    p: int = source.starts[c];
+    while (p < source.ends[c] && (source.data[p] as int == 77 || source.data[p] as int == 109)) {
+        e: int = record_line_end(source.data, source.size, p);
         if (ctx.lay_headings && !mid) {
-            lay_begin(ctx, if (ctx.source.data[p] as int == 77) STYLE_MAJOR else STYLE_RANGE,
+            lay_begin(ctx, if (source.data[p] as int == 77) STYLE_MAJOR else STYLE_RANGE,
                 PARA_CENTER, 0);
-            lay_bytes(ctx, p + 1, e);
+            lay_bytes(source, ctx, p + 1, e);
             lay_byte(ctx, 10)
         }
         p = e + 1
     }
     if (!first && !ctx.lay_passage) {
         lay_begin(ctx, STYLE_BOOKLABEL, PARA_CENTER, 0);
-        if (source_book_is(&ctx.source, b, "PSA")) lay_str(ctx, "PSALM") else lay_upper(ctx,
-            source_book_name_start(&ctx.source, b), source_book_name_end(&ctx.source,
-            b));
+        if (book_code(b) == "PSA") lay_str(ctx, "PSALM") else lay_upper_str(ctx, book_name(b));
         ctx.label_end = ctx.out_n;
         lay_byte(ctx, 10)
     }
@@ -402,16 +400,16 @@ layout_append(ctx: *ChapterLayout, c: int) {
     lines: bool = ctx.lay_verse_lines;
     // In a psalm's title (which a footnote's mark may be inside).
     in_title: bool = false;
-    e_ch: int = ctx.source.ends[c];
+    e_ch: int = source.ends[c];
     if (mid && p < e_ch) {
-        q: int = source_verse_block(&ctx.source, c, ctx.lay_v1);
-        if (ctx.lay_orig) ctx.lay_ow = og_word_at(ctx, c, q);
+        q: int = source_verse_block(source, c, ctx.lay_v1);
+        if (ctx.lay_orig) ctx.lay_ow = og_word_at(source, ctx, c, q);
         p = q
     }
-    if (ctx.lay_v2 > 0 && p < e_ch) e_ch = source_verse_block(&ctx.source, c, ctx.lay_v2 + 1);
+    if (ctx.lay_v2 > 0 && p < e_ch) e_ch = source_verse_block(source, c, ctx.lay_v2 + 1);
     while (p < e_ch) {
-        e: int = record_line_end(ctx.source.data, ctx.source.size, p);
-        k: int = ctx.source.data[p] as int;
+        e: int = record_line_end(source.data, source.size, p);
+        k: int = source.data[p] as int;
         jesus: bool = k == 87 || k == 74;
         supplied: bool = k == 73 || k == 74;
         if (k == 87 || k == 73 || k == 74 || k == 72 || k == 88) k = 84;
@@ -427,15 +425,15 @@ layout_append(ctx: *ChapterLayout, c: int) {
                 notes = notes + 1
             } else if (k == 100 && ctx.lay_headings) {
                 lay_begin(ctx, STYLE_TITLE, PARA_PROSE, 0);
-                lay_bytes(ctx, p + 1, e)
+                lay_bytes(source, ctx, p + 1, e)
             }
         } else if (k == 80) {
             // P: a paragraph (in verses on lines of their own, only poetry's
             // and lists' lines break; prose runs on).
-            m: int = ctx.source.data[p + 1] as int;
+            m: int = source.data[p + 1] as int;
             pk: int = if (m == 49) PARA_Q1 else if (m == 50) PARA_Q2 else if (m == 108) PARA_L1 else if (m == 76) PARA_L2 else if (m == 99) PARA_CENTER else if (m == 114) PARA_RIGHT else PARA_PROSE;
             if (!lines || pk >= PARA_Q1 && pk <= PARA_L2) {
-                if (open && words) lay_para_end(ctx);
+                if (open && words) lay_para_end(source, ctx);
                 open = true;
                 words = false;
                 kind = pk;
@@ -456,11 +454,10 @@ layout_append(ctx: *ChapterLayout, c: int) {
             if (k == 86) {
                 // V: a verse's number (not the first's, but on a line of its
                 // own).
-                v: int = record_number_at(ctx.source.data, ctx.source.size, p + 1);
-                verse_open(ctx, record_key_at(ctx.source.data, ctx.source.size, p + 1),
-                    v);
+                v: int = record_number_at(source.data, source.size, p + 1);
+                verse_open(ctx, record_key_at(source.data, source.size, p + 1), v);
                 if (lines) {
-                    if (words) lay_para_end(ctx);
+                    if (words) lay_para_end(source, ctx);
                     lay_para_open(ctx);
                     words = false;
                     kind = PARA_VERSE
@@ -488,8 +485,8 @@ layout_append(ctx: *ChapterLayout, c: int) {
                 // T: words.
                 para: int = kind + (if (gap && !words) KINDS else 0);
                 verse_here(ctx);
-                if (ctx.lay_orig) lay_orig_words(ctx, p + 1, e, para, false) else lay_words_as(ctx,
-                    p + 1, e, para, jesus, supplied);
+                if (ctx.lay_orig) lay_orig_words(source, ctx, p + 1, e, para, false) else lay_words_as(source,
+                    ctx, p + 1, e, para, jesus, supplied);
                 verse_on(ctx);
                 words = true;
                 gap = false;
@@ -505,10 +502,10 @@ layout_append(ctx: *ChapterLayout, c: int) {
         } else if (k == 68 && ctx.lay_orig) {
             // A psalm's title in the original: its words, a paragraph of
             // their own (shown whatever the headings' switch says).
-            if (open && words) lay_para_end(ctx);
+            if (open && words) lay_para_end(source, ctx);
             lay_para_open(ctx);
-            lay_orig_words(ctx, p + 1, e, PARA_PROSE, true);
-            lay_para_end(ctx);
+            lay_orig_words(source, ctx, p + 1, e, PARA_PROSE, true);
+            lay_para_end(source, ctx);
             open = false;
             words = false;
             gap = false;
@@ -517,15 +514,15 @@ layout_append(ctx: *ChapterLayout, c: int) {
             // A heading of some kind, on a line of its own.
             style: int = if (k == 83) STYLE_HEAD else if (k == 115) STYLE_SUBHEAD else if (k == 82) STYLE_REF else if (k == 68) STYLE_TITLE else if (k == 77) STYLE_MAJOR else if (k == 109) STYLE_RANGE else if (k == 65) STYLE_ACROSTIC else -1;
             if (style >= 0 && (ctx.lay_headings || !is_heading_line(k))) {
-                if (open && words) lay_para_end(ctx);
+                if (open && words) lay_para_end(source, ctx);
                 open = false;
                 words = false;
                 gap = false;
                 headed = true;
                 lay_begin(ctx, style, if (style == STYLE_MAJOR || style == STYLE_RANGE) PARA_CENTER else PARA_PROSE,
                     0);
-                if (style == STYLE_REF) lay_refs(ctx, p + 1, e) else lay_bytes(ctx,
-                    p + 1, e);
+                if (style == STYLE_REF) lay_refs(source, ctx, p + 1, e) else lay_bytes(source,
+                    ctx, p + 1, e);
                 // (A title's line ends after any footnote in it.)
                 if (style == STYLE_TITLE) in_title = true else lay_byte(ctx, 10)
             } else if (style == STYLE_TITLE) in_title = true
@@ -533,16 +530,21 @@ layout_append(ctx: *ChapterLayout, c: int) {
         p = e + 1
     }
     if (in_title && ctx.lay_headings) lay_byte(ctx, 10);
-    if (open && words) lay_para_end(ctx)
+    if (open && words) lay_para_end(source, ctx)
 }
 
 // The first word at or after record p of chapter c.
-og_word_at(ctx: *ChapterLayout, c: int, p: int): int {
+og_word_at(
+    source: *TextData,
+    ctx: *ChapterLayout,
+    c: int,
+    p: int
+): int {
     w: int = og_ch_first[c];
-    q: int = ctx.source.starts[c];
-    while (q < p && q < ctx.source.ends[c]) {
-        e: int = record_line_end(ctx.source.data, ctx.source.size, q);
-        if (og_words_line(ctx.source.data[q] as int)) w = w + record_og_count(ctx.source.data,
+    q: int = source.starts[c];
+    while (q < p && q < source.ends[c]) {
+        e: int = record_line_end(source.data, source.size, q);
+        if (og_words_line(source.data[q] as int)) w = w + record_og_count(source.data,
             q + 1, e, w);
         q = e + 1
     }
@@ -557,15 +559,15 @@ lay_para_open(ctx: *ChapterLayout) {
 }
 
 // A paragraph ends: its line, then (in the original) its apparatus.
-lay_para_end(ctx: *ChapterLayout) {
+lay_para_end(source: *TextData, ctx: *ChapterLayout) {
     lay_byte(ctx, 10);
-    if (ctx.lay_orig && ctx.ap_n > 0) lay_apparatus(ctx);
+    if (ctx.lay_orig && ctx.ap_n > 0) lay_apparatus(source, ctx);
     ctx.ap_run0 = -1
 }
 
 // The apparatus: the paragraph set close above it (TIGHT), then each
 // glossed word "form gloss", " · " between them, each a link to the word.
-lay_apparatus(ctx: *ChapterLayout) {
+lay_apparatus(source: *TextData, ctx: *ChapterLayout) {
     if (ctx.ap_run0 >= 0) {
         for r in ctx.ap_run0..ctx.runs
             if (ctx.run_para[r] < TIGHT) ctx.run_para[r] = ctx.run_para[r] + TIGHT
@@ -585,7 +587,7 @@ lay_apparatus(ctx: *ChapterLayout) {
             lay_str(ctx, " ")
         }
         lay_begin(ctx, STYLE_APP_ENTRY, PARA_PROSE, w + 1);
-        og_form_lay(ctx, w, ctx.ap_p[i], ctx.ap_e[i]);
+        og_form_lay(source, ctx, w, ctx.ap_p[i], ctx.ap_e[i]);
         lay_byte(ctx, 194);
         lay_byte(ctx, 160);
         j: int = w - og_gl_first;
@@ -599,6 +601,7 @@ lay_apparatus(ctx: *ChapterLayout) {
 // Word w's form (its letters, the source's p to e), the Hebrew isolated right to
 // left (U+2067 ... U+2069).
 og_form_lay(
+    source: *TextData,
     ctx: *ChapterLayout,
     w: int,
     p: int,
@@ -609,7 +612,7 @@ og_form_lay(
         lay_byte(ctx, 129);
         lay_byte(ctx, 167)
     }
-    lay_bytes(ctx, p, e);
+    lay_bytes(source, ctx, p, e);
     if (!og_greek(w)) {
         lay_byte(ctx, 226);
         lay_byte(ctx, 129);
@@ -622,6 +625,7 @@ og_form_lay(
 // not), its punctuation, a Qere's faint °; its letters kept in ow_b to
 // ow_e; a word glossed onto the paragraph's apparatus, a lemma once.
 lay_orig_words(
+    source: *TextData,
     ctx: *ChapterLayout,
     p: int,
     e: int,
@@ -632,7 +636,7 @@ lay_orig_words(
     glossy: int = if (title) STYLE_OTITLE_GL else STYLE_ORIG_GL;
     i: int = p;
     while (i < e) {
-        if (ctx.source.data[i] as int == 32) {
+        if (source.data[i] as int == 32) {
             lay_begin(ctx, plain, para, 0);
             lay_byte(ctx, 32);
             i = i + 1
@@ -641,12 +645,12 @@ lay_orig_words(
             n: int = if (w < og_n) og_len(w) else e - i;
             if (n <= 0) n = e - i;
             we: int = if (i + n < e) i + n else e;
-            le: int = letters_end_of(ctx.source.data, i, we);
+            le: int = letters_end_of(source.data, i, we);
             gl: bool = og_glossed(w);
             lay_begin(ctx, if (gl) glossy else plain, para, 0);
             b0: int = ctx.out_n;
-            if (ctx.lay_accents && !og_greek(w) && og_acc_n > 0) og_lay_accented(ctx,
-                i, le) else lay_bytes(ctx, i, le);
+            if (ctx.lay_accents && !og_greek(w) && og_accents_here()) og_lay_accented(source,
+                ctx, i, le) else lay_bytes(source, ctx, i, le);
             if (ctx.ow_n < OW_MOST) {
                 ctx.ow_b[ctx.ow_n] = b0;
                 ctx.ow_e[ctx.ow_n] = ctx.out_n;
@@ -656,7 +660,7 @@ lay_orig_words(
             }
             if (le < we) {
                 lay_begin(ctx, plain, para, 0);
-                lay_bytes(ctx, le, we)
+                lay_bytes(source, ctx, le, we)
             }
             if (w < og_n && (og_flags(w) & OG_QERE) != 0) {
                 lay_begin(ctx, STYLE_QERE, para, 0);
@@ -671,8 +675,8 @@ lay_orig_words(
                 ap_end: int = le;
                 if ((sh & 2) != 0) {
                     nb: int = we;
-                    while (nb < e && ctx.source.data[nb] as int == 32) nb = nb + 1;
-                    if (nb < e) ap_end = letters_end_of(ctx.source.data, nb, if (nb + og_len(w + 1) < e) nb + og_len(w + 1) else e)
+                    while (nb < e && source.data[nb] as int == 32) nb = nb + 1;
+                    if (nb < e) ap_end = letters_end_of(source.data, nb, if (nb + og_len(w + 1) < e) nb + og_len(w + 1) else e)
                 }
                 ap_add(ctx, w, ap_b, ap_end)
             }
@@ -702,35 +706,49 @@ ap_add(
     }
 }
 
-og_lay_accented(ctx: *ChapterLayout, p: int, e: int) {
+og_lay_accented(
+    source: *TextData,
+    ctx: *ChapterLayout,
+    p: int,
+    e: int
+) {
     w: int = ctx.lay_ow;
-    // (To word w's line, from the line kept, or from its chapter's.)
-    if (ctx.og_acc_w > w || ctx.og_acc_line < 0 || w - ctx.og_acc_w > 64) {
-        c: int = og_chapter_of(w);
-        if (c < 0 || og_acc_ch[c] < 0) {
-            lay_bytes(ctx, p, e);
-            return
+    borrow orig_words as od {
+        acc: []i8 = od.accents;
+        n: int = od.accents_size;
+        if (ctx.og_acc_w > w || ctx.og_acc_line < 0 || w - ctx.og_acc_w > 64) {
+            c: int = og_chapter_of(w);
+            if (c < 0 || od.accents_chapter[c] < 0) {
+                lay_bytes(source, ctx, p, e);
+                return
+            }
+            ctx.og_acc_line = od.accents_chapter[c];
+            ctx.og_acc_w = og_ch_first[c]
         }
-        ctx.og_acc_line = og_acc_ch[c];
-        ctx.og_acc_w = og_ch_first[c]
+        while (ctx.og_acc_w < w && ctx.og_acc_line < n) {
+            while (ctx.og_acc_line < n && acc[ctx.og_acc_line] as int != 10) ctx.og_acc_line = ctx.og_acc_line + 1;
+            ctx.og_acc_line = ctx.og_acc_line + 1;
+            ctx.og_acc_w = ctx.og_acc_w + 1
+        }
+        q: int = ctx.og_acc_line;
+        while (q < n && acc[q] as int != 10) q = q + 1;
+        if (q - 2 >= ctx.og_acc_line && (acc[q - 2] as int & 255) == 215 && (acc[q - 1] as int & 255) == 131) q = q - 2;
+        for x in ctx.og_acc_line..q lay_byte(ctx, acc[x] as int)
     }
-    while (ctx.og_acc_w < w && ctx.og_acc_line < og_acc_n) {
-        while (ctx.og_acc_line < og_acc_n && og_acc[ctx.og_acc_line] as int != 10) ctx.og_acc_line = ctx.og_acc_line + 1;
-        ctx.og_acc_line = ctx.og_acc_line + 1;
-        ctx.og_acc_w = ctx.og_acc_w + 1
-    }
-    q: int = ctx.og_acc_line;
-    while (q < og_acc_n && og_acc[q] as int != 10) q = q + 1;
+    // (To word w's line, from the line kept, or from its chapter's.)
     // (Its sof pasuq is the text's punctuation, laid after.)
-    if (q - 2 >= ctx.og_acc_line && (og_acc[q - 2] as int & 255) == 215 && (og_acc[q - 1] as int & 255) == 131) q = q - 2;
-    for x in ctx.og_acc_line..q lay_byte(ctx, og_acc[x] as int)
 }
 
-xnum(ctx: *ChapterLayout, i: int, e: int): int {
+xnum(
+    source: *TextData,
+    ctx: *ChapterLayout,
+    i: int,
+    e: int
+): int {
     n: int = 0;
     j: int = i;
-    while (j < e && is_digit(ctx.source.data[j] as int) && j - i < 6) {
-        n = n * 10 + ctx.source.data[j] as int - 48;
+    while (j < e && is_digit(source.data[j] as int) && j - i < 6) {
+        n = n * 10 + source.data[j] as int - 48;
         j = j + 1
     }
     ctx.xn_end = j;
@@ -738,42 +756,52 @@ xnum(ctx: *ChapterLayout, i: int, e: int): int {
 }
 
 // A dash at the source's byte i (-, or an en or em dash): its length, or 0.
-bsb_dash_at(ctx: *ChapterLayout, i: int, e: int): int {
-    if (i < e && ctx.source.data[i] as int == 45) return 1;
-    if (i + 2 < e && ub(ctx.source.data, i) == 226 && ub(ctx.source.data, i + 1) == 128 && (ub(ctx.source.data,
-        i + 2) == 147 || ub(ctx.source.data, i + 2) == 148)) return 3;
+bsb_dash_at(
+    source: *TextData,
+    ctx: *ChapterLayout,
+    i: int,
+    e: int
+): int {
+    if (i < e && source.data[i] as int == 45) return 1;
+    if (i + 2 < e && ub(source.data, i) == 226 && ub(source.data, i + 1) == 128 && (ub(source.data,
+        i + 2) == 147 || ub(source.data, i + 2) == 148)) return 3;
     0
 }
 
-layout_xref_scan(ctx: *ChapterLayout, p: int, e: int): bool {
+layout_xref_scan(
+    source: *TextData,
+    ctx: *ChapterLayout,
+    p: int,
+    e: int
+): bool {
     ctx.xr_book = -1;
     // The book's name: up to the space before its chapter's number.
     q: int = p;
     name_e: int = -1;
     while (q < e && name_e < 0) {
-        if (ctx.source.data[q] as int == 32 && q + 1 < e && is_digit(ctx.source.data[q + 1] as int) && q > p && is_letter(ctx.source.data[q - 1] as int)) name_e = q;
+        if (source.data[q] as int == 32 && q + 1 < e && is_digit(source.data[q + 1] as int) && q > p && is_letter(source.data[q - 1] as int)) name_e = q;
         q = q + 1
     }
     if (name_e < 0 || name_e - p >= 96) return false;
-    b: int = heading_book(ctx.source.data, p, name_e);
+    b: int = heading_book(source.data, p, name_e);
     if (b < 0) return false;
     i: int = name_e + 1;
-    c: int = xnum(ctx, i, e);
+    c: int = xnum(source, ctx, i, e);
     i = ctx.xn_end;
     v: int = 0;
     ce: int = 0;
     ve: int = 0;
-    if (i + 1 < e && ctx.source.data[i] as int == 58 && is_digit(ctx.source.data[i + 1] as int)) {
-        v = xnum(ctx, i + 1, e);
+    if (i + 1 < e && source.data[i] as int == 58 && is_digit(source.data[i + 1] as int)) {
+        v = xnum(source, ctx, i + 1, e);
         i = ctx.xn_end
     }
-    d: int = bsb_dash_at(ctx, i, e);
-    if (d > 0 && i + d < e && is_digit(ctx.source.data[i + d] as int)) {
-        n: int = xnum(ctx, i + d, e);
+    d: int = bsb_dash_at(source, ctx, i, e);
+    if (d > 0 && i + d < e && is_digit(source.data[i + d] as int)) {
+        n: int = xnum(source, ctx, i + d, e);
         i = ctx.xn_end;
-        if (i + 1 < e && ctx.source.data[i] as int == 58 && is_digit(ctx.source.data[i + 1] as int)) {
+        if (i + 1 < e && source.data[i] as int == 58 && is_digit(source.data[i + 1] as int)) {
             ce = n;
-            ve = xnum(ctx, i + 1, e);
+            ve = xnum(source, ctx, i + 1, e);
             i = ctx.xn_end
         } else if (v > 0) {
             ce = c;
@@ -782,13 +810,10 @@ layout_xref_scan(ctx: *ChapterLayout, p: int, e: int): bool {
     }
     if (i != e) return false;
     if (c < 1 || c > book_count[b]) return false;
-    // (A text of some books holds no verses of the others: their numbers
-    // are taken as written.)
-    some: bool = ctx.source.some;
-    if (!some && v > ctx.source.verses[book_first[b] + c - 1]) return false;
+    if (v > tx_ch_verses[source.version][book_first[b] + c - 1]) return false;
     if (ce > 0) {
         if (ce < c || ce > book_count[b]) return false;
-        if (!some && ve > ctx.source.verses[book_first[b] + ce - 1]) return false;
+        if (ve > tx_ch_verses[source.version][book_first[b] + ce - 1]) return false;
         if (ce == c && ve <= v) {
             ce = 0;
             ve = 0
@@ -804,30 +829,35 @@ layout_xref_scan(ctx: *ChapterLayout, p: int, e: int): bool {
 
 // An R line's passages, from the source's p to e: "(John 1:1–5; Hebrews 11:1–3)",
 // each reference a run of its own (STYLE_XREF), the rest STYLE_REF.
-lay_refs(ctx: *ChapterLayout, p: int, e: int) {
+lay_refs(
+    source: *TextData,
+    ctx: *ChapterLayout,
+    p: int,
+    e: int
+) {
     i: int = p;
     while (i < e) {
         // A part: to the next "; ", or the closing parenthesis.
         a: int = i;
-        while (a < e && (ctx.source.data[a] as int == 40 || ctx.source.data[a] as int == 32 || ctx.source.data[a] as int == 59)) a = a + 1;
+        while (a < e && (source.data[a] as int == 40 || source.data[a] as int == 32 || source.data[a] as int == 59)) a = a + 1;
         z: int = a;
-        while (z < e && ctx.source.data[z] as int != 59 && ctx.source.data[z] as int != 41) z = z + 1;
+        while (z < e && source.data[z] as int != 59 && source.data[z] as int != 41) z = z + 1;
         if (a > i) {
             lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
-            lay_bytes(ctx, i, a)
+            lay_bytes(source, ctx, i, a)
         }
-        if (z > a && layout_xref_scan(ctx, a, z)) {
+        if (z > a && layout_xref_scan(source, ctx, a, z)) {
             lay_begin(ctx, STYLE_XREF, PARA_PROSE, ctx.xr_book * 16777216 + ctx.xr_c * 4096 + ctx.xr_v);
             ctx.run_arg2[ctx.runs - 1] = (if (ctx.xr_ce == 0) 0 else ctx.xr_ce * 4096 + ctx.xr_ve);
-            lay_bytes(ctx, a, z)
+            lay_bytes(source, ctx, a, z)
         } else if (z > a) {
             lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
-            lay_bytes(ctx, a, z)
+            lay_bytes(source, ctx, a, z)
         }
         // (The ; or ) after it.)
         if (z < e) {
             lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
-            lay_byte(ctx, ctx.source.data[z] as int);
+            lay_byte(ctx, source.data[z] as int);
             z = z + 1
         }
         i = z

@@ -16,7 +16,7 @@ Cache construction, row helpers and filter storage carry an internal tag.
 The screen coordinator retains navigation, platform-service callbacks and action
 routing. Those operations share the screen stack and host contract; they stay
 together even where their combined size exceeds the module-size heuristic.
-`core/host.l8` runs the line-based host used by web, Android and terminal.
+`core/host.l8` runs the line-based host used by every platform.
 `core/kept.l8` loads and saves named user files. Data modules handle text,
 study records, original languages, audio timings and the ESV cache.
 
@@ -25,10 +25,11 @@ rules. Marks are keyed by reference, so switching versions preserves their
 meaning where the verse exists. Ribbons are named reading places; plans
 track progress independently. Study and Practice share the language data.
 
-The iOS app calls shared core from native UIKit views and retains native
-reader layout, audio and navigation integrations. Other skins use core's
-host protocol. Feature availability can depend on platform services and
-loaded datasets; sharing core does not make platform integrations identical.
+The iOS app is a skin like the others: it runs core on core's host and
+talks to it only in the line protocol, drawing the reader from `chapter`
+lines and every screen from `screen` lines in UIKit. Feature availability
+can depend on platform services and loaded datasets; sharing core does not
+make platform integrations identical.
 
 ## Presentation and platform services
 

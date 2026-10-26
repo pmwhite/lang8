@@ -12,52 +12,283 @@ use_tag std;
 // for the reader), and ios/app.l8 shows it.
 import "text.l8";
 
-// ---- the files ----
-// words.bin: 12 bytes a word; verses.bin: 8 bytes a verse, then one more;
-// supplied.bin: 8 bytes a run of supplied English; the rest text.
-lw: []i8 = new i8[1](0i8);
+// ---- the language data: a dataset of its own ----
+// Its files, as the platform gives them (hs_lang_files' order), and what is
+// read from them, made in an arena of their own when the last has come
+// (language_complete): positions are byte offsets into these files, and,
+// for verse_line_at, into the BSB's text the data describes. Replaced whole
+// when the files come again, the one before let go.
+type LanguageData = {
+    // words.bin: 12 bytes a word; verses.bin: 8 bytes a verse, then one
+    // more; supplied.bin: 8 bytes a run of supplied English; the rest text.
+    words: []i8;
+    word_count: int;
+    verses: []i8;
+    verse_count: int;
+    supplied: []i8;
+    supplied_count: int;
+    forms: []i8;
+    forms_size: int;
+    morph: []i8;
+    morph_size: int;
+    concordance: []i8;
+    concordance_size: int;
+    lexicon: []i8;
+    lexicon_size: int;
+    grammar: []i8;
+    grammar_size: int;
+    // senses.bin: a byte a word, its sense (DESIGN.md §10.3); related.bin:
+    // words used in similar contexts (§10.4).
+    senses: []i8;
+    senses_size: int;
+    related: []i8;
+    related_size: int;
+    // Cross references (xref_index.bin, xrefs.bin), Matthew Henry's Concise
+    // Commentary (mhcc.txt), meanings in context (meanings.bin,
+    // meanings.txt), the words to learn (vocab.bin) and the letters
+    // (letters.txt): each where its functions say.
+    xref_index: []i8;
+    xref_index_count: int;
+    xrefs: []i8;
+    xrefs_size: int;
+    commentary: []i8;
+    commentary_size: int;
+    meanings: []i8;
+    meanings_size: int;
+    meaning_text: []i8;
+    meaning_text_size: int;
+    vocab: []i8;
+    vocab_size: int;
+    letters: []i8;
+    letters_size: int;
+    // How many of the files have come, and whether they have all come and
+    // been read (the empty data before them is not).
+    files_come: int;
+    ready: bool;
+    // ---- the indexes ----
+    // Where each line of forms.txt, morph.txt and grammar.txt begins (and
+    // where the last ends, after them).
+    form_at: []int;
+    form_count: int;
+    morph_at: []int;
+    morph_count: int;
+    gram_at: []int;
+    gram_count: int;
+    // Where each Strong's number's entry is in conc.bin and lexicon.txt (-1:
+    // none), Greek and Hebrew; where its related words are in related.bin
+    // (its count's byte; -1: none).
+    conc_greek: []int;
+    conc_hebrew: []int;
+    lex_greek: []int;
+    lex_hebrew: []int;
+    related_greek: []int;
+    related_hebrew: []int;
+    // Each verse's V line in the BSB's text, and each chapter's first verse.
+    verse_line_at: []int;
+    chapter_first_verse: []int;
+    // Each chapter's C line in mhcc.txt (-1: none).
+    commentary_chapter_at: []int;
+    // Where each meaning's line begins (mean_at[k] for meaning k; the
+    // credit's line is 0).
+    mean_at: []int;
+    mean_count: int
+}
 
-lw_n: int = 0;
+// The language data (empty, and not ready, until all its files have
+// come), and the one coming, its files so far.
+language_data: ?owned *LanguageData = language_empty();
 
-lv: []i8 = new i8[1](0i8);
+language_coming: ?owned *LanguageData = null;
 
-lv_n: int = 0;
+LANGUAGE_FILES: int = 17;
 
-lsup: []i8 = new i8[1](0i8);
+// Whether the language data has come.
+language_ready(): bool {
+    borrow language_data {
+        language_data.ready
+    }
+}
 
-lsup_n: int = 0;
+STRONGS_MAX: int = 10000;
 
-lforms: []i8 = new i8[1](0i8);
+language_empty(): owned *LanguageData {
+    own {
+        none: []i8 = new i8[1](0i8);
+        nothing: []int = new int[1](0);
+        new LanguageData {
+            words: none,
+            word_count: 0,
+            verses: none,
+            verse_count: 0,
+            supplied: none,
+            supplied_count: 0,
+            forms: none,
+            forms_size: 0,
+            morph: none,
+            morph_size: 0,
+            concordance: none,
+            concordance_size: 0,
+            lexicon: none,
+            lexicon_size: 0,
+            grammar: none,
+            grammar_size: 0,
+            senses: none,
+            senses_size: 0,
+            related: none,
+            related_size: 0,
+            xref_index: none,
+            xref_index_count: 0,
+            xrefs: none,
+            xrefs_size: 0,
+            commentary: none,
+            commentary_size: 0,
+            meanings: none,
+            meanings_size: 0,
+            meaning_text: none,
+            meaning_text_size: 0,
+            vocab: none,
+            vocab_size: 0,
+            letters: none,
+            letters_size: 0,
+            files_come: 0,
+            ready: false,
+            form_at: nothing,
+            form_count: 0,
+            morph_at: nothing,
+            morph_count: 0,
+            gram_at: nothing,
+            gram_count: 0,
+            conc_greek: nothing,
+            conc_hebrew: nothing,
+            lex_greek: nothing,
+            lex_hebrew: nothing,
+            related_greek: nothing,
+            related_hebrew: nothing,
+            verse_line_at: nothing,
+            chapter_first_verse: nothing,
+            commentary_chapter_at: nothing,
+            mean_at: nothing,
+            mean_count: 0
+        }
+    }
+}
 
-lforms_len: int = 0;
+// File k of the language data came, its first n bytes buf (in its arena).
+language_file_set(
+    language: *LanguageData,
+    k: int,
+    buf: []i8@language,
+    n: int
+) {
+    if (k == 0) {
+        language.words = buf;
+        language.word_count = n / 12
+    } else if (k == 1) {
+        language.verses = buf;
+        language.verse_count = n / 8 - 1
+    } else if (k == 2) {
+        language.supplied = buf;
+        language.supplied_count = n / 8
+    } else if (k == 3) {
+        language.forms = buf;
+        language.forms_size = n
+    } else if (k == 4) {
+        language.morph = buf;
+        language.morph_size = n
+    } else if (k == 5) {
+        language.concordance = buf;
+        language.concordance_size = n
+    } else if (k == 6) {
+        language.lexicon = buf;
+        language.lexicon_size = n
+    } else if (k == 7) {
+        language.grammar = buf;
+        language.grammar_size = n
+    } else if (k == 8) {
+        language.senses = buf;
+        language.senses_size = n
+    } else if (k == 9) {
+        language.related = buf;
+        language.related_size = n
+    } else if (k == 10) {
+        language.xref_index = buf;
+        language.xref_index_count = n / 4
+    } else if (k == 11) {
+        language.xrefs = buf;
+        language.xrefs_size = n
+    } else if (k == 12) {
+        language.commentary = buf;
+        language.commentary_size = n
+    } else if (k == 13) {
+        language.meanings = buf;
+        language.meanings_size = n
+    } else if (k == 14) {
+        language.meaning_text = buf;
+        language.meaning_text_size = n
+    } else if (k == 15) {
+        language.vocab = buf;
+        language.vocab_size = n
+    } else if (k == 16) {
+        language.letters = buf;
+        language.letters_size = n
+    }
+    language.files_come = language.files_come + 1
+}
 
-lmorph: []i8 = new i8[1](0i8);
+// The language data coming, made (empty) if none is.
+language_coming_ensure() {
+    if (language_coming != null) return;
+    // (It is empty: dropping it lets nothing go, but says so.)
+    drop language_coming;
+    language_coming = language_empty()
+}
 
-lmorph_len: int = 0;
+// File k (the host's id; size bytes, -1: it could not come) read by the
+// host into the language data coming (read: file id's bytes into the
+// buffer given); when it is the last, the data made the language data.
+language_file_read(
+    k: int,
+    id: int,
+    size: int,
+    read: fn(id: int, out: []i8)
+) {
+    language_coming_ensure();
+    borrow language_coming {
+        coming: *LanguageData = language_coming;
+        allocate coming {
+            buf: []i8 = new i8[(if (size < 0) 0 else size) + 1](0i8);
+            if (size > 0) read(id, buf);
+            language_file_set(coming, k, buf, if (size < 0) 0 else size)
+        }
+    }
+    language_complete()
+}
 
-lconc: []i8 = new i8[1](0i8);
-
-lconc_len: int = 0;
-
-llex: []i8 = new i8[1](0i8);
-
-llex_len: int = 0;
-
-lgram: []i8 = new i8[1](0i8);
-
-lgram_len: int = 0;
-
-lang_ready: bool = false;
-
-// senses.bin: a byte a word, its sense (DESIGN.md §10.3); related.bin: words
-// used in similar contexts (§10.4).
-lsen: []i8 = new i8[1](0i8);
-
-lsen_n: int = 0;
-
-lrel: []i8 = new i8[1](0i8);
-
-lrel_n: int = 0;
+// Its files all come: indexed (in its arena), made the language data in
+// place of the one before (let go), then Learn's indexes, the cards, and
+// core's screens made again.
+language_complete() {
+    if (language_coming == null) return;
+    whole: bool = false;
+    borrow language_coming {
+        whole = language_coming.files_come >= LANGUAGE_FILES
+    }
+    if (!whole) return;
+    borrow language_coming {
+        coming: *LanguageData = language_coming;
+        allocate coming {
+            lang_index(coming)
+        }
+    }
+    drop language_data;
+    language_data = move language_coming;
+    borrow language_data {
+        learn_index_files(language_data);
+        learn_index_lang(language_data)
+    }
+    kept_load_cards();
+    sk_update_all()
+}
 
 // A byte, and little-endian numbers of two and four bytes.
 byte_of(b: []i8, i: int): int {
@@ -72,122 +303,84 @@ le32(b: []i8, i: int): int {
     le16(b, i) | le16(b, i + 2) << 16
 }
 
-// ---- the indexes, made once the files are read ----
-// Where each line of forms.txt, morph.txt and grammar.txt begins.
-form_at: []int = new int[100000](0);
-
-form_n: int = 0;
-
-morph_at: []int = new int[5000](0);
-
-morph_n: int = 0;
-
-gram_at: []int = new int[512](0);
-
-gram_n: int = 0;
-
-// Where each Strong's number's entry is in conc.bin and lexicon.txt (-1:
-// none), Greek and Hebrew.
-STRONGS_MAX: int = 10000;
-
-conc_g: []int = new int[STRONGS_MAX](-1);
-
-conc_h: []int = new int[STRONGS_MAX](-1);
-
-lex_g: []int = new int[STRONGS_MAX](-1);
-
-lex_h: []int = new int[STRONGS_MAX](-1);
-
-// Where each number's related words are in related.bin (its count's
-// byte; -1: none).
-rel_g: []int = new int[STRONGS_MAX](-1);
-
-rel_h: []int = new int[STRONGS_MAX](-1);
-
-// Each verse's V line in bsb, and each chapter's first verse.
-vb_at: []int = new int[32000](0);
-
-ch_vi: []int = new int[1200](0);
-
-// The lines of the first n bytes of b: where each starts, into at (and
-// where the last ends after them); how many.
-line_starts(b: []i8, n: int, at: []int): int {
-    k: int = 0;
-    start: int = 0;
-    for i in 0..n {
-        if (b[i] as int == 10 && k + 1 < len(at)) {
-            at[k] = start;
-            k = k + 1;
-            start = i + 1
-        }
-    }
-    at[k] = n;
-    k
-}
-
 // (The BSB's: its words are what the data describes, whatever version
 // the reader is in.)
-lang_index() {
-    src: TextSource = ready_source(TEXT_BSB);
-    lang_index_bsb(&src)
+lang_index(language: *LanguageData@new) {
+    borrow texts[text_or_current(TEXT_BSB)] as src {
+        lang_index_bsb(language, src);
+        mhcc_index(language);
+        mean_index(language)
+    }
 }
 
-lang_index_bsb(src: *TextSource) {
-    form_n = line_starts(lforms, lforms_len, form_at);
-    morph_n = line_starts(lmorph, lmorph_len, morph_at);
-    gram_n = line_starts(lgram, lgram_len, gram_at);
+lang_index_bsb(language: *LanguageData@new, src: *TextData) {
+    language.form_at = line_places(language.forms, language.forms_size);
+    language.form_count = len(language.form_at) - 1;
+    language.morph_at = line_places(language.morph, language.morph_size);
+    language.morph_count = len(language.morph_at) - 1;
+    language.gram_at = line_places(language.grammar, language.grammar_size);
+    language.gram_count = len(language.gram_at) - 1;
+    language.conc_greek = new int[STRONGS_MAX](-1);
+    language.conc_hebrew = new int[STRONGS_MAX](-1);
+    language.lex_greek = new int[STRONGS_MAX](-1);
+    language.lex_hebrew = new int[STRONGS_MAX](-1);
+    language.related_greek = new int[STRONGS_MAX](-1);
+    language.related_hebrew = new int[STRONGS_MAX](-1);
+    language.verse_line_at = new int[language.verse_count + 1](0);
+    language.chapter_first_verse = new int[chapters](0);
     // conc.bin: key, 0, then numbers to a 0 byte.
     p: int = 0;
-    while (p < lconc_len) {
-        greek: bool = lconc[p] as int == 71;
+    while (p < language.concordance_size) {
+        greek: bool = language.concordance[p] as int == 71;
         num: int = 0;
         q: int = p + 1;
-        while (q < lconc_len && lconc[q] as int != 0) {
-            num = num * 10 + lconc[q] as int - 48;
+        while (q < language.concordance_size && language.concordance[q] as int != 0) {
+            num = num * 10 + language.concordance[q] as int - 48;
             q = q + 1
         }
         if (num < STRONGS_MAX) {
-            if (greek) conc_g[num] = p else conc_h[num] = p
+            if (greek) language.conc_greek[num] = p else language.conc_hebrew[num] = p
         }
         q = q + 1;
         // (The count, then deltas to the 0 that ends them.)
-        while (q < lconc_len && byte_of(lconc, q) >= 128) q = q + 1;
+        while (q < language.concordance_size && byte_of(language.concordance, q) >= 128) q = q + 1;
         q = q + 1;
-        while (q < lconc_len && lconc[q] as int != 0) q = q + 1;
+        while (q < language.concordance_size && language.concordance[q] as int != 0) q = q + 1;
         p = q + 1
     }
     // lexicon.txt: @G25 lines, each before its entries.
     p = 0;
-    while (p < llex_len) {
-        if (llex[p] as int == 64) {
-            greek: bool = llex[p + 1] as int == 71;
+    while (p < language.lexicon_size) {
+        if (language.lexicon[p] as int == 64) {
+            greek: bool = language.lexicon[p + 1] as int == 71;
             num: int = 0;
             q: int = p + 2;
-            while (q < llex_len && is_digit(llex[q] as int)) {
-                num = num * 10 + llex[q] as int - 48;
+            while (q < language.lexicon_size && is_digit(language.lexicon[q] as int)) {
+                num = num * 10 + language.lexicon[q] as int - 48;
                 q = q + 1
             }
             if (num < STRONGS_MAX) {
-                if (greek) lex_g[num] = q + 1 else lex_h[num] = q + 1
+                if (greek) language.lex_greek[num] = q + 1 else language.lex_hebrew[num] = q + 1
             }
         }
-        while (p < llex_len && llex[p] as int != 10) p = p + 1;
+        while (p < language.lexicon_size && language.lexicon[p] as int != 10) p = p + 1;
         p = p + 1
     }
     // related.bin: KEY, 0, n, then n entries of 3 bytes.
     p = 0;
-    while (p < lrel_n) {
-        greek: bool = lrel[p] as int == 71;
+    while (p < language.related_size) {
+        greek: bool = language.related[p] as int == 71;
         num: int = 0;
         q: int = p + 1;
-        while (q < lrel_n && lrel[q] as int != 0) {
-            num = num * 10 + lrel[q] as int - 48;
+        while (q < language.related_size && language.related[q] as int != 0) {
+            num = num * 10 + language.related[q] as int - 48;
             q = q + 1
         }
-        if (num < STRONGS_MAX && q + 1 < lrel_n) {
-            if (greek) rel_g[num] = q + 1 else rel_h[num] = q + 1
+        if (num < STRONGS_MAX && q + 1 < language.related_size) {
+            if (greek) language.related_greek[num] = q + 1 else language.related_hebrew[num] = q + 1
         }
-        p = q + 2 + 3 * (if (q + 1 < lrel_n) byte_of(lrel, q + 1) else 0)
+        p = q + 2 + 3 * (if (q + 1 < language.related_size) byte_of(language.related,
+            q + 1) else 0)
     }
     // The verses' V lines, in order through the text.
     k: int = 0;
@@ -197,86 +390,88 @@ lang_index_bsb(src: *TextSource) {
         e: int = record_line_end(src.data, src.size, p);
         x: int = src.data[p] as int;
         if (x == 67) c = c + 1;
-        if (x == 86 && k < lv_n) {
-            if (c >= 0 && c < len(ch_vi) && (k == 0 || v_chapter(k - 1) != c)) ch_vi[c] = k;
-            vb_at[k] = p;
+        if (x == 86 && k < language.verse_count) {
+            if (c >= 0 && c < len(language.chapter_first_verse) && (k == 0 || v_chapter(language,
+                k - 1) != c)) language.chapter_first_verse[c] = k;
+            language.verse_line_at[k] = p;
             k = k + 1
         }
         p = e + 1
     }
-    lang_ready = true
+    language.ready = true
 }
 
 // ---- verses and words ----
-v_first(vi: int): int {
-    le32(lv, vi * 8)
+v_first(language: *LanguageData, vi: int): int {
+    le32(language.verses, vi * 8)
 }
 
-v_end(vi: int): int {
-    le32(lv, vi * 8 + 8)
+v_end(language: *LanguageData, vi: int): int {
+    le32(language.verses, vi * 8 + 8)
 }
 
-v_chapter(vi: int): int {
-    le16(lv, vi * 8 + 4)
+v_chapter(language: *LanguageData, vi: int): int {
+    le16(language.verses, vi * 8 + 4)
 }
 
-v_num(vi: int): int {
-    le16(lv, vi * 8 + 6) & 32767
+v_num(language: *LanguageData, vi: int): int {
+    le16(language.verses, vi * 8 + 6) & 32767
 }
 
 // Whether the verse's English and its words agree, so it can be studied.
-v_aligned(vi: int): bool {
-    (le16(lv, vi * 8 + 6) & 32768) == 0
+v_aligned(language: *LanguageData, vi: int): bool {
+    (le16(language.verses, vi * 8 + 6) & 32768) == 0
 }
 
 // Whether verse vi can be studied: aligned, and with words.
-v_studyable(vi: int): bool {
-    vi >= 0 && vi < lv_n && v_aligned(vi) && v_end(vi) > v_first(vi)
+v_studyable(language: *LanguageData, vi: int): bool {
+    vi >= 0 && vi < language.verse_count && v_aligned(language, vi) && v_end(language,
+        vi) > v_first(language, vi)
 }
 
 // The index of verse v of chapter c (-1 if there is none).
-lang_verse(c: int, v: int): int {
-    if (!lang_ready || c < 0 || c >= chapters) return -1;
-    vi: int = ch_vi[c];
-    while (vi < lv_n && v_chapter(vi) == c) {
-        if (v_num(vi) == v) return vi;
+lang_verse(language: *LanguageData, c: int, v: int): int {
+    if (!language.ready || c < 0 || c >= chapters) return -1;
+    vi: int = language.chapter_first_verse[c];
+    while (vi < language.verse_count && v_chapter(language, vi) == c) {
+        if (v_num(language, vi) == v) return vi;
         vi = vi + 1
     }
     -1
 }
 
-w_strongs(w: int): int {
-    le16(lw, w * 12) & 32767
+w_strongs(language: *LanguageData, w: int): int {
+    le16(language.words, w * 12) & 32767
 }
 
-w_greek(w: int): bool {
-    (le16(lw, w * 12) & 32768) != 0
+w_greek(language: *LanguageData, w: int): bool {
+    (le16(language.words, w * 12) & 32768) != 0
 }
 
-w_morph(w: int): int {
-    le16(lw, w * 12 + 2)
+w_morph(language: *LanguageData, w: int): int {
+    le16(language.words, w * 12 + 2)
 }
 
-w_ntok(w: int): int {
-    byte_of(lw, w * 12 + 4)
+w_ntok(language: *LanguageData, w: int): int {
+    byte_of(language.words, w * 12 + 4)
 }
 
-w_order(w: int): int {
-    byte_of(lw, w * 12 + 5)
+w_order(language: *LanguageData, w: int): int {
+    byte_of(language.words, w * 12 + 5)
 }
 
 // 1 untranslated, 2 rendered with a neighbour (8: the one before), 4 no
 // English.
-w_flags(w: int): int {
-    byte_of(lw, w * 12 + 6)
+w_flags(language: *LanguageData, w: int): int {
+    byte_of(language.words, w * 12 + 6)
 }
 
-w_tok(w: int): int {
-    byte_of(lw, w * 12 + 7)
+w_tok(language: *LanguageData, w: int): int {
+    byte_of(language.words, w * 12 + 7)
 }
 
-w_form(w: int): int {
-    le32(lw, w * 12 + 8)
+w_form(language: *LanguageData, w: int): int {
+    le32(language.words, w * 12 + 8)
 }
 
 // The word's form (its original, then its transliteration): where each is
@@ -289,12 +484,12 @@ wt_b: int = 0;
 
 wt_e: int = 0;
 
-form_of(w: int) {
-    f: int = w_form(w);
-    p: int = form_at[f];
-    e: int = form_at[f + 1] - 1;
+form_of(language: *LanguageData, w: int) {
+    f: int = w_form(language, w);
+    p: int = language.form_at[f];
+    e: int = language.form_at[f + 1] - 1;
     t: int = p;
-    while (t < e && lforms[t] as int != 9) t = t + 1;
+    while (t < e && language.forms[t] as int != 9) t = t + 1;
     wf_b = p;
     wf_e = t;
     wt_b = (if (t < e) t + 1 else e);
@@ -310,11 +505,11 @@ md_b: int = 0;
 
 md_e: int = 0;
 
-morph_of(m: int) {
-    p: int = morph_at[m];
-    e: int = morph_at[m + 1] - 1;
+morph_of(language: *LanguageData, m: int) {
+    p: int = language.morph_at[m];
+    e: int = language.morph_at[m + 1] - 1;
     t: int = p;
-    while (t < e && lmorph[t] as int != 9) t = t + 1;
+    while (t < e && language.morph[t] as int != 9) t = t + 1;
     mc_b = p;
     mc_e = t;
     md_b = (if (t < e) t + 1 else e);
@@ -398,21 +593,22 @@ tokenize(b: []i8, n: int) {
 }
 
 // Verse vi's English into st, and its tokens (the BSB's, in any version).
-study_load(vi: int) {
+study_load(language: *LanguageData, vi: int) {
     if (vi == st_vi) return;
-    src: TextSource = ready_source(TEXT_BSB);
-    study_load_bsb(&src, vi)
+    borrow texts[text_or_current(TEXT_BSB)] as src {
+        study_load_bsb(language, src, vi)
+    }
 }
 
-study_load_bsb(src: *TextSource, vi: int) {
+study_load_bsb(language: *LanguageData, src: *TextData, vi: int) {
     st_vi = vi;
     st_n = 0;
-    c: int = v_chapter(vi);
-    v: int = v_num(vi);
+    c: int = v_chapter(language, vi);
+    v: int = v_num(language, vi);
     if (v == 1) {
         // (A psalm's title: its D line, and its d lines after a footnote.)
         p: int = src.starts[c];
-        while (p < vb_at[vi]) {
+        while (p < language.verse_line_at[vi]) {
             e: int = record_line_end(src.data, src.size, p);
             k: int = src.data[p] as int;
             if (k == 68 || k == 100) {
@@ -424,7 +620,7 @@ study_load_bsb(src: *TextSource, vi: int) {
     st_title = st_n;
     if (st_n > 0) st_add(32);
     // The verse's words, from its V line to the next (as verse_text).
-    p: int = record_line_end(src.data, src.size, vb_at[vi]) + 1;
+    p: int = record_line_end(src.data, src.size, language.verse_line_at[vi]) + 1;
     e_ch: int = src.ends[c];
     broke: bool = false;
     words: int = st_n;
@@ -448,16 +644,16 @@ study_load_bsb(src: *TextSource, vi: int) {
     }
     // The supplied runs of the verse (supplied.bin is in verse order).
     lo: int = 0;
-    hi: int = lsup_n;
+    hi: int = language.supplied_count;
     while (lo < hi) {
         mid: int = (lo + hi) / 2;
-        if (le32(lsup, mid * 8) < vi) lo = mid + 1 else hi = mid
+        if (le32(language.supplied, mid * 8) < vi) lo = mid + 1 else hi = mid
     }
     r: int = lo;
-    while (r < lsup_n && le32(lsup, r * 8) == vi) {
-        t0: int = byte_of(lsup, r * 8 + 4);
-        n: int = byte_of(lsup, r * 8 + 5);
-        kind: int = if ((le16(lsup, r * 8 + 6) & 1) != 0) 2 else 1;
+    while (r < language.supplied_count && le32(language.supplied, r * 8) == vi) {
+        t0: int = byte_of(language.supplied, r * 8 + 4);
+        n: int = byte_of(language.supplied, r * 8 + 5);
+        kind: int = if ((le16(language.supplied, r * 8 + 6) & 1) != 0) 2 else 1;
         for t in t0..t0 + n
             if (t < tok_n) tok_sup[t] = kind;
         r = r + 1
@@ -465,10 +661,10 @@ study_load_bsb(src: *TextSource, vi: int) {
 }
 
 // The word whose English covers token t of verse vi (-1: none).
-word_of_token(vi: int, t: int): int {
-    for w in v_first(vi)..v_end(vi) {
-        n: int = w_ntok(w);
-        if (n > 0 && t >= w_tok(w) && t < w_tok(w) + n) return w
+word_of_token(language: *LanguageData, vi: int, t: int): int {
+    for w in v_first(language, vi)..v_end(language, vi) {
+        n: int = w_ntok(language, w);
+        if (n > 0 && t >= w_tok(language, w) && t < w_tok(language, w) + n) return w
     }
     -1
 }
@@ -479,9 +675,9 @@ ch_b: int = 0;
 
 ch_e: int = 0;
 
-chunk_of(w: int) {
-    n: int = w_ntok(w);
-    t: int = w_tok(w);
+chunk_of(language: *LanguageData, w: int) {
+    n: int = w_ntok(language, w);
+    t: int = w_tok(language, w);
     if (n == 0 || t + n > tok_n) {
         ch_b = 0;
         ch_e = 0;
@@ -522,14 +718,15 @@ pk_add_run(ctx: *ChapterLayout, r: int, from: int) {
 }
 
 study_pick(
+    language: *LanguageData,
     ctx: *ChapterLayout,
     c: int,
     b: int,
     e: int
 ): bool {
+    if (!language.ready) return false;
     pick_vi = -1;
     pick_word = -1;
-    if (!lang_ready) return false;
     // The verse: the one whose text the bytes begin in, or verse 1 for a
     // psalm's title.
     title_at: bool = false;
@@ -551,7 +748,7 @@ study_pick(
         if (at < 0) return false;
         vn = ctx.verse_num[at]
     }
-    vi: int = lang_verse(c, vn);
+    vi: int = lang_verse(language, c, vn);
     if (vi < 0) return false;
     if (at < 0) {
         for i in 0..ctx.verse_count
@@ -586,7 +783,7 @@ study_pick(
         }
     }
     tokenize(pk_buf, pk_n);
-    study_load(vi);
+    study_load(language, vi);
     if (tk_n != tok_n) return false;
     t0: int = -1;
     t1: int = -1;
@@ -603,7 +800,8 @@ study_pick(
     pick_t0 = t0;
     pick_t1 = t1;
     for t in t0..t1 + 1 {
-        if (pick_word < 0 && tok_sup[t] == 0) pick_word = word_of_token(vi, t)
+        if (pick_word < 0 && tok_sup[t] == 0) pick_word = word_of_token(language,
+            vi, t)
     }
     true
 }
@@ -628,15 +826,16 @@ tile_add(w: int, t0: int, n: int) {
     tile_n = tile_n + 1
 }
 
-interlinear_tiles(vi: int, original: bool) {
-    study_load(vi);
+interlinear_tiles(language: *LanguageData, vi: int, original: bool) {
+    study_load(language, vi);
     tile_n = 0;
-    first: int = v_first(vi);
-    last: int = v_end(vi);
+    first: int = v_first(language, vi);
+    last: int = v_end(language, vi);
     if (original) {
         for o in 0..last - first {
             for w in first..last
-                if (w_order(w) == o) tile_add(w, w_tok(w), w_ntok(w))
+                if (w_order(language, w) == o) tile_add(w, w_tok(language, w), w_ntok(language,
+                    w))
         }
         return
     }
@@ -648,8 +847,9 @@ interlinear_tiles(vi: int, original: bool) {
             while (t < tok_n && tok_sup[t] == 2) t = t + 1;
             tile_add(-1, t0, t - t0)
         } else if (w < last) {
-            tile_add(w, w_tok(w), w_ntok(w));
-            if (w_ntok(w) > 0) t = w_tok(w) + w_ntok(w);
+            tile_add(w, w_tok(language, w), w_ntok(language, w));
+            if (w_ntok(language, w) > 0) t = w_tok(language, w) + w_ntok(language,
+                w);
             w = w + 1
         } else t = t + 1
     }
@@ -694,12 +894,12 @@ cc_num: int = 0;
 
 leb_at: int = 0;
 
-leb(): int {
+leb(language: *LanguageData): int {
     n: int = 0;
     shift: int = 0;
     more: bool = true;
-    while (more && leb_at < lconc_len) {
-        x: int = byte_of(lconc, leb_at);
+    while (more && leb_at < language.concordance_size) {
+        x: int = byte_of(language.concordance, leb_at);
         leb_at = leb_at + 1;
         n = n | (x & 127) << shift;
         shift = shift + 7;
@@ -708,22 +908,22 @@ leb(): int {
     n
 }
 
-conc_load(greek: bool, num: int): bool {
+conc_load(language: *LanguageData, greek: bool, num: int): bool {
     cc_n = 0;
     cc_words = 0;
     cc_greek = greek;
     cc_num = num;
     cc_sense = 0;
-    if (!lang_ready || num <= 0 || num >= STRONGS_MAX) return false;
-    p: int = if (greek) conc_g[num] else conc_h[num];
+    if (!language.ready || num <= 0 || num >= STRONGS_MAX) return false;
+    p: int = if (greek) language.conc_greek[num] else language.conc_hebrew[num];
     if (p < 0) return false;
-    while (lconc[p] as int != 0) p = p + 1;
+    while (language.concordance[p] as int != 0) p = p + 1;
     leb_at = p + 1;
-    cc_words = leb();
+    cc_words = leb(language);
     at: int = 0;
     more: bool = true;
     while (more) {
-        d: int = leb();
+        d: int = leb(language);
         if (d == 0) more = false else {
             at = at + d;
             if (cc_n < len(cc_vi)) {
@@ -737,8 +937,9 @@ conc_load(greek: bool, num: int): bool {
 
 // Whether word w is the number loaded (and of the sense loaded, if one is:
 // cc_sense, 0 any).
-is_cc(w: int): bool {
-    w_strongs(w) == cc_num && w_greek(w) == cc_greek && (cc_sense == 0 || w_sense(w) == cc_sense)
+is_cc(language: *LanguageData, w: int): bool {
+    w_strongs(language, w) == cc_num && w_greek(language, w) == cc_greek && (cc_sense == 0 || w_sense(language,
+        w) == cc_sense)
 }
 
 cc_sense: int = 0;
@@ -756,14 +957,14 @@ mk_untranslated: bool = false;
 // (A parsing's concordance marks only its words: mk_form, -1 none.)
 mk_form: int = -1;
 
-conc_marks(vi: int) {
-    study_load(vi);
+conc_marks(language: *LanguageData, vi: int) {
+    study_load(language, vi);
     mk_n = 0;
     any: bool = false;
-    for w in v_first(vi)..v_end(vi) {
-        if (is_cc(w) && (mk_form < 0 || fo_is(w, mk_form))) {
+    for w in v_first(language, vi)..v_end(language, vi) {
+        if (is_cc(language, w) && (mk_form < 0 || fo_is(language, w, mk_form))) {
             any = true;
-            chunk_of(w);
+            chunk_of(language, w);
             if (ch_e > ch_b && mk_n < len(mk_b)) {
                 mk_b[mk_n] = ch_b;
                 mk_e[mk_n] = ch_e;
@@ -797,8 +998,8 @@ rw: []i8 = new i8[512](0i8);
 
 rw_n: int = 0;
 
-rendering_of(w: int) {
-    chunk_of(w);
+rendering_of(language: *LanguageData, w: int) {
+    chunk_of(language, w);
     rw_n = 0;
     for i in ch_b..ch_e {
         if (rw_n < len(rw)) {
@@ -822,17 +1023,17 @@ rd_find(): int {
     -1
 }
 
-renderings() {
+renderings(language: *LanguageData) {
     rd_n = 0;
     rd_pool_n = 0;
     rd_none = 0;
     for x in 0..cc_n {
         vi: int = cc_vi[x];
-        study_load(vi);
-        for w in v_first(vi)..v_end(vi) {
-            if (is_cc(w)) {
-                if (w_ntok(w) == 0) rd_none = rd_none + 1 else {
-                    rendering_of(w);
+        study_load(language, vi);
+        for w in v_first(language, vi)..v_end(language, vi) {
+            if (is_cc(language, w)) {
+                if (w_ntok(language, w) == 0) rd_none = rd_none + 1 else {
+                    rendering_of(language, w);
                     r: int = rd_find();
                     if (r < 0 && rd_n < len(rd_at) && rd_pool_n + rw_n <= len(rd_pool)) {
                         r = rd_n;
@@ -867,9 +1068,9 @@ swap(a: []int, j: int) {
 }
 
 // Whether word w (its verse studied) is rendered as rendering r.
-rendered_as(w: int, r: int): bool {
-    if (w_ntok(w) == 0) return false;
-    rendering_of(w);
+rendered_as(language: *LanguageData, w: int, r: int): bool {
+    if (w_ntok(language, w) == 0) return false;
+    rendering_of(language, w);
     if (rw_n != rd_len[r]) return false;
     for i in 0..rw_n
         if (rd_pool[rd_at[r] + i] != rw[i]) return false;
@@ -878,15 +1079,15 @@ rendered_as(w: int, r: int): bool {
 
 // The verses loaded, kept only where the number is rendered as r (and how
 // many times it is, in cc_words).
-conc_only(r: int) {
+conc_only(language: *LanguageData, r: int) {
     n: int = 0;
     words: int = 0;
     for x in 0..cc_n {
         vi: int = cc_vi[x];
-        study_load(vi);
+        study_load(language, vi);
         here: int = 0;
-        for w in v_first(vi)..v_end(vi)
-            if (is_cc(w) && rendered_as(w, r)) here = here + 1;
+        for w in v_first(language, vi)..v_end(language, vi)
+            if (is_cc(language, w) && rendered_as(language, w, r)) here = here + 1;
         if (here > 0) {
             cc_vi[n] = vi;
             n = n + 1;
@@ -900,28 +1101,28 @@ conc_only(r: int) {
 // ---- the lexicon ----
 // A number's entries: where the first begins in llex (-1: none), and how
 // many there are.
-lex_first(greek: bool, num: int): int {
-    if (!lang_ready || num <= 0 || num >= STRONGS_MAX) return -1;
-    if (greek) lex_g[num] else lex_h[num]
+lex_first(language: *LanguageData, greek: bool, num: int): int {
+    if (!language.ready || num <= 0 || num >= STRONGS_MAX) return -1;
+    if (greek) language.lex_greek[num] else language.lex_hebrew[num]
 }
 
-lex_count(p: int): int {
+lex_count(language: *LanguageData, p: int): int {
     if (p < 0) return 0;
     n: int = 0;
     q: int = p;
-    while (q < llex_len && llex[q] as int != 64) {
+    while (q < language.lexicon_size && language.lexicon[q] as int != 64) {
         n = n + 1;
-        while (q < llex_len && llex[q] as int != 10) q = q + 1;
+        while (q < language.lexicon_size && language.lexicon[q] as int != 10) q = q + 1;
         q = q + 1
     }
     n
 }
 
 // The line of entry i (from the first, at p).
-lex_line(p: int, i: int): int {
+lex_line(language: *LanguageData, p: int, i: int): int {
     q: int = p;
     for _k in 0..i {
-        while (q < llex_len && llex[q] as int != 10) q = q + 1;
+        while (q < language.lexicon_size && language.lexicon[q] as int != 10) q = q + 1;
         q = q + 1
     }
     q
@@ -934,24 +1135,24 @@ lf_b: int = 0;
 
 lf_e: int = 0;
 
-lex_field(p: int, k: int) {
-    lex_field_at(p, k + 1)
+lex_field(language: *LanguageData, p: int, k: int) {
+    lex_field_at(language, p, k + 1)
 }
 
 // The entry's extended Strong's code (H7462B; empty for an entry without a
 // letter): lf_b to lf_e.
-lex_code(p: int) {
-    lex_field_at(p, 0)
+lex_code(language: *LanguageData, p: int) {
+    lex_field_at(language, p, 0)
 }
 
-lex_field_at(p: int, k: int) {
+lex_field_at(language: *LanguageData, p: int, k: int) {
     q: int = p;
     for _i in 0..k {
-        while (q < llex_len && llex[q] as int != 9 && llex[q] as int != 10) q = q + 1;
-        if (q < llex_len && llex[q] as int == 9) q = q + 1
+        while (q < language.lexicon_size && language.lexicon[q] as int != 9 && language.lexicon[q] as int != 10) q = q + 1;
+        if (q < language.lexicon_size && language.lexicon[q] as int == 9) q = q + 1
     }
     e: int = q;
-    while (e < llex_len && llex[e] as int != 9 && llex[e] as int != 10) e = e + 1;
+    while (e < language.lexicon_size && language.lexicon[e] as int != 9 && language.lexicon[e] as int != 10) e = e + 1;
     lf_b = q;
     lf_e = e
 }
@@ -1053,19 +1254,19 @@ lx_put_int(n: int, style: int) {
 
 // Whether the paragraph at llex[p] (to e) begins with a sense's number:
 // "1.", "1a)", "(a)", "b." and so on.
-sense_at(p: int, e: int): bool {
+sense_at(language: *LanguageData, p: int, e: int): bool {
     q: int = p;
-    if (q < e && llex[q] as int == 40) q = q + 1;
+    if (q < e && language.lexicon[q] as int == 40) q = q + 1;
     n: int = 0;
-    while (q < e && is_alnum(llex[q] as int) && n < 6) {
+    while (q < e && is_alnum(language.lexicon[q] as int) && n < 6) {
         q = q + 1;
         n = n + 1
     }
     if (n == 0 || q >= e) return false;
-    k: int = llex[q] as int;
+    k: int = language.lexicon[q] as int;
     if (k != 46 && k != 41) return false;
     // (A word, as "Of." or "Lit.", is not a number.)
-    first: int = llex[if (llex[p] as int == 40) p + 1 else p] as int;
+    first: int = language.lexicon[if (language.lexicon[p] as int == 40) p + 1 else p] as int;
     is_digit(first) || n == 1
 }
 
@@ -1108,76 +1309,77 @@ lx_label_left: int = 0;
 lx_stem_left: int = 0;
 
 // A paragraph begins at llex[q]: a sense, or an outline's line, or neither.
-lx_paragraph(q: int, e: int) {
+lx_paragraph(language: *LanguageData, q: int, e: int) {
     lx_label_left = 0;
     lx_stem_left = 0;
-    level: int = outline_at(llex, q, e);
+    level: int = outline_at(language.lexicon, q, e);
     if (level >= 0) {
         lx_cur_level = level + 1;
         lx_cur_sense = false;
         lx_label_left = ol_len;
         s: int = q + ol_len;
-        if (s < e && llex[s] as int == 32) lx_stem_left = stem_at(llex, s + 1, e)
+        if (s < e && language.lexicon[s] as int == 32) lx_stem_left = stem_at(language.lexicon,
+            s + 1, e)
     } else {
         lx_cur_level = 0;
-        lx_cur_sense = sense_at(q, e);
-        lx_stem_left = stem_at(llex, q, e)
+        lx_cur_sense = sense_at(language, q, e);
+        lx_stem_left = stem_at(language.lexicon, q, e)
     }
 }
 
-lex_markup(p: int, e: int) {
+lex_markup(language: *LanguageData, p: int, e: int) {
     lx_n = 0;
     lx_runs = 0;
     style: int = 0;
     script: int = 0;
     lx_ref_b = -1;
-    lx_paragraph(p, e);
+    lx_paragraph(language, p, e);
     q: int = p;
     while (q < e) {
-        k: int = byte_of(llex, q);
-        if (k == 92 && q + 1 < e && llex[q + 1] as int == 110) {
+        k: int = byte_of(language.lexicon, q);
+        if (k == 92 && q + 1 < e && language.lexicon[q + 1] as int == 110) {
             lx_put(10, style & 3 | script);
             q = q + 2;
-            lx_paragraph(q, e)
-        } else if (k == 42 && q + 1 < e && llex[q + 1] as int == 42) {
+            lx_paragraph(language, q, e)
+        } else if (k == 42 && q + 1 < e && language.lexicon[q + 1] as int == 42) {
             style = style ^ LX_BOLD;
             q = q + 2
         } else if (k == 95) {
             style = style ^ LX_ITALIC;
             q = q + 1
-        } else if (k == 91 && q + 1 < e && llex[q + 1] as int == 91) {
+        } else if (k == 91 && q + 1 < e && language.lexicon[q + 1] as int == 91) {
             // [[BOOK.C.V|text]]
             r: int = q + 2;
             bk: int = -1;
             for b in 0..books {
-                if (r + 3 <= e && bsb[book_line[b] + 1] == llex[r] && bsb[book_line[b] + 2] == llex[r + 1] && bsb[book_line[b] + 3] == llex[r + 2]) bk = b
+                if (r + 3 <= e && book_codes[b][0] == language.lexicon[r] && book_codes[b][1] == language.lexicon[r + 1] && book_codes[b][2] == language.lexicon[r + 2]) bk = b
             }
             r = r + 4;
             cn: int = 0;
-            while (r < e && is_digit(llex[r] as int)) {
-                cn = cn * 10 + llex[r] as int - 48;
+            while (r < e && is_digit(language.lexicon[r] as int)) {
+                cn = cn * 10 + language.lexicon[r] as int - 48;
                 r = r + 1
             }
             r = r + 1;
             vn: int = 0;
-            while (r < e && is_digit(llex[r] as int)) {
-                vn = vn * 10 + llex[r] as int - 48;
+            while (r < e && is_digit(language.lexicon[r] as int)) {
+                vn = vn * 10 + language.lexicon[r] as int - 48;
                 r = r + 1
             }
-            while (r < e && llex[r] as int != 124) r = r + 1;
+            while (r < e && language.lexicon[r] as int != 124) r = r + 1;
             r = r + 1;
             ve: int = r;
-            while (ve < e && !(llex[ve] as int == 93 && ve + 1 < e && llex[ve + 1] as int == 93)) ve = ve + 1;
+            while (ve < e && !(language.lexicon[ve] as int == 93 && ve + 1 < e && language.lexicon[ve + 1] as int == 93)) ve = ve + 1;
             lx_ref_b = bk;
             lx_ref_c = cn;
             lx_ref_v = vn;
-            if (bk >= 0) lx_ref(bk, cn, vn, r, ve, LX_REF | style & 3) else {
-                for x in r..ve lx_put(byte_of(llex, x), style & 3)
+            if (bk >= 0) lx_ref(language, bk, cn, vn, r, ve, LX_REF | style & 3) else {
+                for x in r..ve lx_put(byte_of(language.lexicon, x), style & 3)
             }
             lx_ref_b = -1;
             q = ve + 2
         } else {
-            k2: int = if (q + 1 < e) byte_of(llex, q + 1) else 0;
+            k2: int = if (q + 1 < e) byte_of(language.lexicon, q + 1) else 0;
             sc: int = script_of(k, k2);
             if (sc >= 0) script = sc;
             extra: int = 0;
@@ -1203,14 +1405,13 @@ rn_n: int = 0;
 
 ref_name(b: int) {
     rn_n = 0;
-    s: int = book_name_start(b);
-    e: int = book_name_end(b);
-    core: int = e - s;
-    if (core > 2 && is_digit(bsb[s] as int) && bsb[s + 1] as int == 32) core = core - 2;
+    name: str = book_name(b);
+    core: int = len(name);
+    if (core > 2 && is_digit(name[0] as int) && name[1] as int == 32) core = core - 2;
     if (core <= 5) {
-        for i in s..e {
+        for k in name {
             if (rn_n < len(rn)) {
-                rn[rn_n] = bsb[i];
+                rn[rn_n] = k;
                 rn_n = rn_n + 1
             }
         }
@@ -1224,11 +1425,11 @@ ref_name(b: int) {
 // A number at llex[i] (to e): its value; where it ends in num_at.
 num_at: int = 0;
 
-num_value(i: int, e: int): int {
+num_value(language: *LanguageData, i: int, e: int): int {
     n: int = 0;
     j: int = i;
-    while (j < e && is_digit(llex[j] as int)) {
-        n = n * 10 + llex[j] as int - 48;
+    while (j < e && is_digit(language.lexicon[j] as int)) {
+        n = n * 10 + language.lexicon[j] as int - 48;
         j = j + 1
     }
     num_at = j;
@@ -1236,10 +1437,11 @@ num_value(i: int, e: int): int {
 }
 
 // The length of a dash at llex[i] (- or an en or em dash), or 0.
-dash_at(i: int, e: int): int {
-    if (i < e && llex[i] as int == 45) return 1;
-    if (i + 2 < e && byte_of(llex, i) == 226 && byte_of(llex, i + 1) == 128 && (byte_of(llex,
-        i + 2) == 147 || byte_of(llex, i + 2) == 148)) return 3;
+dash_at(language: *LanguageData, i: int, e: int): int {
+    if (i < e && language.lexicon[i] as int == 45) return 1;
+    if (i + 2 < e && byte_of(language.lexicon, i) == 226 && byte_of(language.lexicon,
+        i + 1) == 128 && (byte_of(language.lexicon, i + 2) == 147 || byte_of(language.lexicon,
+        i + 2) == 148)) return 3;
     0
 }
 
@@ -1247,6 +1449,7 @@ dash_at(i: int, e: int): int {
 // 44", "II Tim 4:8, 10", "Ju 12") is llex[a] to e, put as the app gives
 // references: "Matt 5:43–44", "2 Tim 4:8, 10", "Jude 12".
 lx_ref(
+    language: *LanguageData,
     bk: int,
     c: int,
     v: int,
@@ -1266,13 +1469,13 @@ lx_ref(
     // The rest of STEP's text: after its first verse (past a ":" and its
     // digits, or else at the first comma).
     t: int = a;
-    while (t < e && llex[t] as int != 58) t = t + 1;
+    while (t < e && language.lexicon[t] as int != 58) t = t + 1;
     if (t < e) {
         t = t + 1;
-        while (t < e && is_digit(llex[t] as int)) t = t + 1
+        while (t < e && is_digit(language.lexicon[t] as int)) t = t + 1
     } else {
         t = a;
-        while (t < e && llex[t] as int != 44) t = t + 1
+        while (t < e && language.lexicon[t] as int != 44) t = t + 1
     }
     last_c: int = c;
     last_v: int = v;
@@ -1280,21 +1483,21 @@ lx_ref(
     run_to: int = -1;
     more: bool = true;
     while (more && t < e) {
-        k: int = llex[t] as int;
-        d: int = dash_at(t, e);
-        if (k == 32 || k == 44) t = t + 1 else if (d > 0 && t + d < e && is_digit(llex[t + d] as int)) {
-            m: int = num_value(t + d, e);
+        k: int = language.lexicon[t] as int;
+        d: int = dash_at(language, t, e);
+        if (k == 32 || k == 44) t = t + 1 else if (d > 0 && t + d < e && is_digit(language.lexicon[t + d] as int)) {
+            m: int = num_value(language, t + d, e);
             t = num_at;
             run_to = m;
             last_v = m
         } else if (is_digit(k)) {
-            n: int = num_value(t, e);
+            n: int = num_value(language, t, e);
             t = num_at;
             ic: int = last_c;
             iv: int = n;
-            if (t + 1 < e && llex[t] as int == 58 && is_digit(llex[t + 1] as int)) {
+            if (t + 1 < e && language.lexicon[t] as int == 58 && is_digit(language.lexicon[t + 1] as int)) {
                 ic = n;
-                iv = num_value(t + 1, e);
+                iv = num_value(language, t + 1, e);
                 t = num_at
             }
             if (ic == last_c && iv == last_v + 1) run_to = iv else {
@@ -1320,7 +1523,7 @@ lx_ref(
     }
     // (Whatever else there is, as it is.)
     if (t < e) lx_put(32, style);
-    for x in t..e lx_put(byte_of(llex, x), style)
+    for x in t..e lx_put(byte_of(language.lexicon, x), style)
 }
 
 // ---- a definition's first words ----
@@ -1348,25 +1551,25 @@ pv_sep() {
     }
 }
 
-definition_preview_of(p: int) {
+definition_preview_of(language: *LanguageData, p: int) {
     pv_n = 0;
-    n: int = lex_count(p);
+    n: int = lex_count(language, p);
     if (n == 0) return;
-    lex_field(p, 2);
+    lex_field(language, p, 2);
     pos_b: int = lf_b;
     pos_e: int = lf_e;
     outline: bool = false;
     for x in 0..n {
-        q: int = lex_line(p, x);
-        lex_field(q, 2);
+        q: int = lex_line(language, p, x);
+        lex_field(language, q, 2);
         same: bool = lf_e - lf_b == pos_e - pos_b;
         if (same) {
             for i in 0..lf_e - lf_b
-                if (llex[lf_b + i] != llex[pos_b + i]) same = false
+                if (language.lexicon[lf_b + i] != language.lexicon[pos_b + i]) same = false
         }
         if (same) {
-            lex_field(q, 4);
-            lex_markup(lf_b, lf_e);
+            lex_field(language, q, 4);
+            lex_markup(language, lf_b, lf_e);
             // Each paragraph: an outline's top line (past its label and
             // stem), or an entry's first paragraph if it has no outline.
             a: int = 0;
@@ -1401,8 +1604,8 @@ definition_preview_of(p: int) {
     }
     // No outline: the main entry's paragraphs run together, each after a
     // dash unless the one before ends a sentence ("God" — Another name of).
-    lex_field(p, 4);
-    lex_markup(lf_b, lf_e);
+    lex_field(language, p, 4);
+    lex_markup(language, lf_b, lf_e);
     for i in 0..lx_n {
         k: int = lx[i] as int;
         if (k == 10) {
@@ -1477,19 +1680,19 @@ lower(k: int): int {
 
 // The line of grammar.txt one of whose names is words a to b (of cw), or
 // -1.
-gram_find(a: int, b: int): int {
-    for g in 0..gram_n {
-        p: int = gram_at[g];
-        e: int = gram_at[g + 1];
-        if (p < e && lgram[p] as int != 35) {
+gram_find(language: *LanguageData, a: int, b: int): int {
+    for g in 0..language.gram_count {
+        p: int = language.gram_at[g];
+        e: int = language.gram_at[g + 1];
+        if (p < e && language.grammar[p] as int != 35) {
             // Each name, to | or the tab.
             q: int = p;
             more: bool = true;
             while (more && q < e) {
                 ne: int = q;
-                while (ne < e && lgram[ne] as int != 124 && lgram[ne] as int != 9) ne = ne + 1;
-                if (gram_name_is(q, ne, a, b)) return g;
-                if (ne < e && lgram[ne] as int == 124) q = ne + 1 else more = false
+                while (ne < e && language.grammar[ne] as int != 124 && language.grammar[ne] as int != 9) ne = ne + 1;
+                if (gram_name_is(language, q, ne, a, b)) return g;
+                if (ne < e && language.grammar[ne] as int == 124) q = ne + 1 else more = false
             }
         }
     }
@@ -1498,6 +1701,7 @@ gram_find(a: int, b: int): int {
 
 // Whether lgram[q..ne] is words a to b of cw (single spaces between).
 gram_name_is(
+    language: *LanguageData,
     q: int,
     ne: int,
     a: int,
@@ -1506,13 +1710,13 @@ gram_name_is(
     i: int = q;
     for w in a..b {
         if (w > a) {
-            if (i >= ne || lgram[i] as int != 32) return false;
+            if (i >= ne || language.grammar[i] as int != 32) return false;
             i = i + 1;
             // (" / " is a space, too.)
-            if (i + 1 < ne && lgram[i] as int == 47 && lgram[i + 1] as int == 32) i = i + 2
+            if (i + 1 < ne && language.grammar[i] as int == 47 && language.grammar[i + 1] as int == 32) i = i + 2
         }
         for x in cw_b[w]..cw_e[w] {
-            if (i >= ne || lower(lgram[i] as int) != cw[x] as int) return false;
+            if (i >= ne || lower(language.grammar[i] as int) != cw[x] as int) return false;
             i = i + 1
         }
     }
@@ -1528,14 +1732,14 @@ gx_b: int = 0;
 
 gx_e: int = 0;
 
-gram_parts(g: int) {
-    p: int = gram_at[g];
-    e: int = gram_at[g + 1] - 1;
+gram_parts(language: *LanguageData, g: int) {
+    p: int = language.gram_at[g];
+    e: int = language.gram_at[g + 1] - 1;
     q: int = p;
-    while (q < e && lgram[q] as int != 124 && lgram[q] as int != 9) q = q + 1;
+    while (q < e && language.grammar[q] as int != 124 && language.grammar[q] as int != 9) q = q + 1;
     gn_b = p;
     gn_e = q;
-    while (q < e && lgram[q] as int != 9) q = q + 1;
+    while (q < e && language.grammar[q] as int != 9) q = q + 1;
     gx_b = (if (q < e) q + 1 else e);
     gx_e = e
 }
@@ -1565,6 +1769,7 @@ pt_add(
 
 // The chunk of the description from a to b (in lmorph) as terms.
 chunk_terms(
+    language: *LanguageData,
     a: int,
     b: int,
     part: int,
@@ -1575,13 +1780,13 @@ chunk_terms(
     n: int = 0;
     i: int = a;
     while (i < b) {
-        k: int = lower(lmorph[i] as int);
+        k: int = lower(language.morph[i] as int);
         if (k == 32 || k == 45 || k == 47) i = i + 1 else {
             if (cw_n < len(cw_b)) {
                 cw_b[cw_n] = n;
-                while (i < b && lmorph[i] as int != 32 && lmorph[i] as int != 45 && lmorph[i] as int != 47) {
+                while (i < b && language.morph[i] as int != 32 && language.morph[i] as int != 45 && language.morph[i] as int != 47) {
                     if (n < len(cw)) {
-                        cw[n] = lower(lmorph[i] as int) trunc i8;
+                        cw[n] = lower(language.morph[i] as int) trunc i8;
                         n = n + 1
                     }
                     i = i + 1
@@ -1599,7 +1804,7 @@ chunk_terms(
         span: int = 4;
         while (span >= 1 && found < 0) {
             if (w + span <= cw_n) {
-                g: int = gram_find(w, w + span);
+                g: int = gram_find(language, w, w + span);
                 if (g >= 0) {
                     found = g;
                     upto = w + span
@@ -1608,8 +1813,8 @@ chunk_terms(
             span = span - 1
         }
         if (found >= 0) {
-            gram_parts(found);
-            pt_add(part, chunk, found, lgram, gn_b, gn_e);
+            gram_parts(language, found);
+            pt_add(part, chunk, found, language.grammar, gn_b, gn_e);
             w = upto
         } else {
             // (A word not known: kept, unless it is a stray code, as "cdc".)
@@ -1628,10 +1833,10 @@ part_starts: []int = new int[8](0);
 part_ends: []int = new int[8](0);
 
 // Parsing m as terms.
-parse_terms(m: int) {
+parse_terms(language: *LanguageData, m: int) {
     pt_n = 0;
     pt_buf_n = 0;
-    morph_of(m);
+    morph_of(language, m);
     // The parts, between " | ".
     starts: []int = part_starts;
     ends: []int = part_ends;
@@ -1639,7 +1844,7 @@ parse_terms(m: int) {
     p: int = md_b;
     i: int = md_b;
     while (i <= md_e) {
-        if (i == md_e || i + 2 < md_e && lmorph[i] as int == 32 && lmorph[i + 1] as int == 124 && lmorph[i + 2] as int == 32) {
+        if (i == md_e || i + 2 < md_e && language.morph[i] as int == 32 && language.morph[i + 1] as int == 124 && language.morph[i + 2] as int == 32) {
             if (np < len(starts)) {
                 starts[np] = p;
                 ends[np] = i;
@@ -1653,7 +1858,7 @@ parse_terms(m: int) {
     // The word's own part: the last that is not a suffix (a suffix begins
     // with a person: "first person common singular").
     word: int = np - 1;
-    if (np >= 2 && suffix_part(starts[np - 1], ends[np - 1])) word = np - 2;
+    if (np >= 2 && suffix_part(language, starts[np - 1], ends[np - 1])) word = np - 2;
     chunk: int = 0;
     for x in 0..np {
         part: int = if (x < word) 0 else if (x == word) 1 else 2;
@@ -1662,10 +1867,10 @@ parse_terms(m: int) {
         j: int = a;
         while (j <= ends[x]) {
             at_end: bool = j == ends[x];
-            dash: bool = !at_end && j + 2 < ends[x] && lmorph[j] as int == 32 && lmorph[j + 1] as int == 45 && lmorph[j + 2] as int == 32;
-            comma: bool = !at_end && j + 1 < ends[x] && lmorph[j] as int == 44 && lmorph[j + 1] as int == 32;
+            dash: bool = !at_end && j + 2 < ends[x] && language.morph[j] as int == 32 && language.morph[j + 1] as int == 45 && language.morph[j + 2] as int == 32;
+            comma: bool = !at_end && j + 1 < ends[x] && language.morph[j] as int == 44 && language.morph[j + 1] as int == 32;
             if (at_end || dash || comma) {
-                chunk_terms(a, j, part, chunk);
+                chunk_terms(language, a, j, part, chunk);
                 chunk = chunk + 1;
                 j = j + (if (dash) 3 else if (comma) 2 else 1);
                 a = j
@@ -1674,13 +1879,13 @@ parse_terms(m: int) {
     }
 }
 
-suffix_part(a: int, b: int): bool {
+suffix_part(language: *LanguageData, a: int, b: int): bool {
     for word in ["first person", "second person", "third person", "1st person", "2nd person",
         "3rd person"] {
         if (b - a >= len(word)) {
             same: bool = true;
             for i in 0..len(word)
-                if (lower(lmorph[a + i] as int) != word[i] as int) same = false;
+                if (lower(language.morph[a + i] as int) != word[i] as int) same = false;
             if (same) return true
         }
     }
@@ -1688,16 +1893,16 @@ suffix_part(a: int, b: int): bool {
 }
 
 // Whether term t is of person, gender or number (which run together).
-pgn(t: int): bool {
+pgn(language: *LanguageData, t: int): bool {
     g: int = pt_gram[t];
     if (g < 0) return false;
-    gram_parts(g);
+    gram_parts(language, g);
     for word in ["1st person", "2nd person", "3rd person", "singular", "plural", "dual",
         "masculine", "feminine", "neuter", "common"] {
         if (gn_e - gn_b == len(word)) {
             same: bool = true;
             for i in 0..len(word)
-                if (lgram[gn_b + i] != word[i]) same = false;
+                if (language.grammar[gn_b + i] != word[i]) same = false;
             if (same) return true
         }
     }
@@ -1717,8 +1922,8 @@ pl_add(k: int) {
     }
 }
 
-plain_parsing(m: int) {
-    parse_terms(m);
+plain_parsing(language: *LanguageData, m: int) {
+    parse_terms(language, m);
     pl_n = 0;
     for t in 0..pt_n {
         if (t > 0 && pt_part[t] != pt_part[t - 1]) {
@@ -1729,7 +1934,7 @@ plain_parsing(m: int) {
             if (pt_part[t] == 2)
                 for x in 0..7 pl_add("suffix "[x] as int)
         } else if (t > 0) {
-            if ((pgn(t) || is_construct(t)) && pgn(t - 1) && pt_chunk[t] == pt_chunk[t - 1]) pl_add(32) else {
+            if ((pgn(language, t) || is_construct(t)) && pgn(language, t - 1) && pt_chunk[t] == pt_chunk[t - 1]) pl_add(32) else {
                 // " · "
                 pl_add(32);
                 pl_add(194);
@@ -1845,18 +2050,10 @@ is_construct(t: int): bool {
 // xref_index.bin: where each verse's targets begin in xrefs.bin (4 bytes a
 // verse, in verses.bin's order, and one more); xrefs.bin: 4 bytes a target,
 // most votes first (tools/xrefs.py). Mapped at the first study.
-lxi: []i8 = new i8[1](0i8);
-
-lxi_n: int = 0;
-
-lxr: []i8 = new i8[1](0i8);
-
-lxr_n: int = 0;
-
 // How many targets verse vi has.
-xref_count(vi: int): int {
-    if (vi < 0 || vi + 1 >= lxi_n) return 0;
-    le32(lxi, vi * 4 + 4) - le32(lxi, vi * 4)
+xref_count(language: *LanguageData, vi: int): int {
+    if (vi < 0 || vi + 1 >= language.xref_index_count) return 0;
+    le32(language.xref_index, vi * 4 + 4) - le32(language.xref_index, vi * 4)
 }
 
 // Target i of verse vi, into xr_book and the rest (text.l8's reference):
@@ -1868,9 +2065,9 @@ xa_ce: int = 0;
 
 xa_tier: int = 0;
 
-xref_at(vi: int, i: int) {
-    k: int = le32(lxi, vi * 4) + i;
-    w: int = if (k * 4 + 4 <= lxr_n) le32(lxr, k * 4) else 0;
+xref_at(language: *LanguageData, vi: int, i: int) {
+    k: int = le32(language.xref_index, vi * 4) + i;
+    w: int = if (k * 4 + 4 <= language.xrefs_size) le32(language.xrefs, k * 4) else 0;
     c: int = w & 2047;
     v1: int = w >> 11 & 255;
     v2: int = w >> 19 & 255;
@@ -1895,31 +2092,22 @@ xref_at(vi: int, i: int) {
 // ---- Matthew Henry's Concise Commentary (DESIGN.md §9.7) ----
 // mhcc.txt (tools/mhcc.py): B a book, its introduction's p lines; C a
 // chapter; O its outline's lines; K a section (K3:1-3:21), its p lines.
-lmh: []i8 = new i8[1](0i8);
-
-lmh_n: int = 0;
-
-// Each chapter's C line in mhcc.txt (-1: none), made at first use.
-mh_ch: []int = new int[1200](-1);
-
-mh_ready: bool = false;
-
-mhcc_index() {
-    if (mh_ready) return;
-    mh_ready = true;
+// Each chapter's C line in mhcc.txt (lang_index's).
+mhcc_index(language: *LanguageData@new) {
+    language.commentary_chapter_at = new int[chapters](-1);
     b: int = -1;
     p: int = 0;
-    while (p < lmh_n) {
+    while (p < language.commentary_size) {
         e: int = p;
-        while (e < lmh_n && lmh[e] as int != 10) e = e + 1;
-        k: int = lmh[p] as int;
+        while (e < language.commentary_size && language.commentary[e] as int != 10) e = e + 1;
+        k: int = language.commentary[p] as int;
         if (k == 66) b = b + 1;
         if (k == 67 && b >= 0 && b < 66) {
             n: int = 0;
             for i in p + 1..e {
-                if (is_digit(lmh[i] as int)) n = n * 10 + lmh[i] as int - 48
+                if (is_digit(language.commentary[i] as int)) n = n * 10 + language.commentary[i] as int - 48
             }
-            if (n >= 1 && n <= book_count[b]) mh_ch[book_first[b] + n - 1] = p
+            if (n >= 1 && n <= book_count[b]) language.commentary_chapter_at[book_first[b] + n - 1] = p
         }
         p = e + 1
     }
@@ -1945,12 +2133,12 @@ mh_e: int = 0;
 // A K line's numbers at p (to e): c:v-c2:v2, into mh_c1 and the rest.
 mh_nums: []int = new int[4](0);
 
-mh_range(p: int, e: int) {
+mh_range(language: *LanguageData, p: int, e: int) {
     nums: []int = mh_nums;
     for i in 0..4 nums[i] = 0;
     j: int = 0;
     for i in p + 1..e {
-        k: int = lmh[i] as int;
+        k: int = language.commentary[i] as int;
         if (is_digit(k)) nums[j] = nums[j] * 10 + k - 48 else if (j < 3) j = j + 1
     }
     mh_c1 = nums[0];
@@ -1962,42 +2150,42 @@ mh_range(p: int, e: int) {
 // The section on verse v of chapter c: the one whose verses hold it, or
 // else the nearest before it in the chapter (or one from the chapter before
 // that runs into it). False if there is none.
-mhcc_section(c: int, v: int): bool {
-    mhcc_index();
+mhcc_section(language: *LanguageData, c: int, v: int): bool {
     mh_k = -1;
     if (c < 0 || c >= chapters) return false;
     n: int = ch_num[c];
     at: int = v;
     // (A section of the chapter before may run on into this one.)
-    from: int = if (c > 0 && ch_book[c - 1] == ch_book[c] && mh_ch[c - 1] >= 0) mh_ch[c - 1] else mh_ch[c];
+    chapter_at: []int = language.commentary_chapter_at;
+    from: int = if (c > 0 && ch_book[c - 1] == ch_book[c] && chapter_at[c - 1] >= 0) chapter_at[c - 1] else chapter_at[c];
     if (from < 0) return false;
     best: int = -1;
     p: int = from;
     past: bool = false;
-    while (p < lmh_n && !past) {
+    while (p < language.commentary_size && !past) {
         e: int = p;
-        while (e < lmh_n && lmh[e] as int != 10) e = e + 1;
-        k: int = lmh[p] as int;
-        if (k == 66 && p > from || k == 67 && p > mh_ch[c] && mh_ch[c] >= 0) past = true else if (k == 75) {
-            mh_range(p, e);
+        while (e < language.commentary_size && language.commentary[e] as int != 10) e = e + 1;
+        k: int = language.commentary[p] as int;
+        if (k == 66 && p > from || k == 67 && p > chapter_at[c] && chapter_at[c] >= 0) past = true else if (k == 75) {
+            mh_range(language, p, e);
             starts: bool = mh_c1 < n || mh_c1 == n && mh_v1 <= at;
             ends: bool = mh_c2 > n || mh_c2 == n && mh_v2 >= at;
-            if (starts && ends) best = p else if (starts && mh_c1 == n && (best < 0 || !mh_holds(best,
-                n, at))) best = p
+            if (starts && ends) best = p else if (starts && mh_c1 == n && (best < 0 || !mh_holds(language,
+                best, n, at))) best = p
         }
         p = e + 1
     }
     if (best < 0) return false;
     e: int = best;
-    while (e < lmh_n && lmh[e] as int != 10) e = e + 1;
-    mh_range(best, e);
+    while (e < language.commentary_size && language.commentary[e] as int != 10) e = e + 1;
+    mh_range(language, best, e);
     mh_k = best;
     mh_p = e + 1;
     q: int = mh_p;
     more: bool = true;
-    while (q < lmh_n && more) {
-        if (lmh[q] as int != 112) more = false else {
-            while (q < lmh_n && lmh[q] as int != 10) q = q + 1;
+    while (q < language.commentary_size && more) {
+        if (language.commentary[q] as int != 112) more = false else {
+            while (q < language.commentary_size && language.commentary[q] as int != 10) q = q + 1;
             q = q + 1
         }
     }
@@ -2006,10 +2194,15 @@ mhcc_section(c: int, v: int): bool {
 }
 
 // Whether the K line at p holds verse at of chapter n.
-mh_holds(p: int, n: int, at: int): bool {
+mh_holds(
+    language: *LanguageData,
+    p: int,
+    n: int,
+    at: int
+): bool {
     e: int = p;
-    while (e < lmh_n && lmh[e] as int != 10) e = e + 1;
-    mh_range(p, e);
+    while (e < language.commentary_size && language.commentary[e] as int != 10) e = e + 1;
+    mh_range(language, p, e);
     (mh_c1 < n || mh_c1 == n && mh_v1 <= at) && (mh_c2 > n || mh_c2 == n && mh_v2 >= at)
 }
 
@@ -2053,48 +2246,48 @@ mo_put(k: int, kind: int, ref: int) {
 }
 
 // The number at lmh[i] (to e): its value; where it ends in num_at.
-mh_num(i: int, e: int): int {
+mh_num(language: *LanguageData, i: int, e: int): int {
     n: int = 0;
     j: int = i;
-    while (j < e && is_digit(lmh[j] as int)) {
-        n = n * 10 + lmh[j] as int - 48;
+    while (j < e && is_digit(language.commentary[j] as int)) {
+        n = n * 10 + language.commentary[j] as int - 48;
         j = j + 1
     }
     num_at = j;
     n
 }
 
-mh_markup(p: int, e: int) {
+mh_markup(language: *LanguageData, p: int, e: int) {
     mo_n = 0;
     mo_runs = 0;
     italic: bool = false;
     q: int = p;
     while (q < e) {
-        k: int = byte_of(lmh, q);
+        k: int = byte_of(language.commentary, q);
         if (k == 95) {
             italic = !italic;
             q = q + 1
-        } else if (k == 91 && q + 1 < e && lmh[q + 1] as int == 91) {
+        } else if (k == 91 && q + 1 < e && language.commentary[q + 1] as int == 91) {
             // [[BOOK.C.V(-C2.V2)|text]]
             r: int = q + 2;
             bk: int = -1;
             for b in 0..books {
-                if (r + 3 <= e && bsb[book_line[b] + 1] == lmh[r] && bsb[book_line[b] + 2] == lmh[r + 1] && bsb[book_line[b] + 3] == lmh[r + 2]) bk = b
+                if (r + 3 <= e && book_codes[b][0] == language.commentary[r] && book_codes[b][1] == language.commentary[r + 1] && book_codes[b][2] == language.commentary[r + 2]) bk = b
             }
-            cn: int = mh_num(r + 4, e);
-            vn: int = mh_num(num_at + 1, e);
+            cn: int = mh_num(language, r + 4, e);
+            vn: int = mh_num(language, num_at + 1, e);
             r = num_at;
             ce: int = 0;
             ve: int = 0;
-            if (r < e && lmh[r] as int == 45) {
-                ce = mh_num(r + 1, e);
-                ve = mh_num(num_at + 1, e);
+            if (r < e && language.commentary[r] as int == 45) {
+                ce = mh_num(language, r + 1, e);
+                ve = mh_num(language, num_at + 1, e);
                 r = num_at
             }
-            while (r < e && lmh[r] as int != 124) r = r + 1;
+            while (r < e && language.commentary[r] as int != 124) r = r + 1;
             r = r + 1;
             z: int = r;
-            while (z + 1 < e && !(lmh[z] as int == 93 && lmh[z + 1] as int == 93)) z = z + 1;
+            while (z + 1 < e && !(language.commentary[z] as int == 93 && language.commentary[z + 1] as int == 93)) z = z + 1;
             ref: int = 0;
             if (bk >= 0 && cn >= 1 && cn <= book_count[bk]) {
                 xr_book = bk;
@@ -2106,7 +2299,7 @@ mh_markup(p: int, e: int) {
             }
             // (A run of its own, even beside another reference.)
             mo_split = true;
-            for x in r..z mo_put(byte_of(lmh, x), if (ref != 0) MH_REF else MH_PLAIN,
+            for x in r..z mo_put(byte_of(language.commentary, x), if (ref != 0) MH_REF else MH_PLAIN,
                 ref);
             mo_split = true;
             q = z + 2
@@ -2120,15 +2313,20 @@ mh_markup(p: int, e: int) {
 // ---- exact senses (DESIGN.md §10.3) ----
 // Word w's sense: k for the k-th entry under its number in lexicon.txt
 // (from 1), 0 if not known.
-w_sense(w: int): int {
-    if (w < 0 || w >= lsen_n) 0 else byte_of(lsen, w)
+w_sense(language: *LanguageData, w: int): int {
+    if (w < 0 || w >= language.senses_size) 0 else byte_of(language.senses, w)
 }
 
 // Entry k (from 1) of a number's, or -1.
-sense_entry(greek: bool, num: int, k: int): int {
-    p: int = lex_first(greek, num);
-    if (p < 0 || k < 1 || k > lex_count(p)) return -1;
-    lex_line(p, k - 1)
+sense_entry(
+    language: *LanguageData,
+    greek: bool,
+    num: int,
+    k: int
+): int {
+    p: int = lex_first(language, greek, num);
+    if (p < 0 || k < 1 || k > lex_count(language, p)) return -1;
+    lex_line(language, p, k - 1)
 }
 
 // The entry whose gloss a word of sense k shows as its Meaning (review
@@ -2136,21 +2334,26 @@ sense_entry(greek: bool, num: int, k: int): int {
 // entries share (three people named Anah), when the sense isn't known; and
 // -1 when it isn't known and the entries differ, so that no particular
 // sense's meaning is shown.
-meaning_entry(greek: bool, num: int, k: int): int {
-    e: int = sense_entry(greek, num, k);
+meaning_entry(
+    language: *LanguageData,
+    greek: bool,
+    num: int,
+    k: int
+): int {
+    e: int = sense_entry(language, greek, num, k);
     if (e >= 0) return e;
-    p: int = lex_first(greek, num);
-    n: int = lex_count(p);
+    p: int = lex_first(language, greek, num);
+    n: int = lex_count(language, p);
     if (n == 0) return -1;
     if (n == 1) return p;
-    lex_field(p, 3);
+    lex_field(language, p, 3);
     b: int = lf_b;
     len_: int = lf_e - lf_b;
     for x in 1..n {
-        lex_field(lex_line(p, x), 3);
+        lex_field(language, lex_line(language, p, x), 3);
         if (lf_e - lf_b != len_) return -1;
         for i in 0..len_
-            if (llex[lf_b + i] != llex[b + i]) return -1
+            if (language.lexicon[lf_b + i] != language.lexicon[b + i]) return -1
     }
     p
 }
@@ -2160,15 +2363,15 @@ meaning_entry(greek: bool, num: int, k: int): int {
 // how many senses are in use.
 sn_count: []int = new int[256](0);
 
-senses_in_use(): int {
+senses_in_use(language: *LanguageData): int {
     for k in 0..len(sn_count) sn_count[k] = 0;
     was: int = cc_sense;
     cc_sense = 0;
     for x in 0..cc_n {
         vi: int = cc_vi[x];
-        for w in v_first(vi)..v_end(vi) {
-            if (is_cc(w)) {
-                k: int = w_sense(w);
+        for w in v_first(language, vi)..v_end(language, vi) {
+            if (is_cc(language, w)) {
+                k: int = w_sense(language, w);
                 sn_count[k] = sn_count[k] + 1
             }
         }
@@ -2182,15 +2385,15 @@ senses_in_use(): int {
 
 // The verses loaded, kept only where the number is of sense k (and how
 // many times it is, in cc_words); is_cc from now on that sense's.
-conc_sense(k: int) {
+conc_sense(language: *LanguageData, k: int) {
     cc_sense = k;
     n: int = 0;
     words: int = 0;
     for x in 0..cc_n {
         vi: int = cc_vi[x];
         here: int = 0;
-        for w in v_first(vi)..v_end(vi)
-            if (is_cc(w)) here = here + 1;
+        for w in v_first(language, vi)..v_end(language, vi)
+            if (is_cc(language, w)) here = here + 1;
         if (here > 0) {
             cc_vi[n] = vi;
             n = n + 1;
@@ -2212,27 +2415,27 @@ rl_num: []int = new int[32](0);
 
 rl_dist: []int = new int[32](0);
 
-related_load(greek: bool, num: int) {
+related_load(language: *LanguageData, greek: bool, num: int) {
     rl_n = 0;
-    if (!lang_ready || num <= 0 || num >= STRONGS_MAX) return;
-    p: int = if (greek) rel_g[num] else rel_h[num];
+    if (!language.ready || num <= 0 || num >= STRONGS_MAX) return;
+    p: int = if (greek) language.related_greek[num] else language.related_hebrew[num];
     if (p < 0) return;
-    n: int = byte_of(lrel, p);
+    n: int = byte_of(language.related, p);
     for i in 0..n {
         q: int = p + 1 + 3 * i;
-        if (q + 2 < lrel_n && rl_n < len(rl_num)) {
-            x: int = le16(lrel, q);
+        if (q + 2 < language.related_size && rl_n < len(rl_num)) {
+            x: int = le16(language.related, q);
             rl_greek[rl_n] = (x & 32768) != 0;
             rl_num[rl_n] = x & 32767;
-            rl_dist[rl_n] = byte_of(lrel, q + 2);
+            rl_dist[rl_n] = byte_of(language.related, q + 2);
             rl_n = rl_n + 1
         }
     }
 }
 
 // How many times a number occurs (every sense).
-occurrences(greek: bool, num: int): int {
-    if (!conc_load(greek, num)) return 0;
+occurrences(language: *LanguageData, greek: bool, num: int): int {
+    if (!conc_load(language, greek, num)) return 0;
     cc_words
 }
 
@@ -2436,11 +2639,11 @@ pe_e: int = 0;
 pm_prefixed: bool = false;
 
 // Whether lmorph[a..b] is a person-gender-number ending (3ms, 1cp).
-pgn_at(a: int, b: int): bool {
+pgn_at(language: *LanguageData, a: int, b: int): bool {
     if (b - a != 3) return false;
-    p: int = lmorph[a] as int;
-    g: int = lmorph[a + 1] as int;
-    n: int = lmorph[a + 2] as int;
+    p: int = language.morph[a] as int;
+    g: int = language.morph[a + 1] as int;
+    n: int = language.morph[a + 2] as int;
     p >= 49 && p <= 51 && (g == 109 || g == 102 || g == 99) && (n == 115 || n == 112)
 }
 
@@ -2450,12 +2653,17 @@ sp_b: int = 0;
 
 sp_e: int = 0;
 
-split_part(a: int, b: int, k: int): bool {
+split_part(
+    language: *LanguageData,
+    a: int,
+    b: int,
+    k: int
+): bool {
     i: int = a;
     n: int = 0;
     start: int = a;
     while (i <= b) {
-        bar: bool = i + 2 < b && lmorph[i] as int == 32 && lmorph[i + 1] as int == 124 && lmorph[i + 2] as int == 32;
+        bar: bool = i + 2 < b && language.morph[i] as int == 32 && language.morph[i + 1] as int == 124 && language.morph[i + 2] as int == 32;
         if (i == b || bar) {
             if (n == k) {
                 sp_b = start;
@@ -2470,23 +2678,24 @@ split_part(a: int, b: int, k: int): bool {
     false
 }
 
-parse_parts(m: int) {
-    morph_of(m);
+parse_parts(language: *LanguageData, m: int) {
+    morph_of(language, m);
     np: int = 0;
-    while (split_part(mc_b, mc_e, np)) np = np + 1;
+    while (split_part(language, mc_b, mc_e, np)) np = np + 1;
     main: int = np - 1;
-    while (main > 0 && split_part(mc_b, mc_e, main) && pgn_at(sp_b, sp_e)) main = main - 1;
-    _a: bool = split_part(mc_b, mc_e, main);
+    while (main > 0 && split_part(language, mc_b, mc_e, main) && pgn_at(language,
+        sp_b, sp_e)) main = main - 1;
+    _a: bool = split_part(language, mc_b, mc_e, main);
     pm_b = sp_b;
     pm_e = sp_e;
     pm_prefixed = main > 0;
     pe_b = 0;
     pe_e = 0;
-    if (main + 1 < np && split_part(mc_b, mc_e, main + 1)) {
+    if (main + 1 < np && split_part(language, mc_b, mc_e, main + 1)) {
         pe_b = sp_b;
         pe_e = sp_e
     }
-    _d: bool = split_part(md_b, md_e, main);
+    _d: bool = split_part(language, md_b, md_e, main);
     // (The description's parts are as many as the code's.)
     pd_b = sp_b;
     pd_e = sp_e;
@@ -2497,6 +2706,7 @@ parse_parts(m: int) {
 }
 
 same_bytes(
+    language: *LanguageData,
     a: int,
     b: int,
     c: int,
@@ -2504,16 +2714,16 @@ same_bytes(
 ): bool {
     if (b - a != d - c) return false;
     for i in 0..b - a
-        if (lmorph[a + i] != lmorph[c + i]) return false;
+        if (language.morph[a + i] != language.morph[c + i]) return false;
     true
 }
 
 // The parsing of morph line m (found or added): its index, or -1.
-fo_group(m: int): int {
-    parse_parts(m);
+fo_group(language: *LanguageData, m: int): int {
+    parse_parts(language, m);
     for g in 0..fo_n
-        if (same_bytes(fo_code_b[g], fo_code_e[g], pm_b, pm_e) && same_bytes(fo_end_b[g],
-            fo_end_e[g], pe_b, pe_e)) return g;
+        if (same_bytes(language, fo_code_b[g], fo_code_e[g], pm_b, pm_e) && same_bytes(language,
+            fo_end_b[g], fo_end_e[g], pe_b, pe_e)) return g;
     if (fo_n >= FO_MOST) return -1;
     g: int = fo_n;
     fo_code_b[g] = pm_b;
@@ -2531,21 +2741,21 @@ fo_group(m: int): int {
     g
 }
 
-forms_of(greek: bool, num: int) {
+forms_of(language: *LanguageData, greek: bool, num: int) {
     fo_n = 0;
     fp_n = 0;
     fo_total = 0;
     fo_greek = greek;
     fo_num = num;
-    if (!conc_load(greek, num)) return;
+    if (!conc_load(language, greek, num)) return;
     for x in 0..cc_n {
         vi: int = cc_vi[x];
-        for w in v_first(vi)..v_end(vi) {
-            if (w_strongs(w) == num && w_greek(w) == greek) {
-                g: int = fo_group(w_morph(w));
+        for w in v_first(language, vi)..v_end(language, vi) {
+            if (w_strongs(language, w) == num && w_greek(language, w) == greek) {
+                g: int = fo_group(language, w_morph(language, w));
                 if (g >= 0) {
                     plain: bool = !pm_prefixed;
-                    f: int = w_form(w);
+                    f: int = w_form(language, w);
                     p: int = -1;
                     for q in 0..fp_n
                         if (fp_g[q] == g && fp_form[q] == f) p = q;
@@ -2613,23 +2823,24 @@ fx_pool_n: int = 0;
 
 fo_rend: []int = new int[1024](-1);
 
-forms_renderings() {
+forms_renderings(language: *LanguageData) {
     fx_n = 0;
     fx_pool_n = 0;
     for g in 0..fo_n fo_rend[g] = -1;
-    if (fo_n == 0 || !conc_load(fo_greek, fo_num)) return;
+    if (fo_n == 0 || !conc_load(language, fo_greek, fo_num)) return;
     for x in 0..cc_n {
         vi: int = cc_vi[x];
         loaded: bool = false;
-        for w in v_first(vi)..v_end(vi) {
-            if (w_strongs(w) == fo_num && w_greek(w) == fo_greek && w_ntok(w) > 0) {
-                g: int = fo_group(w_morph(w));
+        for w in v_first(language, vi)..v_end(language, vi) {
+            if (w_strongs(language, w) == fo_num && w_greek(language, w) == fo_greek && w_ntok(language,
+                w) > 0) {
+                g: int = fo_group(language, w_morph(language, w));
                 if (g >= 0) {
                     if (!loaded) {
-                        study_load(vi);
+                        study_load(language, vi);
                         loaded = true
                     }
-                    rendering_of(w);
+                    rendering_of(language, w);
                     up: bool = ch_e > ch_b && st[ch_b] as int >= 65 && st[ch_b] as int <= 90;
                     first: bool = sentence_first(ch_b);
                     p: int = fx_find(g);
@@ -2691,23 +2902,24 @@ fx_find(g: int): int {
 
 // Whether word w is of parsing g (its main part and ending), for the
 // concordance a form's tap opens.
-fo_is(w: int, g: int): bool {
-    if (g < 0 || g >= fo_n || w_strongs(w) != fo_num || w_greek(w) != fo_greek) return false;
-    parse_parts(w_morph(w));
-    same_bytes(fo_code_b[g], fo_code_e[g], pm_b, pm_e) && same_bytes(fo_end_b[g],
-        fo_end_e[g], pe_b, pe_e)
+fo_is(language: *LanguageData, w: int, g: int): bool {
+    if (g < 0 || g >= fo_n || w_strongs(language, w) != fo_num || w_greek(language,
+        w) != fo_greek) return false;
+    parse_parts(language, w_morph(language, w));
+    same_bytes(language, fo_code_b[g], fo_code_e[g], pm_b, pm_e) && same_bytes(language,
+        fo_end_b[g], fo_end_e[g], pe_b, pe_e)
 }
 
 // The verses loaded (conc_load), kept only where the lemma is of parsing
 // g (and how many times, cc_words).
-conc_of_form(g: int) {
+conc_of_form(language: *LanguageData, g: int) {
     n: int = 0;
     words: int = 0;
     for x in 0..cc_n {
         vi: int = cc_vi[x];
         here: int = 0;
-        for w in v_first(vi)..v_end(vi)
-            if (fo_is(w, g)) here = here + 1;
+        for w in v_first(language, vi)..v_end(language, vi)
+            if (fo_is(language, w, g)) here = here + 1;
         if (here > 0) {
             cc_vi[n] = vi;
             n = n + 1;
@@ -2773,10 +2985,10 @@ fs_put_str(s: str) {
 
 // lmorph[a..b] put, each word capitalized ("consecutive imperfect":
 // "Consecutive Imperfect").
-fs_put_title(a: int, b: int) {
+fs_put_title(language: *LanguageData, a: int, b: int) {
     cap: bool = true;
     for i in a..b {
-        k: int = lmorph[i] as int;
+        k: int = language.morph[i] as int;
         if (cap && k >= 97 && k <= 122) k = k - 32;
         cap = k == 32;
         fs_put(k)
@@ -2784,20 +2996,20 @@ fs_put_title(a: int, b: int) {
 }
 
 // The letter at i of the main code (0 past it).
-pc(i: int): int {
-    if (pm_b + i < pm_e) lmorph[pm_b + i] as int else 0
+pc(language: *LanguageData, i: int): int {
+    if (pm_b + i < pm_e) language.morph[pm_b + i] as int else 0
 }
 
 // Where the main code's k-th "-" separated field begins (-1: none), and
 // its length (pf_len).
 pf_len: int = 0;
 
-pf_at(k: int): int {
+pf_at(language: *LanguageData, k: int): int {
     i: int = pm_b;
     n: int = 0;
     start: int = pm_b;
     while (i <= pm_e) {
-        if (i == pm_e || lmorph[i] as int == 45) {
+        if (i == pm_e || language.morph[i] as int == 45) {
             if (n == k) {
                 pf_len = i - start;
                 return start
@@ -2844,11 +3056,11 @@ person_names: []str = ["1st person", "2nd person", "3rd person"];
 
 // A Greek verb's voice, from the code's letters after the tense and mood
 // (A, M, M/P, P): 0 to 3, or -1.
-greek_voice(at: int, n: int): int {
-    if (n == 1 && lmorph[at] as int == 65) return 0;
-    if (n == 1 && lmorph[at] as int == 77) return 1;
-    if (n == 3 && lmorph[at] as int == 77) return 2;
-    if (n == 1 && lmorph[at] as int == 80) return 3;
+greek_voice(language: *LanguageData, at: int, n: int): int {
+    if (n == 1 && language.morph[at] as int == 65) return 0;
+    if (n == 1 && language.morph[at] as int == 77) return 1;
+    if (n == 3 && language.morph[at] as int == 77) return 2;
+    if (n == 1 && language.morph[at] as int == 80) return 3;
     -1
 }
 
@@ -2856,7 +3068,7 @@ greek_voice(at: int, n: int): int {
 // title_b) when it begins one.
 title_b: int = 0;
 
-pg_place(g: int) {
+pg_place(language: *LanguageData, g: int) {
     pg_family = -1;
     pg_col = -1;
     pg_row = 0;
@@ -2864,13 +3076,13 @@ pg_place(g: int) {
     pm_e = fo_code_e[g];
     title_b = fs_pool_n;
     if (fo_greek) {
-        if (pc(0) == 86 && pc(1) == 45) {
+        if (pc(language, 0) == 86 && pc(language, 1) == 45) {
             // V-AIA-3S, V-PPA-NMS, V-ANA.
-            at: int = pf_at(1);
+            at: int = pf_at(language, 1);
             if (at < 0 || pf_len < 3) return;
-            t: int = fs_letter_index("PIFARL", lmorph[at] as int);
-            mood: int = lmorph[at + 1] as int;
-            voice: int = greek_voice(at + 2, pf_len - 2);
+            t: int = fs_letter_index("PIFARL", language.morph[at] as int);
+            mood: int = language.morph[at + 1] as int;
+            voice: int = greek_voice(language, at + 2, pf_len - 2);
             if (t < 0 || voice < 0) return;
             pg_family = 0;
             if (mood == 78 || mood == 80) {
@@ -2888,23 +3100,23 @@ pg_place(g: int) {
             fs_put_str(greek_voices[voice]);
             fs_put(32);
             fs_put_str(greek_moods[md]);
-            p: int = pf_at(2);
+            p: int = pf_at(language, 2);
             if (p < 0 || pf_len != 2) return;
-            person: int = lmorph[p] as int - 49;
+            person: int = language.morph[p] as int - 49;
             if (person < 0 || person > 2) return;
             pg_row = person;
-            pg_col = (if (lmorph[p + 1] as int == 80) 1 else 0);
+            pg_col = (if (language.morph[p + 1] as int == 80) 1 else 0);
             return
         }
         // Art-NMS, N-GFP, Adj-AMS, PPro-GM3S, PPro-N1S, RelPro-NMS.
-        at: int = pf_at(1);
+        at: int = pf_at(language, 1);
         if (at < 0 || pf_len < 2) return;
-        cs: int = fs_letter_index("NGDAV", lmorph[at] as int);
+        cs: int = fs_letter_index("NGDAV", language.morph[at] as int);
         if (cs < 0) return;
         gender: int = -1;
-        nb: int = lmorph[at + pf_len - 1] as int;
+        nb: int = language.morph[at + pf_len - 1] as int;
         for i in 1..pf_len - 1 {
-            x: int = fs_letter_index("MFN", lmorph[at + i] as int);
+            x: int = fs_letter_index("MFN", language.morph[at + i] as int);
             if (x >= 0) gender = x
         }
         if (nb != 83 && nb != 80) return;
@@ -2917,46 +3129,47 @@ pg_place(g: int) {
     }
     // Hebrew: V-Qal-Perf-3ms, V-Qal-Imp-ms, V-Qal-Inf, V-Qal-Prtcpl-msc;
     // N-ms, N-fpc, Adj-ms.
-    if (pc(0) == 86 && pc(1) == 45) {
-        s: int = pf_at(1);
+    if (pc(language, 0) == 86 && pc(language, 1) == 45) {
+        s: int = pf_at(language, 1);
         stem_n: int = pf_len;
-        c: int = pf_at(2);
+        c: int = pf_at(language, 2);
         if (s < 0 || c < 0) return;
         pg_family = 2;
-        stem: int = heb_stem_order(s, stem_n);
-        conj: int = heb_conj_order(c, pf_len);
+        stem: int = heb_stem_order(language, s, stem_n);
+        conj: int = heb_conj_order(language, c, pf_len);
         // (The description's stem and conjugation as the title: "Qal
         // Consecutive Imperfect".)
-        fs_put_desc_title(g);
+        fs_put_desc_title(language, g);
         if (conj >= 7) {
             pg_section = 9000 + stem * 10 + conj;
             pg_row = 0;
             return
         }
         pg_section = stem * 10 + conj;
-        p: int = pf_at(3);
+        p: int = pf_at(language, 3);
         if (p < 0) return;
         // (3ms; or an imperative's ms, the 2nd person.)
         person: int = 1;
         q: int = p;
         if (pf_len == 3) {
-            person = lmorph[p] as int - 49;
+            person = language.morph[p] as int - 49;
             q = p + 1
         } else if (pf_len != 2) return;
-        gd: int = fs_letter_index("mfc", lmorph[q] as int);
+        gd: int = fs_letter_index("mfc", language.morph[q] as int);
         if (person < 0 || person > 2 || gd < 0) return;
         // (3rd, then 2nd, then 1st; masculine, feminine, common.)
         pg_row = (2 - person) * 3 + gd;
-        pg_col = (if (lmorph[q + 1] as int == 112) 1 else if (lmorph[q + 1] as int == 100) 2 else 0);
+        pg_col = (if (language.morph[q + 1] as int == 112) 1 else if (language.morph[q + 1] as int == 100) 2 else 0);
         if (pg_col == 2) pg_col = 1;
         return
     }
-    if (pc(0) == 78 && pc(1) == 45 || pc(0) == 65 && pc(1) == 100 && pc(2) == 106) {
-        at: int = pf_at(1);
+    if (pc(language, 0) == 78 && pc(language, 1) == 45 || pc(language, 0) == 65 && pc(language,
+        1) == 100 && pc(language, 2) == 106) {
+        at: int = pf_at(language, 1);
         if (at < 0 || pf_len < 2) return;
-        nb: int = fs_letter_index("spd", lmorph[at + 1] as int);
+        nb: int = fs_letter_index("spd", language.morph[at + 1] as int);
         if (nb < 0) return;
-        construct: bool = pf_len >= 3 && lmorph[at + 2] as int == 99;
+        construct: bool = pf_len >= 3 && language.morph[at + 2] as int == 99;
         pg_family = 3;
         if (fo_end_e[g] > fo_end_b[g]) {
             pg_section = 9500;
@@ -2973,13 +3186,13 @@ pg_place(g: int) {
 
 heb_stems: []str = ["Qal", "Nifal", "Piel", "Pual", "Hifil", "Hofal", "Hitpael", "QalPass"];
 
-heb_stem_order(a: int, n: int): int {
+heb_stem_order(language: *LanguageData, a: int, n: int): int {
     for i in 0..len(heb_stems) {
         s: str = heb_stems[i];
         if (len(s) == n) {
             same: bool = true;
             for x in 0..n
-                if (lmorph[a + x] != s[x]) same = false;
+                if (language.morph[a + x] != s[x]) same = false;
             if (same) return i
         }
     }
@@ -2989,14 +3202,14 @@ heb_stem_order(a: int, n: int): int {
 // Perfect, Imperfect, Consecutive Imperfect, Consecutive Perfect, Jussive
 // and Cohortative (as Imperfect's), Imperative; then (7 on) the lists:
 // infinitives and participles.
-heb_conj_order(a: int, n: int): int {
-    k0: int = lmorph[a] as int;
-    k1: int = if (n > 1) lmorph[a + 1] as int else 0;
-    if (n >= 3 && k0 == 73 && k1 == 110 && lmorph[a + 2] as int == 102) return 7;
+heb_conj_order(language: *LanguageData, a: int, n: int): int {
+    k0: int = language.morph[a] as int;
+    k1: int = if (n > 1) language.morph[a + 1] as int else 0;
+    if (n >= 3 && k0 == 73 && k1 == 110 && language.morph[a + 2] as int == 102) return 7;
     for i in 0..n
-        if (i + 6 <= n && lmorph[a + i] as int == 80 && lmorph[a + i + 1] as int == 114 && lmorph[a + i + 2] as int == 116) return 8;
-    if (n >= 11 && k0 == 67 && lmorph[a + 4] as int == 101 && lmorph[a + 5] as int == 99 && lmorph[a + 6] as int == 73) return 2;
-    if (n >= 10 && k0 == 67 && lmorph[a + 4] as int == 101 && lmorph[a + 5] as int == 99 && lmorph[a + 6] as int == 80) return 3;
+        if (i + 6 <= n && language.morph[a + i] as int == 80 && language.morph[a + i + 1] as int == 114 && language.morph[a + i + 2] as int == 116) return 8;
+    if (n >= 11 && k0 == 67 && language.morph[a + 4] as int == 101 && language.morph[a + 5] as int == 99 && language.morph[a + 6] as int == 73) return 2;
+    if (n >= 10 && k0 == 67 && language.morph[a + 4] as int == 101 && language.morph[a + 5] as int == 99 && language.morph[a + 6] as int == 80) return 3;
     if (k0 == 80) return 0;
     if (k0 == 73 && k1 == 109 && n == 3) return 6;
     if (k0 == 73) return 1;
@@ -3006,7 +3219,7 @@ heb_conj_order(a: int, n: int): int {
 
 // The description's stem and conjugation as a title (a Hebrew verb's:
 // "Verb - Qal - Consecutive imperfect - …": "Qal Consecutive Imperfect").
-fs_put_desc_title(g: int) {
+fs_put_desc_title(language: *LanguageData, g: int) {
     a: int = fo_desc_b[g];
     b: int = fo_desc_e[g];
     // (Its second and third " - " fields.)
@@ -3014,11 +3227,11 @@ fs_put_desc_title(g: int) {
     i: int = a;
     start: int = a;
     while (i <= b) {
-        dash: bool = i + 2 < b && lmorph[i] as int == 32 && lmorph[i + 1] as int == 45 && lmorph[i + 2] as int == 32;
+        dash: bool = i + 2 < b && language.morph[i] as int == 32 && language.morph[i + 1] as int == 45 && language.morph[i + 2] as int == 32;
         if (i == b || dash) {
             if (k == 1 || k == 2) {
                 if (k == 2) fs_put(32);
-                fs_put_title(start, i)
+                fs_put_title(language, start, i)
             }
             k = k + 1;
             i = i + 3;
@@ -3029,7 +3242,7 @@ fs_put_desc_title(g: int) {
 
 // The forms of the lemma loaded (forms_of) as sections, each sorted by
 // its key, its rows by theirs.
-forms_layout() {
+forms_layout(language: *LanguageData) {
     fs_n = 0;
     fr_n = 0;
     fs_pool_n = 0;
@@ -3048,7 +3261,7 @@ forms_layout() {
     }
     for x in 0..fo_n {
         g: int = order[x];
-        pg_place(g);
+        pg_place(language, g);
         if (pg_family >= 0) fl_add(g)
     }
     // Sections by key; rows by key, a grid's in order.
@@ -3167,30 +3380,18 @@ fs_row_at(s: int, k: int): int {
 // meanings.txt, from 1; 0 none known); meanings.txt: L CODE DOMAIN
 // SUBDOMAIN DEFINITION GLOSSES STRONGS a line, after the credit's
 // (tools/ubs.py). Given by the platform at first use.
-lmean: []i8 = new i8[1](0i8);
-
-lmean_n: int = 0;
-
-lmeant: []i8 = new i8[1](0i8);
-
-lmeant_n: int = 0;
-
-MEANS_MOST: int = 30000;
-
-mean_at: []int = new int[30001](0);
-
-mean_n: int = 0;
-
 // Where each meaning's line begins (mean_at[k] for meaning k; the credit's
 // line is 0).
-mean_index() {
-    mean_n = line_starts(lmeant, lmeant_n, mean_at) - 1;
-    if (mean_n < 0) mean_n = 0
+mean_index(language: *LanguageData@new) {
+    language.mean_at = line_places(language.meaning_text, language.meaning_text_size);
+    language.mean_count = len(language.mean_at) - 2;
+    if (language.mean_count < 0) language.mean_count = 0
 }
 
 // Word w's meaning (0: none known).
-w_meaning(w: int): int {
-    if (w < 0 || w * 2 + 1 >= lmean_n) 0 else le16(lmean, w * 2)
+w_meaning(language: *LanguageData, w: int): int {
+    if (w < 0 || w * 2 + 1 >= language.meanings_size) 0 else le16(language.meanings,
+        w * 2)
 }
 
 // Field f of meaning m (1 CODE, 2 DOMAIN, 3 SUBDOMAIN, 4 DEFINITION, 5
@@ -3199,33 +3400,38 @@ mf_b: int = 0;
 
 mf_e: int = 0;
 
-mean_field(m: int, f: int) {
+mean_field(language: *LanguageData, m: int, f: int) {
     mf_b = 0;
     mf_e = 0;
-    if (m < 1 || m > mean_n) return;
-    p: int = mean_at[m];
-    e: int = mean_at[m + 1] - 1;
+    if (m < 1 || m > language.mean_count) return;
+    p: int = language.mean_at[m];
+    e: int = language.mean_at[m + 1] - 1;
     k: int = 0;
     while (k < f && p < e) {
-        if (lmeant[p] as int == 9) k = k + 1;
+        if (language.meaning_text[p] as int == 9) k = k + 1;
         p = p + 1
     }
     if (k < f) return;
     q: int = p;
-    while (q < e && lmeant[q] as int != 9) q = q + 1;
+    while (q < e && language.meaning_text[q] as int != 9) q = q + 1;
     mf_b = p;
     mf_e = q
 }
 
 // Whether fields f of meanings a and b are the same.
-mean_same(a: int, b: int, f: int): bool {
-    mean_field(a, f);
+mean_same(
+    language: *LanguageData,
+    a: int,
+    b: int,
+    f: int
+): bool {
+    mean_field(language, a, f);
     x: int = mf_b;
     n: int = mf_e - mf_b;
-    mean_field(b, f);
+    mean_field(language, b, f);
     if (mf_e - mf_b != n || n == 0) return false;
     for i in 0..n
-        if (lmeant[x + i] != lmeant[mf_b + i]) return false;
+        if (language.meaning_text[x + i] != language.meaning_text[mf_b + i]) return false;
     true
 }
 
@@ -3236,17 +3442,17 @@ dm_num: []int = new int[512](0);
 
 dm_n: int = 0;
 
-domain_words(m: int) {
+domain_words(language: *LanguageData, m: int) {
     dm_n = 0;
-    if (m < 1 || m > mean_n) return;
-    greek: bool = lmeant[mean_at[m]] as int == 71;
-    mean_field(m, 6);
-    own: int = mean_number(mf_b, mf_e);
-    for x in 1..mean_n + 1 {
-        if (x != m && lmeant[mean_at[x]] == lmeant[mean_at[m]] && mean_same(x, m,
-            1)) {
-            mean_field(x, 6);
-            num: int = mean_number(mf_b, mf_e);
+    if (m < 1 || m > language.mean_count) return;
+    greek: bool = language.meaning_text[language.mean_at[m]] as int == 71;
+    mean_field(language, m, 6);
+    own: int = mean_number(language, mf_b, mf_e);
+    for x in 1..language.mean_count + 1 {
+        if (x != m && language.meaning_text[language.mean_at[x]] == language.meaning_text[language.mean_at[m]] && mean_same(language,
+            x, m, 1)) {
+            mean_field(language, x, 6);
+            num: int = mean_number(language, mf_b, mf_e);
             if (num > 0 && num != own) {
                 k: int = num | (if (greek) 32768 else 0);
                 seen: bool = false;
@@ -3262,11 +3468,11 @@ domain_words(m: int) {
 }
 
 // The first number in a STRONGS field (G25,H157 ...): its digits.
-mean_number(a: int, b: int): int {
+mean_number(language: *LanguageData, a: int, b: int): int {
     n: int = 0;
     p: int = a + 1;
-    while (p < b && is_digit(lmeant[p] as int)) {
-        n = n * 10 + lmeant[p] as int - 48;
+    while (p < b && is_digit(language.meaning_text[p] as int)) {
+        n = n * 10 + language.meaning_text[p] as int - 48;
         p = p + 1
     }
     n

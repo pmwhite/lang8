@@ -18,7 +18,12 @@
 //       (its redirect's target, on audio.esv.org, which holds no key);
 //       remembered for 30 days in D1 (the address only), so a chapter
 //       costs one query a month (DESIGN.md §12.6). The Worker never
-//       fetches or streams the sound itself.
+//       fetches or streams the ESV's sound itself.
+//   GET /api/v1/audio/relay?u=https://openbible.com/audio/souer/BSB_43_Jhn_003.mp3
+//       the recording, streamed through (audio/mpeg): for the web app to
+//       keep a chapter (core/held.l8's downloads), since the readers' hosts
+//       give pages no access to their files. Only those hosts' recordings
+//       (RELAYED), kept at Cloudflare's edge for 30 days.
 //
 // It also serves the site's pages (ASSETS), and the reader on the web at
 // /read/ with its headers, a reader's address with no page answered by the
@@ -46,6 +51,40 @@ const TIMEOUT = 8000;
 const headers = { "content-type": "application/json", "cache-control": "no-store" };
 const reply = (status, body) => new Response(JSON.stringify(body), { status, headers });
 const fail = (status, error, message, retry = 0) => reply(status, { error, message, retry });
+
+// Where a recording may be relayed from: the folders of the readers'
+// recordings (core/audio.l8's audio_url), their .mp3 files alone.
+export const RELAYED = ["https://openbible.com/audio/", "https://ebible.org/eng-web/audio/"];
+const RELAY_KEEP = 30 * 86400;
+
+// The address to relay, or null: one of RELAYED's .mp3 files, as the URL
+// parser reads it (dots and escapes resolved), with no query.
+export const relayable = (u) => {
+  let url;
+  try {
+    url = new URL(u);
+  } catch {
+    return null;
+  }
+  if (url.search || url.hash || url.username || url.password || !url.pathname.endsWith(".mp3")) return null;
+  return RELAYED.some((p) => url.href.startsWith(p)) ? url : null;
+};
+
+async function relay(params) {
+  const url = relayable(params.get("u") ?? "");
+  if (!url) return fail(400, "bad_request", "Not a recording Smooth Bible relays.");
+  let r;
+  try {
+    r = await fetch(url, { cf: { cacheEverything: true, cacheTtl: RELAY_KEEP } });
+  } catch {
+    return fail(504, "timeout", "The recording didn't come.");
+  }
+  if (r.status !== 200 || !r.body) return fail(502, "upstream", "The recording isn't available right now.");
+  const h = { "content-type": "audio/mpeg", "cache-control": "no-store" };
+  const n = r.headers.get("content-length");
+  if (n) h["content-length"] = n;
+  return new Response(r.body, { status: 200, headers: h });
+}
 
 const book = (code) => BOOKS.find((b) => b[0] === code);
 const sum = (a) => a.reduce((x, y) => x + y, 0);
@@ -278,7 +317,7 @@ export const CSP = [
   "img-src 'self' data:",
   "font-src 'self'",
   "connect-src 'self'",
-  "media-src 'self' https://openbible.com https://ebible.org https://audio.esv.org",
+  "media-src 'self' blob: https://openbible.com https://ebible.org https://audio.esv.org",
   "frame-ancestors 'none'",
   "base-uri 'none'",
   "form-action 'self'",
@@ -376,6 +415,7 @@ export default {
     if (path === "/esv/chapters") return chapters(env, url.searchParams, now);
     if (path === "/esv/search") return search(env, url.searchParams, now);
     if (path === "/esv/audio") return audio(env, url.searchParams, now);
+    if (path === "/audio/relay") return relay(url.searchParams);
     return fail(400, "bad_request", "No such request.");
   },
 };

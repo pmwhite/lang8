@@ -1,0 +1,851 @@
+tag bible_ios;
+
+use_tag std, ios, bible, bible_wire;
+
+// The reader's chapters as core says them (SKINS.md's chapter block): each
+// one's text, its runs (UTF-16), its verses, links, glossed words and what
+// is marked on its verses, kept for a few chapters at a time; made into an
+// attributed string for its row, with the marks put in (a bookmark's glyph
+// before its verse's number, a note's after its end), and washed: the
+// highlights, the verses selected, the verse flashed after a jump, the verse
+// being heard. A tap on it is said to core, which decides what it does.
+import "../../ios/objc.l8";
+
+import "../core/text.l8";
+
+// ---- the chapters kept ----
+RS_SLOTS: int = 8;
+
+SP_MOST: int = 16384;
+
+VS_MOST: int = 256;
+
+LK_MOST: int = 8192;
+
+GL_MOST: int = 8192;
+
+EV_MOST: int = 512;
+
+rs_c: []int = new int[8](-1);
+
+rs_used: []int = new int[8](0);
+
+rs_clock: int = 0;
+
+// Its text (and the ESV's notice after it), NSStrings kept.
+rs_text: []int = new int[8](0);
+
+// Its layout: the original's (1), right to left (2), a verse a line (4);
+// where its opener and its label end (UTF-16).
+rs_flags: []int = new int[8](0);
+
+// Its name, as the bar shows it (an NSString).
+rs_name: []int = new int[8](0);
+
+rs_opener: []int = new int[8](0);
+
+rs_label: []int = new int[8](0);
+
+rs_sp_n: []int = new int[8](0);
+
+rs_sp_b: []int = new int[8 * 16384](0);
+
+rs_sp_e: []int = new int[8 * 16384](0);
+
+rs_sp_style: []int = new int[8 * 16384](0);
+
+rs_sp_para: []int = new int[8 * 16384](0);
+
+// Its verses: each one's number and where it is in the text (from its
+// number to its end), as core says it and with the marks put in (rs_vb2,
+// rs_ve2); whether its wash goes on over the space after it.
+rs_v_n: []int = new int[8](0);
+
+rs_v_num: []int = new int[8 * 256](0);
+
+rs_vb: []int = new int[8 * 256](0);
+
+rs_ve: []int = new int[8 * 256](0);
+
+rs_vb2: []int = new int[8 * 256](0);
+
+rs_ve2: []int = new int[8 * 256](0);
+
+rs_joins: []bool = new bool[8 * 256](false);
+
+rs_lk_n: []int = new int[8](0);
+
+rs_lk_b: []int = new int[8 * 8192](0);
+
+rs_lk_e: []int = new int[8 * 8192](0);
+
+rs_lk_kind: []int = new int[8 * 8192](0);
+
+rs_lk_arg: []int = new int[8 * 8192](0);
+
+rs_gl_n: []int = new int[8](0);
+
+rs_gl_b: []int = new int[8 * 8192](0);
+
+rs_gl_e: []int = new int[8 * 8192](0);
+
+// What is marked, by verse number (0 the chapter's own note): its
+// highlight (-1 none), bookmarked, noted.
+rs_hl: []int = new int[8 * 256](-1);
+
+rs_bm: []bool = new bool[8 * 256](false);
+
+rs_note: []bool = new bool[8 * 256](false);
+
+// The marks put in: where (before them, in the text as core says it), how
+// many units, what (0 a bookmark, 1 a note, 2 the chapter's note), whose.
+rs_ev_n: []int = new int[8](0);
+
+rs_ev_pos: []int = new int[8 * 512](0);
+
+rs_ev_len: []int = new int[8 * 512](0);
+
+rs_ev_kind: []int = new int[8 * 512](0);
+
+rs_ev_verse: []int = new int[8 * 512](0);
+
+// The chapters there are (core's reader N).
+chapters_n: int = 0;
+
+LAY_ORIG: int = 1;
+
+LAY_RTL: int = 2;
+
+LAY_LINES: int = 4;
+
+rs_slot(c: int): int {
+    for s in 0..RS_SLOTS
+        if (rs_c[s] == c && c >= 0) return s;
+    -1
+}
+
+// Every chapter forgotten (the look, or the version, changed).
+reader_forget() {
+    for s in 0..RS_SLOTS {
+        rs_c[s] = -1;
+        rs_text[s] = held(rs_text[s], 0);
+        rs_name[s] = held(rs_name[s], 0)
+    }
+}
+
+// Chapter c's name (0: not here).
+chapter_name(c: int): int {
+    s: int = rs_slot(c);
+    if (s < 0) 0 else rs_name[s]
+}
+
+// Chapter c's slot: kept, or asked for now (-1 if core says none).
+rs_need(c: int): int {
+    s: int = rs_slot(c);
+    if (s >= 0) {
+        rs_clock = rs_clock + 1;
+        rs_used[s] = rs_clock;
+        return s
+    }
+    if (c < 0 || c >= chapters_n) return -1;
+    if (!ask_chapter(c)) return -1;
+    rs_slot(c)
+}
+
+// ---- a chapter's lines, read ----
+cl_at: int = 0;
+
+// The number at data[cl_at...] (its spaces skipped), cl_at past it.
+cl_num(data: []i8, e: int): int {
+    while (cl_at < e && data[cl_at] as int == 32) cl_at = cl_at + 1;
+    neg: bool = cl_at < e && data[cl_at] as int == 45;
+    if (neg) cl_at = cl_at + 1;
+    n: int = 0;
+    while (cl_at < e && data[cl_at] as int >= 48 && data[cl_at] as int <= 57) {
+        n = n * 10 + data[cl_at] as int - 48;
+        cl_at = cl_at + 1
+    }
+    if (neg) -n else n
+}
+
+cl_is(
+    data: []i8,
+    at: int,
+    e: int,
+    word: str
+): bool {
+    if (e - at < len(word)) return false;
+    for i in 0..len(word)
+        if (data[at + i] != word[i]) return false;
+    e - at == len(word) || data[at + len(word)] as int == 32 || data[at + len(word)] as int == 9
+}
+
+cl_text: []i8 = new i8[2097152](0i8);
+
+cl_text_n: int = 0;
+
+// The fields after the chapter line's first, unescaped into cl_text (the
+// tail's, after the text's).
+cl_field(data: []i8, at: int, e: int): int {
+    p: int = at;
+    while (p < e && data[p] as int != 9) {
+        k: int = data[p] as int;
+        if (k == 92 && p + 1 < e) {
+            p = p + 1;
+            k = data[p] as int;
+            if (k == 110) k = 10 else if (k == 116) k = 9
+        }
+        if (cl_text_n >= len(cl_text)) wire_fail("a chapter is too long");
+        cl_text[cl_text_n] = k trunc i8;
+        cl_text_n = cl_text_n + 1;
+        p = p + 1
+    }
+    p
+}
+
+// Chapter lines (data b to e: from its chapter line past its end) kept.
+reader_store(data: []i8, b: int, e: int) {
+    le: int = b;
+    while (le < e && data[le] as int != 10) le = le + 1;
+    cl_at = b + 8;
+    c: int = cl_num(data, le);
+    if (c < 0 || c >= chapters_n) return;
+    s: int = rs_slot(c);
+    if (s < 0) {
+        s = 0;
+        for k in 0..RS_SLOTS
+            if (rs_c[k] < 0 && rs_c[s] >= 0 || rs_c[k] >= 0 && rs_c[s] >= 0 && rs_used[k] < rs_used[s]) s = k
+    }
+    rs_c[s] = c;
+    rs_clock = rs_clock + 1;
+    rs_used[s] = rs_clock;
+    // (Its words, and the ESV's notice after them, as one text.)
+    cl_text_n = 0;
+    p: int = cl_at;
+    while (p < le && data[p] as int != 9) p = p + 1;
+    if (p < le) p = cl_field(data, p + 1, le);
+    if (p < le) _t: int = cl_field(data, p + 1, le);
+    rs_text[s] = held(rs_text[s], nsstring_of(cl_text, cl_text_n));
+    rs_flags[s] = 0;
+    rs_opener[s] = 0;
+    rs_label[s] = 0;
+    rs_sp_n[s] = 0;
+    rs_v_n[s] = 0;
+    rs_lk_n[s] = 0;
+    rs_gl_n[s] = 0;
+    for v in 0..VS_MOST {
+        rs_hl[s * VS_MOST + v] = -1;
+        rs_bm[s * VS_MOST + v] = false;
+        rs_note[s * VS_MOST + v] = false
+    }
+    at: int = le + 1;
+    while (at < e) {
+        le = at;
+        while (le < e && data[le] as int != 10) le = le + 1;
+        if (cl_is(data, at, le, "span")) {
+            n: int = rs_sp_n[s];
+            if (n >= SP_MOST) wire_fail("a chapter has too many runs");
+            k: int = s * SP_MOST + n;
+            cl_at = at + 4;
+            rs_sp_b[k] = cl_num(data, le);
+            rs_sp_e[k] = cl_num(data, le);
+            rs_sp_style[k] = cl_num(data, le);
+            rs_sp_para[k] = cl_num(data, le);
+            rs_sp_n[s] = n + 1
+        } else if (cl_is(data, at, le, "verse")) {
+            n: int = rs_v_n[s];
+            if (n >= VS_MOST) wire_fail("a chapter has too many verses");
+            k: int = s * VS_MOST + n;
+            cl_at = at + 5;
+            rs_v_num[k] = cl_num(data, le);
+            rs_vb[k] = cl_num(data, le);
+            rs_ve[k] = cl_num(data, le);
+            rs_v_n[s] = n + 1
+        } else if (cl_is(data, at, le, "link")) {
+            n: int = rs_lk_n[s];
+            if (n >= LK_MOST) wire_fail("a chapter has too many links");
+            k: int = s * LK_MOST + n;
+            cl_at = at + 4;
+            rs_lk_b[k] = cl_num(data, le);
+            rs_lk_e[k] = cl_num(data, le);
+            rs_lk_kind[k] = cl_num(data, le);
+            rs_lk_arg[k] = cl_num(data, le);
+            rs_lk_n[s] = n + 1
+        } else if (cl_is(data, at, le, "gloss")) {
+            n: int = rs_gl_n[s];
+            if (n >= GL_MOST) wire_fail("a chapter has too many glossed words");
+            k: int = s * GL_MOST + n;
+            cl_at = at + 5;
+            rs_gl_b[k] = cl_num(data, le);
+            rs_gl_e[k] = cl_num(data, le);
+            rs_gl_n[s] = n + 1
+        } else if (cl_is(data, at, le, "mark")) {
+            cl_at = at + 4;
+            v: int = cl_num(data, le);
+            while (cl_at < le && data[cl_at] as int == 32) cl_at = cl_at + 1;
+            hx: int = cl_at;
+            while (cl_at < le && data[cl_at] as int != 32) cl_at = cl_at + 1;
+            if (v >= 0 && v < VS_MOST) {
+                k: int = s * VS_MOST + v;
+                rs_hl[k] = hl_index_of(data, hx, cl_at);
+                rs_bm[k] = cl_num(data, le) == 1;
+                rs_note[k] = cl_num(data, le) == 1
+            }
+        } else if (cl_is(data, at, le, "layout")) {
+            cl_at = at + 6;
+            f: int = 0;
+            if (cl_num(data, le) == 1) f = f | LAY_ORIG;
+            if (cl_num(data, le) == 1) f = f | LAY_RTL;
+            if (cl_num(data, le) == 1) f = f | LAY_LINES;
+            rs_flags[s] = f;
+            rs_opener[s] = cl_num(data, le);
+            rs_label[s] = cl_num(data, le)
+        } else if (cl_is(data, at, le, "name")) {
+            cl_text_n = 0;
+            _p: int = cl_field(data, if (at + 5 < le) at + 5 else le, le);
+            rs_name[s] = held(rs_name[s], nsstring_of(cl_text, cl_text_n))
+        }
+        at = le + 1
+    }
+    rs_measure(s)
+}
+
+// A highlight's color (its swatch's hex) as its index (-1: none).
+hl_index_of(data: []i8, b: int, e: int): int {
+    if (e - b < 6) return -1;
+    for i in 0..len(hl_swatch) {
+        same: bool = len(hl_swatch[i]) == e - b;
+        for k in 0..e - b
+            if (same && hex_digit(data[b + k] as int) != hex_digit(hl_swatch[i][k] as int)) same = false;
+        if (same) return i
+    }
+    -1
+}
+
+// The marks to put in, and each verse's place past them (as core's
+// chapter_ranges.l8 has them).
+rs_measure(s: int) {
+    text: int = rs_text[s];
+    n: int = msg(text, sel("length"));
+    rs_ev_n[s] = 0;
+    if (rs_label[s] > 0 && rs_note[s * VS_MOST]) rs_event(s, rs_label[s], 2, 2, 0);
+    for i in 0..rs_v_n[s] {
+        k: int = s * VS_MOST + i;
+        v: int = rs_v_num[k];
+        e: int = rs_ve[k];
+        rs_joins[k] = e < n && msg1(text, sel("characterAtIndex:"), e) == 32;
+        if (v > 0 && v < VS_MOST) {
+            if (rs_bm[s * VS_MOST + v]) rs_event(s, rs_vb[k], 3, 0, v);
+            if (rs_note[s * VS_MOST + v]) rs_event(s, rs_ve[k], 2, 1, v)
+        }
+    }
+    shift: int = 0;
+    j: int = 0;
+    for i in 0..rs_v_n[s] {
+        k: int = s * VS_MOST + i;
+        b: int = rs_vb[k];
+        while (j < rs_ev_n[s] && rs_ev_pos[s * EV_MOST + j] <= b) {
+            shift = shift + rs_ev_len[s * EV_MOST + j];
+            j = j + 1
+        }
+        rs_vb2[k] = b + shift;
+        e: int = rs_ve[k];
+        while (j < rs_ev_n[s] && rs_ev_pos[s * EV_MOST + j] < e) {
+            shift = shift + rs_ev_len[s * EV_MOST + j];
+            j = j + 1
+        }
+        rs_ve2[k] = e + shift
+    }
+}
+
+rs_event(
+    s: int,
+    pos: int,
+    n: int,
+    kind: int,
+    v: int
+) {
+    if (rs_ev_n[s] >= EV_MOST) wire_fail("a chapter has too many marks");
+    k: int = s * EV_MOST + rs_ev_n[s];
+    rs_ev_pos[k] = pos;
+    rs_ev_len[k] = n;
+    rs_ev_kind[k] = kind;
+    rs_ev_verse[k] = v;
+    rs_ev_n[s] = rs_ev_n[s] + 1
+}
+
+// A place in the text as core says it, with the marks put in before it
+// (and at it, for a beginning).
+rs_shifted(s: int, u: int, begin: bool): int {
+    sh: int = 0;
+    for j in 0..rs_ev_n[s] {
+        p: int = rs_ev_pos[s * EV_MOST + j];
+        if (p < u || begin && p == u) sh = sh + rs_ev_len[s * EV_MOST + j]
+    }
+    u + sh
+}
+
+// A place in the text shown (the marks in it) as core says it.
+rs_unshifted(s: int, k: int): int {
+    u: int = k;
+    for j in 0..rs_ev_n[s] {
+        p: int = rs_shifted(s, rs_ev_pos[s * EV_MOST + j], true) - rs_ev_len[s * EV_MOST + j];
+        n: int = rs_ev_len[s * EV_MOST + j];
+        if (k >= p + n) u = u - n else if (k >= p) u = u - (k - p)
+    }
+    if (u < 0) 0 else u
+}
+
+// The index of verse v's first piece in slot s (-1: none), or of the one
+// holding unit k of the text shown.
+rs_verse_index(s: int, v: int): int {
+    for i in 0..rs_v_n[s]
+        if (rs_v_num[s * VS_MOST + i] == v) return i;
+    -1
+}
+
+rs_verse_at(s: int, k: int): int {
+    for i in 0..rs_v_n[s] {
+        x: int = s * VS_MOST + i;
+        if (k >= rs_vb2[x] && k < rs_ve2[x]) return i
+    }
+    -1
+}
+
+// ---- as an attributed string ----
+// (The rows' attributes for what a tap finds: a footnote's mark, a
+// reference, a word of the original's, the ESV's line, a note's mark, the
+// chapter's own note.)
+k_esv: str = "L8Esv";
+
+// An attachment of a symbol's image, h points tall, its foot y above the
+// baseline.
+symbol_attachment(name: str, h: f64, y: f64): int {
+    image: int = symbol(name, h * 1.2f64, 5, c_accent);
+    att: int = msg1(cls("NSTextAttachment"), sel("textAttachmentWithImage:"), image);
+    l8_msg_hfa(hfa, image, sel("size"), 0, 0, 0);
+    w: f64 = if (hfa[1] > 0.0f64) hfa[0] * h / hfa[1] else h;
+    msg_rect(att, sel("setBounds:"), 0.0f64, y, w, h);
+    att
+}
+
+// Mark j of slot s put into a (a bookmark's glyph held to the number after
+// it by a word joiner and a narrow no-break space; a note's after a thin
+// space).
+put_event(a: int, s: int, j: int) {
+    x: int = s * EV_MOST + j;
+    pos: int = rs_ev_pos[x];
+    kind: int = rs_ev_kind[x];
+    n: int = msg(a, sel("length"));
+    at: int = if (kind >= 1) pos - 1 else pos;
+    if (at < 0) at = 0;
+    if (at >= n) at = n - 1;
+    if (at < 0) return;
+    base: int = msg2(a, sel("attributesAtIndex:effectiveRange:"), at, 0);
+    att: int = if (kind == 0) symbol_attachment("bookmark.fill", em * 0.55f64, em * 0.3f64) else symbol_attachment("note.text",
+        em * 0.62f64, -em * 0.04f64);
+    msg1(att, sel("setAccessibilityLabel:"), nsstring(w_mark_names[clamp(kind, 0,
+        2)]));
+    d: int = msg(base, sel("mutableCopy"));
+    msg2(d, sel("setObject:forKey:"), att, k_attachment);
+    msg1(d, sel("removeObjectForKey:"), nsstring(k_link));
+    msg1(d, sel("removeObjectForKey:"), nsstring(k_xref));
+    if (kind == 1) msg2(d, sel("setObject:forKey:"), nsnumber_int(rs_ev_verse[x]),
+        nsstring(k_note_mark));
+    if (kind == 2) msg2(d, sel("setObject:forKey:"), nsnumber_int(1), nsstring(k_chapter_note));
+    glyph: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        ustr(65532, 0), d);
+    space: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        if (kind == 0) ustr(8288, 8239) else ustr(8201, 0), base);
+    ins: int = make("NSMutableAttributedString");
+    if (kind == 0) {
+        msg1(ins, sel("appendAttributedString:"), glyph);
+        msg1(ins, sel("appendAttributedString:"), space)
+    } else {
+        msg1(ins, sel("appendAttributedString:"), space);
+        msg1(ins, sel("appendAttributedString:"), glyph)
+    }
+    if (pos <= n) msg2(a, sel("insertAttributedString:atIndex:"), ins, pos);
+    release(ins);
+    release(glyph);
+    release(space);
+    release(d)
+}
+
+// Whether the run at b of slot s is a bookmarked verse's number.
+rs_bookmarked_at(s: int, b: int): bool {
+    for i in 0..rs_v_n[s] {
+        x: int = s * VS_MOST + i;
+        v: int = rs_v_num[x];
+        if (rs_vb[x] == b && v > 0 && v < VS_MOST) return rs_bm[s * VS_MOST + v]
+    }
+    false
+}
+
+// Chapter c as an attributed string, washed (autoreleased; a line saying
+// it is still to come if core has none).
+chapter_text(c: int): int {
+    s: int = rs_need(c);
+    if (s < 0) return msg(make("NSMutableAttributedString"), sel("autorelease"));
+    text: int = rs_text[s];
+    n: int = msg(text, sel("length"));
+    a: int = msg(msg1(msg(cls("NSMutableAttributedString"), sel("alloc")), sel("initWithString:"),
+        text), sel("autorelease"));
+    f: int = rs_flags[s];
+    for i in 0..rs_sp_n[s] {
+        k: int = s * SP_MOST + i;
+        b: int = rs_sp_b[k];
+        e: int = rs_sp_e[k];
+        if (e > n) e = n;
+        if (e > b) {
+            st: int = rs_sp_style[k];
+            attrs: int = layout_attrs_sp(f, st, rs_sp_para[k]);
+            if (st == STYLE_RULE) {
+                d: int = msg(attrs, sel("mutableCopy"));
+                msg2(d, sel("setObject:forKey:"), rule_attachment, k_attachment);
+                msg3(a, sel("setAttributes:range:"), d, b, e - b);
+                release(d)
+            } else if (st == STYLE_VERSE && rs_bookmarked_at(s, b)) {
+                // (A bookmarked verse's number: accent and semibold, §2.)
+                d: int = msg(attrs, sel("mutableCopy"));
+                msg2(d, sel("setObject:forKey:"), c_accent, k_color);
+                msg2(d, sel("setObject:forKey:"), msg_ff(cls("UIFont"), sel("monospacedDigitSystemFontOfSize:weight:"),
+                    msg_f(layout_font_of(f, STYLE_VERSE), sel("pointSize")), 0.3f64),
+                    k_font);
+                msg3(a, sel("setAttributes:range:"), d, b, e - b);
+                release(d)
+            } else msg3(a, sel("setAttributes:range:"), attrs, b, e - b)
+        }
+    }
+    for i in 0..rs_lk_n[s] {
+        k: int = s * LK_MOST + i;
+        b: int = rs_lk_b[k];
+        e: int = rs_lk_e[k];
+        if (e > n) e = n;
+        kind: int = rs_lk_kind[k];
+        key: str = if (kind == 0) k_link else if (kind == 1) k_xref else if (kind == 2) k_gloss else k_esv;
+        if (e > b) msg4(a, sel("addAttribute:value:range:"), nsstring(key), nsnumber_int(rs_lk_arg[k] + 1),
+            b, e - b)
+    }
+    // (No empty line after the chapter's last, and no space after it: the
+    // space between chapters is the next one's.)
+    if (n > 1 && msg1(text, sel("characterAtIndex:"), n - 1) == 10) {
+        msg2(a, sel("deleteCharactersInRange:"), n - 1, 1);
+        n = n - 1;
+        last_nl: int = msg2(msg(a, sel("string")), sel("rangeOfString:options:"),
+            nsstring("\n"), 4);
+        from: int = if (last_nl >= 0 && last_nl < n) last_nl + 1 else 0;
+        if (from < n) {
+            ps: int = msg3(a, sel("attribute:atIndex:effectiveRange:"), k_para, n - 1,
+                0);
+            if (ps != 0) {
+                p2: int = msg(ps, sel("mutableCopy"));
+                msg_set_f(p2, sel("setParagraphSpacing:"), 0.0f64);
+                msg4(a, sel("addAttribute:value:range:"), k_para, p2, from, n - from);
+                release(p2)
+            }
+        }
+    }
+    j: int = rs_ev_n[s] - 1;
+    while (j >= 0) {
+        put_event(a, s, j);
+        j = j - 1
+    }
+    paint_marks(a, s, c);
+    a
+}
+
+// ---- the washes ----
+// The verses selected (core's selection), the verse flashed after a jump,
+// the verse being heard (its chapter, or -1).
+sel_c: int = -1;
+
+sel_n: int = 0;
+
+sel_v: []int = new int[200](0);
+
+flash_c: int = -1;
+
+flash_v: int = 0;
+
+speak_c: int = -1;
+
+speak_v: int = 0;
+
+is_selected(v: int): bool {
+    for i in 0..sel_n
+        if (sel_v[i] == v) return true;
+    false
+}
+
+paint_marks(a: int, s: int, c: int) {
+    n: int = msg(a, sel("length"));
+    msg3(a, sel("removeAttribute:range:"), k_background, 0, n);
+    msg3(a, sel("removeAttribute:range:"), k_underline, 0, n);
+    for i in 0..rs_v_n[s] {
+        x: int = s * VS_MOST + i;
+        v: int = rs_v_num[x];
+        b: int = rs_vb2[x];
+        e: int = rs_ve2[x];
+        if (e > n) e = n;
+        h: int = if (v > 0 && v < VS_MOST) rs_hl[s * VS_MOST + v] else -1;
+        if (h >= 0) {
+            // (Joined to the next verse's, if it is the same color.)
+            to: int = e;
+            if (i + 1 < rs_v_n[s] && rs_joins[x]) {
+                nv: int = rs_v_num[x + 1];
+                if (nv > 0 && nv < VS_MOST && rs_hl[s * VS_MOST + nv] == h) to = rs_vb2[x + 1]
+            }
+            if (to > n) to = n;
+            if (to > b) msg4(a, sel("addAttribute:value:range:"), k_background, c_hl[h],
+                b, to - b)
+        }
+        if (e > b) {
+            if (c == sel_c && is_selected(v)) {
+                msg4(a, sel("addAttribute:value:range:"), k_background, c_sel, b,
+                    e - b);
+                msg4(a, sel("addAttribute:value:range:"), k_underline, nsnumber_int(257),
+                    b, e - b);
+                msg4(a, sel("addAttribute:value:range:"), k_underline_color, c_underline,
+                    b, e - b)
+            }
+            if (c == flash_c && v == flash_v) msg4(a, sel("addAttribute:value:range:"),
+                k_background, c_flash, b, e - b);
+            if (c == speak_c && v == speak_v) msg4(a, sel("addAttribute:value:range:"),
+                k_background, c_sel, b, e - b)
+        }
+    }
+    // (The original's glossed words' dotted lines, under no selection.)
+    for i in 0..rs_gl_n[s] {
+        k: int = s * GL_MOST + i;
+        b: int = rs_shifted(s, rs_gl_b[k], true);
+        e: int = rs_shifted(s, rs_gl_e[k], false);
+        if (e > n) e = n;
+        vi: int = rs_verse_at(s, b);
+        selected: bool = vi >= 0 && c == sel_c && is_selected(rs_v_num[s * VS_MOST + vi]);
+        if (e > b && !selected) {
+            msg4(a, sel("addAttribute:value:range:"), k_underline, nsnumber_int(257),
+                b, e - b);
+            msg4(a, sel("addAttribute:value:range:"), k_underline_color, c_gloss_line,
+                b, e - b)
+        }
+    }
+}
+
+// The washes of chapter c painted again where it is on the screen.
+repaint(c: int) {
+    tv: int = view_of(c);
+    if (tv == 0) return;
+    s: int = rs_need(c);
+    if (s < 0) return;
+    storage: int = msg(tv, sel("textStorage"));
+    msg(storage, sel("beginEditing"));
+    paint_marks(storage, s, c);
+    msg(storage, sel("endEditing"))
+}
+
+// Chapter c asked for again (what is marked on it changed) and made again
+// where it is on the screen, the place kept.
+remake(c: int) {
+    s: int = rs_slot(c);
+    if (s >= 0) rs_c[s] = -1;
+    tv: int = view_of(c);
+    if (tv == 0) return;
+    msg1(tv, sel("setAttributedText:"), chapter_text(c));
+    msg(table, sel("beginUpdates"));
+    msg(table, sel("endUpdates"))
+}
+
+// ---- where things are ----
+// Where verse v of chapter c begins in its text shown (-1: not there).
+verse_unit(c: int, v: int): int {
+    s: int = rs_need(c);
+    if (s < 0) return -1;
+    i: int = rs_verse_index(s, v);
+    if (i < 0) -1 else rs_vb2[s * VS_MOST + i]
+}
+
+// The verse at unit k of chapter c's text shown, or before it (0: above
+// the first).
+verse_from_unit(c: int, k: int): int {
+    s: int = rs_need(c);
+    if (s < 0) return 0;
+    v: int = 0;
+    for i in 0..rs_v_n[s]
+        if (rs_vb2[s * VS_MOST + i] <= k) v = rs_v_num[s * VS_MOST + i];
+    v
+}
+
+// Where chapter c's opener (its numeral, or its book's name) is in its text
+// shown.
+opener_unit(c: int): int {
+    s: int = rs_need(c);
+    if (s < 0) 0 else rs_shifted(s, rs_opener[s], false)
+}
+
+// Whether the chapter has verses (the ESV's waiting line has none).
+chapter_has_verses(c: int): bool {
+    s: int = rs_need(c);
+    s >= 0 && rs_v_n[s] > 0
+}
+
+// The verses of chapter c the units a to b of its text shown touch, into
+// sel_v-like out; how many.
+verses_touched(
+    c: int,
+    a: int,
+    b: int,
+    out: []int
+): int {
+    s: int = rs_need(c);
+    if (s < 0) return 0;
+    n: int = 0;
+    for i in 0..rs_v_n[s] {
+        x: int = s * VS_MOST + i;
+        v: int = rs_v_num[x];
+        if (rs_vb2[x] < b && rs_ve2[x] > a && v > 0 && n < len(out)) {
+            dup: bool = false;
+            for k in 0..n
+                if (out[k] == v) dup = true;
+            if (!dup) {
+                out[n] = v;
+                n = n + 1
+            }
+        }
+    }
+    n
+}
+
+// Units a to b of chapter c's text shown, as core says its text.
+core_units(c: int, k: int): int {
+    s: int = rs_need(c);
+    if (s < 0) k else rs_unshifted(s, k)
+}
+
+// ---- taps ----
+// A tap on chapter c's text view tv at (x, y): a link's (a footnote's
+// mark, a word of the original, a reference, the ESV's line), a note's
+// mark (its note), the chapter's note, a verse (core toggles it), or none
+// (the selection let go). Core says what follows.
+reader_tap(tv: int, x: f64, y: f64) {
+    c: int = chapter_of_view(tv);
+    if (c < 0) return;
+    // (Words selected in the text: the tap is the text view's, letting
+    // them go.)
+    range: int = msg(tv, sel("selectedTextRange"));
+    if (range != 0 && (msg(range, sel("isEmpty")) & 255) == 0) return;
+    tap_rect_view = tv;
+    tap_rect_x = x;
+    tap_rect_y = y;
+    link: int = link_at(tv, x, y, k_link);
+    if (link > 0) {
+        send2("footnote", c, link - 1);
+        return
+    }
+    gw: int = link_at_within(tv, x, y, k_gloss, 6.0f64);
+    if (gw > 0) {
+        send1("word", gw - 1);
+        return
+    }
+    ref: int = link_at_within(tv, x, y, k_xref, 12.0f64);
+    if (ref > 0) {
+        send1("preview", ref - 1);
+        return
+    }
+    mark: int = link_at(tv, x, y, k_note_mark);
+    if (mark > 0) {
+        note_open(c, mark);
+        return
+    }
+    what: int = link_at_within(tv, x, y, k_esv, 12.0f64);
+    if (what > 0) {
+        send2("esvact", what - 1, c);
+        return
+    }
+    if (link_at(tv, x, y, k_chapter_note) > 0) {
+        note_open(c, 0);
+        return
+    }
+    k: int = char_at(tv, x, y);
+    if (k >= 0) {
+        s: int = rs_need(c);
+        i: int = if (s >= 0) rs_verse_at(s, k) else -1;
+        if (i >= 0 && near_char(tv, k, x, y, 6.0f64)) {
+            haptic_select();
+            send2("tapverse", c, rs_v_num[s * VS_MOST + i]);
+            return
+        }
+    }
+    send0("tapnone")
+}
+
+// Where the last tap was (for a popover core opens from it: a footnote, a
+// word).
+tap_rect_view: int = 0;
+
+tap_rect_x: f64 = 0.0f64;
+
+tap_rect_y: f64 = 0.0f64;
+
+// Verse v's note (0: the chapter's) opened: core's Note screen.
+note_open(c: int, v: int) {
+    to_core_str("open ");
+    to_core_int(SCR_NOTE);
+    to_core_arg(c * 1000 + v);
+    to_core_str(" 0");
+    to_core_end()
+}
+
+// The UTF-16 index of the character at (x, y) in tv, or -1.
+char_at(tv: int, x: f64, y: f64): int {
+    pos: int = msg_ff(tv, sel("closestPositionToPoint:"), x, y);
+    if (pos == 0) return -1;
+    msg2(tv, sel("offsetFromPosition:toPosition:"), msg(tv, sel("beginningOfDocument")),
+        pos)
+}
+
+// What the attribute key (a link's, a note mark's) at (x, y) in tv says (0
+// if none there).
+link_at(
+    tv: int,
+    x: f64,
+    y: f64,
+    key_name: str
+): int {
+    link_at_within(tv, x, y, key_name, 16.0f64)
+}
+
+link_at_within(
+    tv: int,
+    x: f64,
+    y: f64,
+    key_name: str,
+    slack: f64
+): int {
+    i: int = char_at(tv, x, y);
+    if (i < 0) return 0;
+    storage: int = msg(tv, sel("textStorage"));
+    n: int = msg(storage, sel("length"));
+    key: int = nsstring(key_name);
+    // The character after the place, or before it (a mark is one).
+    for k in [i, i - 1] {
+        if (k >= 0 && k < n) {
+            v: int = msg3(storage, sel("attribute:atIndex:effectiveRange:"), key,
+                k, 0);
+            if (v != 0 && near_char(tv, k, x, y, slack)) return msg(v, sel("longValue"))
+        }
+    }
+    0
+}
+
+// Whether (x, y) is on or near character k of tv (within slack).
+near_char(
+    tv: int,
+    k: int,
+    x: f64,
+    y: f64,
+    slack: f64
+): bool {
+    if (!range_rect(tv, k, 1)) return false;
+    x >= hfa[0] - slack && x <= hfa[0] + hfa[2] + slack && y >= hfa[1] - slack && y <= hfa[1] + hfa[3] + slack
+}

@@ -151,23 +151,10 @@ esv_book_verses(b: int): int {
 }
 
 esv_chapter_verses(c: int): int {
-    base: int = if (tx_ready[0]) tx_ch_verses[0][c] else ch_verses[c];
+    base: int = tx_ch_verses[text_or_current(TEXT_BSB)][c];
     b: int = ch_book[c];
     // (3JN 1 and REV 12: one more each in the ESV.)
-    if (book_is_code(b, 51, 74, 78) && ch_num[c] == 1 || book_is_code(b, 82, 69, 86) && ch_num[c] == 12) base + 1 else base
-}
-
-// Whether book b's code is the three letters k1 k2 k3.
-book_is_code(
-    b: int,
-    k1: int,
-    k2: int,
-    k3: int
-): bool {
-    src: TextSource = ready_source(TEXT_BSB);
-    p: int = src.book_lines[b] + 1;
-    same: bool = src.data[p] as int == k1 && src.data[p + 1] as int == k2 && src.data[p + 2] as int == k3;
-    same
+    if (book_code(b) == "3JN" && ch_num[c] == 1 || book_code(b) == "REV" && ch_num[c] == 12) base + 1 else base
 }
 
 // How many verses may be held of book b: half of them.
@@ -397,70 +384,96 @@ esv_wanted(c: int, t: int): bool {
 }
 
 // ---- the ESV as a text ----
-// Text 5 made of the chapters held: every book's B line (its name from the
-// BSB, so the openers read the same), then each chapter held after its C
-// line. A chapter not held has ch_start = ch_end = -1: its opener alone is
-// laid out (lay_placeholder).
-ec_text: []i8 = new i8[2621440](0i8);
-
-ec_text_n: int = 0;
-
-ect_put(k: int) {
-    if (ec_text_n < len(ec_text)) {
-        ec_text[ec_text_n] = k trunc i8;
-        ec_text_n = ec_text_n + 1
-    }
-}
-
+// Text 5 made of the chapters held (chapters_text): a chapter not held has
+// no records (starts and ends -1): its opener alone is laid out
+// (lay_placeholder). Each chapter held has verses to its last key; the
+// others the BSB's.
 esv_build() {
-    was: int = text_cur;
-    text_use(TEXT_BSB);
-    ec_text_n = 0;
-    lines: []int = esv_lines;
-    for b in 0..books {
-        lines[b] = ec_text_n;
-        for x in book_line[b]..line_end(book_line[b]) ect_put(bsb[x] as int);
-        ect_put(10)
-    }
-    base_verses: []int = ch_verses;
-    text_begin(TEXT_ESV);
-    for b in 0..books book_line[b] = lines[b];
-    for c in 0..chapters {
-        ch_start[c] = -1;
-        ch_end[c] = -1;
-        ch_verses[c] = base_verses[c]
-    }
-    for i in 0..ec_n {
-        c: int = ec_c[i];
-        ect_put(67);
-        esv_put_int(ch_num[c]);
-        ect_put(10);
-        ch_start[c] = ec_text_n;
-        for x in 0..ec_len[i] ect_put(ec_pool[ec_at[i] + x] as int);
-        if (ec_text_n > 0 && ec_text[ec_text_n - 1] as int != 10) ect_put(10);
-        ch_end[c] = ec_text_n
-    }
-    text_done(TEXT_ESV, ec_text, ec_text_n);
-    // (Each chapter's last verse, by its keys.)
-    for i in 0..ec_n {
-        c: int = ec_c[i];
-        last: int = 0;
-        p: int = ch_start[c];
-        while (p < ch_end[c]) {
-            e: int = line_end(p);
-            if (bsb[p] as int == 86 && key_at(p + 1) > last) last = key_at(p + 1);
-            p = e + 1
+    chapters_text(TEXT_ESV, ec_c, ec_pool, ec_at, ec_len, esv_all(), ec_n);
+    borrow texts[TEXT_ESV] as esv {
+        verses: []int = tx_ch_verses[TEXT_ESV];
+        for i in 0..ec_n {
+            c: int = ec_c[i];
+            last: int = 0;
+            p: int = esv.starts[c];
+            while (p < esv.ends[c]) {
+                e: int = record_line_end(esv.data, esv.size, p);
+                if (esv.data[p] as int == 86 && record_key_at(esv.data, esv.size,
+                    p + 1) > last) last = record_key_at(esv.data, esv.size, p + 1);
+                p = e + 1
+            }
+            if (last > 0) verses[c] = last
         }
-        if (last > 0) ch_verses[c] = last
     }
-    text_use(was)
 }
 
-esv_lines: []int = new int[66](0);
+// The indexes 0 to ec_n of the chapters held: all of them.
+esv_all(): []int@new {
+    all: []int = new int[ec_n](0);
+    for i in 0..ec_n all[i] = i;
+    all
+}
 
-esv_put_int(n: int) {
-    if (n >= 10) esv_put_int(n / 10);
-    ect_put(48 + n % 10)
+// Text t made of some chapters' records (chapter cs[i]'s, pool from at[i],
+// lens[i] long, for i the first count of which), in place of the one
+// before: every book's B line, then each chapter's C line and its records
+// (a newline after them, if they end without one). Its verses a chapter
+// are the BSB's.
+chapters_text(
+    t: int,
+    cs: []int,
+    pool: []i8,
+    at: []int,
+    lens: []int,
+    which: []int,
+    count: int
+) {
+    n: int = 0;
+    for b in 0..books n = n + 6 + len(book_name(b));
+    for x in 0..count n = n + 6 + lens[which[x]];
+    next: owned *TextData = own {
+        text: *TextData = text_made(t, n);
+        data: []i8 = text.data;
+        k: int = 0;
+        for b in 0..books {
+            k = room_put(data, k, "B");
+            k = room_put(data, k, book_code(b));
+            k = room_put(data, k, " ");
+            k = room_put(data, k, book_name(b));
+            k = room_put(data, k, "\n")
+        }
+        for x in 0..count {
+            i: int = which[x];
+            c: int = cs[i];
+            k = room_put(data, k, "C");
+            k = room_int(data, k, ch_num[c]);
+            k = room_put(data, k, "\n");
+            text.starts[c] = k;
+            for y in 0..lens[i] data[k + y] = pool[at[i] + y];
+            k = k + lens[i];
+            if (k > 0 && data[k - 1] as int != 10) k = room_put(data, k, "\n");
+            text.ends[c] = k
+        }
+        text.size = k;
+        text
+    };
+    base: []int = tx_ch_verses[text_or_current(TEXT_BSB)];
+    verses: []int = tx_ch_verses[t];
+    for c in 0..chapters verses[c] = base[c];
+    text_replace(t, move next)
+}
+
+// Words written into room at k (sized for them): the place after them.
+room_put(room: []i8, k: int, s: str): int {
+    for i in 0..len(s) room[k + i] = s[i];
+    k + len(s)
+}
+
+room_int(room: []i8, k: int, n: int): int {
+    at: int = k;
+    if (n >= 10) at = room_int(room, at, n / 10);
+    room[at] = (48 + n % 10) trunc i8;
+    at + 1
 }
 
 // ---- index.tsv, in fbuf ----
@@ -537,18 +550,12 @@ format_esv_summary() {
     for i in 0..ec_n {
         if (i > 0) fput_str(", ");
         c: int = ec_c[i];
-        for x in 0..3 fput(bsb_code_byte(ch_book[c], x));
+        for x in 0..3 fput(book_code_byte(ch_book[c], x));
         fput(32);
         fput_int(ch_num[c]);
         if (!ec_disk[i]) fput_str(" in memory")
     }
     fput_str(")\n")
-}
-
-bsb_code_byte(b: int, x: int): int {
-    src: TextSource = ready_source(TEXT_BSB);
-    k: int = src.data[src.book_lines[b] + 1 + x] as int;
-    k
 }
 
 // ---- Memory's ESV passages: pinned verses (DESIGN.md §13.6) ----
@@ -785,52 +792,16 @@ pin_key(b: []i8, p: int, e: int): int {
 // Text TEXT_PIN made of passage id's pinned verses: every book's B line,
 // then each of its chapters' records after their C line; other chapters
 // have none. The current text kept.
-pin_text: []i8 = new i8[524288](0i8);
-
-pin_text_n: int = 0;
-
-pin_text_put(k: int) {
-    if (pin_text_n < len(pin_text)) {
-        pin_text[pin_text_n] = k trunc i8;
-        pin_text_n = pin_text_n + 1
-    }
-}
-
-pin_lines: []int = new int[66](0);
-
 esv_pin_build(id: int) {
-    was: int = text_cur;
-    text_use(TEXT_BSB);
-    pin_text_n = 0;
-    for b in 0..books {
-        pin_lines[b] = pin_text_n;
-        for x in book_line[b]..line_end(book_line[b]) pin_text_put(bsb[x] as int);
-        pin_text_put(10)
-    }
-    base_verses: []int = ch_verses;
-    text_begin(TEXT_PIN);
-    for b in 0..books book_line[b] = pin_lines[b];
-    for c in 0..chapters {
-        ch_start[c] = -1;
-        ch_end[c] = -1;
-        ch_verses[c] = base_verses[c]
-    }
+    which: []int = new int[pn_n](0);
+    count: int = 0;
     for i in 0..pn_n {
         if (pn_id[i] == id && pn_len[i] >= 0) {
-            c: int = pn_c[i];
-            pin_text_put(67);
-            n: int = ch_num[c];
-            if (n >= 100) pin_text_put(48 + n / 100);
-            if (n >= 10) pin_text_put(48 + n / 10 % 10);
-            pin_text_put(48 + n % 10);
-            pin_text_put(10);
-            ch_start[c] = pin_text_n;
-            for x in 0..pn_len[i] pin_text_put(pn_pool[pn_at[i] + x] as int);
-            ch_end[c] = pin_text_n
+            which[count] = i;
+            count = count + 1
         }
     }
-    text_done(TEXT_PIN, pin_text, pin_text_n);
-    text_use(was)
+    chapters_text(TEXT_PIN, pn_c, pn_pool, pn_at, pn_len, which, count)
 }
 
 // memory.txt, in fbuf: a PIN ID BOOK C V1 V2 FETCHED BYTES line for each
@@ -841,7 +812,7 @@ format_pins() {
         fput_str("PIN\t");
         fput_int(pn_id[i]);
         fput(9);
-        for x in 0..3 fput(bsb_code_byte(ch_book[pn_c[i]], x));
+        for x in 0..3 fput(book_code_byte(ch_book[pn_c[i]], x));
         fput(9);
         fput_int(ch_num[pn_c[i]]);
         fput(9);

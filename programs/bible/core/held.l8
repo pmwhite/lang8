@@ -1,0 +1,276 @@
+tag bible;
+
+use_tag std;
+
+// Recordings held (DESIGN.md §12.3.3, §12.4.3), for core's host: chapters
+// fetched ahead while a recording plays, and books downloaded. Each chapter
+// is a kept file of its own (audio-SRC-BOOK-C.mp3) that the platform fetches
+// (HostIO.fetch), one at a time; core keeps the index of them (held.tsv:
+// core/audio.l8's cache index, the chapters of books downloaded among them)
+// and the books asked for (downloads.tsv). A book's chapters come first,
+// then those ahead of what plays: the next ten on a network that is not
+// metered, one on a metered one unless Download Ahead on Cellular is on.
+// Chapters fetched ahead are let go, least recently played first, past
+// 500 MB; a book's only when it is deleted.
+//
+// The platform's lines: `fetching ID GOT TOTAL` (bytes so far),
+// `fetched ID STATUS BYTES` (STATUS the answer's, 0 no answer; the file
+// there, whole, only with 200), `network KIND` (NET_).
+NET_NONE: int = 0;
+
+NET_FREE: int = 1;
+
+NET_METERED: int = 2;
+
+// What the platform said last (free until it says).
+hd_network: int = 1;
+
+// The fetch going (hd_fetch_id -1: none): its chapter, whether it is one
+// ahead, and how much of it has come (bytes; its whole, as the timings or
+// the platform say).
+hd_fetch_id: int = -1;
+
+hd_next_id: int = 1;
+
+hd_fetch_s: int = 0;
+
+hd_fetch_c: int = -1;
+
+hd_fetch_ahead: bool = false;
+
+hd_fetch_got: int = 0;
+
+hd_fetch_total: int = 0;
+
+// The share of it last shown (hundredths): the screens made again as it
+// comes, a twentieth at a time.
+hd_fetch_shown: int = 0;
+
+// A fetch that failed: no other begun until Listen, a download, or the
+// network changes (each tries again).
+hd_stalled: bool = false;
+
+hd_loaded: bool = false;
+
+// ---- what is kept ----
+held_load() {
+    if (hd_loaded) return;
+    hd_loaded = true;
+    kp_set("downloads.tsv");
+    kp_read();
+    downloads_parse();
+    kp_set("held.tsv");
+    kp_read();
+    _n: int = audio_cache_parse(fbuf, fbuf_n);
+    for i in 0..ac_n
+        if (ac_used[i] >= ac_clock) ac_clock = ac_used[i] + 1
+}
+
+held_save_index() {
+    fbuf_n = audio_cache_format(fbuf);
+    kp_set("held.tsv");
+    kp_write()
+}
+
+held_save_downloads() {
+    downloads_format();
+    kp_set("downloads.tsv");
+    kp_write()
+}
+
+// Chapter c of source s's file let go (and from the index).
+held_drop(s: int, c: int) {
+    i: int = audio_cache_find(s, c);
+    if (i < 0) return;
+    audio_cache_remove(i);
+    held_remove_file(s, c)
+}
+
+held_remove_file(s: int, c: int) {
+    audio_kept_name(s, c);
+    kp_name_n = 0;
+    for i in 0..au_n {
+        if (kp_name_n < len(kp_name)) {
+            kp_name[kp_name_n] = au[i];
+            kp_name_n = kp_name_n + 1
+        }
+    }
+    f: fn() = kept_store.remove;
+    f()
+}
+
+held_have(s: int, c: int): bool {
+    audio_cache_find(s, c) >= 0
+}
+
+// How many of book b's chapters are held for s.
+held_book_count(s: int, b: int): int {
+    n: int = 0;
+    for c in book_first[b]..book_first[b] + book_count[b]
+        if (held_have(s, c)) n = n + 1;
+    n
+}
+
+// ---- the next fetch ----
+// A book's next chapter missing, else one ahead of what Listen plays.
+held_pump() {
+    if (!hs_on || host_io.fetch == null || hd_fetch_id >= 0 || hd_stalled || hd_network == NET_NONE) return;
+    held_load();
+    if (dl_next(&held_have)) {
+        held_fetch(dl_next_s, dl_next_c, false);
+        return
+    }
+    if (!lw_on || !lw_player_on || !src_cacheable(lw_src) || lw_c < 0) return;
+    most: int = audio_ahead_most(hd_network == NET_METERED, pref_is("downloadAheadCellular"));
+    c: int = audio_ahead_next(lw_src, lw_c, most, &held_have);
+    if (c >= 0) held_fetch(lw_src, c, true)
+}
+
+held_fetch(s: int, c: int, ahead: bool) {
+    audio_url(s, c);
+    if (au_n == 0) {
+        hd_stalled = true;
+        return
+    }
+    hd_fetch_id = hd_next_id;
+    hd_next_id = hd_next_id + 1;
+    hd_fetch_s = s;
+    hd_fetch_c = c;
+    hd_fetch_ahead = ahead;
+    hd_fetch_got = 0;
+    hd_fetch_shown = 0;
+    hd_fetch_total = tim_bytes(s, c);
+    for i in 0..au_n hd_url[i] = au[i];
+    url_n: int = au_n;
+    audio_kept_name(s, c);
+    f: ?fn(id: int, url: []i8, url_n: int, name: []i8, name_n: int) = host_io.fetch;
+    if (f != null) f(hd_fetch_id, hd_url, url_n, au, au_n)
+}
+
+hd_url: []i8 = new i8[512](0i8);
+
+// Listen began a chapter (s's c): it played since, and those ahead
+// fetched.
+held_played(s: int, c: int) {
+    if (!hs_on || !src_cacheable(s)) return;
+    held_load();
+    hd_stalled = false;
+    if (audio_cache_find(s, c) >= 0) {
+        audio_cache_touch(s, c, ac_clock);
+        ac_clock = ac_clock + 1;
+        held_save_index()
+    }
+    held_pump()
+}
+
+// Chapter c's file, held, could not be played (gone from under core): let
+// go, so that it is played from online and fetched again.
+held_lost(s: int, c: int) {
+    if (audio_cache_find(s, c) < 0) return;
+    held_drop(s, c);
+    held_save_index()
+}
+
+// ---- the platform's lines ----
+held_fetching(id: int, got: int, total: int) {
+    if (id != hd_fetch_id) return;
+    hd_fetch_got = got;
+    if (total > 0) hd_fetch_total = total;
+    if (hd_fetch_ahead || hd_fetch_total <= 0) return;
+    shown: int = got * 100 / hd_fetch_total;
+    if (shown < hd_fetch_shown + 5) return;
+    hd_fetch_shown = shown;
+    held_screens_changed()
+}
+
+held_fetched(id: int, status: int, bytes: int) {
+    if (id != hd_fetch_id) return;
+    hd_fetch_id = -1;
+    s: int = hd_fetch_s;
+    c: int = hd_fetch_c;
+    if (status != 200 || bytes <= 0) {
+        hd_stalled = true;
+        if (!hd_fetch_ahead) held_screens_changed();
+        return
+    }
+    // (A book let go while its chapter came, or Listen gone on: kept all
+    // the same as one fetched ahead, the cache's to let go.)
+    audio_cache_add(s, c, bytes, ac_clock);
+    ac_clock = ac_clock + 1;
+    held_trim();
+    held_save_index();
+    if (!hd_fetch_ahead) held_screens_changed();
+    held_pump()
+}
+
+held_network(kind: int) {
+    if (kind < NET_NONE || kind > NET_METERED) return;
+    hd_network = kind;
+    hd_stalled = false;
+    held_pump()
+}
+
+// Chapters fetched ahead let go while they pass 500 MB (never what plays
+// now or the two after it).
+held_trim() {
+    playing: int = if (lw_on && lw_player_on) lw_c else -1;
+    v: int = audio_cache_victim(AC_LIMIT, lw_src, playing);
+    while (v >= 0) {
+        s: int = ac_src[v];
+        c: int = ac_c[v];
+        audio_cache_remove(v);
+        held_remove_file(s, c);
+        v = audio_cache_victim(AC_LIMIT, lw_src, playing)
+    }
+}
+
+// ---- books (Downloaded Books, Download a Book) ----
+// The reader whose books are shown: the version's chosen one.
+held_reader(): int {
+    hs_source(text_cur)
+}
+
+held_download(b: int) {
+    held_load();
+    if (!dl_add(held_reader(), b)) return;
+    held_save_downloads();
+    hd_stalled = false;
+    held_screens_changed();
+    held_pump()
+}
+
+// Book b's download stopped, or deleted: its chapters let go.
+held_delete(b: int) {
+    held_load();
+    s: int = held_reader();
+    if (!dl_remove(s, b)) return;
+    held_save_downloads();
+    for c in book_first[b]..book_first[b] + book_count[b] held_drop(s, c);
+    held_save_index();
+    held_screens_changed()
+}
+
+// Book b's progress for the reader shown, in thousandths (-1 not asked
+// for; 1000 whole).
+held_progress(b: int): int {
+    held_load();
+    s: int = held_reader();
+    part: f64 = if (hd_fetch_id >= 0 && !hd_fetch_ahead && hd_fetch_s == s && hd_fetch_c >= 0 && ch_book[hd_fetch_c] == b && hd_fetch_total > 0) hd_fetch_got as f64 / hd_fetch_total as f64 else 0.0f64;
+    dl_progress(s, b, held_book_count(s, b), part)
+}
+
+held_downloaded_bytes(): int {
+    held_load();
+    downloaded_total()
+}
+
+// The screens that show downloads made again.
+held_screens_changed() {
+    for i in 0..sk_n {
+        k: int = sk_kinds[i];
+        if (k == SCR_DOWNLOADS || k == SCR_DOWNLOAD_BOOKS || k == SCR_VOICE) {
+            sk_build(i);
+            ui_effect("update", sk_ids[i], -1)
+        }
+    }
+}

@@ -3,26 +3,29 @@ tag bible;
 use_tag std;
 
 // The host, for any platform that only gives core its primitives (SKINS.md,
-// a skin's interface): the web's, Android's. It asks for the data files
-// (the reader's version and the plans first, then the language data and
-// the Manual), keeps the settings and what is kept (core/kept.l8, by the
-// platform's kept_store), makes the ESV's requests to the site's Worker and
-// reads their answers (core/json.l8), and hands every other line to core.
-// A platform gives it HostIO and a loop that waits for lines:
+// a skin's interface): every skin's. It asks for the data files (the
+// reader's version and the plans first, then the language data and the
+// Manual), each read into the dataset it is part of (its own arena,
+// replaced whole when the file comes again), keeps the settings and what
+// is kept (core/kept.l8, by the platform's kept_store), makes the ESV's
+// requests to the site's Worker and reads their answers (core/json.l8),
+// and hands every other line to core. A platform gives it HostIO and its
+// lines, from a loop that waits for them or from its callbacks alike:
 //
-//   main() noregion: int {
-//       kept_store = ...; host_io = HostIO { ... };
-//       hs_start();
-//       while (true) { wait; n: int = take(hs_inbox); hs_lines(n); hs_after() }
-//   }
+//   kept_store = ...; host_io = HostIO { ... };
+//   hs_start();
+//   ... n: int = take(hs_inbox); hs_lines(n); hs_after() ...
 //
 // Its lines to core, besides the wire: `got ID SIZE` (data file ID came, or
 // -1), `http ID STATUS SIZE` (a request's answer, its body file ID's), `api
-// BASE` (where the site's /api/v1/ is). To the skin, besides core's lines:
-// `ready` once the reader's version and what is kept are read.
+// BASE` (where the site's /api/v1/ is), and core/held.l8's `fetching`,
+// `fetched` and `network`. To the skin, besides core's lines: `ready` once
+// the reader's version and what is kept are read.
 import "skin.l8";
 
 import "json.l8";
+
+import "held.l8";
 
 type HostIO = {
     // Data file name asked for as id (it comes as `got ID SIZE`).
@@ -32,6 +35,14 @@ type HostIO = {
     http: fn(id: int, b: []i8, n: int);
     // File or answer id, as it came, into out: its whole length.
     file: fn(id: int, out: []i8): int;
+    // A GET of the address (url's first url_n bytes) as id, into the kept
+    // file named (name's first name_n bytes): written whole once the answer
+    // is 200, else not at all; a copy of what is online, so the platform
+    // may keep it out of backups. It says `fetching ID GOT TOTAL` as it
+    // comes (if it can) and `fetched ID STATUS BYTES` at its end. Consume
+    // or copy url and name before returning. None: the platform cannot
+    // keep recordings (Downloads is not offered).
+    fetch: ?fn(id: int, url: []i8, url_n: int, name: []i8, name_n: int);
     // Lines to the skin: n bytes of b from start.
     say: fn(b: []i8, start: int, n: int)
 }
@@ -50,6 +61,7 @@ host_io: HostIO = HostIO {
     ask: &hs_no_ask,
     http: &hs_no_http,
     file: &hs_no_file,
+    fetch: null,
     say: &hs_no_say
 };
 
@@ -105,8 +117,6 @@ hs_lang_files: []str = ["lang/words.bin", "lang/verses.bin", "lang/supplied.bin"
     "lang/senses.bin", "lang/related.bin", "xref_index.bin", "xrefs.bin", "mhcc.txt",
     "lang/meanings.bin", "lang/meanings.txt", "lang/vocab.bin", "lang/letters.txt"];
 
-hs_lang_got: int = 0;
-
 // The version the reader opens in, and whether it and the plans have come
 // (then what is kept is read, and the page told).
 hs_start_t: int = 0;
@@ -120,18 +130,13 @@ hs_begun: bool = false;
 // A version asked for (core's sk_want_text), until it comes.
 hs_asked_t: int = -1;
 
-// The original: its words, Ketiv and accents first, then its text.
-hs_og_parts: int = 0;
-
-hs_og_text: []i8 = new i8[1](0i8);
-
-hs_og_text_n: int = -1;
-
 hs_ask_version(t: int) {
     if (t < 0 || t >= len(hs_version_files) || len(hs_version_files[t]) == 0) return;
     if (t == TEXT_ORIG) {
-        hs_og_parts = 0;
-        hs_og_text_n = -1;
+        // (Its words, Ketiv and accents, then its text: those come before
+        // let go.)
+        drop orig_coming;
+        drop orig_text_coming;
         hs_ask(HS_ORIG_WORDS_ID, "lang/orig-words.bin");
         hs_ask(HS_ORIG_KETIV_ID, "lang/orig-ketiv.txt");
         hs_ask(HS_ORIG_ACCENTS_ID, "lang/orig-accents.txt")
@@ -139,55 +144,86 @@ hs_ask_version(t: int) {
     hs_ask(t, hs_version_files[t])
 }
 
-// File id came, size bytes (-1: it could not).
-hs_got(id: int, size: int) noregion {
+// File id came, size bytes (-1: it could not): read into the dataset it
+// is part of (its arena), or into scratch that dataset is made from.
+hs_got(id: int, size: int) {
     if (size < 0) {
-        if (id == hs_start_t && !hs_start_came && id != 0) {
-            // (The version kept couldn't come: the BSB.)
-            hs_start_t = 0;
-            hs_ask_version(0)
-        } else if (id == hs_asked_t) hs_asked_t = -1;
+        hs_missing(id);
         return
     }
-    buf: []i8 = new i8[size + 1](0i8);
-    hs_file(id, buf);
+    // (A dataset of its own: read into its arena, or into scratch and made
+    // in its arena.)
+    if (id >= 0 && id < TEXTS && id != TEXT_ORIG) {
+        text_read(id, id, size, &hs_file);
+        hs_version_arrived(id);
+        return
+    }
+    if (id >= HS_LANG_ID && id < HS_LANG_ID + len(hs_lang_files)) {
+        language_file_read(id - HS_LANG_ID, id, size, &hs_file);
+        return
+    }
+    if (id == HS_PLAN_M_ID || id == HS_PLAN_C_ID) {
+        plan_file_read(hs_plan_of(id), id, size, &hs_file);
+        hs_plan_arrived();
+        return
+    }
+    if (id >= HS_ORIG_WORDS_ID && id <= HS_ORIG_ACCENTS_ID) {
+        orig_file_read(id - HS_ORIG_WORDS_ID, id, size, &hs_file);
+        hs_orig_ready();
+        return
+    }
     if (id == TEXT_ORIG) {
-        hs_og_text = buf;
-        hs_og_text_n = size;
-        hs_orig_ready()
-    } else if (id >= 0 && id < TEXTS) hs_version_came(id, buf, size) else if (id == HS_PLAN_M_ID || id == HS_PLAN_C_ID) {
-        plan_file_set(if (id == HS_PLAN_M_ID) PLAN_MCHEYNE else PLAN_CHRONO, buf,
-            size);
-        hs_plans_got = hs_plans_got + 1;
-        hs_begin()
-    } else if (id >= HS_TIM_ID && id < HS_TIM_ID + 4) _t: int = tim_load(id - HS_TIM_ID,
-        buf, size) else if (id == HS_PATHS_ID) _p: int = henson_paths_load(buf, size) else if (id == HS_HELP_ID) {
-        hlp = buf;
-        hlp_n = size;
-        help_index()
-    } else if (id >= HS_LANG_ID && id < HS_LANG_ID + len(hs_lang_files)) hs_lang_came(id - HS_LANG_ID,
-        buf, size) else if (id == HS_ORIG_WORDS_ID) {
-        og = buf;
-        og_n = size / 12;
-        hs_og_parts = hs_og_parts + 1;
-        hs_orig_ready()
-    } else if (id == HS_ORIG_KETIV_ID) {
-        lket = buf;
-        lket_n = size;
-        ket_index();
-        hs_og_parts = hs_og_parts + 1;
-        hs_orig_ready()
-    } else if (id == HS_ORIG_ACCENTS_ID) {
-        og_acc = buf;
-        og_acc_n = size;
-        og_acc_index();
-        hs_og_parts = hs_og_parts + 1;
-        hs_orig_ready()
+        drop orig_text_coming;
+        orig_text_coming = data_file_read(id, size, &hs_file);
+        hs_orig_ready();
+        return
+    }
+    // (Read into scratch: what is kept of them is made from it.)
+    if (id >= HS_TIM_ID && id < HS_TIM_ID + 4 || id == HS_PATHS_ID) {
+        region {
+            source: []i8 = new i8[size + 1](0i8);
+            hs_file(id, source);
+            if (id == HS_PATHS_ID) henson_paths_came(source, size) else timings_came(id - HS_TIM_ID,
+                source, size)
+        }
+        // (Their chapters known now: a download left unfinished goes on.)
+        held_pump();
+        return
+    }
+    if (id == HS_HELP_ID) {
+        region {
+            source: []i8 = new i8[size + 1](0i8);
+            hs_file(id, source);
+            manual_came(source, size)
+        }
+        return
     }
 }
 
-hs_version_came(t: int, buf: []i8@immortal, n: int) {
-    text_load(t, buf, n);
+// The plan whose file id is.
+hs_plan_of(id: int): int {
+    if (id == HS_PLAN_M_ID) PLAN_MCHEYNE else PLAN_CHRONO
+}
+
+// A plan's file in place: the reader begun once both have come.
+hs_plan_arrived() {
+    hs_plans_got = hs_plans_got + 1;
+    hs_begin()
+}
+
+// File id could not come: a version kept that isn't here gives way to the
+// BSB; one asked for is no longer waited for.
+hs_missing(id: int) {
+    if (id == hs_start_t && !hs_start_came && id != 0) {
+        // (The version kept couldn't come: the BSB.)
+        hs_start_t = 0;
+        hs_ask_version(0)
+    } else if (id == hs_asked_t) hs_asked_t = -1
+}
+
+// Version t's text in place: the reader begun, if it was waited for, or
+// switched to it, if it was asked for.
+hs_version_arrived(t: int) {
     if (!hs_start_came && t == hs_start_t) {
         hs_start_came = true;
         text_use(t);
@@ -209,7 +245,7 @@ hs_loading: []bool = new bool[8](false);
 
 hs_text_ready(t: int): int {
     if (t < 0 || t >= TEXT_PIN || t == TEXT_ESV) return 0;
-    if (tx_ready[t]) return 1;
+    if (text_ready(t)) return 1;
     if (!hs_loading[t] && t != hs_asked_t) {
         hs_loading[t] = true;
         hs_ask_version(t)
@@ -219,10 +255,11 @@ hs_text_ready(t: int): int {
 
 // The original's text read once its words, Ketiv and accents are.
 hs_orig_ready() {
-    if (hs_og_parts < 3 || hs_og_text_n < 0) return;
+    if (!orig_whole()) return;
     og_setting = clamp_index(pref_get("origGlosses"), 4) - 1;
     lay_accents = pref_is("origAccents");
-    hs_version_came(TEXT_ORIG, hs_og_text, hs_og_text_n)
+    orig_complete();
+    hs_version_arrived(TEXT_ORIG)
 }
 
 // The reader's version and the plans here: what is kept read, the page
@@ -232,6 +269,7 @@ hs_begin() {
     hs_begun = true;
     kept_load();
     kept_esv_load();
+    held_load();
     for i in 0..len(hs_lang_files) hs_ask(HS_LANG_ID + i, hs_lang_files[i]);
     hs_ask(HS_HELP_ID, "help.txt");
     for s in 0..len(hs_tim_files) hs_ask(HS_TIM_ID + s, hs_tim_files[s]);
@@ -241,74 +279,10 @@ hs_begin() {
     hs_said("ready\n")
 }
 
-hs_lang_came(k: int, buf: []i8@immortal, n: int) {
-    if (k == 0) {
-        lw = buf;
-        lw_n = n / 12
-    } else if (k == 1) {
-        lv = buf;
-        lv_n = n / 8 - 1
-    } else if (k == 2) {
-        lsup = buf;
-        lsup_n = n / 8
-    } else if (k == 3) {
-        lforms = buf;
-        lforms_len = n
-    } else if (k == 4) {
-        lmorph = buf;
-        lmorph_len = n
-    } else if (k == 5) {
-        lconc = buf;
-        lconc_len = n
-    } else if (k == 6) {
-        llex = buf;
-        llex_len = n
-    } else if (k == 7) {
-        lgram = buf;
-        lgram_len = n
-    } else if (k == 8) {
-        lsen = buf;
-        lsen_n = n
-    } else if (k == 9) {
-        lrel = buf;
-        lrel_n = n
-    } else if (k == 10) {
-        lxi = buf;
-        lxi_n = n / 4
-    } else if (k == 11) {
-        lxr = buf;
-        lxr_n = n
-    } else if (k == 12) {
-        lmh = buf;
-        lmh_n = n
-    } else if (k == 13) {
-        lmean = buf;
-        lmean_n = n
-    } else if (k == 14) {
-        lmeant = buf;
-        lmeant_n = n
-    } else if (k == 15) {
-        lvoc = buf;
-        lvoc_n = n
-    } else if (k == 16) {
-        llet = buf;
-        llet_n = n
-    }
-    hs_lang_got = hs_lang_got + 1;
-    if (hs_lang_got < len(hs_lang_files)) return;
-    // (All of it: indexed, the cards read, and core's screens made again.)
-    mean_index();
-    lang_index();
-    learn_index_files();
-    if (lang_ready) learn_index_lang();
-    kept_load_cards();
-    sk_update_all()
-}
-
 // (The host's numbers: whether the language data is here; the device's
 // own voice reads aloud; the ESV's search's state.)
 hs_num(what: int, _a: int): int {
-    if (what == SK_NUM_LANG || what == SK_NUM_LEARN) return if (lang_ready) 1 else 0;
+    if (what == SK_NUM_LANG || what == SK_NUM_LEARN) return if (language_ready()) 1 else 0;
     if (what == SK_NUM_AUDIO_SOURCE) return hs_source(_a);
     if (what == SK_NUM_VOICE_SEEN || what == SK_NUM_BETTER_VOICE) return 1;
     if (what == SK_NUM_ESV_SEARCH) return hs_esr_state;
@@ -321,6 +295,9 @@ hs_num(what: int, _a: int): int {
     if (what == SK_NUM_END_SEEN) return if (_a == rd_rest_c && rd_rest_end) 1 else 0;
     if (what == SK_NUM_MEMORY_TEXT) return hs_memory_text(_a);
     if (what == SK_NUM_TEXT) return hs_text_ready(_a);
+    if (what == SK_NUM_CELLULAR) return if (pref_is("downloadAheadCellular")) 1 else 0;
+    if (what == SK_NUM_DOWNLOADED) return held_downloaded_bytes();
+    if (what == SK_NUM_DOWNLOAD) return held_progress(_a);
     -1
 }
 
@@ -336,9 +313,10 @@ hs_memory_text(i: int): int {
     mpt_n = 0;
     if (!esv_pin_ready(mq_id[i])) return 0;
     esv_pin_build(mq_id[i]);
-    if (!tx_ready[TEXT_PIN]) return 0;
-    memory_layout_from(text_source(TEXT_PIN), mq_c1[i], mq_v1[i], mq_c2[i], mq_v2[i],
-        mq_id[i]);
+    if (!text_ready(TEXT_PIN)) return 0;
+    borrow texts[TEXT_PIN] as text {
+        memory_layout_from(text, mq_c1[i], mq_v1[i], mq_c2[i], mq_v2[i], mq_id[i])
+    }
     if (mw_n > 0) 1 else 0
 }
 
@@ -509,7 +487,9 @@ hs_range_words() {
     for c in rg_c1..rg_c2 + 1
         if (!esv_held(c)) return;
     esv_build();
-    memory_layout_from(text_source(TEXT_ESV), rg_c1, rg_v1, rg_c2, rg_v2, 1);
+    borrow texts[TEXT_ESV] as text {
+        memory_layout_from(text, rg_c1, rg_v1, rg_c2, rg_v2, 1)
+    }
     fbuf_n = 0;
     if (mt_n > 0) fput_first_words(2000)
 }
@@ -535,7 +515,6 @@ hs_remind_minutes(): int {
 }
 
 hs_notify_schedule() {
-    if (!ui_wire) return;
     ui_str("notify_clear\n");
     memory_on: bool = pref_is("memoryReminder");
     if (!reminders_any() && !memory_on) return;
@@ -697,7 +676,7 @@ hs_fetch(what: int, c: int, count: int): bool {
     sent: bool = false;
     region {
         request: HsRequest = hs_request(HS_CHAPTERS, "esv/chapters?book=");
-        for x in 0..3 hs_url_byte(&request, bsb_code_byte(ch_book[c], x));
+        for x in 0..3 hs_url_byte(&request, book_code_byte(ch_book[c], x));
         hs_url_str(&request, "&chapter=");
         hs_url_int(&request, ch_num[c]);
         hs_url_str(&request, "&count=");
@@ -737,7 +716,7 @@ hs_esv_audio(c: int) {
     sent: bool = false;
     region {
         request: HsRequest = hs_request(HS_AUDIO, "esv/audio?book=");
-        for x in 0..3 hs_url_byte(&request, bsb_code_byte(ch_book[c], x));
+        for x in 0..3 hs_url_byte(&request, book_code_byte(ch_book[c], x));
         hs_url_str(&request, "&chapter=");
         hs_url_int(&request, ch_num[c]);
         sent = hs_get(request)
@@ -756,7 +735,7 @@ hs_book_at(b: []i8, p: int, e: int): int {
     for k in 0..books {
         same: bool = true;
         for x in 0..3
-            if (bsb_code_byte(k, x) != b[p + x] as int) same = false;
+            if (book_code_byte(k, x) != b[p + x] as int) same = false;
         if (same) return k
     }
     -1
@@ -869,29 +848,45 @@ hs_flush() {
     ui_out_n = 0
 }
 
-hs_lines(n: int) noregion {
+hs_lines(n: int) {
     p: int = 0;
     for i in 0..n {
         if (hs_inbox[i] as int == 10) {
-            if (i - p > 4 && sk_word_is(hs_inbox, p, i, "got")) {
-                id: int = sk_num(hs_inbox, p + 4, i);
-                hs_got(id, sk_num(hs_inbox, sk_num_end, i))
-            } else if (i - p > 5 && sk_word_is(hs_inbox, p, i, "http")) {
-                id: int = sk_num(hs_inbox, p + 5, i);
-                st: int = sk_num(hs_inbox, sk_num_end, i);
-                hs_answer(id, st, sk_num(hs_inbox, sk_num_end, i))
-            } else if (i - p > 4 && sk_word_is(hs_inbox, p, i, "api")) {
-                hs_api_n = 0;
-                for x in p + 4..i {
-                    if (hs_api_n < len(hs_api)) {
-                        hs_api[hs_api_n] = hs_inbox[x];
-                        hs_api_n = hs_api_n + 1
-                    }
-                }
-            } else sk_line(hs_inbox, p, i);
+            hs_line(p, i);
             p = i + 1
         }
     }
+}
+
+// The line of the inbox from p to e: a file come, a request's answer, the
+// site's address, or core's. (Any of them, from any callback: what is kept
+// of a file is made in its own arena.)
+hs_line(p: int, e: int) {
+    if (e - p > 4 && sk_word_is(hs_inbox, p, e, "got")) {
+        id: int = sk_num(hs_inbox, p + 4, e);
+        hs_got(id, sk_num(hs_inbox, sk_num_end, e))
+    } else if (e - p > 5 && sk_word_is(hs_inbox, p, e, "http")) {
+        id: int = sk_num(hs_inbox, p + 5, e);
+        st: int = sk_num(hs_inbox, sk_num_end, e);
+        hs_answer(id, st, sk_num(hs_inbox, sk_num_end, e))
+    } else if (sk_word_is(hs_inbox, p, e, "fetching")) {
+        id: int = sk_num(hs_inbox, p + 9, e);
+        got: int = sk_num(hs_inbox, sk_num_end, e);
+        held_fetching(id, got, sk_num(hs_inbox, sk_num_end, e))
+    } else if (sk_word_is(hs_inbox, p, e, "fetched")) {
+        id: int = sk_num(hs_inbox, p + 8, e);
+        st: int = sk_num(hs_inbox, sk_num_end, e);
+        held_fetched(id, st, sk_num(hs_inbox, sk_num_end, e))
+    } else if (sk_word_is(hs_inbox, p, e, "network")) held_network(sk_num(hs_inbox,
+        p + 8, e)) else if (e - p > 4 && sk_word_is(hs_inbox, p, e, "api")) {
+        hs_api_n = 0;
+        for x in p + 4..e {
+            if (hs_api_n < len(hs_api)) {
+                hs_api[hs_api_n] = hs_inbox[x];
+                hs_api_n = hs_api_n + 1
+            }
+        }
+    } else sk_line(hs_inbox, p, e)
 }
 
 // After the lines: a version core wants asked for, and what it said sent.
@@ -909,7 +904,13 @@ hs_after() {
 
 // The host hs_begun: core's host its own, the settings read, the version
 // read last asked for (or the BSB), and the plans.
+hs_stream(data: []i8, start: int, count: int) {
+    send: fn(data: []i8, start: int, count: int) = host_io.say;
+    send(data, start, count)
+}
+
 hs_start() {
+    ui_sender = &hs_stream;
     hs_on = true;
     sk_host = SkinHost {
         save_prefs: &kept_save_prefs,
@@ -928,6 +929,7 @@ hs_start() {
     sk_has_orig = true;
     sk_has_manual = true;
     sk_has_acknowledgements = true;
+    sk_has_downloads = host_io.fetch != null;
     kept_load_prefs();
     hs_voice_load();
     hs_start_t = launch_version(pref_get("version"), false);

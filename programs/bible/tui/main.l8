@@ -223,7 +223,7 @@ tui_file(id: int, out: []i8): int {
     file_into(p, out)
 }
 
-answer_asks() noregion: bool {
+answer_asks(): bool {
     if (waiting_n == 0) return false;
     n: int = 0;
     for w in 0..waiting_n {
@@ -286,6 +286,132 @@ tui_http(id: int, b: []i8, n: int) {
     http_id[http_n] = id;
     http_pid[http_n] = pid;
     http_n = http_n + 1
+}
+
+// ---- recordings fetched into kept files (HostIO.fetch) ----
+// Each by curl into http/fetch-ID.part, moved to its kept name once its
+// answer is 200; how much has come said as it grows.
+FETCH_MOST: int = 4;
+
+fetch_id: []int = new int[4](0);
+
+fetch_pid: []int = new int[4](0);
+
+// Each one's kept name (FETCH_NAME bytes a fetch: as many as kp_name holds).
+FETCH_NAME: int = 64;
+
+fetch_name: []i8 = new i8[4 * 64](0i8);
+
+fetch_name_n: []int = new int[4](0);
+
+fetch_n: int = 0;
+
+fetch_part_path(id: int): str@new {
+    tk_cat_n = 0;
+    tk_cat_buf(tk_kept_dir, tk_kept_dir_n);
+    tk_cat_str("/http/fetch-");
+    tk_cat_int(id);
+    tk_cat_str(".part");
+    cstr(tk_cat_bytes())
+}
+
+fetch_status_path(id: int): str@new {
+    tk_cat_n = 0;
+    tk_cat_buf(tk_kept_dir, tk_kept_dir_n);
+    tk_cat_str("/http/fetch-");
+    tk_cat_int(id);
+    tk_cat_str(".status");
+    cstr(tk_cat_bytes())
+}
+
+tui_fetch(
+    id: int,
+    url: []i8,
+    url_n: int,
+    name: []i8,
+    name_n: int
+) {
+    tk_cat_n = 0;
+    tk_cat_buf(url, url_n);
+    address: str = cstr(tk_cat_bytes());
+    pid: int = -1;
+    if (len(curl) > 0 && fetch_n < FETCH_MOST && name_n <= FETCH_NAME) {
+        pr_begin(curl);
+        pr_arg("-s");
+        pr_arg("-L");
+        pr_arg("--connect-timeout");
+        pr_arg("20");
+        pr_arg("-H");
+        pr_arg("X-Smooth-Bible: terminal (1)");
+        pr_arg("-o");
+        pr_arg(fetch_part_path(id));
+        pr_arg("-w");
+        pr_arg("%{http_code}");
+        pr_arg(address);
+        pid = pr_spawn(curl, fetch_status_path(id), "")
+    }
+    if (pid < 0) {
+        fetch_said(id, 0, 0);
+        return
+    }
+    fetch_id[fetch_n] = id;
+    fetch_pid[fetch_n] = pid;
+    for i in 0..name_n fetch_name[fetch_n * FETCH_NAME + i] = name[i];
+    fetch_name_n[fetch_n] = name_n;
+    fetch_n = fetch_n + 1
+}
+
+fetch_said(id: int, status: int, bytes: int) {
+    tc_str("fetched ");
+    tc_int(id);
+    tc_byte(32);
+    tc_int(status);
+    tc_byte(32);
+    tc_int(bytes);
+    tc_end()
+}
+
+// Each fetch ended: its file moved where it is kept (200), else let go;
+// those going, how much has come.
+fetch_check() {
+    k: int = 0;
+    while (k < fetch_n) {
+        id: int = fetch_id[k];
+        if (pr_done(fetch_pid[k])) {
+            n: int = pr_read(fetch_status_path(id));
+            status: int = if (pr_code == 0) wl_int(pr_buf, 0, n) else 0;
+            _s: int = unlink(fetch_status_path(id));
+            part: str = fetch_part_path(id);
+            size: int = file_size(part);
+            if (status == 200 && size > 0) {
+                kp_name_n = fetch_name_n[k];
+                for i in 0..kp_name_n kp_name[i] = fetch_name[k * FETCH_NAME + i];
+                try {
+                    files::move_file(part, kp_path())
+                } with files::FileError _error -> {
+                    status = 0
+                }
+            }
+            if (status != 200 || size <= 0) _u: int = unlink(part);
+            fetch_said(id, status, if (status == 200 && size > 0) size else 0);
+            fetch_n = fetch_n - 1;
+            fetch_id[k] = fetch_id[fetch_n];
+            fetch_pid[k] = fetch_pid[fetch_n];
+            for i in 0..fetch_name_n[fetch_n] fetch_name[k * FETCH_NAME + i] = fetch_name[fetch_n * FETCH_NAME + i];
+            fetch_name_n[k] = fetch_name_n[fetch_n]
+        } else {
+            got: int = file_size(fetch_part_path(id));
+            if (got > 0) {
+                tc_str("fetching ");
+                tc_int(id);
+                tc_byte(32);
+                tc_int(got);
+                tc_str(" 0");
+                tc_end()
+            }
+            k = k + 1
+        }
+    }
 }
 
 // Each GET ended: its status (curl's) and its body's size, to core.
@@ -366,7 +492,7 @@ send_start() {
 // ---- the loop ----
 // Lines to core (to_core's), to core's host: its lines read, the files it
 // asks for answered, what it says after.
-feed() noregion {
+feed() {
     while (to_core_n > 0) {
         n: int = to_core_n;
         log_to_core(n);
@@ -412,6 +538,7 @@ main(argc: int, args: []str) noregion: int {
         ask: &tui_ask,
         http: &tui_http,
         file: &tui_file,
+        fetch: &tui_fetch,
         say: &tui_say
     };
     hs_start();
@@ -481,7 +608,7 @@ main(argc: int, args: []str) noregion: int {
         }
         if (tk_dirty || rd_dirty || pn_dirty || mn_on) tk_draw();
         wait = tk_timers();
-        if (au_pid > 0 || vo_pid > 0 || http_n > 0 || tz_pid > 0 || voices_pid > 0) {
+        if (au_pid > 0 || vo_pid > 0 || http_n > 0 || fetch_n > 0 || tz_pid > 0 || voices_pid > 0) {
             if (wait > 100) wait = 100
         }
         if (pn_send_at > 0 && pn_send_at - tm_now() < wait) wait = pn_send_at - tm_now();
@@ -497,6 +624,7 @@ main(argc: int, args: []str) noregion: int {
         }
         if (pn_send_at > 0 && tm_now() >= pn_send_at) pn_send_query();
         http_check();
+        fetch_check();
         au_check();
         vo_check();
         rm_check();

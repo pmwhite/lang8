@@ -118,6 +118,61 @@ async function httpGet(id, url) {
   send(`http ${id} ${status} ${bytes.length}`);
 }
 
+// ---- recordings held (core/held.l8): each fetched through the site's
+// Worker (the readers' hosts give pages no access to their files) and kept
+// in the browser's cache under /read/held/NAME, never fetched as such ----
+const HELD = "sb-held";
+const heldKey = (name) => new Request(`/read/held/${encodeURIComponent(name)}`);
+
+async function fetchHeld(id, url, name) {
+  let status = 0;
+  let size = 0;
+  try {
+    const r = await fetch(`${API}audio/relay?u=${encodeURIComponent(url)}`, { headers: { "X-Smooth-Bible": "web (1)" } });
+    status = r.status;
+    if (r.ok && r.body) {
+      const total = Number(r.headers.get("content-length")) || 0;
+      const parts = [];
+      let told = 0;
+      const reader = r.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        size += value.length;
+        if (size - told >= 262144) {
+          told = size;
+          send(`fetching ${id} ${size} ${total}`);
+        }
+      }
+      const blob = new Blob(parts, { type: "audio/mpeg" });
+      await (await caches.open(HELD)).put(heldKey(name), new Response(blob, { headers: { "content-type": "audio/mpeg" } }));
+      keepStorage("sb.held");
+    }
+  } catch {
+    size = 0;
+  }
+  send(`fetched ${id} ${status} ${status === 200 ? size : 0}`);
+}
+
+// A held recording as an address the player can seek in (none: not held).
+async function heldAddress(name) {
+  const hit = await (await caches.open(HELD)).match(heldKey(name));
+  return hit ? URL.createObjectURL(await hit.blob()) : "";
+}
+
+// The network's kind, said as it changes (core/held.l8's NET_: 0 none, 1
+// not metered, 2 metered: a phone's data, or Save-Data asked for).
+let networkSaid = -1;
+
+function tellNetwork() {
+  const c = navigator.connection;
+  const kind = !navigator.onLine ? 0 : c && (c.saveData || c.type === "cellular") ? 2 : 1;
+  if (kind === networkSaid) return;
+  networkSaid = kind;
+  send(`network ${kind}`);
+}
+
 const imports = {
   bw_wait: pausing(),
   bw_take(buf, cap) {
@@ -160,6 +215,11 @@ const imports = {
     httpGet(Number(id), dec.decode(this.bytes().slice(Number(b), Number(b) + Number(n))));
     return 0n;
   },
+  bw_fetch(id, b, n, name, nameN) {
+    const bytes = this.bytes();
+    fetchHeld(Number(id), dec.decode(bytes.slice(Number(b), Number(b) + Number(n))), dec.decode(bytes.slice(Number(name), Number(name) + Number(nameN))));
+    return 0n;
+  },
   bw_store_get(b, start, end, out) {
     const key = "sb." + dec.decode(this.bytes().slice(Number(b) + Number(start), Number(b) + Number(end)));
     const v = localStorage.getItem(key);
@@ -181,7 +241,10 @@ const imports = {
     return 0n;
   },
   bw_store_remove(b, start, end) {
-    localStorage.removeItem("sb." + dec.decode(this.bytes().slice(Number(b) + Number(start), Number(b) + Number(end))));
+    const name = dec.decode(this.bytes().slice(Number(b) + Number(start), Number(b) + Number(end)));
+    localStorage.removeItem("sb." + name);
+    // (A held recording is a kept file too.)
+    caches.open(HELD).then((c) => c.delete(heldKey(name))).catch(() => {});
     return 0n;
   },
 };
@@ -290,6 +353,8 @@ function rich(node, text, runs, links = [], onLink = null) {
     }
     const link = links.find((l) => l[0] <= a && a < l[1]);
     const s = el(link ? "a" : "span", st >= 0 ? runClass(st) : "", text.slice(a, b));
+    // (Where its words begin in text, UTF-16: a reveal finds them by it.)
+    s.dataset.at = a;
     if (link && onLink) {
       s.href = "#";
       s.classList.add("ln");
@@ -378,6 +443,8 @@ function screenLine(w) {
     case "focus":
       s.focus = w.num(1);
       s.focusMode = w.num(2);
+      // (Mode 4: the row's words FROM to TO, UTF-16, kept in sight.)
+      if (s.focusMode === 4) s.focusWords = [w.num(3), w.num(4)];
       break;
     case "intro":
       Object.assign(s, { intro: w.field(1), introRuns: parseRuns(w.field(2)), introQuote: w.fnum(3) === 1 });
@@ -441,7 +508,7 @@ function screenLine(w) {
 function newScreen(w) {
   return {
     id: w.num(1), kind: w.num(2), arg: w.num(3), title: w.field(1), search: w.field(2), sections: [], tools: [],
-    commands: [], focus: -1, focusMode: 0, segments: [], filterColors: [], sorts: [], scopes: [], searchText: "",
+    commands: [], focus: -1, focusMode: 0, focusWords: null, segments: [], filterColors: [], sorts: [], scopes: [], searchText: "",
     intro: "", hero: "", left: "", confirm: "", button: "", emptyTitle: "", emptyLine: "",
   };
 }
@@ -498,6 +565,9 @@ function line(w) {
     case "refill":
       panel.update(w.num(1));
       break;
+    case "reveal":
+      panel.reveal(w.num(1));
+      break;
     case "pop":
     case "close":
       panel.back(false);
@@ -536,7 +606,7 @@ function line(w) {
       break;
     case "place":
       panel.dismiss();
-      reader.jump(w.num(1), Math.floor(w.num(2) / 1000), w.num(2) % 1000);
+      reader.jump(w.num(1), w.num(2), w.num(3));
       break;
     case "relayout":
       reader.relayout();
@@ -597,6 +667,9 @@ function line(w) {
       break;
     case "toast":
       toast(w.field(1));
+      break;
+    case "announce":
+      announce(w.field(1));
       break;
     case "savefile": {
       // (A file to save: downloaded, as a page saves one.)
@@ -1265,6 +1338,40 @@ const panel = {
   update(id) {
     if (!this.stack.length || this.stack[this.stack.length - 1] !== id) return;
     this.show(false);
+  },
+
+  // The focus row's words brought into sight, the list moving as little
+  // as it can (Practice's words practised, the word being typed).
+  reveal(id) {
+    const s = this.top();
+    if (!s || s.id !== id || !s.focusWords) return;
+    const [from, to] = s.focusWords;
+    const list = $(".plist", this.box);
+    const row = list.querySelector(".focus");
+    if (!row) return;
+    let top = Infinity;
+    let bottom = -Infinity;
+    for (const span of row.querySelectorAll("[data-at]")) {
+      const at = +span.dataset.at;
+      const node = span.firstChild;
+      if (!node || node.nodeType !== Node.TEXT_NODE) continue;
+      const a = Math.max(from, at);
+      const b = Math.min(to, at + node.length);
+      if (b <= a) continue;
+      const range = document.createRange();
+      range.setStart(node, a - at);
+      range.setEnd(node, b - at);
+      const r = range.getBoundingClientRect();
+      top = Math.min(top, r.top);
+      bottom = Math.max(bottom, r.bottom);
+    }
+    if (top === Infinity) return;
+    const box = list.getBoundingClientRect();
+    const margin = 16;
+    let by = 0;
+    if (top - margin < box.top) by = top - margin - box.top;
+    else if (bottom + margin > box.bottom) by = Math.min(bottom + margin - box.bottom, top - margin - box.top);
+    if (by) list.scrollBy({ top: by, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
   },
 
   dismiss() {
@@ -2239,6 +2346,17 @@ const player = {
 
 let toastTimer = 0;
 
+// Words for a screen reader alone (a polite live region, off the screen).
+function announce(words) {
+  let a = $(".announce");
+  if (!a) {
+    a = el("div", "announce");
+    a.setAttribute("aria-live", "polite");
+    document.body.appendChild(a);
+  }
+  a.textContent = words;
+}
+
 function toast(words) {
   let t = $(".toast");
   if (!t) {
@@ -2260,11 +2378,27 @@ const sound = {
   tok: 0,
   to: -1,
   timer: 0,
-  play(tok, from, to, rate, url) {
+  held: "",
+  // (kept:NAME, a chapter core holds: played from the cache, else it
+  // fails, and core plays it from online.)
+  async play(tok, from, to, rate, url) {
     voice.stop();
     this.stop();
     this.tok = tok;
     this.to = to;
+    if (url.startsWith("kept:")) {
+      const held = await heldAddress(url.slice(5));
+      if (tok !== this.tok) {
+        if (held) URL.revokeObjectURL(held);
+        return;
+      }
+      if (!held) {
+        this.failed(tok);
+        return;
+      }
+      if (this.held) URL.revokeObjectURL(this.held);
+      this.held = url = held;
+    }
     const a = this.el;
     a.preload = "auto";
     a.src = url;
@@ -2433,6 +2567,10 @@ function begin() {
   if (v) send(`version ${v[1].toUpperCase()}`);
   if (c >= 0) send(`place ${c} 0 0`);
   send(`start ${innerWidth} ${innerHeight} ${Math.round(devicePixelRatio * 100)} ${matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0} ${-new Date().getTimezoneOffset() * 60}`);
+  tellNetwork();
+  addEventListener("online", tellNetwork);
+  addEventListener("offline", tellNetwork);
+  navigator.connection?.addEventListener?.("change", tellNetwork);
   // (Offline once visited, after the first paint: WEB.md §W9.1.)
   if ("serviceWorker" in navigator) setTimeout(offline, 3000);
 }
