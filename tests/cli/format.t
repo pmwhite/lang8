@@ -1,3 +1,47 @@
+Multiple files are formatted in argument order, with independent declarations
+and comments. Standard output matches separate invocations, and -w may follow
+the file arguments:
+
+  $ printf '// first: café\n tag batch; type Item={value:int} main():int {1;}\n' > first.l8
+  $ printf 'tag batch; type Item={name:str} main():int {2;}\n// second\n' > 'second file.l8'
+  $ l8 fmt first.l8 > first.expected
+  $ l8 fmt 'second file.l8' > second.expected
+  $ cat first.expected second.expected > combined.expected
+  $ l8 fmt first.l8 'second file.l8' > combined.actual
+  $ cmp combined.expected combined.actual
+  $ l8 fmt first.l8 'second file.l8' -w
+  $ cmp first.expected first.l8 && cmp second.expected 'second file.l8'
+  $ l8 fmt -w first.l8 'second file.l8' first.l8
+  $ cmp first.expected first.l8 && cmp second.expected 'second file.l8'
+
+A missing file stops the batch and prevents commands chained with &&. Files
+after the failure stay untouched; earlier successful files remain formatted:
+
+  $ printf 'tag batch; main():int {3;}\n' > after.l8
+  $ cp after.l8 after.original
+  $ l8 fmt -w first.l8 absent.l8 after.l8 && echo 'validation continued'
+  error: absent.l8:1:1: cannot open file
+  [1]
+  $ cmp first.expected first.l8 && cmp after.original after.l8
+
+A syntax error also stops the batch, without rewriting the invalid file:
+
+  $ printf 'tag batch;\nmain(): int { @ }\n' > invalid.l8
+  $ cp invalid.l8 invalid.original
+  $ l8 fmt -w invalid.l8 after.l8 && echo 'validation continued'
+  error: invalid.l8:2:15: expected expression
+  [1]
+  $ cmp invalid.original invalid.l8 && cmp after.original after.l8
+
+No input is still a usage error:
+
+  $ l8 fmt
+  error: usage: l8 fmt [-w] <source.l8> ...
+  [1]
+  $ l8 fmt -w
+  error: usage: l8 fmt [-w] <source.l8> ...
+  [1]
+
 The formatter prints one canonical layout. Formatting its own output changes
 nothing, and the formatted program passes the same tests. Fixtures import the
 standard library by relative path, so work in a copy of the repository layout:

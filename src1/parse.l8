@@ -4278,7 +4278,6 @@ parse_function_tail(fn: *Function@immortal, is_extern: int) noregion raises Erro
     if (is_extern != 0) {
         fn.is_extern = true;
         if (fn.return_ty == null) error("extern function requires a return type");
-        if (rt != null && passes_by_ref(rt)) error("extern function cannot return a large aggregate");
         if (tok.kind == TokKind.LBrace) error("extern function cannot have a body");
         if (tok.kind == TokKind.Assign) {
             tok = tok.next;
@@ -4305,11 +4304,9 @@ parse_function_tail(fn: *Function@immortal, is_extern: int) noregion raises Erro
     current_fn = null
 }
 
-parse_field_list(base_offset: int) noregion raises Error: *Member {
+parse_field_list() noregion raises Error: *Member {
     head: ?*Member = null;
     cur: ?*Member = null;
-    offset: int = base_offset;
-    max_a: int = 1;
     while (tok.kind != TokKind.RBrace) {
         if (tok.kind != TokKind.Ident) error("expected field name");
         mname: []i8 = cur_tokstr();
@@ -4319,17 +4316,9 @@ parse_field_list(base_offset: int) noregion raises Error: *Member {
         skip(TokKind.Colon);
         mty: *Type = parse_type();
         if (is_noreturn_ty(mty)) error("noreturn cannot be a field type");
-        sz: int = type_size(mty);
-        al: int = type_align(mty);
-        if (sz <= 0) {
-            sz = 8;
-            al = 8
-        }
-        if (al <= 0) al = 8;
-        offset = align_up(offset, al);
         m: *Member = new Member {
             name: mname,
-            offset: offset,
+            offset: 0,
             ty: mty,
             next: null,
             lead: null,
@@ -4339,8 +4328,6 @@ parse_field_list(base_offset: int) noregion raises Error: *Member {
             browse_file: browse_tok_file,
             browse_len: browse_tok_len
         };
-        offset = offset + sz;
-        if (al > max_a) max_a = al;
         if (cur != null) {
             cur.next = m;
             cur = m
@@ -4352,9 +4339,119 @@ parse_field_list(base_offset: int) noregion raises Error: *Member {
             if (tok.kind != TokKind.RBrace) error("expected `;`, `,`, or `}` after field")
         }
     }
-    field_list_size = align_up(offset - base_offset, max_a);
     tok = tok.next;
     head or error("empty members")
+}
+
+// Field types may still be forward declarations while imports are parsed.
+// Resolve by-value dependencies before parsing expressions or choosing an ABI.
+// A negative size marks the active dependency path; pointers and slices do not
+// require their element's layout and therefore permit recursive data types.
+layout_error(
+    file: int,
+    pos: int,
+    name: []i8,
+    reason: []i8
+) noregion raises Error: noreturn {
+    message: *StrBuf = sb_new();
+    sb_puts(message, "cannot lay out ");
+    sb_puts(message, name);
+    sb_puts(message, reason);
+    error_at_file(file, pos, sb_finish(message))
+}
+
+resolve_layout_type(ty: *Type, file: int, pos: int) noregion raises Error {
+    match ty.* {
+        Record k -> resolve_record_layout(k.def, file, pos);
+        Enum k -> resolve_enum_layout(k.def, file, pos);
+        Exn k -> resolve_exception_layout(k.def, file, pos);
+        Array k -> resolve_layout_type(k.base, file, pos);
+        Refined k -> resolve_layout_type(k.base, file, pos);
+        _ -> { }
+    }
+}
+
+resolve_member_layouts(members: ?*Member) noregion raises Error: int {
+    offset: int = 0;
+    alignment: int = 1;
+    member: ?*Member = members;
+    while (member != null) {
+        resolve_layout_type(member.ty, member.browse_file, member.browse_pos);
+        a: int = type_align(member.ty);
+        offset = align_up(offset, a);
+        member.offset = offset;
+        offset = offset + type_size(member.ty);
+        if (a > alignment) alignment = a;
+        member = member.next
+    }
+    align_up(offset, alignment)
+}
+
+resolve_record_layout(def: *StructDef, file: int, pos: int) noregion raises Error {
+    if (def.size < 0) layout_error(file, pos, def.name, ": recursive by-value field; use a pointer to break the cycle");
+    if (def.size > 0) return;
+    if (def.members == null) layout_error(file, pos, def.name, ": no definition for this by-value type");
+    def.size = -1;
+    def.size = resolve_member_layouts(def.members)
+}
+
+resolve_exception_layout(def: *ExnDef, file: int, pos: int) noregion raises Error {
+    if (def.size < 0) layout_error(file, pos, def.name, ": recursive by-value field; use a pointer to break the cycle");
+    if (def.size > 0) return;
+    def.size = -1;
+    def.size = resolve_member_layouts(def.members)
+}
+
+resolve_enum_layout(def: *EnumDef, file: int, pos: int) noregion raises Error {
+    if (def.size < 0) layout_error(file, pos, def.name, ": recursive by-value field; use a pointer to break the cycle");
+    if (def.size > 0) return;
+    def.size = -1;
+    tag_ty: *Type = def.tag_ty or ty_int;
+    tag_size: int = type_size(tag_ty);
+    alignment: int = type_align(tag_ty);
+    end: int = tag_size;
+    variant: ?*Variant = def.variants;
+    while (variant != null) {
+        variant.payload_size = resolve_member_layouts(variant.fields);
+        a: int = members_align(variant.fields);
+        variant.payload_offset = align_up(tag_size, a);
+        payload_ty: ?*Type = variant.payload_ty;
+        if (payload_ty != null) type_struct_def(payload_ty).size = variant.payload_size;
+        variant_end: int = variant.payload_offset + variant.payload_size;
+        if (variant_end > end) end = variant_end;
+        if (a > alignment) alignment = a;
+        variant = variant.next
+    }
+    if (def.min_size > end) end = def.min_size;
+    def.align = alignment;
+    def.size = align_up(end, alignment)
+}
+
+resolve_type_layouts() noregion raises Error {
+    record: ?*StructDef = struct_defs;
+    while (record != null) {
+        // Undefined names behind pointers remain opaque, as before.
+        if (record.members != null) resolve_record_layout(record, record.browse_file,
+            record.browse_pos);
+        record = record.next
+    }
+    enumeration: ?*EnumDef = enum_defs;
+    while (enumeration != null) {
+        resolve_enum_layout(enumeration, enumeration.browse_file, enumeration.browse_pos);
+        enumeration = enumeration.next
+    }
+    exception_def: ?*ExnDef = exn_defs;
+    while (exception_def != null) {
+        resolve_exception_layout(exception_def, exception_def.browse_file, exception_def.browse_pos);
+        exception_def = exception_def.next
+    }
+    fn: ?*Function = functions;
+    while (fn != null) {
+        rt: ?*Type = fn.return_ty;
+        if (fn.is_extern && rt != null && passes_by_ref(rt)) error_at_file(fn.browse_file,
+            fn.browse_pos, "extern function cannot return a large aggregate");
+        fn = fn.next
+    }
 }
 
 check_enum_tag(tag: int, tag_ty: *Type) raises Error {
@@ -4401,14 +4498,11 @@ parse_variant(tag: int, enum_name: []i8, tag_size: int) noregion raises Error: *
     tok = tok.next;
     if (tok.kind == TokKind.LBrace) {
         tok = tok.next;
-        v.fields = parse_field_list(0);
-        v.payload_size = field_list_size;
-        pa: int = members_align(v.fields);
-        v.payload_offset = align_up(tag_size, pa);
+        v.fields = parse_field_list();
         sd: *StructDef = new StructDef {
             name: variant_payload_name(enum_name, v.name),
             members: v.fields,
-            size: field_list_size,
+            size: 0,
             ty: null,
             next: null,
             hash_next: null,
@@ -4448,8 +4542,7 @@ parse_exception_def() noregion raises Error {
     hash_put_exn(ed);
     if (tok.kind == TokKind.LBrace) {
         tok = tok.next;
-        ed.members = parse_field_list(0);
-        ed.size = field_list_size;
+        ed.members = parse_field_list();
         skip_optional_semi()
     } else skip_file_semi();
     exn_type(ed);
@@ -4491,8 +4584,7 @@ parse_type_def() noregion raises Error {
         sd.browse_len = nlen;
         if (sd.members != null) error("redefinition of type");
         tok = tok.next;
-        sd.members = parse_field_list(0);
-        sd.size = field_list_size;
+        sd.members = parse_field_list();
         skip_optional_semi();
         append_item(new_item(ItemKind.Struct { def: sd }, npos));
         return
@@ -4512,8 +4604,6 @@ parse_type_def() noregion raises Error {
     cur: ?*Variant = null;
     next_tag: int = 0;
     tag_size: int = type_size(tag_ty);
-    enum_align: int = type_align(tag_ty);
-    max_end: int = tag_size;
     done: bool = false;
     while (!done) {
         tag: int = next_tag;
@@ -4526,10 +4616,6 @@ parse_type_def() noregion raises Error {
             if (x.tag == v.tag) error("duplicate variant tag");
             x = x.next
         }
-        end: int = v.payload_offset + v.payload_size;
-        if (end > max_end) max_end = end;
-        va: int = members_align(v.fields);
-        if (va > enum_align) enum_align = va;
         if (cur != null) {
             cur.next = v;
             cur = v
@@ -4541,12 +4627,9 @@ parse_type_def() noregion raises Error {
         if (tok.kind == TokKind.Pipe) tok = tok.next else done = true
     }
     if (head == null) error("enum type needs at least one variant");
-    if (min_size > max_end) max_end = min_size;
     ed.variants = head;
     ed.tag_ty = tag_ty;
     ed.min_size = min_size;
-    ed.align = enum_align;
-    ed.size = align_up(max_end, enum_align);
     if (stub != null) {
         if (stub.ty != null) rebind_struct_stub_to_enum(stub, ed)
     }
@@ -5185,6 +5268,7 @@ parse_program(entry_path: []i8) noregion raises Error {
     expect_count = 0;
     parse_defer_bodies = parse_resolve;
     parse_source_file(normalize_path(entry_path), true);
+    if (parse_resolve) resolve_type_layouts();
     parse_run_deferred();
     if (parse_resolve) tag_check_references()
 }

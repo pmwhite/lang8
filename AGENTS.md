@@ -4,6 +4,10 @@ L8 is a self-hosted language. Read `BOOTSTRAP.md` for the compiler stages,
 `TESTING.md` for compiler expect/cram tests, `RELOAD.md` for hot reload and
 `persistent` globals, and the affected program's README.
 
+Ask before editing `AGENTS.md` or creating extra documentation Markdown files,
+unless the user explicitly requests those changes. Report findings in the
+conversation by default.
+
 ## Fast feedback
 
 - Run from the checkout root. Check `pwd`, `git status --short`, and the current
