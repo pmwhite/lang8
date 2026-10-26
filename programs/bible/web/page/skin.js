@@ -287,6 +287,9 @@ function readLook(w) {
   $('meta[name="theme-color"]').content = c(6);
 }
 
+// What a screen reader says of an accessory (core's accessory NAME WORDS).
+const accessories = new Map();
+
 // The credits core says (credit K WORDS LINK ADDRESS LABEL), by K.
 const credits = new Map();
 
@@ -405,6 +408,7 @@ function rowOf(w) {
     runs: parseRuns(w.field(27)), truns: parseRuns(w.field(28)), titleLines: w.fnum(29),
     fieldKind: w.fnum(30), lead: w.field(31), leadStyle: w.fnum(32), side: w.field(33),
     sruns: parseRuns(w.field(34)), sideNote: w.field(35), links: [], cells: [],
+    caps: w.field(38).trim().split(" ").filter(Boolean).map(Number),
   };
   split(w.field(36)).forEach((ic, i) => {
     if (r.actions[i]) r.actions[i].icon = ic;
@@ -605,6 +609,9 @@ function line(w) {
       break;
     case "highlights":
       readHighlights(w);
+      break;
+    case "accessory":
+      accessories.set(w.word(1), w.field(1));
       break;
     case "credit":
       credits.set(w.num(1), { words: w.field(1), link: w.field(2), address: w.field(3), label: w.field(4) });
@@ -1780,7 +1787,7 @@ const panel = {
       if (mark) {
         const a = el("span", `acc acc-${r.acc}`);
         a.appendChild(icon(mark));
-        if (r.acc === "done") a.setAttribute("aria-label", "Today’s read");
+        if (accessories.has(r.acc)) a.setAttribute("aria-label", accessories.get(r.acc));
         line.appendChild(a);
       }
       if (r.info) {
@@ -2172,21 +2179,34 @@ function fieldRow(s) {
   return null;
 }
 
-// A row's detail, the places its screen's field found stressed.
+// A row's detail: the places its screen's field found stressed, and the
+// divine name's letters core marks (CAPS) in small capitals.
 function marked(node, r) {
-  if (r.marks.length < 2) {
+  if (r.marks.length < 2 && r.caps.length < 2) {
     node.textContent = r.detail;
     return;
   }
-  let at = 0;
-  for (let i = 0; i + 1 < r.marks.length; i += 2) {
-    const b = Math.max(at, Math.min(r.marks[i], r.detail.length));
-    const e = Math.max(b, Math.min(r.marks[i + 1], r.detail.length));
-    node.append(r.detail.slice(at, b));
-    node.appendChild(el("mark", "", r.detail.slice(b, e)));
-    at = e;
+  const n = r.detail.length;
+  const within = (pairs, i) => {
+    for (let k = 0; k + 1 < pairs.length; k += 2) if (pairs[k] <= i && i < pairs[k + 1]) return true;
+    return false;
+  };
+  const cuts = [...new Set([0, n, ...r.marks, ...r.caps].map((p) => Math.max(0, Math.min(p, n))))].sort((a, b) => a - b);
+  for (let i = 0; i + 1 < cuts.length; i++) {
+    const b = cuts[i];
+    let part = document.createTextNode(r.detail.slice(b, cuts[i + 1]));
+    if (within(r.caps, b)) {
+      const s = el("span", "divine");
+      s.append(part);
+      part = s;
+    }
+    if (within(r.marks, b)) {
+      const m = el("mark", "");
+      m.append(part);
+      part = m;
+    }
+    node.append(part);
   }
-  node.append(r.detail.slice(at));
 }
 
 // Core's icons (Apple's symbols' names) as the page's own (icons.svg).

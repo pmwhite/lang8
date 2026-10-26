@@ -150,6 +150,9 @@ final class Screen {
     // Places in the detail to stress: pairs of UTF-16 offsets; the runs of
     // its detail, title and side words (END, STYLE pairs).
     int[] marks = new int[0], runs = new int[0], truns = new int[0], sruns = new int[0];
+    // The divine name's letters in a scripture row's detail, to set in
+    // small capitals: pairs of UTF-16 offsets.
+    int[] caps = new int[0];
     // A page's paragraph's links: B, E (UTF-16), ACTION, ARG each.
     long[] links = new long[0];
     final ArrayList<Action> actions = new ArrayList<>();
@@ -184,6 +187,7 @@ final class Screen {
     r.custom = w.fieldNum(16);
     r.hint = w.field(17);
     r.marks = nums(w.field(18), ' ');
+    r.caps = nums(w.field(38), ' ');
     r.lines = w.fieldNum(19);
     r.circle = w.fieldNum(20);
     r.circleAction = w.fieldNum(21);

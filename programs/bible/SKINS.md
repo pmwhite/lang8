@@ -332,7 +332,7 @@ A screen, from core:
 A row's fields, in order: `row` KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS
 VALUE OPTIONS LO HI LABEL TRAILING DELETE CUSTOM HINT MARKS LINES CIRCLE
 CIRCLE_ACTION SUFFIX ICON_COLOR NOTE INFO ACTIONS RUNS TRUNS TITLE_LINES
-FIELD_KIND LEAD LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS LINKS.
+FIELD_KIND LEAD LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS LINKS CAPS.
 
 - KIND is `item`, `toggle`, `choice`, `slider`, `field`, `button`, `custom`,
   `time`, `text` or `tiles`; ACC is empty, `more`, `check`, `info`, `done` (a faint check) or
@@ -365,7 +365,11 @@ FIELD_KIND LEAD LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS LINKS.
   its title; FIELD_KIND what a field takes (0 a name, 1 a reference, 2 prose:
   a note's many lines); LEAD a glyph at its start in LEAD_STYLE's script;
   SIDE words at its end over SIDE_NOTE; LINKS a paragraph's links
-  (`B:E:ACTION:ARG` split by `|`, B and E UTF-16 places in its title).
+  (`B:E:ACTION:ARG` split by `|`, B and E UTF-16 places in its title);
+  CAPS, in a scripture row's detail, the divine name's letters to set in
+  small capitals (LORD's ORD: pairs of UTF-16 places, as MARKS). In runs,
+  the Bible's words (`RUN_SCRIPTURE`) have the same letters as runs of
+  their own, `RUN_DIVINE`.
 
 Other lines from core:
 
@@ -408,7 +412,11 @@ View, 2 none; its key and modifiers, as `key` sends them; Show Study or
 Hide Study), `commands MASK` (those that act now, bit K, written as that
 changes), `credit K` WORDS LINK ADDRESS LABEL (at `start`: a section's
 credit K, its words then a link to ADDRESS, and what a screen reader
-says of it), `studyable 1|0` (the answer to `studyable`), `copy`,
+says of it), `editcommand K` TITLE (at `start`: the text's own menu's
+commands, done as `editmenu K`), `accessory NAME` WORDS (at `start`: what
+a screen reader says of a row's accessory, `done`'s), `trayfit` TITLES (at
+`start`: the tray's buttons' titles, split by `|`, that a skin sizing one
+size of title for all of them fits to the widest), `studyable 1|0` (the answer to `studyable`), `copy`,
 `share`, `share_image` (Share as Image's card, above), `highlighted`,
 `bookmarked`, `clear_selection`, `tray`, `tray_away`.
 

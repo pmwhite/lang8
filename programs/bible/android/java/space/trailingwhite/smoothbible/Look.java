@@ -50,6 +50,10 @@ final class Look {
   // The widest the text's column is (em: the look line's COLUMN).
   float column = 34;
 
+  // What a screen reader says of an accessory (core's accessory NAME
+  // WORDS), by its name.
+  final java.util.HashMap<String, String> accessories = new java.util.HashMap<>();
+
   // The credits core says (credit K WORDS LINK ADDRESS LABEL): each its
   // fields, by K.
   final java.util.HashMap<Integer, Wire> credits = new java.util.HashMap<>();
@@ -209,7 +213,7 @@ final class Look {
       RUN_TRANSLIT = 104, RUN_CODE = 105, RUN_FAINT = 106, RUN_STRONG = 107, RUN_PLAIN = 108,
       RUN_SMALL = 109, RUN_GREEK_FAINT = 110, RUN_HEBREW_FAINT = 111, RUN_READING = 112,
       RUN_ITALIC = 113, RUN_ACCENT = 114, RUN_SYMBOL = 115, RUN_SYMBOL_BOLD = 116,
-      RUN_SCRIPTURE = 117, RUN_PRACTICE = 200;
+      RUN_SCRIPTURE = 117, RUN_DIVINE = 118, RUN_PRACTICE = 200;
 
   // Words set by their runs (END, STYLE pairs; END in UTF-16 units, as
   // Java counts): the reader's styles, or core's RUN_.
@@ -282,6 +286,12 @@ final class Look {
       case RUN_SCRIPTURE:
         span(s, new TypefaceSpan("serif"), a, b);
         span(s, new ForegroundColorSpan(ink), a, b);
+        break;
+      case RUN_DIVINE:
+        // (The divine name's letters after its first, in small capitals.)
+        span(s, new TypefaceSpan("serif"), a, b);
+        span(s, new ForegroundColorSpan(ink), a, b);
+        span(s, new RelativeSizeSpan(0.8f), a, b);
         break;
       case RUN_SYMBOL:
       case RUN_SYMBOL_BOLD:

@@ -1102,6 +1102,7 @@ final class Panel extends FrameLayout {
           a.setTextSize(TypedValue.COMPLEX_UNIT_SP, r.acc.equals("more") ? 22 : 18);
           a.setTextColor(r.acc.equals("check") ? look.accent : look.faint);
           a.setPadding(dp(8), 0, 0, 0);
+          if (look.accessories.containsKey(r.acc)) a.setContentDescription(look.accessories.get(r.acc));
           line.addView(a);
         }
         if (r.infoAction != 0) {
@@ -1521,10 +1522,16 @@ final class Panel extends FrameLayout {
     }
   }
 
-  // A row's detail, its marks stressed (in full ink, bold, washed).
+  // A row's detail, its marks stressed (in full ink, bold, washed), the
+  // divine name's letters core marks in small capitals.
   private CharSequence marked(Screen.Row r) {
-    if (r.marks.length < 2) return r.detail;
+    if (r.marks.length < 2 && r.caps.length < 2) return r.detail;
     SpannableString s = new SpannableString(r.detail);
+    for (int i = 0; i + 1 < r.caps.length; i += 2) {
+      int b = Math.max(0, Math.min(r.caps[i], s.length()));
+      int e = Math.max(b, Math.min(r.caps[i + 1], s.length()));
+      s.setSpan(new android.text.style.RelativeSizeSpan(0.8f), b, e, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    }
     for (int i = 0; i + 1 < r.marks.length; i += 2) {
       int b = Math.max(0, Math.min(r.marks[i], s.length()));
       int e = Math.max(b, Math.min(r.marks[i + 1], s.length()));

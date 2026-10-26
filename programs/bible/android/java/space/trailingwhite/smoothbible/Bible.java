@@ -975,6 +975,9 @@ public final class Bible extends Activity {
       case "credit":
         look.credits.put(w.num(1), w);
         break;
+      case "accessory":
+        look.accessories.put(w.word(1), w.field(1));
+        break;
       case "look":
         look.read(w);
         restyle();
