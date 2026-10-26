@@ -967,6 +967,9 @@ public final class Bible extends Activity {
       case "relayout":
         reader.forget();
         break;
+      case "highlights":
+        look.readHighlights(w);
+        break;
       case "look":
         look.read(w);
         restyle();

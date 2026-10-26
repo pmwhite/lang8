@@ -168,8 +168,10 @@ program's `reload()`. A program that lives in UIKit's run loop cannot run
 callbacks (methods added with the old build's function values) now enter
 the new build's functions of the same names. The Bible's keeps its
 window, delegate and scene as persistent globals and builds its views
-again (`programs/bible/ios/app.l8`); a method a build adds to a class is
-not there until the app is launched again.
+again (`programs/bible/ios/app.l8`). Its classes are made with
+`class_make` (`programs/ios/objc.l8`): on a reload it gives back the class
+the first build made, so its methods (entering the new build's functions
+by name) are kept and a method new to the class is added to it.
 
 ```sh
 tools/ios/hot.sh device programs/bible/ios/app.l8 programs/bible/ios .build/hot LAPTOP:8777

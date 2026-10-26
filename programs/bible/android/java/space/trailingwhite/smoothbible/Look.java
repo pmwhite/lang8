@@ -45,6 +45,22 @@ final class Look {
     font = w.num(13);
   }
 
+  // The highlights' washes now, by the color a mark line names each with.
+  final java.util.HashMap<String, Integer> washes = new java.util.HashMap<>();
+
+  // highlights SWATCH WASH STRENGTH... (STRENGTH thousandths)
+  void readHighlights(Wire w) {
+    washes.clear();
+    for (int i = 1; i + 2 < w.words.length; i += 3)
+      washes.put(w.word(i), alpha(color(w.word(i + 1)), w.num(i + 2) / 1000f));
+  }
+
+  // A marked verse's wash (0: none).
+  int wash(String named) {
+    Integer c = washes.get(named);
+    return c == null ? 0 : c;
+  }
+
   Typeface face() {
     return faceOf(font);
   }

@@ -108,7 +108,8 @@ a concrete implementation: `web/main.l8` (the platform) and
 |---|---|
 | Begin, and its appearance | `start W H DENSITY DARK TZ`, `version ABBR`, `dark`, `away` |
 | Taps | `tap`, `act`, `query`, `scope`, `text`, `submit`, `tapverse`, `tapnone`, `trayact`, `word`, `footnote`, `preview`, `esvact`, `versestudy`, `back` |
-| Keys | `key NAME MODS` |
+| Keys | `command`, `commands` → `key NAME MODS` |
+| A panel beside the reader | `panelfits`, `panelvisible`, `tap study`, `beside` |
 | Recordings | `audio_play`, `audio_stop` → `audiotime`, `audioended`, `audiofailed`; an address `kept:NAME` is the kept file NAME (a chapter core holds), and one that isn't there fails, so core plays it from online |
 | Its voice | `voices` (once); `say`, `speech_stop` → `spoke`, `spoken` |
 | Listening's controls | `listen_pause`, `listen_resume`, `listen_stop`, `follow`; `listenplay`, `listenpause`, `listenprev`, `listennext`, `listenstop` (its own player's too: a lock screen's) |
@@ -376,7 +377,7 @@ Other lines from core:
 | `reader N` | the reader has N chapters |
 | `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA`, `verse V A B`, `link A B KIND ARG` (a footnote's mark, KIND 0, ARG its place; a reference, 1, ARG the reference; a word of the original's, 2), `gloss A B` (a word of the original glossed under its paragraph) and `mark V HEX BOOKMARK NOTE` lines (a verse's highlight's color, `-` none; bookmarked; noted; verse 0 the chapter's own note, marked after its label), then `end`. A `layout ORIG RTL VERSELINES OPENER LABEL` line after the first says whether the chapter is the original's, set right to left, a verse a line, and where its opener and its label end (UTF-16; 0 none); a `name` TITLE line names it as the bar does. A skin ignores the lines it does not know |
 | `jump C V`, `goto C V`, `relayout` | the reader moved; the screens away, then moved; every chapter to be asked for again |
-| `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT THEME CHOSEN` | all a skin needs of look.l8: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument); THEME the theme it is (look.l8's index, for a skin keeping its tables' other colors: selections, sheets, highlights' washes), CHOSEN the one chosen (0 Auto) |
+| `highlights SWATCH WASH STRENGTH...`, `themes DAY NIGHT PAGE INK...`, then `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT THEME CHOSEN HAIRLINE SELECTION SHEET CELL` | all a skin needs of look.l8. `highlights`: each of the five by the color its `mark` lines name it with, and the wash a highlighted verse shows now (STRENGTH, like GLOSS, HAIRLINE and SELECTION, in thousandths). `themes`: the themes Auto follows by day and at night, then each theme's page and ink, in the Theme setting's order (for its swatches). `look`: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument); THEME the theme it is and CHOSEN the one chosen (0 Auto), of `themes`; HAIRLINE a rule's strength (RULE's color), SELECTION a selection's (ACCENT's); SHEET and CELL a sheet's color and its rows' (`-`: the platform's grouped colors) |
 | `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation |
 | `url` ADDRESS | a page outside the app to open |
 | `place C V FRAC`, `back` WORDS | the reader to a place (a ribbon's, the way back's); the capsule's words (none: away) |
@@ -393,10 +394,18 @@ given, 1 a wrong letter typed), `announce` WORDS (for a screen reader alone:
 a word missed), `toast SYMBOL` WORDS (a toast's words, and its symbol: 0
 plus, 1 a check, 2 the brain, 3 the carried ribbon), `study_verse C V`,
 `study_moved C V` (Study beside the reader moved to another verse: the
-reader follows), `beside OPEN C V` (at `start`: whether Study beside the
-reader was left open, and the verse it showed, C -1 never; core keeps
-them, from `panel`, the panel's verse and `closegroup 1`, so a skin with
-that panel opens it again where it fits), `studyable 1|0` (the answer to `studyable`), `copy`,
+reader follows), `beside OPEN C V` (whether Study is wanted beside the
+reader, and its verse, C -1 never: at `start` as it was left, so a skin
+with that panel opens it again where it fits; then as core opens it
+(`tap study`, its key, the tray's Study where the panel fits), shows
+another verse there (verses selected while it shows: core has made its
+screen again) or closes it. The skin makes the panel (`panel`) or lets it
+go (`closegroup 1`); core keeps what it shows from those lines and the
+panel's verse), `command K MENU NAME MODS` TITLE (each of the keyboard's
+commands, at `start` and again as its title changes: its menu, 0 Go, 1
+View, 2 none; its key and modifiers, as `key` sends them; Show Study or
+Hide Study), `commands MASK` (those that act now, bit K, written as that
+changes), `studyable 1|0` (the answer to `studyable`), `copy`,
 `share`, `share_image` (Share as Image's card, above), `highlighted`,
 `bookmarked`, `clear_selection`, `tray`, `tray_away`.
 
@@ -405,7 +414,7 @@ From the skin:
 | Line | Meaning |
 |---|---|
 | `start W H DENSITY DARK TZ` | the app begun: the window (points), its scale (hundredths), the system's appearance, its time zone (seconds east of UTC: the day turns at its midnight) |
-| `tap goto`, `tap versions`, `tap settings`, `tap history`, `tap search`, `tap library` | the bar's buttons |
+| `tap goto`, `tap versions`, `tap settings`, `tap history`, `tap search`, `tap library`, `tap study` | the bar's buttons (`study`: Study beside the reader opened or closed, where the panel fits) |
 | `act ID ACTION ARG VALUE` | an action (VALUE: a toggle's 1 or 0, a choice's, segment's, filter's or sort's index, a slider's value, a time's minutes, a swatch's color). An action on a screen means those over it have gone |
 | `query ID TEXT` | screen ID's field typed in (TEXT to the line's end), once typing has rested |
 | `scope ID N` | scope N chosen in screen ID's field |
@@ -416,7 +425,7 @@ From the skin:
 | `openplan PLAN DAY SELECT PUSH` | open a plan's days at DAY, with that day selected when SELECT is 1 |
 | `anchor ID` | keep the navigation stack through ID, closing screens above it before pushing from that controller |
 | `closegroup GROUP` | close the sheet's screens (0) or the side panel's screens (1) |
-| `panelvisible 0/1` | tell core whether Study beside the reader is currently visible, including when the platform temporarily detaches its panel |
+| `panelfits 0/1`, `panelvisible 0/1` | tell core whether a panel beside the reader fits the window now, and whether Study beside the reader is currently visible, including when the platform temporarily detaches its panel |
 | `model ID [SECTION ROW]` | return the screen's current description without a presentation effect; with windowed rows, include the requested lazy row |
 | `windowrows 0/1` | choose full lazy sections (the default) or their counts with rows fetched on demand; available to every skin |
 | `editmenu COMMAND` | perform one of core's text-selection menu commands on the current selection |
@@ -434,7 +443,7 @@ From the skin:
 | `spoke C V MS`, `spoken C V`, `listenstop` | the skin's voice began (MS its clock: following waits 8 s after a finger moves the reader) and finished saying verse C:V (0 the chapter's title), or was stopped: a skin speaks what core's session gives it (`say C V` WORDS, `player` TITLE STATE PLAYING READER VERSION (also for the platform's own player: a lock screen's, a headset's; its buttons `listenplay`, `listenpause`, `listenprev`, `listennext`, `listenstop`), `follow C V`, `listen_stop`) |
 | `rest C V FRAC END ENDS_HI MS`, `moving MS`, `tick MS`, `jumped KIND` | the reader at rest (chapter, verse, thousandths of an em; its end on the screen; the last chapter whose end is; the skin's clock), begun to move (a finger's scroll), the time core asked for (`wake MS`), a jump (0 with a way back, 1 the capsule's, 2 neither): `core/reading.l8` counts chapters read (20 s at rest, end seen), moves the carried ribbon, and puts a chapter dwelt in 20 s onto the history |
 | `back` | the capsule tapped: core goes back (`place`), or opens the plan's day it came from |
-| `key NAME MODS` | a hardware keyboard's key (NAME its character, or `left`, `up`, `down`, `space`, `return`; MODS 1 ⌘ or Ctrl, 2 Shift, 4 Alt): `core/keys.l8` makes it a command and does it where it acts — Go To, Search, Library, Settings, chapters, Back, Listen, a page (`page 1` down, `page 0` up: the skin scrolls a screen less three lines), a plan's day's Mark Read and Next, Practice's Check and grades. The iPhone's `UIKeyCommand`s send them, offered where `core/keys.l8`'s `kc_allowed` says |
+| `key NAME MODS` | a hardware keyboard's key (NAME its character, or `left`, `up`, `down`, `space`, `return`; MODS 1 ⌘ or Ctrl, 2 Shift, 4 Alt): `core/keys.l8` makes it a command and does it where it acts — Go To, Search, Library, Settings, chapters, Back, Listen, a page (`page 1` down, `page 0` up: the skin scrolls a screen less three lines), a plan's day's Mark Read and Next, Practice's Check and grades, Study beside the reader and its verses. A skin with menus or a command overlay makes them from core's `command` lines and offers each where `commands` says |
 | `footnote C P`, `preview REF` | a footnote's mark tapped (its place P in chapter C), a reference tapped: core's footnote (`core/footnote.l8`) or preview |
 | `studyable C A B`, `studyat C A B` | whether the words at UTF-16 A to B of chapter C's text have a word to study (core says `studyable 1` or `0`: a skin's menu offers Study), and that word's Study opened |
 | `link ADDRESS` | a link into the app opened (`bsb://JHN/3/16`): the reader there |
@@ -490,14 +499,13 @@ Ribbon and a ribbon's screen, the Library and Memory (Add Passage, a
 passage, its versions, Memory's reminder), Compare, a word's study, its
 grammar and concordance, the language page and what it pushes (Sounds
 Written As, the Alphabet, Your Words, Add Words and its preview, Verses You
-Can Read) and a lemma's Forms. The iPhone keeps what is kept in its files and
-defaults, and core asks it to keep a change (`SK_KEPT_*`); its own state
-core asks for by number (`SK_NUM_*`: a reminder's time, whether the phone has
-turned notifications off) and by words (`SK_WORDS_*`). The settings are kept
-by the iPhone as before: ios/skin.l8 copies them into core's
-(`uk_prefs_from_app`) before a screen is built, and does a change core made
-the app's way (`uk_app_from_prefs`: the theme's fade, red letters, Keep
-Screen On).
+Can Read) and a lemma's Forms. What is kept (the settings among it) is
+core's, in the files its host keeps through the iPhone (`KeptStore`), as
+for every skin; a change of the look comes as the look's lines, Keep
+Screen On as `awake`. The iPhone's menus and keyboard commands are core's
+(`command`, `commands`), and so is what Study beside the reader shows
+(`beside`): the iPhone draws them, and its panel where it fits
+(`panelfits`).
 
 ## Moving the iPhone
 

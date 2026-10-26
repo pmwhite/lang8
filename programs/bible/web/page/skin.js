@@ -286,6 +286,15 @@ function readLook(w) {
   $('meta[name="theme-color"]').content = c(6);
 }
 
+// The highlights' washes now, by the color a mark line names each with
+// (core's highlights line: SWATCH WASH STRENGTH...).
+const washes = new Map();
+
+function readHighlights(w) {
+  washes.clear();
+  for (let i = 1; w.word(i + 2) !== ""; i += 3) washes.set(w.word(i), hexAlpha(w.word(i + 1), w.num(i + 2) / 1000));
+}
+
 function hexAlpha(hex, a) {
   const n = parseInt(hex, 16);
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
@@ -589,6 +598,9 @@ function line(w) {
       break;
     case "refresh":
       send("refresh");
+      break;
+    case "highlights":
+      readHighlights(w);
       break;
     case "look":
       readLook(w);
@@ -1208,7 +1220,7 @@ function layChapter(text, spans, verses, links, marks) {
         firstOf.add(v);
       }
       const m = marks.get(v);
-      if (m && m.hex !== "-") span.style.backgroundColor = hexAlpha(m.hex, look.dark ? 0.32 : 0.4);
+      if (m && washes.has(m.hex)) span.style.backgroundColor = washes.get(m.hex);
     }
     const li = links.findIndex((l) => l[0] <= a && a < l[1]);
     if (li >= 0) span.dataset.l = li;

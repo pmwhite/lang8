@@ -136,11 +136,10 @@ final class Reader extends ListView {
     links.put(c, lk);
     // (What is marked: a highlight's color behind its verse.)
     for (Wire w : lines) {
-      if (!w.word(0).equals("mark") || w.word(2).equals("-")) continue;
+      if (!w.word(0).equals("mark") || look.wash(w.word(2)) == 0) continue;
       int[] r = range(c, w.num(1));
-      if (r != null) s.setSpan(new android.text.style.BackgroundColorSpan(
-          Look.alpha(Look.color(w.word(2)), look.dark ? 0.32f : 0.4f)), r[0], r[1],
-          android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+      if (r != null) s.setSpan(new android.text.style.BackgroundColorSpan(look.wash(w.word(2))),
+          r[0], r[1], android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
     if (c == selC) markSelection(c);
     if (c == heardC) markHeard(c);
