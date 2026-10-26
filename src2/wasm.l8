@@ -1481,16 +1481,46 @@ wg_read(args: ?*Expr) noregion raises Error {
     wt_put(tf)
 }
 
+// Capture in source order, including aggregate copies, then load ABI order.
+wg_ordered_args(fn: *Function, args: ?*Expr) noregion raises Error {
+    temps: []int = new int[fn.nparams](0);
+    for i in 0..fn.nparams temps[i] = wt_get();
+    for i in 0..fn.nparams {
+        argument: *Expr = call_source_arg(args, i) or error("missing source argument");
+        parameter: *Obj = fn_param(fn, argument.arg_index) or error("missing parameter");
+        ty: *Type = parameter.ty or error("missing parameter type");
+        if (passes_by_ref(ty)) {
+            off: int = wl_spill_slot(type_size(ty));
+            wg_store_into(ty, -1, off, argument);
+            wg_frame_addr(off)
+        } else wg_expr(argument);
+        w_lset(temps[argument.arg_index])
+    }
+    parameter: ?*Obj = fn.params;
+    for i in 0..fn.nparams {
+        w_lget(temps[i]);
+        if (fn.is_extern && parameter != null) wg_to_import(parameter.ty);
+        if (parameter != null) parameter = parameter.param_next
+    }
+    i: int = fn.nparams;
+    while (i > 0) {
+        i = i - 1;
+        wt_put(temps[i])
+    }
+}
+
 wg_indirect_call(target: *Expr, fn: *Function, args: ?*Expr) noregion raises Error {
     rt: ?*Type = fn.return_ty;
     t: int = wt_get();
     wg_expr(target);
     w_lset(t);
     if (rt != null && passes_by_ref(rt)) wg_frame_addr(wl_spill_slot(type_size(rt)));
-    a: ?*Expr = args;
-    while (a != null) {
-        wg_expr(a);
-        a = a.next
+    if (call_needs_capture(args)) wg_ordered_args(fn, args) else {
+        a: ?*Expr = args;
+        while (a != null) {
+            wg_expr(a);
+            a = a.next
+        }
     }
     w_lget(t);
     w_wrap();
@@ -1546,19 +1576,21 @@ wg_call(
     if (site && !wa_site_ok) wa_misplaced(n);
     wa_site_ok = false;
     if (fn.sret != null) wg_frame_addr(wl_rbp + cg_temp_offset(n));
-    a: ?*Expr = args;
-    p: ?*Obj = fn.params;
-    while (a != null) {
-        wg_expr(a);
-        if (fn.is_extern) {
-            pty: ?*Type = null;
-            if (p != null) {
-                pty = p.ty;
-                p = p.param_next
+    if (call_needs_capture(args)) wg_ordered_args(fn, args) else {
+        a: ?*Expr = args;
+        p: ?*Obj = fn.params;
+        while (a != null) {
+            wg_expr(a);
+            if (fn.is_extern) {
+                pty: ?*Type = null;
+                if (p != null) {
+                    pty = p.ty;
+                    p = p.param_next
+                }
+                wg_to_import(pty)
             }
-            wg_to_import(pty)
+            a = a.next
         }
-        a = a.next
     }
     external: bool = fn.is_extern && !wasm_is_exit(fn) && !wasm_is_arena_live(fn);
     if (external) w_call(wf_arena_suspend);

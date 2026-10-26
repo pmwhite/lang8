@@ -238,6 +238,15 @@ type TagRef = {
     next: ?*TagRef
 }
 
+// The tag context of a use of a type's representation, captured while
+// parsing. Field accesses and matches check it once their type is known.
+type RepresentationSite = {
+    qualifier: []i8;
+    scope: *TagScope;
+    tags: ?*TagSet;
+    pos: int
+}
+
 type BrowseOcc = {
     file: int;
     pos: int;
@@ -376,6 +385,8 @@ type MatchArm = {
     is_literal: bool;
     binder: ?*Obj;
     binder_name: []i8;
+    // Where binder_name is written, or 0 without a binder.
+    binder_pos: int;
     body: *Stmt;
     next: ?*MatchArm;
     lead: ?*Com;
@@ -383,6 +394,16 @@ type MatchArm = {
     pos: int;
     file: int;
     toklen: int
+}
+
+// Where a match is written, kept to resolve its arms once its subject is
+// typed: a subject naming an inferred local has no type while parsing.
+type MatchSite = {
+    file: int;
+    // The closing brace, where missing arms are reported.
+    close_pos: int;
+    // Null when parsing only for formatting.
+    representation: ?*RepresentationSite
 }
 
 type CatchArm = {
@@ -448,7 +469,12 @@ type ExprKind =
         fn: ?*Function,
         target: ?*Expr
     }
-    | MemberAccess { lhs: *Expr, name: []i8, member: ?*Member }
+    | MemberAccess {
+        lhs: *Expr,
+        name: []i8,
+        member: ?*Member,
+        representation: ?*RepresentationSite
+    }
     | As { lhs: *Expr }
     | Trunc { lhs: *Expr }
     | New {
@@ -468,7 +494,7 @@ type ExprKind =
         inits: ?*FieldInit
     }
     | If { cond: *Expr, then: *Expr, els: *Expr }
-    | Match { cond: *Expr, arms: ?*MatchArm }
+    | Match { cond: *Expr, arms: ?*MatchArm, site: *MatchSite }
     | Block { body: ?*Stmt }
     | Own { body: *Stmt, slot: *Obj }
     | Move { lhs: *Expr }
@@ -486,7 +512,12 @@ type Expr = {
     source_start: int;
     source_end: int;
     // Frame offset of this expression's aggregate temporary, or 0.
-    cg_temp: int
+    cg_temp: int;
+    // Call argument label and original source position within the argument list.
+    arg_label: []i8;
+    arg_order: int;
+    arg_index: int;
+    arg_pos: int
 }
 
 type StmtKind =
@@ -509,11 +540,12 @@ type StmtKind =
     | ExprStmt { lhs: *Expr }
     | Decl {
         name: []i8,
-        ty: *Type,
+        // null preserves := syntax; the inferred type is stored on var.
+        ty: ?*Type,
         init: ?*Expr,
         var: ?*Obj
     }
-    | Match { cond: *Expr, arms: ?*MatchArm }
+    | Match { cond: *Expr, arms: ?*MatchArm, site: *MatchSite }
     | Raise {
         name: []i8,
         exn: ?*ExnDef,
@@ -562,6 +594,8 @@ type Obj = {
     init: ?*Expr;
     next: ?*Obj;
     param_next: ?*Obj;
+    // Empty for positional parameters; otherwise part of the callable interface.
+    param_label: []i8;
     hash_next: ?*Obj;
     life: int;
     // Parameter lifetime carried by a match or for copy. Kept off `life` so a
@@ -1721,25 +1755,33 @@ append_type(sb: *StrBuf@immortal, t: ?*Type) raises Error {
 
 check_call_argument_count(call: *Expr, callee: []i8, expected: int) noregion raises Error {
     match call.kind {
-        Funcall invocation -> {
-            actual: int = 0;
-            argument: ?*Expr = invocation.args;
-            while (argument != null) {
-                actual = actual + 1;
-                argument = argument.next
-            }
-            if (actual == expected) return;
-            message: *StrBuf = sb_new();
-            sb_puts(message, callee);
-            sb_puts(message, " expects ");
-            sb_uint(message, expected);
-            if (expected == 1) sb_puts(message, " argument, got ") else sb_puts(message,
-                " arguments, got ");
-            sb_uint(message, actual);
-            error_at_file(call.file, call.pos, sb_finish(message))
-        }
+        Funcall invocation -> check_argument_count(call, invocation.args, callee,
+            expected);
         _ -> error("internal: expected a function call")
     }
+}
+
+// Labeled arguments are bound to parameter order first; count that list.
+check_argument_count(
+    call: *Expr,
+    arguments: ?*Expr,
+    callee: []i8,
+    expected: int
+) noregion raises Error {
+    actual: int = 0;
+    argument: ?*Expr = arguments;
+    while (argument != null) {
+        actual = actual + 1;
+        argument = argument.next
+    }
+    if (actual == expected) return;
+    message: *StrBuf = sb_new();
+    sb_puts(message, callee);
+    sb_puts(message, " expects ");
+    sb_uint(message, expected);
+    if (expected == 1) sb_puts(message, " argument, got ") else sb_puts(message, " arguments, got ");
+    sb_uint(message, actual);
+    error_at_file(call.file, call.pos, sb_finish(message))
 }
 
 error_unknown_variant_at(

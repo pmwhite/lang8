@@ -22,11 +22,8 @@ type RepresentationOperation =
 
 type RepresentationAccess = {
     name: []i8;
-    qualifier: []i8;
     operation: RepresentationOperation;
-    scope: *TagScope;
-    tags: ?*TagSet;
-    pos: int;
+    site: *RepresentationSite;
     next: ?*RepresentationAccess
 }
 
@@ -41,57 +38,81 @@ representation_tags(name: []i8): ?*TagSet@immortal {
     null
 }
 
+// The current tag context of a use at pos, or null when parsing only for
+// formatting, which checks no representation access.
+representation_site(qualifier: []i8, pos: int) noregion raises Error: ?*RepresentationSite@new {
+    if (!parse_resolve) return null;
+    new RepresentationSite {
+        qualifier: intern(qualifier, 0, len(qualifier)),
+        scope: tag_scope or error("missing tag scope"),
+        tags: tag_local,
+        pos: pos
+    }
+}
+
+// The declared name of a type with a representation, or "" for other types.
+representation_name(ty: *Type): []i8 {
+    match ty.* {
+        Record record -> record.def.name;
+        Enum choice -> choice.def.name;
+        _ -> ""
+    }
+}
+
+// Records a use whose type is known while parsing. These are checked once
+// every declaration's tags are known.
 note_representation_access(
     ty: *Type,
     qualifier: []i8,
     operation: RepresentationOperation,
     pos: int
 ) noregion raises Error {
-    if (!parse_resolve) return;
-    name: []i8;
-    match ty.* {
-        Record record -> name = intern(record.def.name, 0, len(record.def.name));
-        Enum choice -> name = intern(choice.def.name, 0, len(choice.def.name));
-        _ -> return
-    }
+    site: ?*RepresentationSite = representation_site(qualifier, pos);
+    if (site == null) return;
+    name: []i8 = representation_name(ty);
+    if (len(name) == 0) return;
     representation_accesses = new RepresentationAccess {
-        name: name,
-        qualifier: intern(qualifier, 0, len(qualifier)),
+        name: intern(name, 0, len(name)),
         operation: operation,
-        scope: tag_scope or error("missing tag scope"),
-        tags: tag_local,
-        pos: pos,
+        site: site,
         next: representation_accesses
     }
 }
 
-check_representation_access(access: *RepresentationAccess) noregion raises Error {
-    name: []i8 = access.name;
+// Checks a use captured while parsing, once typing has found its type.
+check_representation_site(ty: *Type, site: ?*RepresentationSite, operation: RepresentationOperation) noregion raises Error {
+    if (site == null) return;
+    name: []i8 = representation_name(ty);
+    if (len(name) == 0) return;
+    check_representation_use(name, operation, site)
+}
+
+check_representation_use(name: []i8, operation: RepresentationOperation, site: *RepresentationSite) noregion raises Error {
     tags: ?*TagSet = representation_tags(name);
-    match access.operation {
+    match operation {
         AccessField -> {
-            if (len(access.qualifier) != 0) {
+            if (len(site.qualifier) != 0) {
                 if (tags == null) {
                     definition: ?*TaggedDef = tag_find(name);
                     if (definition != null) tags = tag_union(definition.tags, definition.scope.tags)
                 }
-                if (tag_has(tags, access.qualifier)) return;
+                if (tag_has(tags, site.qualifier)) return;
                 message: *StrBuf = sb_new();
                 sb_puts(message, "representation of ");
                 sb_puts(message, name);
                 sb_puts(message, " does not have tag ");
-                sb_puts(message, access.qualifier);
-                error_at_file(access.scope.file.id, access.pos, sb_finish(message))
+                sb_puts(message, site.qualifier);
+                error_at_file(site.scope.file.id, site.pos, sb_finish(message))
             }
         }
         Construct -> { }
         MatchVariants -> { }
     }
     if (tags == null) return;
-    scope: *TagScope = access.scope;
-    if (tag_intersects(tags, access.tags) || tag_intersects(tags, scope.tags) || tag_intersects(tags,
+    scope: *TagScope = site.scope;
+    if (tag_intersects(tags, site.tags) || tag_intersects(tags, scope.tags) || tag_intersects(tags,
         scope.uses)) return;
-    if (len(access.qualifier) != 0 && tag_has(tags, access.qualifier)) return;
+    if (len(site.qualifier) != 0 && tag_has(tags, site.qualifier)) return;
     message: *StrBuf = sb_new();
     sb_puts(message, "representation of ");
     sb_puts(message, name);
@@ -101,13 +122,13 @@ check_representation_access(access: *RepresentationAccess) noregion raises Error
         tags = tags.next;
         if (tags != null) sb_puts(message, ", ")
     }
-    error_at_file(scope.file.id, access.pos, sb_finish(message))
+    error_at_file(scope.file.id, site.pos, sb_finish(message))
 }
 
 check_representation_accesses() noregion raises Error {
     access: ?*RepresentationAccess = representation_accesses;
     while (access != null) {
-        check_representation_access(access);
+        check_representation_use(access.name, access.operation, access.site);
         access = access.next
     }
 }

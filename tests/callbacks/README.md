@@ -30,7 +30,9 @@ pointer and can be stored in globals, arrays, and C-layout listener structs,
 passed to `extern` functions, returned, and called through expressions. There
 are no closures or captured locals. `?fn(...)` permits null; narrow it with a
 null check or `or` before calling. Signatures compare parameter types and lifetime
-bounds, with parameter names matched by position. They also compare the
+bounds, with positional parameter names matched by position. [Named
+parameters](../../NAMED_ARGUMENTS.md) use `named name: Type`; their modes and
+labels must match at the same signature positions. They also compare the
 `noregion` requirement and the set of declared exceptions.
 
 Ordinary function values support L8 records, enums, fixed arrays, slices,

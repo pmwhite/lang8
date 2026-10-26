@@ -188,6 +188,7 @@ fnptr_signatures_equal(a: *Function, b: *Function) raises Error: bool {
     bp: ?*Obj = b.params;
     i: int = 0;
     while (ap != null && bp != null) {
+        if (!streq(ap.param_label, bp.param_label)) return false;
         at: *Type = ap.ty or error("missing function parameter type");
         bt: *Type = bp.ty or error("missing function parameter type");
         if (!types_equal(at, bt) || fnptr_bound(a, ap.life_bound, i) != fnptr_bound(b,
@@ -207,6 +208,7 @@ append_fnptr_type(sb: *StrBuf@immortal, fn: *Function, optional: bool) raises Er
     while (p != null) {
         if (!first) sb_puts(sb, ", ");
         first = false;
+        if (len(p.param_label) != 0) sb_puts(sb, "named ");
         sb_puts(sb, p.name);
         sb_puts(sb, ": ");
         append_type(sb, p.ty);
@@ -272,6 +274,147 @@ type_function_address(p: *Expr@new, name: []i8@p) noregion raises Error {
     p.ty = new Type.FnPtr { fn: fn, optional: false }
 }
 
+call_argument_error(
+    site: *Expr,
+    pos: int,
+    message: []i8,
+    name: []i8
+) noregion raises Error: noreturn {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, message);
+    sb_puts(sb, " '");
+    sb_puts(sb, name);
+    sb_putc(sb, '\'');
+    error_at_file(site.file, pos, sb_finish(sb))
+}
+
+// Type expressions in source order before calling this. The checked argument
+// list is in parameter order; arg_order preserves the evaluation order.
+bind_call_arguments(fn: *Function, args: ?*Expr@immortal, site: *Expr) noregion raises Error: ?*Expr@args {
+    if (args != null && args.arg_index >= 0) return args;
+    labeled: bool = false;
+    probe: ?*Expr = args;
+    source_index: int = 0;
+    while (probe != null) {
+        if (len(probe.arg_label) != 0) labeled = true;
+        probe.arg_order = source_index;
+        probe.arg_index = source_index;
+        source_index = source_index + 1;
+        probe = probe.next
+    }
+    parameter: ?*Obj = fn.params;
+    while (parameter != null) {
+        if (len(parameter.param_label) != 0) labeled = true;
+        parameter = parameter.param_next
+    }
+    if (!labeled) return args;
+    ordered: ?*Expr = null;
+    positional: int = 0;
+    order: int = 0;
+    a: ?*Expr = args;
+    while (a != null) {
+        a.arg_order = order;
+        order = order + 1;
+        index: int = 0;
+        p: ?*Obj = fn.params;
+        if (len(a.arg_label) != 0) {
+            while (p != null && !streq(p.param_label, a.arg_label)) {
+                p = p.param_next;
+                index = index + 1
+            }
+            if (p == null) call_argument_error(site, a.arg_pos, "unknown argument label",
+                a.arg_label)
+        } else {
+            index = positional;
+            p = fn_param(fn, index);
+            while (p != null && len(p.param_label) != 0) {
+                p = p.param_next;
+                index = index + 1
+            }
+            if (p == null) error_at_file(site.file, a.arg_pos, "too many positional arguments");
+            positional = index + 1
+        }
+        a.arg_index = index;
+        following: ?*Expr = a.next;
+        previous: ?*Expr = null;
+        slot: ?*Expr = ordered;
+        while (slot != null && slot.arg_index < index) {
+            previous = slot;
+            slot = slot.next
+        }
+        if (slot != null && slot.arg_index == index) call_argument_error(site, a.arg_pos,
+            "duplicate argument label", a.arg_label);
+        a.next = slot;
+        if (previous != null) previous.next = a else ordered = a;
+        a = following
+    }
+    if (order != fn.nparams) {
+        expected: int = 0;
+        present: ?*Expr = ordered;
+        while (present != null && present.arg_index == expected) {
+            expected = expected + 1;
+            present = present.next
+        }
+        missing: *Obj = fn_param(fn, expected) or error("missing required argument");
+        call_argument_error(site, site.pos, "missing required argument", missing.name)
+    }
+    ordered
+}
+
+call_source_arg(args: ?*Expr, order: int): ?*Expr@args {
+    a: ?*Expr = args;
+    while (a != null) {
+        if (a.arg_order == order) return a;
+        a = a.next
+    }
+    null
+}
+
+type_call_arguments(args: ?*Expr@immortal) noregion raises Error {
+    if (args != null && args.arg_index >= 0 && call_args_reordered(args)) {
+        order: int = 0;
+        argument: ?*Expr = call_source_arg(args, order);
+        while (argument != null) {
+            add_type(argument);
+            order = order + 1;
+            argument = call_source_arg(args, order)
+        }
+        return
+    }
+    argument: ?*Expr = args;
+    while (argument != null) {
+        add_type(argument);
+        argument = argument.next
+    }
+}
+
+call_args_reordered(args: ?*Expr): bool {
+    a: ?*Expr = args;
+    index: int = 0;
+    while (a != null) {
+        if (a.arg_order != index) return true;
+        index = index + 1;
+        a = a.next
+    }
+    false
+}
+
+// Named calls also capture aggregate values when no permutation is needed:
+// a later argument can mutate the storage an earlier aggregate was read from.
+call_needs_capture(args: ?*Expr): bool {
+    if (call_args_reordered(args)) return true;
+    labeled: bool = false;
+    aggregate: bool = false;
+    argument: ?*Expr = args;
+    while (argument != null) {
+        if (len(argument.arg_label) != 0) labeled = true;
+        ty: ?*Type = argument.ty;
+        if (ty != null && passes_by_ref(ty)) aggregate = true;
+        argument = argument.next
+    }
+    labeled && aggregate
+}
+
 type_indirect_call(p: *Expr) noregion raises Error {
     match p.kind {
         Funcall q -> {
@@ -293,11 +436,12 @@ type_indirect_call(p: *Expr) noregion raises Error {
             }
             if (is_opt_fnptr(ty)) error_nullable_use(target, "calling it");
             fn: *Function = fnptr_function(ty);
-            check_call_argument_count(p, "function value", fn.nparams);
+            type_call_arguments(args);
+            args = bind_call_arguments(fn, args, p);
+            check_argument_count(p, args, "function value", fn.nparams);
             a: ?*Expr = args;
             po: ?*Obj = fn.params;
             while (a != null && po != null) {
-                add_type(a);
                 if (!assignable(po.ty, a)) error_call_argument_type(p, fn, a, po);
                 a = a.next;
                 po = po.param_next
@@ -338,11 +482,11 @@ emit_indirect_call(target_off: int) noregion raises Error {
 // Reserve stable rbp-relative slots before evaluating arguments. Aggregate
 // literals and nested calls can leave temporary stack storage behind; copy each
 // argument into its slot before discarding those temporaries. The result area
-// survives the call just like the hidden-sret area of an ordinary direct call.
-gen_indirect_call(n: *Expr) noregion raises Error {
+// lives in the expression's fixed frame slot, as for ordinary direct calls.
+gen_captured_call(n: *Expr) noregion raises Error {
     match n.kind {
         Funcall k -> {
-            target: *Expr = k.target or error("missing function target");
+            target: ?*Expr = k.target;
             fn: *Function = k.fn or error("missing function signature");
             rt: ?*Type = fn.return_ty;
             result_size: int = 0;
@@ -365,8 +509,7 @@ gen_indirect_call(n: *Expr) noregion raises Error {
                 }
                 p = p.param_next
             }
-            gen_expr(target);
-            if (result_size != 0) cg_alu_imm(5, result_size, 4);
+            if (target != null) gen_expr(target) else cg_mov_imm(0, 0);
             result_off: int = cg_rsp_off;
             scratch: int = 8 + fn.nparams * 8 + copies;
             cg_alu_imm(5, scratch, 4);
@@ -374,11 +517,11 @@ gen_indirect_call(n: *Expr) noregion raises Error {
             base: int = 8 - fixed_off;
             cg_mov_rm(0, 5, base);
             copy_off: int = base + 8 + fn.nparams * 8;
-            arg: ?*Expr = k.args;
-            p = fn.params;
             index: int = 0;
-            while (arg != null && p != null) {
-                ty: *Type = p.ty or error("missing function parameter type");
+            while (index < fn.nparams) {
+                arg: *Expr = call_source_arg(k.args, index) or error("missing source argument");
+                parameter: *Obj = fn_param(fn, arg.arg_index) or error("missing parameter");
+                ty: *Type = parameter.ty or error("missing function parameter type");
                 gen_expr(arg);
                 if (passes_by_ref(ty)) {
                     cg_mov_rr(0, 6);
@@ -387,11 +530,9 @@ gen_indirect_call(n: *Expr) noregion raises Error {
                     cg_lea_mr(5, copy_off, 0);
                     copy_off = copy_off + align_up(type_size(ty), 8)
                 }
-                cg_mov_rm(0, 5, base + 8 + index * 8);
+                cg_mov_rm(0, 5, base + 8 + arg.arg_index * 8);
                 if (cg_rsp_off != fixed_off) cg_alu_imm(0, cg_rsp_off - fixed_off,
                     4);
-                arg = arg.next;
-                p = p.param_next;
                 index = index + 1
             }
             pad: int = (16 - (cg_rsp_off + nstack * 8 + 8) % 16) % 16;
@@ -399,7 +540,7 @@ gen_indirect_call(n: *Expr) noregion raises Error {
             ni = 0;
             ns = 0;
             if (result_size != 0) {
-                cg_lea_mr(5, 8 - result_off, cg_arg_reg(0));
+                cg_lea_mr(5, cg_temp_offset(n), cg_arg_reg(0));
                 ni = 1
             }
             p = fn.params;
@@ -424,9 +565,9 @@ gen_indirect_call(n: *Expr) noregion raises Error {
                 p = p.param_next
             }
             cg_arm_nstack = nstack;
-            emit_indirect_call(fixed_off);
+            if (target != null) emit_indirect_call(fixed_off) else cg_call(fn.link_name);
             cg_alu_imm(0, cg_rsp_off - result_off, 4);
-            if (result_size != 0) cg_lea_mr(5, 8 - result_off, 0) else emit_ret_to_rax(rt)
+            if (result_size != 0) cg_lea_mr(5, cg_temp_offset(n), 0) else emit_ret_to_rax(rt)
         }
         _ -> error("expected indirect call")
     }
