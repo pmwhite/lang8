@@ -89,8 +89,9 @@ handle is harmless. Moving a handle empties its source; copying one is an error.
 Assignment requires an empty destination and does not free its old value.
 An owner assignment has no value; it cannot also supply a second owner through
 a surrounding expression.
-Handles can be locals, globals, parameters, and return values. They cannot yet
-be record or variant fields, array or slice elements, or pointer targets.
+Handles can be locals, globals, parameters, return values, and elements of a
+`[]?owned *T` slice (below). They cannot yet be record or variant fields,
+fixed-array elements, or pointer targets.
 
 `borrow name { ... }` temporarily exposes the root through the same name. An
 ordinary local assignment can give that pointer another name. Mutable aliases
@@ -102,6 +103,30 @@ element copied from such a collection keeps that lifetime too. Storing a
 pointer into a field of a local record shortens that record's lifetime to
 the pointer's. Changing
 a variant's tag through another alias does not change the payload local's layout.
+
+A slice `[]?owned *T` holds independent handles. Its elements must be
+optional, since each may be empty. `new ?owned *T[n](null)` makes one with
+every element empty; array literals cannot hold owners. An element is used
+only as a place, and each use evaluates the slice and index once:
+
+- `move xs[i]` yields the handle as a `?owned *T` and empties the element.
+- `drop xs[i]` drops the arena, if any, and empties the element.
+- `xs[i] = move h`, `xs[i] = own { ... }`, or `xs[i] = make()` (a call that
+  returns an owner) fills the element. It must be empty when the right side
+  has run; otherwise the program stops. Assigning `null` is an error: drop or
+  move the element to empty it.
+- `xs[i] == null` and `xs[i] != null` test it.
+- `borrow xs[i] as name { ... }` binds `name` to the root for the block. It
+  stops the program if the element is empty and counts a borrow on the
+  element's arena, as `borrow` of a global does.
+
+Copying an element, passing or returning it, and iterating owners with `for`
+are errors; move or borrow `xs[i]` instead. The checker treats each element
+borrow as its own arena, so pointers from one element cannot be stored into
+another. `borrow owner as name { ... }` also works for an owner variable.
+Slice storage is ordinary memory: reclaiming it (a region ending, its arena
+dropped) does not drop handles still in it, and a persistent global cannot
+hold owners.
 
 `allocate pointer { ... }` selects the arena recorded for a local borrowed
 pointer or its local alias. A `borrow` alone does not change where `new`

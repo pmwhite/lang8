@@ -1289,6 +1289,17 @@ wg_assign(lhs: *Expr, rhs: *Expr) noregion raises Error {
         wt_put(t);
         return
     }
+    if (is_owned_ty(decay(lty))) {
+        match lhs.kind {
+            Index _ -> {
+                wg_fill_owner_element(lhs, t);
+                w_lget(t);
+                wt_put(t);
+                return
+            }
+            _ -> { }
+        }
+    }
     match lhs.kind {
         Var k -> {
             vo: ?*Obj = k.var;
@@ -1314,6 +1325,40 @@ wg_assign(lhs: *Expr, rhs: *Expr) noregion raises Error {
     wg_store_op(lty, 0);
     w_lget(t);
     wt_put(t)
+}
+
+// Push the handle in an owner element and empty the element. The slice and
+// index are evaluated once.
+wg_take_owner_element(element: *Expr) noregion raises Error {
+    address: int = wt_get();
+    wg_addr(element);
+    w_lset(address);
+    w_lget(address);
+    w_wrap();
+    w_mem(41, 0);
+    w_lget(address);
+    w_wrap();
+    w_i64(0);
+    w_mem(55, 0);
+    wt_put(address)
+}
+
+// Store the handle in temporary local `value` into an owner element, which
+// must be empty: the right side, evaluated first, may have refilled it.
+wg_fill_owner_element(element: *Expr, value: int) noregion raises Error {
+    address: int = wt_get();
+    wg_addr(element);
+    w_ltee(address);
+    w_wrap();
+    w_mem(41, 0);
+    w_i64(0);
+    w_op(82);
+    w_oob_if();
+    w_lget(address);
+    w_wrap();
+    w_lget(value);
+    w_mem(55, 0);
+    wt_put(address)
 }
 
 // memcpy(dst, di, src, si, n) with the x86 backend's range checks.
@@ -1695,6 +1740,7 @@ wg_expr(n: *Expr) noregion raises Error {
                     w_lget(held);
                     wt_put(held)
                 }
+                Index _ -> wg_take_owner_element(k.lhs);
                 _ -> error("move")
             }
         }
@@ -1893,7 +1939,7 @@ wa_count_stmt(s: *Stmt): int {
             total
         }
         Region k -> wa_count_stmt(k.body);
-        Borrow k -> wa_count_stmt(k.body);
+        Borrow k -> wa_count_expr(k.place) + wa_count_stmt(k.body);
         Allocate k -> wa_count_stmt(k.body);
         Drop k -> wa_count_expr(k.target);
         Expect _ -> 0;
@@ -2547,8 +2593,7 @@ wg_stmt_code(n: *Stmt) noregion raises Error {
             w_call(wf_region_pop)
         }
         Borrow k -> {
-            oty: *Type = k.owner.ty or ty_int;
-            wg_load_var(k.owner, oty);
+            wg_expr(k.place);
             wg_store_var(k.header, ty_int);
             wg_load_var(k.header, ty_int);
             w_call(wf_borrow_enter);
@@ -2580,6 +2625,11 @@ wg_stmt_code(n: *Stmt) noregion raises Error {
                     w_call(wf_arena_drop);
                     w_i64(0);
                     wg_store_var(dropped, dty)
+                }
+                // Empty the element before freeing, as the x86 backend does.
+                Index _ -> {
+                    wg_take_owner_element(k.target);
+                    w_call(wf_arena_drop)
                 }
                 _ -> error("drop")
             }
@@ -2751,7 +2801,10 @@ wasm_mark_stmts(stmts: ?*Stmt) {
                 }
             }
             Region k -> wasm_mark_stmts(k.body);
-            Borrow k -> wasm_mark_stmts(k.body);
+            Borrow k -> {
+                wasm_mark_expr(k.place);
+                wasm_mark_stmts(k.body)
+            }
             Allocate k -> wasm_mark_stmts(k.body);
             Drop k -> wasm_mark_expr(k.target);
             Expect _ -> { }

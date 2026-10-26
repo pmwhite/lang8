@@ -531,7 +531,10 @@ kill_assigned_stmt(s: *Stmt) noregion {
             }
         }
         Region k -> kill_assigned_stmt(k.body);
-        Borrow k -> kill_assigned_stmt(k.body);
+        Borrow k -> {
+            kill_assigned_expr(k.place);
+            kill_assigned_stmt(k.body)
+        }
         Allocate k -> kill_assigned_stmt(k.body);
         Drop k -> kill_assigned_expr(k.target);
         Expect _ -> { }
@@ -2730,6 +2733,7 @@ da_stmt_node(s: *Stmt) noregion raises Error: bool {
         }
         Region k -> da_stmt(k.body);
         Borrow k -> {
+            if (da_expr(k.place)) return true;
             init_mark(k.shadow);
             da_stmt(k.body)
         }
@@ -2876,7 +2880,8 @@ record_noregion_call_stmt(owner: *Function@immortal, s: ?*Stmt) raises Error: bo
             false
         }
         Region k -> record_noregion_call_stmt(owner, k.body);
-        Borrow k -> record_noregion_call_stmt(owner, k.body);
+        Borrow k -> record_noregion_call_expr(owner, k.place) || record_noregion_call_stmt(owner,
+            k.body);
         Allocate k -> record_noregion_call_stmt(owner, k.body);
         Drop k -> record_noregion_call_expr(owner, k.target);
         Decl k -> record_noregion_call_expr(owner, k.init);
@@ -3136,6 +3141,7 @@ check_region_calls_node(s: *Stmt) noregion raises Error {
             return
         }
         Borrow k -> {
+            check_region_calls_expr(k.place);
             check_region_calls_stmt(k.body);
             return
         }
@@ -3222,25 +3228,61 @@ type_move_expr(p: *Expr@immortal, lhs: *Expr@immortal) noregion raises Error {
             note_expr_arena(p, noted.life, owner);
             return
         }
-        _ -> error("move requires an owner variable")
+        // An element's arena is not known statically; a later borrow of the
+        // handle's new owner gets a fresh arena life.
+        Index _ -> {
+            p.ty = lt;
+            return
+        }
+        _ -> error("move requires an owner variable or an element of a []?owned *T")
+    }
+}
+
+// The owner type of a borrowed place: an owner variable, or an element of a
+// []?owned *T.
+borrowed_owner_type(place: *Expr) noregion raises Error: *Type@place {
+    pt: ?*Type = decay(place.ty);
+    if (pt != null && is_owned_ty(pt)) {
+        match place.kind {
+            Var _ -> return pt;
+            Index _ -> return pt;
+            _ -> { }
+        }
+    }
+    error_expression_requirement(place, "borrow requires an owner variable or an element of a []?owned *T")
+}
+
+// An owner variable keeps one arena life across its borrows. Each element
+// borrow gets a fresh one: indexes are dynamic, so two element borrows may
+// name different arenas.
+borrowed_arena_life(place: *Expr) noregion raises Error: int {
+    match place.kind {
+        Var k -> {
+            owner: *Obj = k.var or error("borrow requires an owner variable");
+            mark_var_use(owner);
+            noted: *ObjArena = ensure_owner_arena(owner);
+            noted.life
+        }
+        _ -> life_alloc_frame(0 - 1, LIFE_KIND_ARENA)
     }
 }
 
 type_borrow_stmt(
-    owner: *Obj@immortal,
+    place: *Expr@immortal,
     shadow: *Obj@immortal,
     header: *Obj@immortal,
     body: *Stmt
 ) noregion raises Error {
-    mark_var_use(owner);
-    ot: ?*Type = decay(owner.ty);
-    if (ot == null || !is_owned_ty(ot)) error("borrow requires an owner");
-    shadow.ty = ptr_to(owned_pointee(ot));
-    noted: *ObjArena = ensure_owner_arena(owner);
-    note_obj_arena(shadow, noted.life, header);
+    saved: int = owner_read_ok;
+    owner_read_ok = owner_read_ok + 1;
+    add_type(place);
+    owner_read_ok = saved;
+    shadow.ty = ptr_to(owned_pointee(borrowed_owner_type(place)));
+    arena_life: int = borrowed_arena_life(place);
+    note_obj_arena(shadow, arena_life, header);
     old_cur: int = life_cur;
     old_heap: int = life_heap;
-    _f: int = life_enter_borrow(noted.life);
+    _f: int = life_enter_borrow(arena_life);
     add_type_stmt(body);
     life_leave_region(old_cur, old_heap)
 }
@@ -3266,7 +3308,8 @@ type_drop_stmt(target: *Expr@immortal) noregion raises Error {
     if (lt == null || !is_owned_ty(lt)) error("drop requires an owner");
     match target.kind {
         Var _ -> return;
-        _ -> error("drop requires an owner variable")
+        Index _ -> return;
+        _ -> error("drop requires an owner variable or an element of a []?owned *T")
     }
 }
 

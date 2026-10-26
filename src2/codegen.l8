@@ -611,6 +611,29 @@ gen_simple_addr(n: *Expr, reg: int) noregion raises Error: bool {
     }
 }
 
+// Leave the handle in an owner element in rax and empty the element. The
+// slice and index are evaluated once.
+gen_take_owner_element(element: *Expr) noregion raises Error {
+    gen_addr(element);
+    cg_mov_rr(0, 7);
+    cg_mov_mr(7, 0, 0);
+    cg_mov_imm(0, 6);
+    cg_mov_rm(6, 7, 0)
+}
+
+// Store the handle in rax into an owner element, which must be empty: the
+// right side, evaluated first, may have refilled it.
+gen_fill_owner_element(element: *Expr) noregion raises Error {
+    cg_push(0);
+    gen_addr(element);
+    cg_mov_rr(0, 7);
+    cg_mov_mr(7, 0, 0);
+    cg_alu_imm(7, 0, 0);
+    cg_jump_id(5, oob_lab);
+    cg_pop(0);
+    cg_mov_rm(0, 7, 0)
+}
+
 gen_load(n: *Expr) noregion raises Error {
     ty: *Type = n.ty or error("missing type");
     if (passes_by_ref(ty)) {
@@ -1652,6 +1675,11 @@ gen_expr(n: *Expr) noregion raises Error {
                     _ -> { }
                 }
             }
+            // Owner variables were stored above; this is an element.
+            if (is_owned_ty(decay(lhs_ty))) {
+                gen_fill_owner_element(q.lhs);
+                return
+            }
             if (!passes_by_ref(lhs_ty) && gen_simple_store(q.lhs, lhs_ty)) return;
             // Simple address formation preserves the evaluated source in rax.
             if (passes_by_ref(lhs_ty) && gen_simple_addr(q.lhs, 7)) {
@@ -2000,6 +2028,10 @@ gen_expr(n: *Expr) noregion raises Error {
                     cg_mov_imm(0, 0);
                     emit_store_var(src, src.ty or ty_int);
                     cg_pop(0);
+                    return
+                }
+                Index _ -> {
+                    gen_take_owner_element(k.lhs);
                     return
                 }
                 _ -> error("move")
@@ -2511,7 +2543,7 @@ gen_stmt(n: *Stmt) noregion raises Error {
             return
         }
         Borrow k -> {
-            emit_load_var(k.owner, k.owner.ty or ty_int);
+            gen_expr(k.place);
             emit_store_var(k.header, ty_int);
             cg_mov_rr(0, cg_arg_reg(0));
             cg_call("l8_borrow_enter");
@@ -2548,6 +2580,14 @@ gen_stmt(n: *Stmt) noregion raises Error {
                     cg_call("l8_arena_drop");
                     cg_mov_imm(0, 0);
                     emit_store_var(dropped, dropped.ty or ty_int);
+                    return
+                }
+                // Empty the element before freeing, so it never names a
+                // dropped arena.
+                Index _ -> {
+                    gen_take_owner_element(k.target);
+                    cg_mov_rr(0, cg_arg_reg(0));
+                    cg_call("l8_arena_drop");
                     return
                 }
                 _ -> error("drop")
@@ -2767,7 +2807,10 @@ cg_temps_stmts(stmts: ?*Stmt, off: int) raises Error: int {
                 }
             }
             Region k -> o = cg_temps_stmts(k.body, o);
-            Borrow k -> o = cg_temps_stmts(k.body, o);
+            Borrow k -> {
+                o = cg_temps_expr(k.place, o);
+                o = cg_temps_stmts(k.body, o)
+            }
             Allocate k -> o = cg_temps_stmts(k.body, o);
             Drop k -> o = cg_temps_expr(k.target, o);
             Expect _ -> { }

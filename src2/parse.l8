@@ -1565,14 +1565,22 @@ decl_spec() noregion raises Error: *Type@new {
     error("expected type")
 }
 
+// A slice can hold owners only as optional elements: each may be empty.
+check_owner_slice_element(element: *Type, element_pos: int) raises Error {
+    // The formatter accepts the type; compiling rejects it.
+    if (parse_resolve && is_owned_ty(element) && !is_opt_owned(element)) error_at(element_pos,
+        "owner slice elements must be optional (each may be empty): write ?owned *T")
+}
+
 parse_type() noregion raises Error: *Type@new {
     if (at_function_type()) return parse_fnptr_type(false);
     if (tok.kind == TokKind.LBrack) {
         tok = tok.next;
         if (tok.kind == TokKind.RBrack) {
             tok = tok.next;
+            element_pos: int = tok.pos;
             base0: *Type = parse_type();
-            if (is_owned_ty(base0)) error("owned handles cannot be slice elements");
+            check_owner_slice_element(base0, element_pos);
             if (is_noreturn_ty(base0)) error("noreturn cannot be a slice element");
             return slice_of(base0)
         }
@@ -1615,8 +1623,9 @@ parse_type() noregion raises Error: *Type@new {
             tok = tok.next;
             if (tok.kind != TokKind.RBrack) error("expected [] after ? in optional slice type");
             tok = tok.next;
+            optional_element_pos: int = tok.pos;
             sbase: *Type = parse_type();
-            if (is_owned_ty(sbase)) error("owned handles cannot be slice elements");
+            check_owner_slice_element(sbase, optional_element_pos);
             if (is_noreturn_ty(sbase)) error("noreturn cannot be a slice element");
             return opt_slice_of(sbase)
         }
@@ -1816,13 +1825,14 @@ parse_primary() noregion raises Error: *Expr@new {
             hn.toklen = hvlen;
             return hn
         }
+        base_pos: int = tok.pos;
         base: *Type = parse_type();
-        if (is_owned_ty(base)) error("owned handles cannot be allocated inside other storage");
         if (tok.kind == TokKind.LBrack) {
             tok = tok.next;
             len: *Expr = parse_expr();
             skip(TokKind.RBrack);
             if (is_noreturn_ty(base)) error("new [n] element type cannot be noreturn");
+            check_owner_slice_element(base, base_pos);
             if (tok.kind != TokKind.LParen) error("new T[n] requires an initial value (new T[n](v))");
             tok = tok.next;
             fill: *Expr = parse_expr();
@@ -1833,6 +1843,7 @@ parse_primary() noregion raises Error: *Expr@new {
             hn1.toklen = allocation_end - new_pos;
             return hn1
         }
+        if (is_owned_ty(base)) error("owned handles cannot be allocated inside other storage");
         if (is_pointer(base)) error("new expects a non-pointer type");
         if (tok.kind != TokKind.LBrace) error("expected {, [, or .Variant after new");
         if (is_enum_ty(base)) error("use new Enum.Variant { ... } for sum types");
@@ -2392,7 +2403,17 @@ parse_match_arms(mcond: *Expr@immortal) noregion raises Error: ?*MatchArm@new {
     arms
 }
 
+// Whether a postfix chain continues through `as` and `trunc` conversions.
+// A borrowed place stops before them: `borrow xs[i] as name { ... }`.
+type PostfixConversions =
+    | Included
+    | Excluded
+
 parse_postfix() noregion raises Error: *Expr@new {
+    parse_postfix_chain(PostfixConversions.Included)
+}
+
+parse_postfix_chain(conversions: PostfixConversions) noregion raises Error: *Expr@new {
     call_start: int = tok.pos;
     if (len(tok.qualifier) != 0) call_start = call_start - len(tok.qualifier) - 2;
     n: *Expr = parse_primary();
@@ -2490,7 +2511,7 @@ parse_postfix() noregion raises Error: *Expr@new {
                     }
                 }
             } else {
-                if (tok.kind == TokKind.As || tok.kind == TokKind.Trunc) {
+                if ((tok.kind == TokKind.As || tok.kind == TokKind.Trunc) && conversions == PostfixConversions.Included) {
                     is_trunc: bool = tok.kind == TokKind.Trunc;
                     cast_pos: int = tok.pos;
                     tok = tok.next;
@@ -2624,15 +2645,22 @@ add_type_field_inits_opt(inits: ?*FieldInit@immortal, heap: int) noregion raises
 }
 
 type_index_expr(p: *Expr, lhs: *Expr@immortal, idx: *Expr@immortal) noregion raises Error {
+    // Move, drop, assignment, borrow, and null tests may name an owner
+    // element; the slice and index are ordinary reads.
+    owner_place: bool = owner_read_ok > 0;
+    saved_owner: int = owner_read_ok;
+    owner_read_ok = 0;
     add_type(lhs);
     add_type(idx);
+    owner_read_ok = saved_owner;
     idt: ?*Type = decay(idx.ty);
     if (idt == null || !is_int_ty(idt)) error_expression_requirement(idx, "array index must be int");
     raw: ?*Type = lhs.ty;
     if (raw != null && (is_opt_slice(raw) || is_opt_str(raw))) error_nullable_use(lhs,
         "indexing it");
     if (raw == null || !is_indexable(raw)) error_expression_requirement(lhs, "indexing requires str, []T, or [N]T");
-    p.ty = type_base(raw)
+    p.ty = type_base(raw);
+    if (!owner_place && is_owned_ty(decay(p.ty))) error_owner_element_copy(p)
 }
 
 type_log(
@@ -2825,6 +2853,16 @@ add_type_null_test(value: *Expr@immortal, other: *Expr) noregion raises Error {
         Var k -> {
             variable: ?*Obj = k.var;
             if (variable != null && is_owned_ty(decay(variable.ty)) && is_null_expr(other)) {
+                owner_read_ok = owner_read_ok + 1;
+                add_type(value);
+                owner_read_ok = owner_read_ok - 1;
+                return
+            }
+        }
+        // Indexing admits an owner element only where the place itself is
+        // allowed; its operands are typed as ordinary reads.
+        Index _ -> {
+            if (is_null_expr(other)) {
                 owner_read_ok = owner_read_ok + 1;
                 add_type(value);
                 owner_read_ok = owner_read_ok - 1;
@@ -3327,8 +3365,11 @@ add_type_expr(p: *Expr@immortal) noregion raises Error {
                     "allocation length must be int");
                 fill: ?*Expr = k.fill;
                 if (fill == null) error("new T[n] requires an initial value (new T[n](v))");
-                add_type(fill);
                 elem: *Type = type_base(p.ty or error("missing type"));
+                // One handle cannot fill several elements.
+                if (is_owned_ty(elem) && !is_null_expr(fill)) error_at_file(fill.file,
+                    fill.source_start, "an owner slice starts empty: write new ?owned *T[n](null), then fill elements with xs[i] = move h");
+                add_type(fill);
                 if (!assignable(elem, fill)) error_have_expr_want("new T[n] fill type mismatch",
                     fill, elem);
                 check_store(fill, life_heap, null)
@@ -3351,6 +3392,7 @@ add_type_expr(p: *Expr@immortal) noregion raises Error {
             et0: ?*Type = e.ty;
             if (et0 == null) error("array literal element has no type");
             et: *Type = et0;
+            if (is_owned_ty(decay(et))) error("array literals cannot hold owners; use new ?owned *T[n](null) and move each handle in");
             check_store(e, life_heap, null);
             e = e.next;
             while (e != null) {
@@ -3550,7 +3592,12 @@ add_type_expr(p: *Expr@immortal) noregion raises Error {
             if (is_owned_ty(lt)) {
                 match q.lhs.kind {
                     Var _ -> { }
-                    _ -> error("an owner can only be assigned through its variable")
+                    // At run time the element must be empty; null would
+                    // not change it.
+                    Index _ -> {
+                        if (is_null_value_expr(assigned)) error("assigning null does not empty an owner element; drop it to free its arena, or move it out")
+                    }
+                    _ -> error("an owner can only be assigned through its variable or a []?owned *T element")
                 }
                 fresh: bool = false;
                 match assigned.kind {
@@ -3878,6 +3925,7 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             cu: *Obj = co;
             iu: *Obj = ix;
             cu.ty = itu;
+            if (is_owned_ty(type_base(itu))) error_owner_elements_iterated(k.iter);
             k.item.ty = type_base(itu);
             note_copied_life(k.iter, k.item);
             add_type_stmt(k.body);
@@ -3991,7 +4039,7 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             return
         }
         Borrow k -> {
-            type_borrow_stmt(k.owner, k.shadow, k.header, k.body);
+            type_borrow_stmt(k.place, k.shadow, k.header, k.body);
             return
         }
         Allocate k -> {
@@ -4579,19 +4627,35 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         skip_stmt_semi();
         return new_decl(o.name, dty, null, o)
     }
-    if (at_word("borrow") && tok.next.kind == TokKind.Ident && tok.next.next.kind == TokKind.LBrace) {
+    if (at_word("borrow") && tok.next.kind == TokKind.Ident) {
         tok = tok.next;
-        bname: []i8 = cur_tokstr();
-        bowner: ?*Obj = find_var(bname);
-        if (bowner == null && parse_resolve) error("unknown owner");
-        owner_obj: *Obj = bowner or new_obj(bname, true);
-        tok = tok.next;
+        place: *Expr;
+        shadow_name: []i8;
+        if (tok.next.kind == TokKind.LBrace) {
+            // `borrow owner { ... }` exposes the root through the owner's name.
+            shadow_name = cur_tokstr();
+            bowner: ?*Obj = find_var(shadow_name);
+            if (bowner == null && parse_resolve) error("unknown owner");
+            place = new_var_node(bowner or new_obj(shadow_name, true));
+            place_expr(place, tok.pos, current_file_id);
+            tok = tok.next
+        } else {
+            place = parse_postfix_chain(PostfixConversions.Excluded);
+            if (tok.kind != TokKind.As || tok.next.kind != TokKind.Ident || tok.next.next.kind != TokKind.LBrace) error("name the borrowed root: borrow xs[i] as name { ... }");
+            tok = tok.next;
+            shadow_name = cur_tokstr();
+            tok = tok.next
+        }
         enter_scope();
         region_depth = region_depth + 1;
-        shadow: *Obj = new_obj(bname, true);
+        shadow: *Obj = new_obj(shadow_name, true);
         if (parse_resolve) {
-            oty: ?*Type = decay(owner_obj.ty);
-            if (oty != null && is_owned_ty(oty)) shadow.ty = ptr_to(owned_pointee(oty))
+            // The body's member accesses are typed as it is parsed.
+            saved_owner: int = owner_read_ok;
+            owner_read_ok = owner_read_ok + 1;
+            add_type(place);
+            owner_read_ok = saved_owner;
+            shadow.ty = ptr_to(owned_pointee(borrowed_owner_type(place)))
         }
         bbody: *Stmt = parse_compound();
         region_depth = region_depth - 1;
@@ -4599,7 +4663,7 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         header: *Obj = new_obj(".borrow_owner", true);
         header.ty = ty_int;
         return mk_stmt(StmtKind.Borrow {
-            owner: owner_obj,
+            place: place,
             shadow: shadow,
             header: header,
             body: bbody
