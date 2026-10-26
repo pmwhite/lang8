@@ -98,7 +98,9 @@ are allowed; a borrow does not impose Rust's exclusive-reference rule. Pointers
 from the borrow cannot escape into longer-lived storage. `match` payloads remain
 shallow copies in arm locals. A pointer copied from a region, arena, parameter, or local address keeps
 that lifetime, so it cannot outlive the value it was copied from. A `for`
-element copied from such a collection keeps that lifetime too. Changing
+element copied from such a collection keeps that lifetime too. Storing a
+pointer into a field of a local record shortens that record's lifetime to
+the pointer's. Changing
 a variant's tag through another alias does not change the payload local's layout.
 
 `allocate pointer { ... }` selects the arena recorded for a local borrowed
