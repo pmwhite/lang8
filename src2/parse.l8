@@ -3251,6 +3251,24 @@ type_if_expr(
     if (en) bind_null_to_pointer(p.ty, els)
 }
 
+// An integer match's arm that names an integer const (visible where the
+// match is written): matched as the const's value, as a literal is.
+match_arm_const(arm: *MatchArm, site: *MatchSite) noregion raises Error {
+    found: ?*Obj = find_global(arm.name);
+    if (found == null || !found.is_const || !is_int_width_ty(found.ty)) error_at_file(arm.file,
+        arm.pos, "integer match arm requires a literal, an integer const or `_`");
+    g: *Obj = found or error("internal: match arm const");
+    if (arm.binder != null) error_at_file(arm.file, arm.pos, "a const match arm cannot bind a payload");
+    use: ?*RepresentationSite = site.representation;
+    d: ?*TaggedDef = tag_find(arm.name);
+    if (use != null && d != null) {
+        if (!tag_visible(d, use.tags, use.scope)) error_at_file(arm.file, arm.pos,
+            tag_not_in_scope_message(arm.name, d))
+    }
+    arm.literal = const_global_value(g);
+    arm.is_literal = true
+}
+
 // Match subjects may be inferred locals. Resolve the arms and their payload
 // bindings only after preceding declarations have been checked, in the
 // surrounding effect context.
@@ -3264,6 +3282,8 @@ resolve_match_arms(cond: *Expr@immortal, arms: ?*MatchArm, site: *MatchSite) nor
     has_wild: bool = false;
     arm: ?*MatchArm = arms;
     while (arm != null) {
+        if (!enum_subject && !arm.is_literal && !streq(arm.name, "_")) match_arm_const(arm,
+            site);
         if (streq(arm.name, "_")) has_wild = true else if (arm.is_literal) {
             if (enum_subject) error_at_file(arm.file, arm.pos, "enum match arm requires a variant");
             literal: int = arm.literal;
@@ -3277,7 +3297,7 @@ resolve_match_arms(cond: *Expr@immortal, arms: ?*MatchArm, site: *MatchSite) nor
                 prior = earlier.next
             }
         } else {
-            if (!enum_subject) error_at_file(arm.file, arm.pos, "integer match arm requires a literal or `_`");
+            // (An integer match's arm is a literal by now: match_arm_const.)
             enum_def: *EnumDef = type_enum_def(et);
             variant: *Variant = find_variant(enum_def, arm.name) or error_unknown_variant_at(arm.file,
                 arm.pos, enum_def, arm.name);
@@ -5144,6 +5164,7 @@ parse_variant(tag: int, enum_name: []i8, tag_size: int) noregion raises Error: *
             name: variant_payload_name(enum_name, v.name),
             members: v.fields,
             size: field_list_size,
+            layout: TypeLayout.Unlaid,
             ty: null,
             next: null,
             hash_next: null,
@@ -5170,6 +5191,7 @@ parse_exception_def() noregion raises Error {
         tag: next_exn_tag,
         members: null,
         size: 0,
+        layout: TypeLayout.Unlaid,
         ty: null,
         next: exn_defs,
         hash_next: null,
@@ -5313,6 +5335,133 @@ parse_type_def() noregion raises Error {
     }
     skip_optional_semi();
     append_item(new_item(ItemKind.Enum { def: ed }, npos))
+}
+
+// ---- laying types out ----
+// Records', variants' and exceptions' fields laid out once every type is
+// declared, each type a field holds by value laid out first: a type can
+// hold one declared after it (or in a file imported later), whose size
+// parsing did not yet know.
+layout_types() noregion raises Error {
+    sd: ?*StructDef = struct_defs;
+    while (sd != null) {
+        layout_struct(sd);
+        sd = sd.next
+    }
+    ed: ?*EnumDef = enum_defs;
+    while (ed != null) {
+        layout_enum(ed);
+        ed = ed.next
+    }
+    xd: ?*ExnDef = exn_defs;
+    while (xd != null) {
+        members: ?*Member = xd.members;
+        unlaid: bool = match xd.layout {
+            Unlaid -> true;
+            _ -> false
+        };
+        if (unlaid && members != null) {
+            xd.layout = TypeLayout.Laying;
+            xd.size = layout_members(members);
+            xd.layout = TypeLayout.Laid
+        }
+        xd = xd.next
+    }
+}
+
+// The types t holds by value laid out.
+layout_type(t: *Type) noregion raises Error {
+    match t.* {
+        Record k -> layout_struct(k.def);
+        Enum k -> layout_enum(k.def);
+        Array k -> layout_type(k.base);
+        Refined k -> layout_type(k.base);
+        _ -> { }
+    }
+}
+
+layout_contains_itself(name: []i8, file: int, pos: int) noregion raises Error {
+    message: *StrBuf = sb_new();
+    sb_puts(message, "type ");
+    sb_puts(message, name);
+    sb_puts(message, " contains itself (hold it by pointer)");
+    error_at_file(file, pos, sb_finish(message))
+}
+
+layout_struct(sd: *StructDef) noregion raises Error {
+    match sd.layout {
+        Laid -> return;
+        Laying -> layout_contains_itself(sd.name, sd.browse_file, sd.browse_pos);
+        Unlaid -> { }
+    }
+    sd.layout = TypeLayout.Laying;
+    members: ?*Member = sd.members;
+    if (members != null) sd.size = layout_members(members);
+    sd.layout = TypeLayout.Laid
+}
+
+layout_enum(ed: *EnumDef) noregion raises Error {
+    match ed.layout {
+        Laid -> return;
+        Laying -> layout_contains_itself(ed.name, ed.browse_file, ed.browse_pos);
+        Unlaid -> { }
+    }
+    tag_ty: ?*Type = ed.tag_ty;
+    if (ed.variants == null || tag_ty == null) {
+        ed.layout = TypeLayout.Laid;
+        return
+    }
+    ed.layout = TypeLayout.Laying;
+    tag_size: int = type_size(tag_ty);
+    enum_align: int = type_align(tag_ty);
+    max_end: int = tag_size;
+    v: ?*Variant = ed.variants;
+    while (v != null) {
+        fields: ?*Member = v.fields;
+        if (fields != null) {
+            v.payload_size = layout_members(fields);
+            v.payload_offset = align_up(tag_size, members_align(fields));
+            payload_ty: ?*Type = v.payload_ty;
+            if (payload_ty != null) {
+                payload: *StructDef = type_struct_def(payload_ty);
+                payload.size = v.payload_size;
+                payload.layout = TypeLayout.Laid
+            }
+            va: int = members_align(fields);
+            if (va > enum_align) enum_align = va
+        }
+        end: int = v.payload_offset + v.payload_size;
+        if (end > max_end) max_end = end;
+        v = v.next
+    }
+    if (ed.min_size > max_end) max_end = ed.min_size;
+    ed.align = enum_align;
+    ed.size = align_up(max_end, enum_align);
+    ed.layout = TypeLayout.Laid
+}
+
+// Fields laid out from offset 0, as parse_field_list lays them: their
+// size (to the largest of their alignments).
+layout_members(head: *Member) noregion raises Error: int {
+    offset: int = 0;
+    max_a: int = 1;
+    m: ?*Member = head;
+    while (m != null) {
+        layout_type(m.ty);
+        sz: int = type_size(m.ty);
+        al: int = type_align(m.ty);
+        if (sz <= 0) {
+            sz = 8;
+            al = 8
+        }
+        if (al <= 0) al = 8;
+        offset = align_up(offset, al);
+        m.offset = offset;
+        offset = offset + sz;
+        if (al > max_a) max_a = al;
+        m = m.next
+    }
+    align_up(offset, max_a)
 }
 
 parse_source_file(path: []i8@immortal, keep_items: bool) noregion raises Error {
@@ -5955,6 +6104,7 @@ parse_program(entry_path: []i8) noregion raises Error {
     expect_count = 0;
     parse_defer_bodies = parse_resolve;
     parse_source_file(normalize_path(entry_path), true);
+    if (parse_resolve) layout_types();
     parse_run_deferred();
     if (parse_resolve) {
         tag_check_references();

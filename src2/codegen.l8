@@ -334,6 +334,7 @@ index_simple(n: *Expr): bool {
         Binary k -> {
             match k.op {
                 Add -> index_atom(k.lhs) && index_atom(k.rhs);
+                Sub -> index_atom(k.lhs) && index_atom(k.rhs);
                 _ -> false
             }
         }
@@ -356,6 +357,22 @@ gen_simple_idx(n: *Expr) noregion raises Error {
         }
         Binary k -> {
             kn: int = index_idx_num(k.rhs);
+            match k.op {
+                Sub -> {
+                    // (A difference, as an element before another.)
+                    gen_simple_idx(k.lhs);
+                    if (kn >= 0) {
+                        if (kn != 0) cg_alu_imm(5, kn, 0)
+                    } else {
+                        cg_mov_rr(0, 1);
+                        gen_simple_idx(k.rhs);
+                        cg_alu_rr(41, 0, 1);
+                        cg_mov_rr(1, 0)
+                    }
+                    return
+                }
+                _ -> { }
+            }
             if (kn >= 0) {
                 gen_simple_idx(k.lhs);
                 if (kn != 0) cg_alu_imm(0, kn, 0);
@@ -624,7 +641,10 @@ gen_simple_addr(n: *Expr, reg: int) noregion raises Error: bool {
                 Binary sum -> {
                     if (!gen_simple_operand(sum.lhs, 10)) return false;
                     if (!gen_simple_operand(sum.rhs, 11)) return false;
-                    cg_alu_rr(1, 11, 10)
+                    match sum.op {
+                        Sub -> cg_alu_rr(41, 11, 10);
+                        _ -> cg_alu_rr(1, 11, 10)
+                    }
                 }
                 _ -> {
                     if (!gen_simple_operand(k.idx, 10)) return false
@@ -1015,13 +1035,19 @@ is_sse_ty(t: ?*Type): bool {
     t != null && is_float_ty(t)
 }
 
-/* Immediate integer operand for codegen (numeric literal or null). */
+/* Immediate integer operand for codegen: a numeric literal, null, or an
+ * integer const global (its value known here). */
 imm_operand(n: *Expr): bool {
     match n.kind {
         Num k -> {
             if (k.str_label != 0) false else true
         }
         Null -> true;
+        Var k -> {
+            vo: ?*Obj = k.var;
+            ty: ?*Type = n.ty;
+            vo != null && vo.is_const && ty != null && is_int_ty(ty)
+        }
         _ -> false
     }
 }
@@ -1030,6 +1056,10 @@ imm_value(n: *Expr): int {
     match n.kind {
         Num k -> k.val;
         Null -> 0;
+        Var k -> {
+            vo: ?*Obj = k.var;
+            if (vo != null && vo.is_const) vo.const_val else 0
+        }
         _ -> 0
     }
 }
@@ -2176,15 +2206,67 @@ gen_enum_dispatch(
     gen_enum_dispatch(arms, first, middle, fallback)
 }
 
+// An integer match's dispatch, before its bodies, the value in rax: its
+// literal arms' values sorted (values[from..to), each arm's label beside
+// it), split at the middle one until a few are left, then compared
+// directly; any other value goes to fallback.
+gen_literal_dispatch(
+    values: []int,
+    labels: []int,
+    from: int,
+    to: int,
+    fallback: int
+) noregion raises Error {
+    if (to - from <= 3) {
+        for i in from..to {
+            gen_match_tag_compare(values[i]);
+            cg_jump_id(4, labels[i])
+        }
+        cg_jump_id(0 - 1, fallback);
+        return
+    }
+    middle: int = from + (to - from) / 2;
+    below: int = new_label();
+    gen_match_tag_compare(values[middle]);
+    // (Signed: values below the middle one, then the rest.)
+    cg_jump_id(12, below);
+    gen_literal_dispatch(values, labels, middle, to, fallback);
+    cg_label_id(below);
+    gen_literal_dispatch(values, labels, from, middle, fallback)
+}
+
+// How many arms of a match are literals (dispatched by gen_literal_dispatch
+// from 4 on).
+match_literal_arms(arms: ?*MatchArm): int {
+    count: int = 0;
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        if (arm.is_literal) count = count + 1;
+        arm = arm.next
+    }
+    count
+}
+
 gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error {
     lend: int = new_label();
     cty: ?*Type = cond.ty;
+    // A variant made here (a call's result) that travels in a register: its
+    // value pushed, matched at its address on the stack.
+    spilled: bool = false;
     if (cty != null && is_enum_ty(cty)) {
         match cond.kind {
             Var _p -> gen_addr(cond);
             MemberAccess _p -> gen_addr(cond);
             Deref _p -> gen_addr(cond);
-            _ -> gen_expr(cond)
+            _ -> {
+                gen_expr(cond);
+                if (!passes_by_ref(cty)) {
+                    cg_push(0);
+                    cg_push(0);
+                    cg_mov_rr(4, 0);
+                    spilled = true
+                }
+            }
         }
     } else gen_expr(cond);
     enum_dispatch: bool = cty != null && is_enum_ty(cty);
@@ -2198,6 +2280,33 @@ gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error {
         cg_push(0)
     }
     missing: int = new_label();
+    literals: int = if (enum_dispatch) 0 else match_literal_arms(arms);
+    literal_dispatch: bool = literals >= 4;
+    if (literal_dispatch) {
+        fallback2: int = missing;
+        values: []int = new int[literals](0);
+        labels: []int = new int[literals](0);
+        n: int = 0;
+        scan2: ?*MatchArm = arms;
+        while (scan2 != null) {
+            scan2.codegen_label = new_label();
+            if (scan2.is_literal) {
+                // (Kept sorted as they are added.)
+                k: int = n;
+                while (k > 0 && values[k - 1] > scan2.literal) {
+                    values[k] = values[k - 1];
+                    labels[k] = labels[k - 1];
+                    k = k - 1
+                }
+                values[k] = scan2.literal;
+                labels[k] = scan2.codegen_label;
+                n = n + 1
+            } else if (fallback2 == missing) fallback2 = scan2.codegen_label;
+            scan2 = scan2.next
+        }
+        cg_mov_mr(4, 0, 0);
+        gen_literal_dispatch(values, labels, 0, n, fallback2)
+    }
     if (enum_dispatch) {
         fallback: int = missing;
         low: int = 0;
@@ -2218,7 +2327,7 @@ gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error {
     while (arm != null) {
         la: int = new_label();
         av: ?*Variant = arm.variant;
-        if (enum_dispatch) cg_label_id(arm.codegen_label) else if (av != null) {
+        if (enum_dispatch || literal_dispatch) cg_label_id(arm.codegen_label) else if (av != null) {
             cg_mov_mr(4, 0, 0);
             gen_match_tag_compare(av.tag);
             cg_jump_id(5, la)
@@ -2241,14 +2350,14 @@ gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error {
         }
         gen_stmt(arm.body);
         cg_jump_id(0 - 1, lend);
-        if (!enum_dispatch && (av != null || arm.is_literal)) cg_label_id(la);
+        if (!enum_dispatch && !literal_dispatch && (av != null || arm.is_literal)) cg_label_id(la);
         arm = arm.next
     }
     cg_label_id(missing);
     cg_mov_imm(1, 7);
     cg_call("exit");
     cg_label_id(lend);
-    if (!enum_dispatch) cg_alu_imm(0, 16, 4)
+    if (!enum_dispatch || spilled) cg_alu_imm(0, 16, 4)
 }
 
 // For-loop bounds and counters are integer locals with no evaluation effects.
