@@ -9,7 +9,7 @@ instances, calls, memory and the transfer of persistent state.
 | File | What it is |
 |---|---|
 | `module.l8` | The decoder: a module's types, imports, functions, table, memory, globals, exports, data, tags, and the `name` and `l8persist` sections |
-| `interp.l8` | The interpreter: each function decoded once into words (an operation and its immediates, branches resolved to a target and a stack height), then run in a loop; frames, operands and exception handlers of its own; memory one mapped region read as bytes and as words |
+| `interp.l8` | The interpreter: each function decoded once into words (an operation and its immediates, branches resolved to a target and a stack height; the most frequent sequences of L8's code, such as `local.set` then `local.get` or a comparison then `if`, fused into one operation where no label falls between them), then run in a loop that dispatches on the operation with one `match`; frames, operands and exception handlers of its own; memory one mapped region read as bytes and as words |
 | `sys.l8` | The standard imports (`web/README.md`, "Host interface"), natively: files, output, clocks, the environment, `qsort` through the module's comparator, the `l8 test` protocol on fd 3; helpers for a host's own imports (`wasm_str_at`, `wasm_new_bytes`, `wasm_alloc`) |
 | `persist.l8` | Persistent globals across instances: the manifest, which old value a new type can take, and the copy (`wasm_transfer`), as `web/reload.js` does it |
 | `native.s` | What L8 cannot say: a word view of mapped bytes, float bit casts, a call of a native function by address with integer and float arguments, and 1024 callback trampolines (x86-64 Linux; `native.arm64-darwin.s` for iOS) |
