@@ -86,7 +86,10 @@ its verses. `versification_book` finds a book by OSIS name.
 
 `versification_data.l8` is generated from a SWORD source tree's
 `include/canon*.h` by `tools/versifications.l8` (then formatted with
-`l8 fmt -w`); do not edit it.
+`l8 fmt -w`); do not edit it. It holds facts only: each system's books and
+how many verses each chapter has. SWORD's mappings from one system's
+verses to another's are not taken, so a verse is found by the numbering
+its own module uses.
 
 ## Markup
 
