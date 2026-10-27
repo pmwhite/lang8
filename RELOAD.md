@@ -192,9 +192,18 @@ The running host can also be driven through that server:
 node web/devctl.mjs shot                   # prints the saved PNG's path
 node web/devctl.mjs scroll 600             # points, in the first scroll view
 node web/devctl.mjs notify NAME            # posts a Darwin notification
+node web/devctl.mjs wire tap shelf         # a line for Smooth Bible's core
 node web/devctl.mjs reload
 node web/devctl.mjs log
 ```
+
+`wire` lines go to the app rather than the host: a Smooth Bible build for
+hot reload (`programs/bible/ios/devwire.l8`) long-polls the server's
+`/wire` and gives each line to core as its skin would (`select C V`,
+`trayact ACTION 0`, `act ID ACTION ARG VALUE`; `|` separates several, and
+`!screens` writes the screens shown to the log). While it is connected the
+app keeps the screen on and writes its diagnostics. A build without a
+server set asks nothing.
 
 These commands use `http://localhost:8777` by default (`--server URL`
 chooses another). A freshly launched host synchronizes its command cursor

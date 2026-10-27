@@ -2,51 +2,69 @@ tag bible_ios;
 
 use_tag std, ios, bible, bible_wire;
 
-// Study beside the text (DESIGN.md §17.3.8): on a wide window, Study opens
-// in a panel at the page's right instead of over it, and stays while you
-// read. The root (ios/ipad.l8's L8Root) holds it as a second child, its
-// navigation controller's view 390 points wide after a 1 point rule, the
-// page taking the rest; the page's place is kept as its width changes, as
-// for any width (§17.2.2). The panel is the Study sheet's screens (one
-// Study at a time: the interlinear's state is one set of globals), its bar
-// Show in Text and a close, its toolbar the sheet's chevrons. It shows the
-// verse chosen (the tray's Study, a word's Study, a verse selected while it
-// is open) and stays there as the page scrolls on. It is open or closed by
-// its bar button and ⌥⌘I, and remembered (studyBeside, its verse). Where
-// the window is too narrow for it, it goes and the page takes its width;
-// it comes back as it was when the window widens again. Core keeps whether
-// it is open and its verse (its `beside` line at launch; SKINS.md).
+// The panel beside the page (core/beside.l8): what is read with the Bible
+// (the Bookshelf, a commentary following the page, a book, a dictionary,
+// Study), core's screens in a navigation controller of its own, kept
+// while sheets come and go. On a wide window it is at the page's right,
+// 390 points wide after a 1 point rule; elsewhere (an iPhone) it is under
+// the page, its grabber dragged to make it taller or shorter, or down to
+// put it away. The root (ios/ipad.l8's L8Root) holds it as a second child;
+// the page's place is kept as its size changes. The bar's Bookshelf (and
+// ⌥⌘I) opens or closes it; core keeps whether it is open and what it
+// shows (its `beside` line, at launch as it was left), and makes its
+// screens when it opens (`panelmake`); its Back tells core what shows
+// (`panelanchor`), its close and the grabber let it go (`closegroup 1`).
 import "../../ios/objc.l8";
 
 import "../core/text.l8";
 
-// The panel's width (fixed: every Study screen is laid out for it, §17.10
-// question 7), and the least column the page keeps beside it.
+// The panel's width beside the page (fixed: every screen of core's is laid
+// out for it, §17.10 question 7), and the least column the page keeps
+// beside it.
 PANEL_W: f64 = 390.0f64;
 
 PAGE_LEAST_EM: f64 = 28.0f64;
 
-// Whether it is wanted open, and its verse (core's to keep: told by its
-// `beside` line; bs_c -1: never opened).
+// Under the page: its share of the window's height (as the grabber leaves
+// it), the least and most it is dragged to, and below what a drag lets it
+// go.
+bs_share: f64 = 0.5f64;
+
+BESIDE_SHARE_LEAST: f64 = 0.28f64;
+
+BESIDE_SHARE_MOST: f64 = 0.86f64;
+
+BESIDE_SHARE_GONE: f64 = 0.18f64;
+
+// Whether it is wanted open (core's to keep: told by its `beside` line).
 bs_open: bool = false;
 
-bs_c: int = -1;
-
-bs_v: int = 0;
-
-// Its navigation controller while it holds Study (kept while the window is
-// too narrow for it), whether it is in the root now, the rule, its class
-// and its bar's items.
+// Its navigation controller while it is open (kept while a window is
+// laid out without it), whether it is in the root now, and whether under
+// the page (else at its right); the rule, the grabber, its class.
 bs_nav: int = 0;
 
 bs_shown: bool = false;
 
+bs_under: bool = false;
+
 bs_rule: int = 0;
+
+bs_grabber: int = 0;
 
 bs_class: int = 0;
 
-// Whether the panel fits beside the page in a window W wide: a wide window,
-// with the page beside 390 points still a column of 28 em with its margins.
+// Its height under the page (0: at its right, or away).
+bs_under_h: f64 = 0.0f64;
+
+// Screens core pushed on the panel's while its navigation controller is
+// being made (`panelmake`'s), pushed once it is.
+bs_pending: []int = new int[8](0);
+
+bs_pending_n: int = 0;
+
+// Whether a wide window has room for the panel at the page's right: the
+// page beside 390 points still a column of 28 em with its margins.
 beside_fits_in(W: f64): bool {
     if (!wide()) return false;
     W >= PANEL_W + 1.0f64 + 2.0f64 * look_margin + PAGE_LEAST_EM * em
@@ -57,10 +75,20 @@ beside_fits(): bool {
     beside_fits_in(view_width(msg(root_vc, sel("view"))))
 }
 
-// Whether the root lays the panel out now (a Study sheet of its own up
-// keeps it away, one Study at a time).
-beside_wanted(W: f64): bool {
-    bs_open && restored && beside_fits_in(W) && (bs_nav != 0 || uk_table_of(SCR_VERSE_STUDY) == 0)
+// Whether the root lays the panel out now: open, and made.
+beside_wanted(_W: f64): bool {
+    bs_open && restored && bs_nav != 0
+}
+
+// Its screens asked for if it is wanted open and not made yet (the root
+// laying out).
+beside_ensure() {
+    if (bs_open && restored && bs_nav == 0) beside_build()
+}
+
+// The panel's height under the page in a window H high.
+beside_height(H: f64): f64 {
+    bs_share * H
 }
 
 // The root laid out again (the panel coming or going, the rule changing).
@@ -71,46 +99,124 @@ root_relayout() {
     msg(view, sel("layoutIfNeeded"))
 }
 
-// The panel placed by the root: in, at the page's right, or out.
+// The panel placed by the root: in at the page's right (the page pw wide)
+// or under it (the page ph high), or out.
 beside_place(
     on: bool,
     pw: f64,
+    ph: f64,
     W: f64,
     H: f64
 ) {
-    beside_tell_fits(beside_fits_in(W));
+    // (It always fits: beside the page, or under it.)
+    beside_tell_fits(true);
+    under_h: f64 = if (on && ph < H) H - ph else 0.0f64;
+    if (under_h != bs_under_h) {
+        bs_under_h = under_h;
+        tray_place_bottom()
+    }
     if (on) {
-        if (bs_nav == 0) beside_build();
-        if (bs_nav == 0) return;
         if (!bs_shown) beside_attach();
-        msg_rect(bs_rule, sel("setFrame:"), pw, 0.0f64, 1.0f64, H);
-        msg_rect(msg(bs_nav, sel("view")), sel("setFrame:"), pw + 1.0f64, 0.0f64,
-            W - pw - 1.0f64, H)
+        bs_under = ph < H;
+        if (bs_under) {
+            msg_rect(bs_rule, sel("setFrame:"), 0.0f64, ph, W, 1.0f64);
+            msg_rect(msg(bs_nav, sel("view")), sel("setFrame:"), 0.0f64, ph + 1.0f64,
+                W, H - ph - 1.0f64);
+            msg1(bs_grabber, sel("setHidden:"), 0);
+            msg_rect(bs_grabber, sel("setFrame:"), W / 2.0f64 - 18.0f64, ph + 5.0f64,
+                36.0f64, 5.0f64);
+            msg1(msg(root_vc, sel("view")), sel("bringSubviewToFront:"), bs_grabber)
+        } else {
+            msg1(bs_grabber, sel("setHidden:"), 1);
+            msg_rect(bs_rule, sel("setFrame:"), pw, 0.0f64, 1.0f64, H);
+            msg_rect(msg(bs_nav, sel("view")), sel("setFrame:"), pw + 1.0f64, 0.0f64,
+                W - pw - 1.0f64, H)
+        }
     } else if (bs_shown) {
         beside_detach();
-        note(if (bs_open) "bible: study beside: hidden (width)" else "bible: study beside: closed")
+        note("bible: beside: closed")
     }
 }
 
-// Study's screens made for the panel, at its verse.
+// The panel's screens asked of core (once, until its first comes: core's
+// lines may be read later, the skin reading others now).
+bs_making: bool = false;
+
 beside_build() {
-    // (Core's Study screen, as the panel's: its screens kept while sheets
-    // come and go.)
+    if (bs_making) return;
+    bs_making = true;
     uk_nav = 0;
     uk_panel_slot = -1;
-    uk_wire_pair("panel", SCR_VERSE_STUDY, (bs_c * 1000 + bs_v) * 4);
-    uk_effects();
-    if (uk_panel_slot < 0) return;
-    vc: int = uk_vcs[uk_panel_slot];
+    bs_pending_n = 0;
+    to_core_str("panelmake");
+    to_core_end();
+    uk_effects()
+}
+
+// Core's `panel`: its first screen made (slot k), the panel made round it
+// (those core pushes after it go on it), and laid out.
+beside_made(k: int) {
+    note_num("bible: beside: made, pending ", bs_pending_n);
+    if (!bs_making || bs_nav != 0 || k < 0) return;
+    bs_making = false;
+    vc: int = uk_vcs[k];
+    beside_dress(vc);
+    n: int = msg1(msg(bs_class, sel("alloc")), sel("initWithRootViewController:"),
+        vc);
+    bs_nav = n;
+    msg1(n, sel("setDelegate:"), n);
+    msg1(msg(n, sel("toolbar")), sel("setTintColor:"), c_icon);
+    // (Those core pushed after it, its stack at once: pushes before the
+    // panel is in the window leave its bar unlike its screens.)
+    if (bs_pending_n > 0) {
+        stack: []int = new int[bs_pending_n + 1](0);
+        stack[0] = vc;
+        for k in 0..bs_pending_n {
+            beside_dress(bs_pending[k]);
+            stack[k + 1] = bs_pending[k]
+        }
+        msg2(n, sel("setViewControllers:animated:"), nsarray(stack, bs_pending_n + 1),
+            0)
+    }
+    bs_pending_n = 0;
+    view: int = msg(n, sel("view"));
+    msg1(view, sel("setAutoresizingMask:"), 0);
+    msg1(view, sel("setBackgroundColor:"), c_bg);
+    // (A group of its own for VoiceOver and the keyboard's focus: §17.3.8.)
+    msg1(view, sel("setShouldGroupAccessibilityChildren:"), 1);
+    msg1(view, sel("setAccessibilityLabel:"), nsstring(w_beside));
+    if (responds(view, "setAccessibilityContainerType:")) msg1(view, sel("setAccessibilityContainerType:"),
+        4);
+    if (responds(view, "setFocusGroupIdentifier:")) {
+        msg1(view, sel("setFocusGroupIdentifier:"), nsstring("beside"));
+        msg1(msg(nav, sel("view")), sel("setFocusGroupIdentifier:"), nsstring("page"))
+    }
+    if (bs_rule == 0) {
+        bs_rule = keep(make("UIView"));
+        msg1(bs_rule, sel("setAutoresizingMask:"), 0)
+    }
+    msg1(bs_rule, sel("setBackgroundColor:"), c_rule);
+    beside_make_grabber();
+    note("bible: beside: made");
+    beside_motion(true);
+    root_relayout();
+    if (bs_shown) {
+        beside_motion_after(true);
+        _a: int = UIAccessibilityPostNotification(objc_const("UIAccessibilityScreenChangedNotification"),
+            msg(bs_nav, sel("view")))
+    }
+    layout_bar();
+    if (tray_shown) update_tray()
+}
+
+// A screen of core's in the panel: its close at the right (unless its bar
+// has a button there), and Study's segments fitted between its buttons.
+beside_dress(vc: int) {
     item: int = msg(vc, sel("navigationItem"));
-    // (Its own close, not Done: it isn't modal. Show in Text, at its left,
-    // is core's.)
-    close: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
-        symbol("xmark", 15.0f64, 5, 0), 0, app_obj, sel("besideClose:")), sel("autorelease"));
-    msg1(close, sel("setAccessibilityLabel:"), nsstring(w_close_study));
-    msg1(item, sel("setRightBarButtonItem:"), close);
-    // (The segments fitted between them: each as wide as its title, which
-    // is a point smaller, so Commentary is whole.)
+    if (msg(item, sel("rightBarButtonItem")) == 0) msg1(item, sel("setRightBarButtonItem:"),
+        beside_close_item());
+    // (Each segment as wide as its title, a point smaller, so Commentary
+    // is whole.)
     seg: int = msg(item, sel("titleView"));
     if (seg != 0 && responds(seg, "setApportionsSegmentWidthsByContent:")) {
         msg1(seg, sel("setApportionsSegmentWidthsByContent:"), 1);
@@ -123,29 +229,84 @@ beside_build() {
             1), 4);
         msg_rect(seg, sel("setFrame:"), 0.0f64, 0.0f64, 262.0f64, 32.0f64)
     }
-    n: int = msg1(msg(bs_class, sel("alloc")), sel("initWithRootViewController:"),
-        vc);
-    bs_nav = n;
-    msg2(n, sel("setToolbarHidden:animated:"), 0, 0);
-    msg1(msg(n, sel("toolbar")), sel("setTintColor:"), c_icon);
-    view: int = msg(n, sel("view"));
-    msg1(view, sel("setAutoresizingMask:"), 0);
-    msg1(view, sel("setBackgroundColor:"), c_bg);
-    // (A group of its own for VoiceOver and the keyboard's focus: §17.3.8.)
-    msg1(view, sel("setShouldGroupAccessibilityChildren:"), 1);
-    if (responds(view, "setAccessibilityContainerType:")) msg1(view, sel("setAccessibilityContainerType:"),
-        4);
-    if (responds(view, "setFocusGroupIdentifier:")) {
-        msg1(view, sel("setFocusGroupIdentifier:"), nsstring("study"));
-        msg1(msg(nav, sel("view")), sel("setFocusGroupIdentifier:"), nsstring("page"))
+}
+
+// The panel's close (where a sheet's screen has Done).
+beside_close_item(): int {
+    close: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
+        symbol("xmark", 15.0f64, 5, 0), 0, app_obj, sel("besideClose:")), sel("autorelease"));
+    msg1(close, sel("setAccessibilityLabel:"), nsstring(w_close_beside));
+    close
+}
+
+// Whether slot k's screen is one of the panel's.
+uk_in_panel(k: int): bool {
+    slot: int = uk_wire_slot(uk_ids[k]);
+    slot >= 0 && uk_wire_groups[slot] == 1
+}
+
+// A screen core pushed on the panel's (its group 1): on its navigation
+// controller, or kept to be once it is made.
+beside_push(vc: int) {
+    if (bs_nav == 0) {
+        if (bs_pending_n < len(bs_pending)) {
+            bs_pending[bs_pending_n] = vc;
+            bs_pending_n = bs_pending_n + 1
+        }
+        return
     }
-    beside_titles();
-    if (bs_rule == 0) {
-        bs_rule = keep(make("UIView"));
-        msg1(bs_rule, sel("setAutoresizingMask:"), 0)
+    beside_dress(vc);
+    note_num("bible: beside: push, shown ", if (bs_shown) 1 else 0);
+    if (bs_shown) {
+        msg2(bs_nav, sel("pushViewController:animated:"), vc, 1);
+        return
     }
-    msg1(bs_rule, sel("setBackgroundColor:"), c_rule);
-    note("bible: study beside: made")
+    // (Not in the window yet: its stack set, not pushed.)
+    msg2(bs_nav, sel("setViewControllers:animated:"), msg1(msg(bs_nav, sel("viewControllers")),
+        sel("arrayByAddingObject:"), vc), 0)
+}
+
+// The grabber at the top of the panel under the page: a drag makes it
+// taller or shorter, or puts it away.
+beside_make_grabber() {
+    if (bs_grabber != 0) return;
+    g: int = keep(make("UIView"));
+    msg1(g, sel("setAutoresizingMask:"), 0);
+    msg1(g, sel("setBackgroundColor:"), c_rule);
+    msg_set_f(msg(g, sel("layer")), sel("setCornerRadius:"), 2.5f64);
+    msg1(g, sel("setUserInteractionEnabled:"), 0);
+    bs_grabber = g;
+    // (The drag is the panel's bar's: the grabber sits on it.)
+    pan: int = msg(msg2(msg(cls("UIPanGestureRecognizer"), sel("alloc")), sel("initWithTarget:action:"),
+        app_obj, sel("besideDragged:")), sel("autorelease"));
+    msg1(msg(bs_nav, sel("navigationBar")), sel("addGestureRecognizer:"), pan)
+}
+
+// The share it had as the drag began.
+bs_drag_from: f64 = 0.5f64;
+
+beside_dragged(_self: int, _cmd: int, pan: int): int {
+    if (!bs_under || root_vc == 0) return 0;
+    view: int = msg(root_vc, sel("view"));
+    H: f64 = view_height(view);
+    if (H <= 0.0f64) return 0;
+    state: int = msg(pan, sel("state"));
+    l8_msg_hfa(hfa, pan, sel("translationInView:"), view, 0, 0);
+    dy: f64 = hfa[1];
+    if (state == 1) bs_drag_from = bs_share;
+    share: f64 = bs_drag_from - dy / H;
+    if (state == 3 && share < BESIDE_SHARE_GONE) {
+        // (Down past the least: put away, at the share it had.)
+        bs_share = bs_drag_from;
+        to_core_str("tap shelf");
+        to_core_end();
+        return 0
+    }
+    if (share < BESIDE_SHARE_LEAST) share = BESIDE_SHARE_LEAST;
+    if (share > BESIDE_SHARE_MOST) share = BESIDE_SHARE_MOST;
+    bs_share = share;
+    root_relayout();
+    0
 }
 
 beside_attach() {
@@ -153,12 +314,11 @@ beside_attach() {
     msg1(root_vc, sel("addChildViewController:"), bs_nav);
     msg1(view, sel("addSubview:"), bs_rule);
     msg1(view, sel("addSubview:"), msg(bs_nav, sel("view")));
+    msg1(view, sel("addSubview:"), bs_grabber);
     msg1(bs_nav, sel("didMoveToParentViewController:"), root_vc);
     bs_shown = true;
     send1("panelvisible", 1);
-    beside_log("shown");
-    // (Its stack as it was: review s17-1, Minor 2.)
-    note_num("bible: study beside: screens ", msg(msg(bs_nav, sel("viewControllers")),
+    note_num("bible: beside: shown, screens ", msg(msg(bs_nav, sel("viewControllers")),
         sel("count")))
 }
 
@@ -167,6 +327,7 @@ beside_detach() {
     msg(msg(bs_nav, sel("view")), sel("removeFromSuperview"));
     msg(bs_nav, sel("removeFromParentViewController"));
     msg(bs_rule, sel("removeFromSuperview"));
+    msg(bs_grabber, sel("removeFromSuperview"));
     bs_shown = false;
     send1("panelvisible", 0)
 }
@@ -177,54 +338,20 @@ beside_discard() {
     if (bs_shown) beside_detach();
     release(bs_nav);
     uk_panel_gone(bs_nav);
-    bs_nav = 0
+    bs_nav = 0;
+    bs_depth = 0;
+    bs_making = false;
+    bs_grabber = held(bs_grabber, 0)
 }
 
-// "bible: study beside: shown John 3:16".
-beside_log(what: str) {
-    if (!diag_on) return;
-    tb_n = 0;
-    tb_str("bible: study beside: ");
-    tb_str(what);
-    tb_byte(32);
-    beside_reference();
-    note_ns(tb_ns())
-}
-
-// The panel's title (VoiceOver's group's name "Study, John 3:16").
-beside_titles() {
-    if (bs_nav == 0) return;
-    tb_n = 0;
-    tb_str(w_study_of);
-    beside_reference();
-    msg1(msg(bs_nav, sel("view")), sel("setAccessibilityLabel:"), tb_ns())
-}
-
-// The panel's verse as core titles its Study (John 3:16), added to the
-// skin's words.
-beside_reference() {
-    if (bs_nav == 0) return;
-    vcs: int = msg(bs_nav, sel("viewControllers"));
-    if (msg(vcs, sel("count")) == 0) return;
-    first: int = msg1(vcs, sel("objectAtIndex:"), 0);
-    for k in 0..UK_SLOTS
-        if (uk_vcs[k] != 0 && uk_vcs[k] == first && uk_ensure(k)) tb_nsstring(uk_text(uk_ui.title))
-}
-
-// `beside OPEN C V`, core's: at launch, as it was left (open where it fits
-// once the reader is at its place); after, Study opened beside the reader
-// at C:V, shown at C:V (verses selected while it is open: core has shown
-// them), or closed.
-beside_line(open: bool, c: int, v: int) {
-    if (c < 0 || c >= chapters_n) return;
+// `beside OPEN`, core's: at launch, as it was left (open once the reader
+// is at its place); after, opened or closed.
+beside_line(open: bool) {
     if (!restored) {
-        bs_c = c;
-        bs_v = v;
         bs_open = open;
         return
     }
-    if (!open) beside_close() else if (bs_open) beside_show_verse(c, v) else beside_open(c,
-        v)
+    if (open) beside_open() else beside_close()
 }
 
 // Whether the panel fits, as told to core (-1: not yet).
@@ -237,50 +364,44 @@ beside_tell_fits(fits: bool) {
     send1("panelfits", f)
 }
 
-// The reader at its place the first time: open, if it was left open.
+// The reader at its place the first time: the panel opened, if it was left
+// open; core told it fits.
 beside_restored() {
+    beside_tell_fits(true);
     if (bs_open) root_relayout()
 }
 
 // ---- opening and closing ----
-// Open at verse v of chapter c (the tray's Study, a word's): the panel
-// slides in from the trailing edge (the page cross-fading to its new
-// width), or, open already, shows the verse.
-beside_open(c: int, v: int) {
-    if (bs_shown) {
-        beside_show_verse(c, v);
-        update_tray();
-        return
-    }
+// Opened: its screens asked for; once they come (beside_made), it slides
+// in from the trailing edge (the page cross-fading to its new width) or up
+// from the bottom.
+beside_open() {
+    if (bs_shown) return;
     bs_open = true;
-    bs_c = c;
-    bs_v = v;
-    if (bs_nav != 0) beside_show_verse(c, v) else beside_build();
-    beside_motion(true);
-    root_relayout();
-    if (bs_shown) {
-        beside_motion_after(true);
-        _a: int = UIAccessibilityPostNotification(objc_const("UIAccessibilityScreenChangedNotification"),
-            msg(bs_nav, sel("view")))
-    }
-    layout_bar();
-    if (tray_shown) update_tray()
+    if (bs_nav == 0) beside_build() else beside_made_again()
 }
 
-// Closed (its close, the bar's button, ⌥⌘I): it slides out, the page
-// taking its width, the verse at the top kept.
+// Opened again while its screens are kept (a window too narrow for it, then
+// wide again): laid out, sliding in.
+beside_made_again() {
+    beside_motion(true);
+    root_relayout();
+    if (bs_shown) beside_motion_after(true);
+    layout_bar()
+}
+
+// Closed (its close, the bar's Bookshelf, ⌥⌘I, the grabber): it slides
+// out, the page taking its room, the verse at the top kept.
 beside_close() {
     if (!bs_open) return;
     bs_open = false;
     if (!bs_shown) {
-        // (Never made, the window too narrow for it: core told it is
-        // closed all the same.)
-        if (bs_nav == 0) send1("closegroup", 1);
         beside_discard();
         layout_bar();
         return
     }
     panel: int = msg(bs_nav, sel("view"));
+    under: bool = bs_under;
     beside_motion(false);
     // (A picture of it slides away over the page; the stack is let go now.)
     out: int = if (reduce_motion()) 0 else msg1(panel, sel("snapshotViewAfterScreenUpdates:"),
@@ -289,22 +410,23 @@ beside_close() {
         l8_msg_hfa(hfa, panel, sel("frame"), 0, 0, 0);
         msg_rect(out, sel("setFrame:"), hfa[0], hfa[1], hfa[2], hfa[3])
     }
+    travel: f64 = if (under) hfa[3] + 1.0f64 else PANEL_W + 1.0f64;
     beside_discard();
     root_relayout();
     if (out != 0) {
         msg1(msg(root_vc, sel("view")), sel("addSubview:"), out);
         layer: int = msg(out, sel("layer"));
-        msg2(layer, sel("setValue:forKeyPath:"), nsnumber_f(PANEL_W + 1.0f64), nsstring("transform.translation.x"));
-        animate(layer, "transform.translation.x", 0.0f64, PANEL_W + 1.0f64, false,
-            0.3f64);
+        key: str = if (under) "transform.translation.y" else "transform.translation.x";
+        msg2(layer, sel("setValue:forKeyPath:"), nsnumber_f(travel), nsstring(key));
+        animate(layer, key, 0.0f64, travel, false, 0.3f64);
         beside_gone(0, 0, 0);
         bs_leaving = keep(out);
         _t: int = after_common(0.32f64, "besideGone:")
     }
     layout_bar();
     if (tray_shown) update_tray();
-    note("bible: study beside: closed");
-    // (VoiceOver back to the verse it showed.)
+    note("bible: beside: closed");
+    // (VoiceOver back to the page.)
     tv: int = current_view();
     if (tv != 0) _a: int = UIAccessibilityPostNotification(objc_const("UIAccessibilityScreenChangedNotification"),
         tv)
@@ -321,7 +443,7 @@ beside_gone(_self: int, _cmd: int, _timer: int): int {
     0
 }
 
-// The page's cross-fade as its width changes (0.2 s; 0.15 s, the panel's
+// The page's cross-fade as its size changes (0.2 s; 0.15 s, the panel's
 // too, with Reduce Motion), at the start, so no line visibly reflows.
 beside_motion(_opening: bool) {
     if (nav == 0) return;
@@ -329,47 +451,34 @@ beside_motion(_opening: bool) {
         0.15f64) else fade_layer(msg(msg(nav, sel("view")), sel("layer")), 0.2f64)
 }
 
-// The panel's slide in from the trailing edge (the panel spring, §0).
+// The panel's slide in from the trailing edge or up from the bottom (the
+// panel spring, §0).
 beside_motion_after(_opening: bool) {
     if (reduce_motion() || bs_nav == 0) return;
-    animate(msg(msg(bs_nav, sel("view")), sel("layer")), "transform.translation.x",
+    view: int = msg(bs_nav, sel("view"));
+    if (bs_under) animate(msg(view, sel("layer")), "transform.translation.y", view_height(view),
+        0.0f64, true, 0.0f64) else animate(msg(view, sel("layer")), "transform.translation.x",
         PANEL_W + 1.0f64, 0.0f64, true, 0.0f64)
 }
 
-// The bar's Study button: core opens or closes it (the reader's place
-// told first: it opens at the verse at the top, if none is selected).
+// The bar's Bookshelf: core opens or closes the panel (the reader's place
+// told first: a commentary opens at it).
 beside_button(_self: int, _cmd: int, _b: int): int {
     place_tell();
-    to_core_str("tap study");
+    to_core_str("tap shelf");
     to_core_end();
     0
 }
 
+// Its close: core told (it says `beside 0`).
 beside_close_tapped(_self: int, _cmd: int, _b: int): int {
-    beside_close();
+    to_core_str("tap shelf");
+    to_core_end();
     0
 }
 
-// ---- its verse ----
-// Shown at verse v of chapter c (core's screen at it made again already):
-// its stack back to Study's first screen.
-beside_show_verse(c: int, v: int) {
-    bs_c = c;
-    bs_v = v;
-    if (bs_nav == 0) return;
-    if (msg(msg(bs_nav, sel("viewControllers")), sel("count")) > 1) msg1(bs_nav, sel("popToRootViewControllerAnimated:"),
-        0);
-    beside_titles();
-    beside_log("verse")
-}
-
-// The panel's own chevrons moved it (the page stays where it is).
-beside_moved(c: int, v: int) {
-    if (bs_nav == 0) return;
-    bs_c = c;
-    bs_v = v;
-    beside_titles()
-}
+// The panel's own chevrons moved Study (the page stays where it is).
+beside_moved(_c: int, _v: int) { }
 
 // A push in the panel: its screen's edges as a sheet's (iOS 26).
 beside_pushed(
@@ -384,13 +493,46 @@ beside_pushed(
     0
 }
 
+// How many screens the panel showed last (its stack's depth).
+bs_depth: int = 0;
+
+// A screen of the panel's shown: back to it (the stack shorter than
+// before), core told which, so that it lets those above go; a push, or the
+// panel coming into the window, tells nothing (core made those screens).
+beside_did_show(
+    _self: int,
+    _cmd: int,
+    nav: int,
+    vc: int,
+    _animated: int
+): int {
+    depth: int = msg(msg(nav, sel("viewControllers")), sel("count"));
+    back: bool = depth < bs_depth;
+    bs_depth = depth;
+    if (!back) return 0;
+    for k in 0..UK_SLOTS {
+        if (uk_vcs[k] != 0 && uk_vcs[k] == vc) {
+            note_num("bible: beside: shows ", uk_ids[k]);
+            to_core_str("panelanchor ");
+            to_core_int(uk_ids[k]);
+            to_core_end();
+            return 0
+        }
+    }
+    0
+}
+
 make_beside_classes() {
-    bs_class = class_make(cls("UINavigationController"), "L8StudyPanel");
-    add_method2(bs_class, sel("pushViewController:animated:"), &beside_pushed, "v@:@B")
+    bs_class = class_make(cls("UINavigationController"), "L8BesidePanel");
+    add_method2(bs_class, sel("pushViewController:animated:"), &beside_pushed, "v@:@B");
+    add_method3(bs_class, sel("navigationController:didShowViewController:animated:"),
+        &beside_did_show, "v@:@@B");
+    add_protocol(bs_class, "UINavigationControllerDelegate")
 }
 
 add_beside_methods(app: int) {
     add_method1(app, sel("besideClose:"), &beside_close_tapped, "v@:@");
     add_method1(app, sel("besideButton:"), &beside_button, "v@:@");
+    add_method1(app, sel("besideDragged:"), &beside_dragged, "v@:@");
     add_method1(app, sel("besideGone:"), &beside_gone, "v@:@")
 }

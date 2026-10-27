@@ -122,7 +122,7 @@ a concrete implementation: `web/main.l8` (the platform) and
 | Begin, and its appearance | `start W H DENSITY DARK TZ`, `version ABBR`, `dark`, `away` |
 | Taps | `tap`, `act`, `query`, `scope`, `text`, `submit`, `tapverse`, `tapnone`, `trayact`, `word`, `footnote`, `preview`, `esvact`, `versestudy`, `back` |
 | Keys | `command`, `commands` → `key NAME MODS` |
-| A panel beside the reader | `panelfits`, `panelvisible`, `tap study`, `beside` |
+| A panel beside the reader | `panelfits`, `panelvisible`, `tap shelf`, `beside`, `panelmake`, `panelanchor` |
 | Recordings | `audio_play`, `audio_stop` → `audiotime`, `audioended`, `audiofailed`; an address `kept:NAME` is the kept file NAME (a chapter core holds), and one that isn't there fails, so core plays it from online |
 | Its voice | `voices` (once); `say`, `speech_stop` → `spoke`, `spoken` |
 | Listening's controls | `listen_pause`, `listen_resume`, `listen_stop`, `follow`; `listenplay`, `listenpause`, `listenprev`, `listennext`, `listenstop` (its own player's too: a lock screen's) |
@@ -209,10 +209,15 @@ build them). It is a title, sections, and rows, and what is around them:
 - **Actions** are numbers chosen by the screen's kind: `(screen id, action,
   argument, value)`. A skin never interprets them; it hands them back.
 
-A screen belongs to a *group*: the sheet (0) or, on a wide window, the
-panel beside the reader (1). Closing one lets its group go, the other kept;
-a screen may also be presented over the sheet up (a note over the Library),
-which stays.
+A screen belongs to a *group*: the sheet (0) or the panel beside the
+reader (1: what is read with the Bible, `core/beside.l8`). Closing one lets
+its group go, the other kept; a screen may also be presented over the sheet
+up (a note over the Library), which stays. A skin with a panel shows it at
+the reader's right where a column fits and under the reader elsewhere,
+the reader still scrolling, and says so (`panelfits 1`); the panel's
+screens are a stack of their own, a `push` of a group 1 screen going on it
+whichever screen acted. A skin without one never says, and the Bookshelf
+opens over the reader as any screen does.
 
 ## What happens: effects
 
@@ -412,15 +417,14 @@ given, 1 a wrong letter typed), `announce` WORDS (for a screen reader alone:
 a word missed), `toast SYMBOL ICON` WORDS (a toast's words, and its
 symbol: 0 plus, 1 a check, 2 the brain, 3 the carried ribbon; ICON the
 symbol's name, `-` for the ribbon's glyph in the carried ribbon's color), `study_verse C V`,
-`study_moved C V` (Study beside the reader moved to another verse: the
-reader follows), `beside OPEN C V` (whether Study is wanted beside the
-reader, and its verse, C -1 never: at `start` as it was left, so a skin
-with that panel opens it again where it fits; then as core opens it
-(`tap study`, its key, the tray's Study where the panel fits), shows
-another verse there (verses selected while it shows: core has made its
-screen again) or closes it. The skin makes the panel (`panel`) or lets it
-go (`closegroup 1`); core keeps what it shows from those lines and the
-panel's verse), `command K MENU NAME MODS` TITLE (each of the keyboard's
+`study_moved C V` (Study in the panel moved to another verse: the reader
+follows), `beside OPEN` (whether the panel beside the reader is wanted
+open: at `start` as it was left, then as core opens or closes it: `tap
+shelf`, its key, the tray's Study, its close. A skin opening it asks for
+its screens, `panelmake`, which come as `panel ID` (its first, the
+Bookshelf) and `push ID` (the module read beside the reader, at its
+place; Study at its verse), each of group 1; it lets them go with
+`closegroup 1`), `command K MENU NAME MODS` TITLE (each of the keyboard's
 commands, at `start` and again as its title changes: its menu, 0 Go, 1
 View, 2 none; its key and modifiers, as `key` sends them; Show Study or
 Hide Study), `commands MASK` (those that act now, bit K, written as that
@@ -439,7 +443,7 @@ From the skin:
 | Line | Meaning |
 |---|---|
 | `start W H DENSITY DARK TZ` | the app begun: the window (points), its scale (hundredths), the system's appearance, its time zone (seconds east of UTC: the day turns at its midnight) |
-| `tap goto`, `tap versions`, `tap settings`, `tap history`, `tap search`, `tap library`, `tap study` | the bar's buttons (`study`: Study beside the reader opened or closed, where the panel fits) |
+| `tap goto`, `tap versions`, `tap settings`, `tap history`, `tap search`, `tap library`, `tap shelf` | the bar's buttons (`shelf`: the panel beside the reader opened or closed; without one, the Bookshelf over the reader) |
 | `act ID ACTION ARG VALUE` | an action (VALUE: a toggle's 1 or 0, a choice's, segment's, filter's or sort's index, a slider's value, a time's minutes, a swatch's color). An action on a screen means those over it have gone |
 | `query ID TEXT` | screen ID's field typed in (TEXT to the line's end), once typing has rested |
 | `scope ID N` | scope N chosen in screen ID's field |
@@ -449,8 +453,10 @@ From the skin:
 | `open KIND ARG PUSH`, `panel KIND ARG` | open a core screen from a platform entry point; PUSH 1 pushes it, 0 presents it; `panel` opens it beside the reader |
 | `openplan PLAN DAY SELECT PUSH` | open a plan's days at DAY, with that day selected when SELECT is 1 |
 | `anchor ID` | keep the navigation stack through ID, closing screens above it before pushing from that controller |
+| `panelmake` | the panel beside the reader opening: core makes its screens (`panel`, then `push`es of group 1) as it was left |
+| `panelanchor ID` | the panel's Back (or a swipe) shows ID on top: core lets the panel's screens above it go, any sheet's kept |
 | `closegroup GROUP` | close the sheet's screens (0) or the side panel's screens (1) |
-| `panelfits 0/1`, `panelvisible 0/1` | tell core whether a panel beside the reader fits the window now, and whether Study beside the reader is currently visible, including when the platform temporarily detaches its panel |
+| `panelfits 0/1`, `panelvisible 0/1` | tell core whether the skin has a panel beside the reader (at its right or under it), and whether it is currently visible, including when the platform temporarily detaches it |
 | `model ID [SECTION ROW]` | return the screen's current description without a presentation effect; with windowed rows, include the requested lazy row |
 | `windowrows 0/1` | choose full lazy sections (the default) or their counts with rows fetched on demand; available to every skin |
 | `editmenu COMMAND` | perform one of core's text-selection menu commands on the current selection |
@@ -469,7 +475,7 @@ From the skin:
 | `next` | the turn core asked for with `next`: a step of its work |
 | `rest C V FRAC END ENDS_HI MS`, `moving MS`, `tick MS`, `jumped KIND` | the reader at rest (chapter, verse, thousandths of an em; its end on the screen; the last chapter whose end is; the skin's clock), begun to move (a finger's scroll), the time core asked for (`wake MS`), a jump (0 with a way back, 1 the capsule's, 2 neither): `core/reading.l8` counts chapters read (20 s at rest, end seen), moves the carried ribbon, and puts a chapter dwelt in 20 s onto the history |
 | `back` | the capsule tapped: core goes back (`place`), or opens the plan's day it came from |
-| `key NAME MODS` | a hardware keyboard's key (NAME its character, or `left`, `up`, `down`, `space`, `return`; MODS 1 ⌘ or Ctrl, 2 Shift, 4 Alt): `core/keys.l8` makes it a command and does it where it acts — Go To, Search, Library, Settings, chapters, Back, Listen, a page (`page 1` down, `page 0` up: the skin scrolls a screen less three lines), a plan's day's Mark Read and Next, Practice's Check and grades, Study beside the reader and its verses. A skin with menus or a command overlay makes them from core's `command` lines and offers each where `commands` says |
+| `key NAME MODS` | a hardware keyboard's key (NAME its character, or `left`, `up`, `down`, `space`, `return`; MODS 1 ⌘ or Ctrl, 2 Shift, 4 Alt): `core/keys.l8` makes it a command and does it where it acts — Go To, Search, Library, Settings, chapters, Back, Listen, a page (`page 1` down, `page 0` up: the skin scrolls a screen less three lines), a plan's day's Mark Read and Next, Practice's Check and grades, the panel beside the reader and Study's verses in it. A skin with menus or a command overlay makes them from core's `command` lines and offers each where `commands` says |
 | `footnote C P`, `preview REF` | a footnote's mark tapped (its place P in chapter C), a reference tapped: core's footnote (`core/footnote.l8`) or preview |
 | `studyable C A B`, `studyat C A B` | whether the words at UTF-16 A to B of chapter C's text have a word to study (core says `studyable 1` or `0`: a skin's menu offers Study), and that word's Study opened |
 | `link ADDRESS` | a link into the app opened (`bsb://JHN/3/16`): the reader there |
@@ -529,9 +535,9 @@ Can Read) and a lemma's Forms. What is kept (the settings among it) is
 core's, in the files its host keeps through the iPhone (`KeptStore`), as
 for every skin; a change of the look comes as the look's lines, Keep
 Screen On as `awake`. The iPhone's menus and keyboard commands are core's
-(`command`, `commands`), and so is what Study beside the reader shows
-(`beside`): the iPhone draws them, and its panel where it fits
-(`panelfits`).
+(`command`, `commands`), and so is what the panel beside the reader
+shows (`beside`): the iPhone draws them, and the panel at the page's
+right on a wide window, under it on an iPhone, its grabber resizing it.
 
 ## Moving the iPhone
 

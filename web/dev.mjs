@@ -19,6 +19,10 @@
 //   POST /control          a command for the device (web/devctl.mjs): shot,
 //                          notify NAME, reload, exit; GET /next?since=N is the
 //                          device's long poll for commands after N
+//   POST /wire             a line for the app's core (web/devctl.mjs wire:
+//                          what a skin would send it, as `tap shelf`);
+//                          GET /wire?since=N is the app's long poll for
+//                          lines after N (Smooth Bible's ios/devwire.l8)
 //   POST /shot             a screenshot (PNG) from the device, saved under
 //                          .build/dev/shots/; GET /shots/latest says which
 //   GET /<path>            a file under --serve DIR, if given
@@ -186,6 +190,9 @@ const deviceLog = [];
 const commands = [];
 let commandId = Date.now();
 const commandWaiters = new Set();
+const wires = [];
+let wireId = Date.now();
+const wireWaiters = new Set();
 const shotsDir = path.join(".build", "dev", "shots");
 let shots = 0;
 
@@ -230,6 +237,44 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
+  if (url.pathname === "/wire" && req.method === "POST") {
+    const parts = [];
+    req.on("data", (d) => parts.push(d));
+    req.on("end", () => {
+      const id = ++wireId;
+      const lines = Buffer.concat(parts).toString("utf8").split("\n").map((l) => l.trim()).filter((l) => l);
+      for (const line of lines) wires.push({ id, line });
+      if (wires.length > 500) wires.splice(0, wires.length - 500);
+      console.log(`${new Date().toLocaleTimeString()}  wire ${id}: ${lines.join(" | ")}`);
+      for (const w of wireWaiters) w();
+      wireWaiters.clear();
+      json({ id });
+    });
+    return;
+  }
+  if (url.pathname === "/wire") {
+    // (As /next: a newly started app takes the cursor, no old lines.)
+    const since = Number(url.searchParams.get("since") || 0);
+    const text = (body) => {
+      res.writeHead(200, { ...headers, "Content-Type": "text/plain; charset=utf-8" });
+      res.end(body);
+    };
+    if (since === 0) return text(`${wireId}\t\n`);
+    const answer = () => text(wires.filter((w) => w.id > since).map((w) => `${w.id}\t${w.line}\n`).join("") || `${wireId}\t\n`);
+    if (wireId > since) return answer();
+    const done = () => {
+      clearTimeout(timer);
+      wireWaiters.delete(done);
+      answer();
+    };
+    const timer = setTimeout(done, 25000);
+    wireWaiters.add(done);
+    req.on("close", () => {
+      clearTimeout(timer);
+      wireWaiters.delete(done);
+    });
+    return;
+  }
   if (url.pathname === "/next") {
     const since = Number(url.searchParams.get("since") || 0);
     // A newly launched host starts at zero. Establish its cursor without
@@ -240,7 +285,10 @@ const server = http.createServer((req, res) => {
     }
     const answer = () => {
       res.writeHead(200, { ...headers, "Content-Type": "text/plain; charset=utf-8" });
-      res.end(commands.filter((c) => c.id > since).map((c) => `${c.id}\t${c.cmd}\n`).join(""));
+      // (None kept after the device's cursor, as after a restart: the
+      // cursor moved to the latest, so the device waits again.)
+      const newer = commands.filter((c) => c.id > since);
+      res.end(newer.length ? newer.map((c) => `${c.id}\t${c.cmd}\n`).join("") : `${commandId}\tsay control connected\n`);
     };
     if (commandId > since) return answer();
     const done = () => {

@@ -570,7 +570,7 @@ function screenLine(w) {
 
 function newScreen(w) {
   return {
-    id: w.num(1), kind: w.num(2), arg: w.num(3), title: w.field(1), search: w.field(2), sections: [], tools: [],
+    id: w.num(1), kind: w.num(2), arg: w.num(3), group: w.num(4), title: w.field(1), search: w.field(2), sections: [], tools: [],
     commands: [], focus: -1, focusMode: 0, focusWords: null, segments: [], filterColors: [], sorts: [], scopes: [], searchText: "",
     intro: "", hero: "", left: "", confirm: "", button: "", emptyTitle: "", emptyLine: "",
   };
@@ -622,7 +622,13 @@ function line(w) {
       panel.push(w.num(1));
       break;
     case "panel":
-      panel.present(w.num(1));
+      panel.besideFirst(w.num(1));
+      break;
+    case "beside":
+      panel.besideLine(w.num(1) === 1);
+      break;
+    case "focus":
+      panel.refocus(w.num(1));
       break;
     case "update":
     case "refill":
@@ -894,6 +900,7 @@ bar.titleButton.addEventListener("contextmenu", (e) => {
   send("titlemenu");
 });
 $(".bar .library").addEventListener("click", () => send("tap library"));
+$(".bar .shelf").addEventListener("click", () => send("tap shelf"));
 $(".bar .search").addEventListener("click", () => send("tap search"));
 $(".bar .version").addEventListener("click", () => send("tap versions"));
 $(".bar .aa").addEventListener("click", () => send("tap settings"));
@@ -1347,7 +1354,12 @@ addEventListener("pointerdown", (e) => {
 // screens, the top one shown, its Back the browser's too.
 const panel = {
   box: null,
+  // The sheet's screens (core's group 0), and those read beside the page
+  // (group 1: the Bookshelf, a commentary following the page, Study),
+  // shown while no sheet is up and kept while sheets come and go.
   stack: [],
+  beside: [],
+  besideOpen: false,
   fields: new Map(),
   typed: 0,
   pending: null,
@@ -1396,8 +1408,14 @@ const panel = {
     addEventListener("popstate", () => this.popped());
   },
 
+  // The screens shown: the sheet's, else those beside the page.
+  current() {
+    return this.stack.length ? this.stack : this.beside;
+  },
+
   top() {
-    return this.stack.length ? screens.get(this.stack[this.stack.length - 1]) : null;
+    const c = this.current();
+    return c.length ? screens.get(c[c.length - 1]) : null;
   },
 
   present(id) {
@@ -1407,14 +1425,52 @@ const panel = {
   },
 
   push(id) {
+    // (One of the panel's beside the page: on its screens.)
+    if (screens.get(id)?.group === 1) {
+      this.beside.push(id);
+      if (!this.stack.length) this.show(true);
+      return;
+    }
     this.stack.push(id);
     this.show(true);
     this.syncHistory();
   },
 
+  // The panel's first screen beside the page (its others pushed after).
+  besideFirst(id) {
+    this.beside = [id];
+    if (!this.stack.length) this.show(true);
+  },
+
+  // `beside OPEN`: the panel beside the page wanted, its screens asked
+  // for; or let go.
+  besideLine(open) {
+    this.besideOpen = open;
+    $(".bar .shelf").setAttribute("aria-pressed", open ? "true" : "false");
+    if (open) {
+      if (!this.beside.length) send("panelmake");
+      return;
+    }
+    this.beside = [];
+    if (!this.stack.length) this.hide();
+  },
+
   update(id) {
-    if (!this.stack.length || this.stack[this.stack.length - 1] !== id) return;
+    const c = this.current();
+    if (!c.length || c[c.length - 1] !== id) return;
     this.show(false);
+  },
+
+  // A screen's focus row brought into sight again (a commentary beside
+  // the page following it).
+  refocus(id) {
+    const s = this.top();
+    if (!s || s.id !== id) return;
+    const list = $(".plist", this.box);
+    const fr = list.querySelector(".focus");
+    if (!fr) return;
+    const at = fr.getBoundingClientRect().top - list.getBoundingClientRect().top + list.scrollTop;
+    list.scrollTo({ top: at - 8, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
   },
 
   // The focus row's words brought into sight, the list moving as little
@@ -1455,7 +1511,8 @@ const panel = {
     if (!this.stack.length) return;
     this.stack = [];
     this.fields.clear();
-    this.hide();
+    if (this.beside.length) this.show(true);
+    else this.hide();
     this.syncHistory();
   },
 
@@ -1467,21 +1524,34 @@ const panel = {
   },
 
   // Back: the top screen let go, and core told (its field's words first).
+  // Beside the page: the one under it shown (core told which), or, the
+  // first, the panel put away.
   back(tell = true) {
-    if (!this.stack.length) return;
+    if (!this.stack.length) {
+      if (!this.beside.length) return;
+      if (this.beside.length === 1) {
+        send("tap shelf");
+        return;
+      }
+      this.fields.delete(this.beside.pop());
+      send(`panelanchor ${this.beside[this.beside.length - 1]}`);
+      this.show(false);
+      return;
+    }
     const id = this.stack[this.stack.length - 1];
     if (tell) this.commitField(id);
     this.stack.pop();
     this.fields.delete(id);
     if (tell) send(`closed ${id}`);
-    if (this.stack.length) this.show(false);
+    if (this.current().length) this.show(!this.stack.length);
     else this.hide();
     this.syncHistory();
   },
 
-  // Back, as the browser's Back is: one entry of its history.
+  // Back, as the browser's Back is: one entry of its history (none for
+  // the screens beside the page).
   userBack() {
-    if (this.depth > 0) history.back();
+    if (this.stack.length && this.depth > 0) history.back();
     else this.back(true);
   },
 
@@ -1514,7 +1584,8 @@ const panel = {
 
   hide() {
     this.box.hidden = true;
-    document.body.classList.remove("panel-open");
+    document.body.classList.remove("panel-open", "beside-under");
+    this.box.classList.remove("under");
     this.shown = -1;
   },
 
@@ -1557,8 +1628,13 @@ const panel = {
     const scroll = fresh ? 0 : list.scrollTop;
     $(".ptitle", p).textContent = s.title;
     const back = $(".pback", p);
-    back.replaceChildren(s.left ? document.createTextNode(s.left) : icon(this.stack.length > 1 ? "chevron-left" : "x"));
-    back.setAttribute("aria-label", s.left || (this.stack.length > 1 ? "Back" : "Close"));
+    const depth = this.current().length;
+    back.replaceChildren(s.left ? document.createTextNode(s.left) : icon(depth > 1 ? "chevron-left" : "x"));
+    back.setAttribute("aria-label", s.left || (depth > 1 ? "Back" : "Close"));
+    // (Beside the page: under it on a narrow window, the page above.)
+    const under = !this.stack.length;
+    p.classList.toggle("under", under);
+    document.body.classList.toggle("beside-under", under);
     const bt = s.confirm || s.button;
     const button = $(".pbutton", p);
     button.hidden = !bt;
@@ -1608,7 +1684,7 @@ const panel = {
     document.body.classList.add("panel-open");
     // (Its field takes the keys as it opens: where core says, and wherever
     // there is a keyboard and a pointer, as a web page's search does.)
-    const typeIn = s.search && (s.focusField || !matchMedia("(pointer: coarse)").matches);
+    const typeIn = s.search && (s.focusField || !matchMedia("(pointer: coarse)").matches) && this.stack.length > 0;
     if (fresh && typeIn) input.focus();
     if (focused && this.fields.get(s.id)) {
       const f = this.fields.get(s.id);
@@ -1622,7 +1698,8 @@ const panel = {
         list.scrollTop = at - (s.focusMode === 1 || s.focusMode === 2 ? list.clientHeight / 2 : 8);
         if (s.focusMode === 3) fr.classList.add("washed");
       } else list.scrollTop = 0;
-      if (!typeIn) $(".pback", p).focus({ preventScroll: true });
+      // (A sheet takes the keys; what is beside the page leaves them to it.)
+      if (!typeIn && this.stack.length) $(".pback", p).focus({ preventScroll: true });
     } else list.scrollTop = scroll;
     this.shown = s.id;
   },
@@ -2660,6 +2737,9 @@ function begin() {
   const v = /^\/read\/(bsb|kjv|web|asv|ylt|esv)\//.exec(location.pathname);
   if (v) send(`version ${v[1].toUpperCase()}`);
   if (c >= 0) send(`place ${c} 0 0`);
+  // (The panel beside the page always fits: at its right on a wide
+  // window, under it on a narrow one.)
+  send("panelfits 1");
   send(`start ${innerWidth} ${innerHeight} ${Math.round(devicePixelRatio * 100)} ${matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0} ${-new Date().getTimezoneOffset() * 60}`);
   tellNetwork();
   addEventListener("online", tellNetwork);

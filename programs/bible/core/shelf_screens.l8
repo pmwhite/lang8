@@ -76,6 +76,10 @@ ACT_SHELF_BROWSE: int = 314;
 
 ACT_SHELF_DELETE: int = 315;
 
+// A commentary's section's verses tapped beside the page (arg chapter *
+// 1000 + verse): the page there.
+ACT_SHELF_VERSES: int = 316;
+
 // (An entry's or part's place in a screen's argument.)
 SHELF_PLACE: int = 1000000;
 
@@ -167,16 +171,25 @@ sk_shelf_opening(kind: int, arg: int) {
 }
 
 // The screens that show the shelf made again (a download's progress, the
-// catalog come, a module opened).
+// catalog come, a module opened); a commentary beside the page whose text
+// has come brought to its focus.
 shelf_screens_changed() {
     for i in 0..sk_n {
         k: int = sk_kinds[i];
         if (k >= SCR_SHELF && k <= SCR_SHELF_BOOK || k == SCR_VERSIONS || k == SCR_VERSE_STUDY) {
+            waited: bool = sk_ids[i] == shelf_refocus_id;
+            if (waited) shelf_refocus_id = -1;
             sk_build(i);
-            ui_effect("update", sk_ids[i], -1)
+            ui_effect("update", sk_ids[i], -1);
+            if (waited && shelf_refocus_id != sk_ids[i]) ui_effect("focus", sk_ids[i],
+                -1)
         }
     }
 }
+
+// A commentary beside the page made while its text was still coming (its
+// id; -1 none): brought to its focus when it has come.
+shelf_refocus_id: int = -1;
 
 sk_build_shelf_screen(id: int, kind: int, arg: int) {
     if (kind == SCR_SHELF) sk_build_shelf(id) else if (kind == SCR_SHELF_BROWSE) sk_build_shelf_browse(id) else if (kind == SCR_SHELF_ITEM) sk_build_shelf_item(id,
@@ -206,9 +219,12 @@ sk_build_shelf(id: int) {
             if (!shelf_ready_at(i)) shelf_downloading_row(i)
         }
     }
+    // (Each kind's latest read first.)
+    order: []int = shelf_by_latest(count);
     for kind in 0..len(shelf_section_titles) {
         n: int = 0;
-        for i in 0..count {
+        for k in 0..count {
+            i: int = order[k];
             if (shelf_ready_at(i) && shelf_kind_at(i) == kind) {
                 if (n == 0) ui_section(shelf_section_titles[kind], "");
                 n = n + 1;
@@ -248,6 +264,22 @@ sk_build_shelf(id: int) {
     ui_set_icon("magnifyingglass");
     ui_set_tinted();
     ui_set_acc(ACC_MORE)
+}
+
+// The first count items' indices, the latest read first (those never read
+// in the shelf's order, after them).
+shelf_by_latest(count: int): []int@new {
+    order: []int = new int[count](0);
+    for i in 0..count {
+        used: int = shelf_used_at(i);
+        k: int = i;
+        while (k > 0 && shelf_used_at(order[k - 1]) < used) {
+            order[k] = order[k - 1];
+            k = k - 1
+        }
+        order[k] = i
+    }
+    order
 }
 
 shelf_bytes(): int {
@@ -935,6 +967,13 @@ sk_build_shelf_commentary(id: int, arg: int) {
     }
     shown: int = 0;
     waiting: bool = false;
+    // (Beside the page, made first at the comment on the page's verse.)
+    at: int = sk_find(id);
+    focus_v: int = sk_beside_focus_v;
+    if (focus_v < 0 && at >= 0 && sk_groups[at] == 1 && c == sk_c) {
+        sk_beside_focus_v = sk_v;
+        sk_beside_shown_v = sk_v
+    }
     borrow shelf_open[SHELF_USE_STUDY] as open {
         match open.reader {
             Verses r -> {
@@ -944,7 +983,10 @@ sk_build_shelf_commentary(id: int, arg: int) {
             _ -> { }
         }
     }
+    sk_beside_focus_v = focus_v;
     if (waiting) {
+        // (Beside the page: brought to its focus once its text has come.)
+        if (at >= 0 && sk_groups[at] == 1) shelf_refocus_id = id;
         shelf_opening_rows(slot, i);
         return
     }
@@ -1003,12 +1045,17 @@ shelf_credit_row(i: int) {
 }
 
 // Chapter c's commentary: each section's verses ("Verses 1–5"), then its
-// paragraphs. How many sections.
+// paragraphs. How many sections. Its focus the section with the comment
+// on verse sk_beside_focus_v (if that is not -1); each section's verses a
+// way to take the page there.
 shelf_commentary_chapter(slot: int, module: *VerseModule, c: int): int {
     place: CommentaryPlace = commentary_place(module, c);
     if (place.book < 0) return 0;
     system: *Versification = verse_module_system(module);
     last: int = system.books[place.book].verses[place.chapter - 1];
+    focus_from: int = if (sk_beside_focus_v >= 0) commentary_section_start(module,
+        place, if (sk_beside_focus_v > last) last else sk_beside_focus_v) else -1;
+    commentary_verses_c = c;
     shown: int = 0;
     v: int = 0;
     while (v <= last) {
@@ -1017,11 +1064,45 @@ shelf_commentary_chapter(slot: int, module: *VerseModule, c: int): int {
             through: int = v;
             while (through < last && verse_entries_same(entry, commentary_entry(module,
                 place, through + 1))) through = through + 1;
+            if (v == focus_from) ui_focus = ui_rows_n;
             if (commentary_section(slot, module, entry, v, through, ACT_SHELF_LINK)) shown = shown + 1;
             v = through + 1
         } else v = v + 1
     }
+    commentary_verses_c = -1;
     shown
+}
+
+// The chapter whose sections are being made (their verses a way to take
+// the page there; -1 none).
+commentary_verses_c: int = -1;
+
+// The first verse of the section with the comment on verse v of a chapter
+// (a verse without one: the section before it; 0 none before).
+commentary_section_start(module: *VerseModule, place: CommentaryPlace, v: int): int {
+    x: int = v;
+    while (x > 0) {
+        entry: VerseEntry = commentary_entry(module, place, x);
+        if (entry.size > 0 && !verse_entries_same(entry, commentary_entry(module,
+            place, x - 1))) return x;
+        x = x - 1
+    }
+    0
+}
+
+// Whether verses a and b of the app's chapter c show the same comment.
+commentary_same_section(
+    module: *VerseModule,
+    c: int,
+    a: int,
+    b: int
+): bool {
+    place: CommentaryPlace = commentary_place(module, c);
+    if (place.book < 0) return true;
+    system: *Versification = verse_module_system(module);
+    last: int = system.books[place.book].verses[place.chapter - 1];
+    commentary_section_start(module, place, if (a > last) last else a) == commentary_section_start(module,
+        place, if (b > last) last else b)
 }
 
 // Whether chapter c's comments are ready to show: a large block decoded as
@@ -1142,10 +1223,12 @@ commentary_section(
 }
 
 // "Verses 14–16" (or "Introduction" for a chapter's verse 0) heading a
-// section of its own.
+// section of its own; in a commentary by chapter, a tap takes the page
+// there.
 commentary_section_label(from: int, through: int) {
     ui_section("", "");
-    ui_row(UI_TEXT, 0, 0);
+    if (commentary_verses_c >= 0 && from > 0) ui_row(UI_TEXT, ACT_SHELF_VERSES, commentary_verses_c * 1000 + from) else ui_row(UI_TEXT,
+        0, 0);
     ui_rich_begin();
     if (from == 0 && through == 0) fput_str("Introduction") else if (through > from) {
         fput_str("Verses ");
@@ -1648,6 +1731,11 @@ sk_shelf_act(
         kind: int = sk_kinds[at];
         if (kind == SCR_SHELF_BOOK) sk_open(SCR_SHELF_BOOK, arg, true) else sk_open(SCR_SHELF_ENTRY,
             arg, true);
+        shelf_note_place(arg);
+        return
+    }
+    if (action == ACT_SHELF_VERSES) {
+        sk_goto(arg / 1000, arg % 1000);
         return
     }
     if (action == ACT_SHELF_LINK) {
@@ -1661,42 +1749,60 @@ sk_shelf_act(
     _v: int = value
 }
 
-// A module read: a Bible as the version (Bookshelf closed, the reader
-// in it); a commentary at the reader's chapter; a dictionary's entries
-// (a devotional at today's); a book's contents.
+// A module read: a Bible as the version (Bookshelf closed, the reader in
+// it); a commentary at the reader's chapter; a book at its contents, then
+// the part last read; a dictionary's entries, then the entry last read; a
+// devotional's, then today's. Pushed where the Bookshelf is (the panel
+// beside the page, or a sheet).
 shelf_read(i: int) {
     if (!shelf_ready_at(i)) return;
-    k: int = shelf_kind_at(i);
-    slot: int = shelf_slot_at(i);
-    if (k == SHELF_KIND_BIBLE) {
+    if (shelf_kind_at(i) == SHELF_KIND_BIBLE) {
         sk_use_version(shelf_text_of(i));
         sk_dismiss();
         return
     }
+    shelf_open_reading(i, false)
+}
+
+// Module i's screens pushed (beside: on the panel's, as it is made again;
+// else over the screen acted on), and it noted as read.
+shelf_open_reading(i: int, beside: bool) {
+    k: int = shelf_kind_at(i);
+    slot: int = shelf_slot_at(i);
+    place: int = shelf_place_at(i);
+    shelf_note_read(i, -1);
     if (k == SHELF_KIND_COMMENTARY) {
-        sk_open(SCR_SHELF_COMMENTARY, slot * SHELF_PLACE + (if (sk_c >= 0 && sk_c < chapters) sk_c else 0),
-            true);
+        shelf_push(SCR_SHELF_COMMENTARY, slot * SHELF_PLACE + (if (sk_c >= 0 && sk_c < chapters) sk_c else 0),
+            beside);
         return
     }
     if (k == SHELF_KIND_BOOK) {
-        sk_open(SCR_SHELF_BOOK, slot * SHELF_PLACE, true);
+        shelf_push(SCR_SHELF_BOOK, slot * SHELF_PLACE, beside);
+        if (place > 0) shelf_push(SCR_SHELF_BOOK, slot * SHELF_PLACE + place, beside);
         return
     }
     shelf_query_n = 0;
-    if (k == SHELF_KIND_DEVOTIONAL && shelf_open_is(SHELF_USE_ENTRIES, slot)) {
-        today: int = -1;
-        borrow shelf_open[SHELF_USE_ENTRIES] as open {
-            match open.reader {
-                Keys r -> today = shelf_today_entry(r.module);
-                _ -> { }
-            }
-        }
-        if (today >= 0) {
-            sk_open(SCR_SHELF_ENTRY, slot * SHELF_PLACE + today, true);
-            return
+    shelf_push(SCR_SHELF_ENTRIES, slot, beside);
+    entry: int = if (k == SHELF_KIND_DEVOTIONAL) shelf_devotional_today(slot) else if (place > 0) place else -1;
+    if (entry >= 0 && entry < shelf_entry_count(slot)) shelf_push(SCR_SHELF_ENTRY,
+        slot * SHELF_PLACE + entry, beside)
+}
+
+shelf_push(kind: int, arg: int, beside: bool) {
+    if (beside) sk_beside_push(kind, arg) else sk_open(kind, arg, true)
+}
+
+// A devotional's entry for today (-1: it is not open yet, or has none).
+shelf_devotional_today(slot: int): int {
+    if (!shelf_open_is(SHELF_USE_ENTRIES, slot)) return -1;
+    today: int = -1;
+    borrow shelf_open[SHELF_USE_ENTRIES] as open {
+        match open.reader {
+            Keys r -> today = shelf_today_entry(r.module);
+            _ -> { }
         }
     }
-    sk_open(SCR_SHELF_ENTRIES, slot, true)
+    today
 }
 
 // The commentary's chapter, the entry or the book's part before or after
@@ -1733,8 +1839,15 @@ shelf_step(at: int, a: int, direction: int) {
         if (next <= 0) return;
         sk_args[at] = slot * SHELF_PLACE + next
     } else return;
+    if (kind == SCR_SHELF_COMMENTARY) sk_beside_stepped(at) else shelf_note_place(sk_args[at]);
     sk_build(at);
     ui_effect("update", sk_ids[at], -1)
+}
+
+// A book's part or a dictionary's entry shown (arg slot * SHELF_PLACE +
+// its index): kept as where its module is read.
+shelf_note_place(arg: int) {
+    shelf_note_read(shelf_find_slot(arg / SHELF_PLACE), arg % SHELF_PLACE)
 }
 
 // What a Bookshelf screen's field holds (lower case), its screen made again.

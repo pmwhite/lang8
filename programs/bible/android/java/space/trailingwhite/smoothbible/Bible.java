@@ -46,7 +46,7 @@ public final class Bible extends Activity {
   String saving;
   FrameLayout root;
   LinearLayout bar;
-  TextView title, version, settings, library;
+  TextView title, version, settings, library, shelf;
   android.widget.ImageView search;
   // A screen or a chapter being said (between its first line and end).
   Screen building;
@@ -89,12 +89,16 @@ public final class Bible extends Activity {
     // (The Library: what is kept, Memory, and the languages.)
     library = button("☰", "library");
     library.setContentDescription("Library");
+    // (The Bookshelf: what is read beside the Bible.)
+    shelf = button("▤", "shelf");
+    shelf.setContentDescription("Bookshelf");
     search = new android.widget.ImageView(this);
     search.setImageResource(android.R.drawable.ic_menu_search);
     search.setPadding(dp(10), dp(10), dp(10), dp(10));
     search.setContentDescription("Search");
     search.setOnClickListener(v -> Native.send("tap search"));
     bar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+    bar.addView(shelf);
     bar.addView(library);
     bar.addView(search, new LinearLayout.LayoutParams(dp(44), dp(44)));
     bar.addView(version);

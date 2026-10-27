@@ -4,6 +4,7 @@
 //   node web/devctl.mjs [--server http://localhost:8777] shot       a screenshot, its file printed
 //   node web/devctl.mjs notify NAME                                 a Darwin notification posted
 //   node web/devctl.mjs scroll DY                                  the first scroll view moved by DY points
+//   node web/devctl.mjs wire LINE [| LINE...]                       lines for the app's core (as a skin sends: tap shelf)
 //   node web/devctl.mjs reload | exit | say TEXT
 //   node web/devctl.mjs log                                         the device's lines so far
 const argv = process.argv.slice(2);
@@ -14,8 +15,14 @@ if (argv[0] === "--server") {
 }
 const cmd = argv.join(" ");
 if (!cmd) {
-  console.error("usage: node web/devctl.mjs [--server URL] shot | notify NAME | scroll DY | reload | exit | say TEXT | log");
+  console.error("usage: node web/devctl.mjs [--server URL] shot | notify NAME | scroll DY | wire LINE | reload | exit | say TEXT | log");
   process.exit(2);
+}
+if (argv[0] === "wire") {
+  const lines = argv.slice(1).join(" ").split("|").map((l) => l.trim()).join("\n");
+  const r = await (await fetch(`${server}/wire`, { method: "POST", body: lines })).json();
+  console.log(`wire ${r.id} queued`);
+  process.exit(0);
 }
 if (cmd === "log") {
   process.stdout.write(await (await fetch(`${server}/log`)).text());

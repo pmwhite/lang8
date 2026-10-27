@@ -1,0 +1,189 @@
+tag bible_ios;
+
+use_tag std, ios, bible, bible_wire;
+
+// The app driven from the development machine (RELOAD.md), in a build for
+// hot reload only: where the hot reload host's server is set (the Settings
+// app's hot_server, or dev-server.txt in the bundle), the app asks it for
+// lines for core (`node web/devctl.mjs wire tap shelf`), long-polling
+// GET /wire?since=N, and gives each to core as the skin gives its own. A
+// line beginning ! is the app's: `!screens` writes the screens shown to
+// the log. While it is connected, the screen stays on (a phone's
+// Auto-Lock, not ten minutes of Keep Screen On) and its diagnostics are
+// written. A build from the App Store has no server set and asks nothing.
+import "../../ios/objc.l8";
+
+// The server's address (http://HOST:PORT), the cursor of its lines, the
+// request under way, its body, and its session (with a long timeout).
+dw_url: int = 0;
+
+dw_since: int = 0;
+
+dw_task: int = 0;
+
+dw_body: int = 0;
+
+dw_session: int = 0;
+
+// Whether the server has answered: the app is being driven.
+dw_on: bool = false;
+
+// The server the hot reload host is set to (0: none).
+dw_server(): int {
+    defaults: int = msg(cls("NSUserDefaults"), sel("standardUserDefaults"));
+    ns: int = msg1(defaults, sel("stringForKey:"), nsstring("hot_server"));
+    if (ns == 0 || msg(ns, sel("length")) == 0) {
+        path: int = msg2(msg(cls("NSBundle"), sel("mainBundle")), sel("pathForResource:ofType:"),
+            nsstring("dev-server"), nsstring("txt"));
+        if (path != 0) ns = msg3(cls("NSString"), sel("stringWithContentsOfFile:encoding:error:"),
+            path, 4, 0)
+    }
+    if (ns == 0) return 0;
+    ns = msg1(ns, sel("stringByTrimmingCharactersInSet:"), msg(cls("NSCharacterSet"),
+        sel("whitespaceAndNewlineCharacterSet")));
+    if (msg(ns, sel("length")) == 0) return 0;
+    keep(msg1(nsstring("http://"), sel("stringByAppendingString:"), ns))
+}
+
+// Begun at launch (and again after a reload), if a server is set.
+devwire_begin() {
+    if (dw_url == 0) dw_url = dw_server();
+    if (dw_url == 0) return;
+    if (dw_session == 0) {
+        config: int = msg(cls("NSURLSessionConfiguration"), sel("ephemeralSessionConfiguration"));
+        msg_set_f(config, sel("setTimeoutIntervalForRequest:"), 40.0f64);
+        delegate: int = msg(msg(msg(http_class, sel("alloc")), sel("init")), sel("autorelease"));
+        dw_session = keep(msg3(cls("NSURLSession"), sel("sessionWithConfiguration:delegate:delegateQueue:"),
+            config, delegate, msg(cls("NSOperationQueue"), sel("mainQueue"))))
+    }
+    devwire_ask()
+}
+
+devwire_ask() {
+    if (dw_task != 0 || dw_url == 0) return;
+    tb_n = 0;
+    tb_str("/wire?since=");
+    tb_int(dw_since);
+    url: int = msg1(cls("NSURL"), sel("URLWithString:"), msg1(dw_url, sel("stringByAppendingString:"),
+        tb_ns()));
+    if (url == 0) return;
+    task: int = msg1(dw_session, sel("dataTaskWithURL:"), url);
+    if (task == 0) return;
+    dw_task = keep(task);
+    dw_body = keep(make("NSMutableData"));
+    msg(task, sel("resume"))
+}
+
+// The session's callbacks (platform.l8's delegate's): whether task is ours.
+devwire_received(task: int, data: int): bool {
+    if (task == 0 || task != dw_task) return false;
+    msg1(dw_body, sel("appendData:"), data);
+    true
+}
+
+devwire_completed(task: int, error: int): bool {
+    if (task == 0 || task != dw_task) return false;
+    body: int = dw_body;
+    dw_task = 0;
+    dw_body = 0;
+    if (error == 0) devwire_lines(body);
+    release(body);
+    release(task);
+    // (Asked again at once; after a failure, in a second.)
+    if (error == 0) devwire_ask() else _t: int = after(1.0f64, "devwireAgain:");
+    true
+}
+
+devwire_again(_self: int, _cmd: int, _timer: int): int {
+    devwire_ask();
+    0
+}
+
+// The server's answer: lines of ID TAB LINE (the first answer, the cursor
+// alone).
+devwire_lines(body: int) {
+    n: int = msg(body, sel("length"));
+    if (n <= 0) return;
+    region {
+        b: []i8 = new i8[n](0i8);
+        memcpy_from(b, msg(body, sel("bytes")), n);
+        if (!dw_on) {
+            dw_on = true;
+            diag_on = true;
+            set_idle_disabled(true);
+            note("bible: driven from the development server")
+        }
+        at: int = 0;
+        while (at < n) {
+            e: int = at;
+            while (e < n && b[e] as int != 10) e = e + 1;
+            tab: int = at;
+            while (tab < e && b[tab] as int != 9) tab = tab + 1;
+            id: int = 0;
+            for i in at..tab id = id * 10 + (b[i] as int - 48);
+            if (id > dw_since) dw_since = id;
+            if (tab + 1 < e) devwire_line(b, tab + 1, e);
+            at = e + 1
+        }
+    }
+}
+
+// One line: the app's (!screens), else core's.
+devwire_line(b: []i8, from: int, to: int) {
+    if (b[from] as int == 33) {
+        devwire_screens();
+        return
+    }
+    for i in from..to to_core_byte(b[i] as int);
+    to_core_end()
+}
+
+// The screens shown, to the log: each one's id, kind and group; then the
+// panel's stack, each one's screen and title.
+devwire_screens() {
+    if (bs_nav != 0) {
+        vcs: int = msg(bs_nav, sel("viewControllers"));
+        tb_n = 0;
+        tb_str("bible: panel stack ");
+        tb_int(msg(vcs, sel("count")));
+        tb_str(" bar items ");
+        tb_int(msg(msg(msg(bs_nav, sel("navigationBar")), sel("items")), sel("count")));
+        tb_str(" shown ");
+        tb_int(if (bs_shown) 1 else 0);
+        note_ns(tb_ns());
+        for i in 0..msg(vcs, sel("count")) {
+            vc: int = msg1(vcs, sel("objectAtIndex:"), i);
+            tb_n = 0;
+            tb_str("bible: panel ");
+            tb_int(i);
+            for k in 0..UK_SLOTS {
+                if (uk_vcs[k] == vc) {
+                    tb_str(" screen ");
+                    tb_int(uk_ids[k]);
+                    tb_str(" sections ");
+                    tb_int(msg(uk_tables[k], sel("numberOfSections")))
+                }
+            }
+            tb_str(" title ");
+            title: int = msg(vc, sel("title"));
+            if (title != 0) tb_nsstring(title);
+            note_ns(tb_ns())
+        }
+    }
+    for index in 0..len(uk_wire_ids) {
+        if (uk_wire_ids[index] >= 0 && uk_slot_of_id(uk_wire_ids[index]) >= 0) {
+            tb_n = 0;
+            tb_str("bible: screen ");
+            tb_int(uk_wire_ids[index]);
+            tb_str(" kind ");
+            tb_int(uk_wire_kinds[index]);
+            tb_str(" group ");
+            tb_int(uk_wire_groups[index]);
+            note_ns(tb_ns())
+        }
+    }
+}
+
+add_devwire_methods(app: int) {
+    add_method1(app, sel("devwireAgain:"), &devwire_again, "v@:@")
+}
