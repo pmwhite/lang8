@@ -4,10 +4,14 @@ tag sword_internal;
 // mods.d/name.conf and the module's files under its DataPath. Opening one
 // reads its conf and takes its files out of the zip; readers then find
 // their files by the ending that follows the data path ("ot.bzv", ".idx").
+// A file of a module: its path in the package, and its bytes, or (not
+// held) only its size: a file read a span at a time (module_text_endings').
 tag sword
 type ModuleFile = {
     path: str;
-    data: []i8
+    data: []i8;
+    held: bool;
+    size: int
 }
 
 tag sword
@@ -19,7 +23,41 @@ type ModulePackage = {
 
 // The package in archive's first size bytes (a zip).
 tag sword
-package_open(archive: []i8, size: int) raises SwordError: *ModulePackage@new {
+package_open(archive: []i8@new, size: int) raises SwordError: *ModulePackage@new {
+    opening: *PackageOpening = package_begin(archive, size);
+    _whole: bool = package_step(opening, PACKAGE_STEP_ALL);
+    package_opened(opening)
+}
+
+// ---- a package opened a step at a time ----
+// Its conf read at once (it is small), then its files taken out of the zip
+// in steps of about a budget of bytes each (package_step), so that a
+// program can answer its user between them; package_opened is the package
+// once they are all out.
+tag sword
+type PackageOpening = tag sword_internal {
+    archive: []i8;
+    size: int;
+    entries: []archive::ZipEntry;
+    conf: *ModuleConf;
+    // The conf as it is in the package (kept as it is, by an unpacking).
+    conf_bytes: []i8;
+    // Each of its files' entry, in order; the files taken out so far, and
+    // the one being taken out (at).
+    file_entries: []int;
+    files: []ModuleFile;
+    at: int;
+    reading: ?*archive::ZipEntryReading;
+    // The files' sizes: all of them, and those already out.
+    total: int;
+    finished: int
+}
+
+// A budget for one step that takes out all of a package at once.
+PACKAGE_STEP_ALL: int = 4611686018427387904;
+
+tag sword
+package_begin(archive: []i8@new, size: int) raises SwordError: *PackageOpening@new {
     try {
         entries: []archive::ZipEntry = archive::zip_entries(archive, size);
         conf_at: int = -1;
@@ -36,20 +74,156 @@ package_open(archive: []i8, size: int) raises SwordError: *ModulePackage@new {
         }
         if (conf_at < 0) raise SwordError { failure: SwordFailure.MissingFile { ending: ".conf" } };
         conf_bytes: []i8 = archive::zip_entry_bytes(archive, size, &entries[conf_at]);
-        conf: *ModuleConf = conf_parse(conf_bytes, len(conf_bytes));
-        files: []ModuleFile = new ModuleFile[file_count](ModuleFile { path: "", data: new i8[0](0i8) });
+        file_entries: []int = new int[file_count](0);
+        total: int = 0;
         k: int = 0;
         for i in 0..len(entries) {
             if (i != conf_at && !archive::zip_entry_is_folder(&entries[i])) {
-                files[k] = ModuleFile { path: entries[i].name, data: archive::zip_entry_bytes(archive,
-                    size, &entries[i]) };
+                file_entries[k] = i;
+                total = total + entries[i].size;
                 k = k + 1
             }
         }
-        new ModulePackage { conf: conf, info: module_info(conf), files: files }
+        new PackageOpening {
+            archive: archive,
+            size: size,
+            entries: entries,
+            conf: conf_parse(conf_bytes, len(conf_bytes)),
+            file_entries: file_entries,
+            files: new ModuleFile[file_count](ModuleFile {
+                path: "",
+                data: sword_empty,
+                held: true,
+                size: 0
+            }),
+            conf_bytes: conf_bytes,
+            at: 0,
+            reading: null,
+            total: total,
+            finished: 0
+        }
     } with archive::ArchiveError _error -> {
         raise SwordError { failure: SwordFailure.BadPackage }
     }
+}
+
+// About budget more bytes of its files taken out; whether all are. (What
+// it takes out is allocated where the opening was: call it there.)
+tag sword
+package_step(opening: *PackageOpening@new, budget: int) raises SwordError: bool {
+    left: int = budget;
+    try {
+        while (opening.at < len(opening.files) && left > 0) {
+            entry: *archive::ZipEntry = &opening.entries[opening.file_entries[opening.at]];
+            reading: ?*archive::ZipEntryReading = opening.reading;
+            if (reading == null) {
+                reading = archive::zip_entry_begin(opening.archive, opening.size,
+                    entry);
+                opening.reading = reading
+            }
+            if (reading != null) {
+                before: int = archive::zip_entry_taken(reading);
+                whole: bool = archive::zip_entry_step(reading, left);
+                left = left - (archive::zip_entry_taken(reading) - before);
+                if (whole) {
+                    opening.files[opening.at] = ModuleFile {
+                        path: entry.name,
+                        data: archive::zip_entry_data(reading),
+                        held: true,
+                        size: entry.size
+                    };
+                    opening.finished = opening.finished + entry.size;
+                    opening.at = opening.at + 1;
+                    opening.reading = null
+                } else left = 0
+            }
+        }
+    } with archive::ArchiveError _error -> {
+        raise SwordError { failure: SwordFailure.BadPackage }
+    }
+    opening.at == len(opening.files)
+}
+
+// How much of its files is out, in thousandths.
+tag sword
+package_progress(opening: *PackageOpening): int {
+    if (opening.total == 0) return 1000;
+    out: int = opening.finished;
+    reading: ?*archive::ZipEntryReading = opening.reading;
+    if (reading != null) out = out + archive::zip_entry_taken(reading);
+    out * 1000 / opening.total
+}
+
+// The package's conf, as its bytes.
+tag sword
+package_conf_bytes(opening: *PackageOpening): []i8@opening {
+    opening.conf_bytes
+}
+
+// The package's files so far (all of them once package_step has said so).
+tag sword
+package_files(opening: *PackageOpening): []ModuleFile@opening {
+    opening.files
+}
+
+// The package, once package_step has said all its files are out.
+tag sword
+package_opened(opening: *PackageOpening@new): *ModulePackage@new {
+    new ModulePackage { conf: opening.conf, info: module_info(opening.conf), files: opening.files }
+}
+
+// A package made of a module's conf and files kept apart (unpacked): the
+// files named by their endings (package_ending's), those not held only
+// their sizes. Their paths are made the package's (the data path, then
+// the ending).
+tag sword
+package_from_files(conf_bytes: []i8, files: []ModuleFile@new) raises SwordError: *ModulePackage@new {
+    conf: *ModuleConf = conf_parse(conf_bytes, len(conf_bytes));
+    info: ModuleInfo = module_info(conf);
+    for k in 0..len(files) {
+        ending: str = files[k].path;
+        path: []i8 = new i8[len(info.data_path) + len(ending)](0i8);
+        memcpy(path, 0, bytes(info.data_path), 0, len(info.data_path));
+        memcpy(path, len(info.data_path), bytes(ending), 0, len(ending));
+        files[k].path = sword_text(path, 0, len(path))
+    }
+    new ModulePackage { conf: conf, info: info, files: files }
+}
+
+// A file's path after the module's data path (its ending, as the readers
+// name their files: "ot.bzz", ".idx"); a file outside it, its whole path.
+tag sword
+package_ending(info: *ModuleInfo, path: str): str@new {
+    data_path: str = info.data_path;
+    if (len(path) > len(data_path)) {
+        same: bool = true;
+        for k in 0..len(data_path)
+            if (sword_lower(path[k] as int) != sword_lower(data_path[k] as int)) same = false;
+        if (same) return sword_text(bytes(path), len(data_path), len(path))
+    }
+    sword_copy(path)
+}
+
+// The endings of a module's files that are read a span at a time, not
+// held whole (its large text: a compressed Bible's or commentary's
+// blocks, a compressed dictionary's, a book's text).
+tag sword
+module_text_endings(info: *ModuleInfo): []str@new {
+    match info.storage {
+        ByVerse s -> if (s.compressed) ["ot.bzz", "nt.bzz"] else new str[0]("");
+        ByKey s -> if (s.compressed) [".zdt"] else new str[0]("");
+        ByTree -> [".bdt"];
+        _ -> new str[0]("")
+    }
+}
+
+// Where some of a file's bytes are, for reading them alone: the file (by
+// its ending) and the span.
+tag sword
+type TextSpan = {
+    ending: str;
+    offset: int;
+    count: int
 }
 
 sword_starts_with(text: str, start: str): bool {

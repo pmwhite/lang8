@@ -23,7 +23,10 @@ study records, original languages, audio timings and the ESV cache.
 rather than bundled. A Bible among them becomes a version in a text slot of
 its own, its records made from the module when it is opened; commentaries,
 dictionaries and books are read from their packages while a screen shows
-them.
+them. Opening a package, making a Bible a version and decoding a large
+commentary block happen a step at a time between the screen's updates
+(core asks the skin for a turn with `next`), so the app keeps answering
+its reader however slowly it runs, as it does interpreted under hot reload.
 
 The reader and a plan's day use the same references and shared reading
 rules. Marks are keyed by reference, so switching versions preserves their

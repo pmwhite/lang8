@@ -215,9 +215,8 @@ zip_entry_is_folder(entry: *ZipEntry): bool {
     len(entry.name) > 0 && entry.name[len(entry.name) - 1] as int == 47
 }
 
-// The entry's data, decompressed and checked against its CRC-32.
-tag archive
-zip_entry_bytes(archive: []i8, size: int, entry: *ZipEntry) raises ArchiveError: []i8@new {
+// Where an entry's data begins: after its local header, checked.
+zip_entry_data_start(archive: []i8, size: int, entry: *ZipEntry) raises ArchiveError: int {
     check_archive_size(archive, size);
     at: int = entry.header_offset;
     if (at < 0 || at + ZIP_LOCAL_SIZE > size) archive_fail(ArchiveFailure.Truncated,
@@ -229,11 +228,25 @@ zip_entry_bytes(archive: []i8, size: int, entry: *ZipEntry) raises ArchiveError:
         at + 28);
     if (start + entry.compressed_size > size) archive_fail(ArchiveFailure.Truncated,
         start);
-    data: []i8 = new i8[0](0i8);
     match entry.method {
         Stored -> {
             if (entry.compressed_size != entry.size) archive_fail(ArchiveFailure.BadRecord,
-                at);
+                at)
+        }
+        Deflated -> { }
+        OtherMethod other -> archive_fail(ArchiveFailure.UnsupportedMethod { method: other.code },
+            at)
+    }
+    start
+}
+
+// The entry's data, decompressed and checked against its CRC-32.
+tag archive
+zip_entry_bytes(archive: []i8, size: int, entry: *ZipEntry) raises ArchiveError: []i8@new {
+    start: int = zip_entry_data_start(archive, size, entry);
+    data: []i8 = new i8[0](0i8);
+    match entry.method {
+        Stored -> {
             data = new i8[entry.size](0i8);
             memcpy(data, 0, archive, start, entry.size)
         }
@@ -244,12 +257,107 @@ zip_entry_bytes(archive: []i8, size: int, entry: *ZipEntry) raises ArchiveError:
                 archive_fail(ArchiveFailure.Corrupt { failure: error.failure }, error.at)
             }
         }
-        OtherMethod other -> archive_fail(ArchiveFailure.UnsupportedMethod { method: other.code },
-            at)
+        OtherMethod _other -> { }
     }
     if (crc32(data, 0, len(data)) != entry.crc32) archive_fail(ArchiveFailure.BadChecksum,
         start);
     data
+}
+
+// ---- an entry read a step at a time ----
+// An entry's data taken out in steps of about a budget of bytes (copied,
+// or inflated), its CRC-32 kept up as they come, so that a program can
+// answer its user between steps: zip_entry_begin, then zip_entry_step
+// until it says it is done; then zip_entry_data is its data, checked.
+tag archive
+type ZipEntryReading = tag archive_internal {
+    archive: []i8;
+    start: int;
+    expected_crc: int;
+    data: []i8;
+    // Bytes of data taken out, and how many of them the CRC covers.
+    taken: int;
+    checked: int;
+    crc: int;
+    inflation: ?*Inflation;
+    done: bool
+}
+
+tag archive
+zip_entry_begin(archive: []i8@new, size: int, entry: *ZipEntry) raises ArchiveError: *ZipEntryReading@new {
+    start: int = zip_entry_data_start(archive, size, entry);
+    data: []i8 = new i8[entry.size](0i8);
+    inflation: ?*Inflation = null;
+    match entry.method {
+        Deflated -> {
+            try {
+                inflation = inflation_raw(archive, start, entry.compressed_size, data,
+                    false)
+            } with DeflateError error -> {
+                archive_fail(ArchiveFailure.Corrupt { failure: error.failure }, error.at)
+            }
+        }
+        _ -> { }
+    }
+    new ZipEntryReading {
+        archive: archive,
+        start: start,
+        expected_crc: entry.crc32,
+        data: data,
+        taken: 0,
+        checked: 0,
+        crc: 0,
+        inflation: inflation,
+        done: false
+    }
+}
+
+// About budget more bytes taken out; whether all are, and checked.
+tag archive
+zip_entry_step(reading: *ZipEntryReading, budget: int) raises ArchiveError: bool {
+    if (reading.done) return true;
+    inflation: ?*Inflation = reading.inflation;
+    whole: bool = false;
+    if (inflation != null) {
+        try {
+            whole = inflation_step(inflation, budget);
+            reading.taken = inflation_produced(inflation)
+        } with DeflateError error -> {
+            archive_fail(ArchiveFailure.Corrupt { failure: error.failure }, error.at)
+        }
+    } else {
+        n: int = len(reading.data) - reading.taken;
+        if (n > budget) n = budget;
+        memcpy(reading.data, reading.taken, reading.archive, reading.start + reading.taken,
+            n);
+        reading.taken = reading.taken + n;
+        whole = reading.taken == len(reading.data)
+    }
+    reading.crc = crc32_update(reading.crc, reading.data, reading.checked, reading.taken - reading.checked);
+    reading.checked = reading.taken;
+    if (!whole) return false;
+    if (reading.crc != reading.expected_crc) archive_fail(ArchiveFailure.BadChecksum,
+        reading.start);
+    reading.done = true;
+    true
+}
+
+// How many of its bytes are taken out so far.
+tag archive
+zip_entry_taken(reading: *ZipEntryReading): int {
+    reading.taken
+}
+
+// What has been taken out so far (thousandths of all of it).
+tag archive
+zip_entry_progress(reading: *ZipEntryReading): int {
+    if (len(reading.data) == 0) 1000 else reading.taken * 1000 / len(reading.data)
+}
+
+// The entry's data, once zip_entry_step has said it is done.
+tag archive
+zip_entry_data(reading: *ZipEntryReading): []i8@reading {
+    reading.data
 }
 
 // ---- tar ----

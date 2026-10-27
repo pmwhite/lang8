@@ -76,10 +76,14 @@ path_size(): int {
     n
 }
 
-// File path read into out (as much as fits): how much.
-path_read(out: []i8): int {
+// File path read into out (as much as fits), from offset: how much.
+path_read(offset: int, out: []i8): int {
     fd: int = open_raw(&path[0], 0, 0);
     if (fd < 0) return 0;
+    if (offset > 0 && lseek(fd, offset, 0) != offset) {
+        close(fd);
+        return 0
+    }
     got: int = 0;
     more: bool = true;
     while (more && got < len(out)) {
@@ -93,7 +97,7 @@ path_read(out: []i8): int {
 // ---- what is kept (core/kept.l8's), as files of the app's ----
 kp_read_file() {
     kp_path();
-    fbuf_n = path_read(fbuf)
+    fbuf_n = path_read(0, fbuf)
 }
 
 kp_write_file() {
@@ -174,9 +178,10 @@ http_path(id: int) {
 }
 
 // ---- kept files read back for core (HostIO.read_kept) ----
-// Each read asked for: its id and kept name, answered in the loop (got ID
-// SIZE) and forgotten once its file is taken. Core reads a module's file
-// once at a time (the catalog, each module opened): far fewer than
+// Each read asked for: its id, kept name and span, answered in the loop
+// (got ID SIZE) and forgotten once its file is taken. Core reads a
+// module's file once at a time (the catalog, each module's files as it is
+// opened, a span of its text): far fewer than
 // KEPT_READS_MOST are ever waiting; past it, a read is answered as a file
 // that is not there (-1), which core reports.
 KEPT_READS_MOST: int = 32;
@@ -191,29 +196,96 @@ kept_read_names: []i8 = new i8[KEPT_READS_MOST * KEPT_READ_NAME_MOST](0i8);
 
 kept_read_lens: []int = new int[KEPT_READS_MOST](0);
 
+// Each read's span (a whole file's: offset 0, count -1).
+kept_read_offsets: []int = new int[KEPT_READS_MOST](0);
+
+kept_read_counts: []int = new int[KEPT_READS_MOST](0);
+
 kept_reads_n: int = 0;
 
 kept_reads_said: int = 0;
 
 android_read_kept(id: int, name: []i8, name_n: int) {
+    android_read_kept_range(id, name, name_n, 0, 0 - 1)
+}
+
+// count bytes from offset (count -1: to its end) of the kept file named.
+android_read_kept_range(
+    id: int,
+    name: []i8,
+    name_n: int,
+    offset: int,
+    count: int
+) {
     if (kept_reads_n >= KEPT_READS_MOST || name_n > KEPT_READ_NAME_MOST) {
-        fbuf_n = 0;
-        fput_str("got ");
-        fput_int(id);
-        fput_str(" -1\n");
-        // (Answered with the asks: core's host reads it next.)
-        for i in 0..fbuf_n {
-            if (late_n < len(late)) {
-                late[late_n] = fbuf[i];
-                late_n = late_n + 1
-            }
-        }
+        late_line("got ", id, " -1\n");
         return
     }
     kept_read_ids[kept_reads_n] = id;
     for i in 0..name_n kept_read_names[kept_reads_n * KEPT_READ_NAME_MOST + i] = name[i];
     kept_read_lens[kept_reads_n] = name_n;
+    kept_read_offsets[kept_reads_n] = offset;
+    kept_read_counts[kept_reads_n] = count;
     kept_reads_n = kept_reads_n + 1
+}
+
+// The size of a read's span: the bytes there are from its offset, at most
+// its count (-1: no such file).
+kept_read_size(k: int): int {
+    kept_read_path(k);
+    size: int = path_size();
+    if (size < 0) return size;
+    left: int = size - kept_read_offsets[k];
+    if (left < 0) left = 0;
+    count: int = kept_read_counts[k];
+    if (count >= 0 && count < left) count else left
+}
+
+// count bytes of data kept as the file named, answered `kept ID OK` (with
+// the asks: core's host reads it next).
+android_keep(
+    id: int,
+    name: []i8,
+    name_n: int,
+    data: []i8,
+    count: int
+) {
+    path_begin();
+    for i in 0..name_n path_put(name[i] as int);
+    path_end();
+    ok: bool = false;
+    // (O_WRONLY | O_CREAT | O_TRUNC)
+    fd: int = open_raw(&path[0], 577, 384);
+    if (fd >= 0) {
+        ok = true;
+        try {
+            write_bytes_n(fd, data, count)
+        } with IoError _e -> {
+            ok = false
+        }
+        close(fd)
+    }
+    late_line("kept ", id, if (ok) " 1\n" else " 0\n")
+}
+
+// A line answered with the asks: word, id and the rest. (Not by fbuf,
+// which core may be using.)
+late_line(word: str, id: int, rest: str) {
+    for c in word late_put(c as int);
+    d: int = 1;
+    while (d * 10 <= id) d = d * 10;
+    while (d > 0) {
+        late_put(48 + id / d % 10);
+        d = d / 10
+    }
+    for c in rest late_put(c as int)
+}
+
+late_put(k: int) {
+    if (late_n < len(late)) {
+        late[late_n] = k trunc i8;
+        late_n = late_n + 1
+    }
 }
 
 // Lines answered at once (a read that couldn't wait), sent with the asks.
@@ -238,6 +310,8 @@ kept_read_forget(k: int) {
     for j in k..kept_reads_n - 1 {
         kept_read_ids[j] = kept_read_ids[j + 1];
         kept_read_lens[j] = kept_read_lens[j + 1];
+        kept_read_offsets[j] = kept_read_offsets[j + 1];
+        kept_read_counts[j] = kept_read_counts[j + 1];
         for i in 0..KEPT_READ_NAME_MOST kept_read_names[j * KEPT_READ_NAME_MOST + i] = kept_read_names[(j + 1) * KEPT_READ_NAME_MOST + i]
     }
     kept_reads_n = kept_reads_n - 1;
@@ -248,15 +322,17 @@ kept_read_forget(k: int) {
 android_file(id: int, out: []i8): int {
     k: int = kept_read_find(id);
     if (k >= 0) {
-        kept_read_path(k);
+        offset: int = kept_read_offsets[k];
+        size: int = kept_read_size(k);
         kept_read_forget(k);
-        return path_read(out)
+        if (size <= 0) return 0;
+        return path_read(offset, out)
     }
     if (id >= ASKED_MOST) http_path(id) else {
         asked_path(id, false);
         if (path_size() < 0) asked_path(id, true)
     }
-    path_read(out)
+    path_read(0, out)
 }
 
 // The asks answered (and the kept reads): each `got ID SIZE` (-1: not
@@ -270,12 +346,11 @@ answer_asks(): bool {
     }
     late_n = 0;
     while (kept_reads_said < kept_reads_n) {
-        kept_read_path(kept_reads_said);
         fbuf_n = 0;
         fput_str("got ");
         fput_int(kept_read_ids[kept_reads_said]);
         fput(32);
-        fput_int(path_size());
+        fput_int(kept_read_size(kept_reads_said));
         fput(10);
         for i in 0..fbuf_n {
             hs_inbox[n] = fbuf[i];
@@ -409,6 +484,8 @@ main() noregion: int {
         file: &android_file,
         fetch: &android_fetch,
         read_kept: &android_read_kept,
+        read_kept_range: &android_read_kept_range,
+        keep: &android_keep,
         say: &android_say
     };
     begun: bool = false;

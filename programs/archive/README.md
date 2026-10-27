@@ -26,6 +26,13 @@ against its CRC-32. Zip64, multi-disk archives, encryption and other
 compression methods are reported rather than misread; listing succeeds for
 entries that cannot be read, so callers can explain which ones those are.
 
+An entry can also be read a step at a time, so that a program answers its
+user between steps: `zip_entry_begin` starts a `ZipEntryReading`,
+`zip_entry_step(reading, budget)` copies or inflates about `budget` more
+bytes and keeps its CRC-32 up as they come, returning true once the data
+is whole and checked, and `zip_entry_data` is the data then.
+`zip_entry_taken` and `zip_entry_progress` say how far it has come.
+
 `tar_entries` lists ustar and GNU tar members, each with its name, a
 `TarKind` (file, folder, or another kind with its type flag) and the
 offset and size of its data within the tar. POSIX ustar prefixes are

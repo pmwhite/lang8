@@ -26,6 +26,25 @@ and leaves any bytes after the stream's checksum unread: some formats pad
 their streams (SWORD's compressed blocks), and a span that ends before the
 checksum is `Truncated`.
 
+`zlib_decompress_prefix(source, start, count, prefix_size)` decodes only the
+first `prefix_size` bytes of a zlib stream and stops there; since the
+checksum covers the whole stream it is not checked, and a stream shorter
+than the prefix is `SizeMismatch`.
+
+A long stream can be decoded a step at a time, so that a program answers
+its user between steps: `inflation_raw` or `inflation_zlib` begins an
+`Inflation` into an output slice (the whole stream, exactly its size, or
+with `prefix` its first `len(output)` bytes), and `inflation_step(job,
+budget)` decodes about `budget` more bytes (a back-reference is copied
+whole), returning true once it is done: the prefix decoded, or the whole
+stream with its size and checksum checked. `inflation_produced` says how
+far it has come. `inflation_grow(job, output, prefix)` makes a prefix's
+decoding go on into a longer output (what is decoded copied in, a
+back-reference cut short by the old prefix finished), so that wanting more
+of a stream does not decode it again from its start. The stepped decoder
+is the one-shot decoder, paused between symbols, so stepping costs no
+speed.
+
 zlib streams are checked against their Adler-32 and gzip members against
 their CRC-32 and size; a gzip header's optional extra field, name, comment
 and header CRC are read and checked. zlib preset dictionaries are not

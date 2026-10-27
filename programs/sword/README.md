@@ -35,8 +35,13 @@ cipher key, a collection of images, an unknown storage driver or
 compression, an unknown versification).
 
 `package_open` reads the zip and its conf (its `info` is `module_info`'s);
-`package_file` finds a data file
-by the end of its name. The readers take the package and keep pointing
+`package_file` finds a data file by the end of its name. A package can
+also be opened a step at a time, so that a program answers its user
+between steps: `package_begin` reads its conf, `package_step(opening,
+budget)` takes about `budget` more bytes of its files out (call it where
+the opening was allocated: what it takes out is allocated there), and
+`package_opened` is the package once a step says all are out;
+`package_progress` says how far it has come. The readers take the package and keep pointing
 into it, so it must outlive them:
 
 - `VerseModule` (zText, zText4, zCom, zCom4, RawText, RawText4, RawCom,
@@ -56,7 +61,19 @@ into it, so it must outlive them:
   `tree_module_first_child`, `tree_module_next` and `tree_module_parent`
   walk it from the root, node 0.
 
-Compressed blocks may be zlib (padded streams are allowed) or LZSS.
+Compressed blocks may be zlib (padded streams are allowed) or LZSS. A
+module stored by book can have very large blocks (the Treasury of David's
+Psalms are one block of 15 MB), so a block can be decoded only as far as
+wanted, and a step at a time: `verse_block_begin(module, testament,
+block, want)` copies the compressed block in (the decoding then needs
+nothing of the module's, so it can live apart from it), `verse_block_step`
+decodes about a budget more, `verse_block_data` is the block's first
+`want` bytes (or all of it) once a step says they are done, and
+`verse_block_size`, `verse_block_progress` and `verse_block_is` say what
+it is and how far it has come. `verse_block_further(module, decoding,
+output)` makes it go on to the block's first `len(output)` bytes (output
+allocated where the decoding is), from where it stopped. LZSS blocks are
+decoded at once.
 
 ## Verse numbering
 

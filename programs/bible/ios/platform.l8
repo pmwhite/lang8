@@ -179,10 +179,14 @@ path_bytes(path: int): int {
     n
 }
 
-// The file at path read into out (as much as fits).
-path_read(path: int, out: []i8) {
+// The file at path read into out (as much as fits), from offset.
+path_read(path: int, offset: int, out: []i8) {
     fd: int = open_fd(msg(path, sel("fileSystemRepresentation")), 0, 0);
     if (fd < 0) return;
+    if (offset > 0 && lseek(fd, offset, 0) != offset) {
+        _c: int = close_fd(fd);
+        return
+    }
     n: int = 0;
     more: bool = true;
     while (more && n < len(out)) {
@@ -193,10 +197,11 @@ path_read(path: int, out: []i8) {
 }
 
 // ---- kept files read back for core (HostIO.read_kept) ----
-// Each read asked for: its id and kept name, answered as asks are (a turn
-// of the run loop later: asks_pump) and forgotten once its file is taken.
-// Core reads a module's file once at a time (the catalog, each module
-// opened): far fewer than KEPT_READS_MOST are ever waiting.
+// Each read asked for: its id, kept name and span, answered as asks are (a
+// turn of the run loop later: asks_pump) and forgotten once its file is
+// taken. Core reads a module's file once at a time (the catalog, each
+// module's files as it is opened, a span of its text): far fewer than
+// KEPT_READS_MOST are ever waiting.
 KEPT_READS_MOST: int = 32;
 
 // The longest kept name a read can be asked for (a module's package:
@@ -209,17 +214,76 @@ kept_read_names: []i8 = new i8[KEPT_READS_MOST * KEPT_READ_NAME_MOST](0i8);
 
 kept_read_lens: []int = new int[KEPT_READS_MOST](0);
 
+// Each read's span (a whole file's: offset 0, count -1).
+kept_read_offsets: []int = new int[KEPT_READS_MOST](0);
+
+kept_read_counts: []int = new int[KEPT_READS_MOST](0);
+
 kept_reads_n: int = 0;
 
 kept_reads_said: int = 0;
 
 ios_read_kept(id: int, name: []i8, name_n: int) {
+    ios_read_kept_range(id, name, name_n, 0, 0 - 1)
+}
+
+// count bytes from offset (count -1: to its end) of the kept file named.
+ios_read_kept_range(
+    id: int,
+    name: []i8,
+    name_n: int,
+    offset: int,
+    count: int
+) {
     if (kept_reads_n >= KEPT_READS_MOST || name_n > KEPT_READ_NAME_MOST) wire_fail("core asked to read too many kept files at once");
     kept_read_ids[kept_reads_n] = id;
     for i in 0..name_n kept_read_names[kept_reads_n * KEPT_READ_NAME_MOST + i] = name[i];
     kept_read_lens[kept_reads_n] = name_n;
+    kept_read_offsets[kept_reads_n] = offset;
+    kept_read_counts[kept_reads_n] = count;
     kept_reads_n = kept_reads_n + 1;
     asks_pump_soon()
+}
+
+kept_read_path(k: int): int {
+    kept_path_of(nsstring_at(bytes_address(kept_read_names) + k * KEPT_READ_NAME_MOST,
+        kept_read_lens[k]))
+}
+
+// The size of a read's span: the bytes there are from its offset, at most
+// its count (-1: no such file).
+kept_read_size(k: int): int {
+    size: int = path_bytes(kept_read_path(k));
+    if (size < 0) return size;
+    left: int = size - kept_read_offsets[k];
+    if (left < 0) left = 0;
+    count: int = kept_read_counts[k];
+    if (count >= 0 && count < left) count else left
+}
+
+// count bytes of data kept as the file named (a module's files, unpacked
+// as it is downloaded: copies of what is online, so kept out of backups),
+// answered `kept ID OK`.
+ios_keep(
+    id: int,
+    name: []i8,
+    name_n: int,
+    data: []i8,
+    count: int
+) {
+    path: int = kept_path_of(nsstring_at(bytes_address(name), name_n));
+    bytes: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(data),
+        count);
+    ok: bool = (msg2(bytes, sel("writeToFile:atomically:"), path, 1) & 255) != 0;
+    if (ok) {
+        url: int = msg1(cls("NSURL"), sel("fileURLWithPath:"), path);
+        _b: int = msg3(url, sel("setResourceValue:forKey:error:"), nsnumber_int(1),
+            objc_const("NSURLIsExcludedFromBackupKey"), 0)
+    } else note("bible: a module's file could not be kept");
+    to_core_str("kept ");
+    to_core_int(id);
+    to_core_str(if (ok) " 1" else " 0");
+    to_core_end()
 }
 
 kept_read_find(id: int): int {
@@ -232,6 +296,8 @@ kept_read_forget(k: int) {
     for j in k..kept_reads_n - 1 {
         kept_read_ids[j] = kept_read_ids[j + 1];
         kept_read_lens[j] = kept_read_lens[j + 1];
+        kept_read_offsets[j] = kept_read_offsets[j + 1];
+        kept_read_counts[j] = kept_read_counts[j + 1];
         for i in 0..KEPT_READ_NAME_MOST kept_read_names[j * KEPT_READ_NAME_MOST + i] = kept_read_names[(j + 1) * KEPT_READ_NAME_MOST + i]
     }
     kept_reads_n = kept_reads_n - 1;
@@ -239,6 +305,22 @@ kept_read_forget(k: int) {
 }
 
 asks_timer: int = 0;
+
+// A turn core asked for (`next`: its work goes on a step at a time),
+// given on the run loop's next pass, once the screen has been drawn.
+next_timer: int = 0;
+
+core_next_soon() {
+    if (next_timer != 0 || app_obj == 0) return;
+    next_timer = after_common(0.0f64, "coreNext:")
+}
+
+core_next(_self: int, _cmd: int, _timer: int): int {
+    next_timer = 0;
+    to_core_str("next");
+    to_core_end();
+    0
+}
 
 asks_pump_soon() {
     if (asks_timer != 0 || app_obj == 0) return;
@@ -252,12 +334,10 @@ asks_pump(_self: int, _cmd: int, _timer: int): int {
     if (kept_reads_said < kept_reads_n) {
         k: int = kept_reads_said;
         kept_reads_said = kept_reads_said + 1;
-        path: int = kept_path_of(nsstring_at(bytes_address(kept_read_names) + k * KEPT_READ_NAME_MOST,
-            kept_read_lens[k]));
         to_core_str("got ");
         to_core_int(kept_read_ids[k]);
         to_core_byte(32);
-        to_core_int(path_bytes(path));
+        to_core_int(kept_read_size(k));
         to_core_end();
         asks_pump_soon();
         return 0
@@ -591,17 +671,19 @@ ios_file(id: int, out: []i8): int {
     // (A kept file read back: from where it is kept.)
     k: int = kept_read_find(id);
     if (k >= 0) {
-        path: int = kept_path_of(nsstring_at(bytes_address(kept_read_names) + k * KEPT_READ_NAME_MOST,
-            kept_read_lens[k]));
+        path: int = kept_read_path(k);
+        offset: int = kept_read_offsets[k];
+        size: int = kept_read_size(k);
         kept_read_forget(k);
-        path_read(path, out);
-        return path_bytes(path)
+        if (size > len(out)) wire_fail("core's room for a kept file is less than the file");
+        if (size > 0) path_read(path, offset, out);
+        return size
     }
     // (A data file asked for: read from the bundle.)
     if (id >= 0 && id < ASK_MOST) {
         path: int = bundle_path(id);
         if (path == 0) return 0;
-        path_read(path, out);
+        path_read(path, 0, out);
         return path_bytes(path)
     }
     data: int = 0;
@@ -686,6 +768,8 @@ platform_begin() {
         file: &ios_file,
         fetch: &ios_fetch,
         read_kept: &ios_read_kept,
+        read_kept_range: &ios_read_kept_range,
+        keep: &ios_keep,
         say: &from_core
     };
     legacy_export();
@@ -700,7 +784,8 @@ platform_begin() {
 }
 
 add_platform_methods(app: int) {
-    add_method1(app, sel("asksPump:"), &asks_pump, "v@:@")
+    add_method1(app, sel("asksPump:"), &asks_pump, "v@:@");
+    add_method1(app, sel("coreNext:"), &core_next, "v@:@")
 }
 
 make_platform_classes() {

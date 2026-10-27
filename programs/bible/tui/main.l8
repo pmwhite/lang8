@@ -186,6 +186,25 @@ file_size(path: str): int {
     n
 }
 
+// The file's bytes from offset into out (as many as it has, up to out's
+// length): how many.
+file_range_into(path: str, offset: int, out: []i8): int {
+    fd: int = open(path, 0, 0);
+    if (fd < 0) return 0;
+    if (offset > 0 && lseek(fd, offset, 0) != offset) {
+        close(fd);
+        return 0
+    }
+    got: int = 0;
+    more: bool = true;
+    while (more && got < len(out)) {
+        k: int = read(fd, out, got, len(out) - got);
+        if (k <= 0) more = false else got = got + k
+    }
+    close(fd);
+    got
+}
+
 file_into(path: str, out: []i8): int {
     fd: int = open(path, 0, 0);
     if (fd < 0) return 0;
@@ -220,8 +239,9 @@ tui_file(id: int, out: []i8): int {
     k: int = kept_read_find(id);
     if (k >= 0) {
         path: str = kept_read_path(k);
+        offset: int = kept_read_offsets[k];
         kept_read_forget(k);
-        return file_into(path, out)
+        return file_range_into(path, offset, out)
     }
     if (id >= 128) return file_into(http_body(id), out);
     p: str = asked_path(id, false);
@@ -247,11 +267,27 @@ kept_read_names: []i8 = new i8[KEPT_READS_MOST * KEPT_READ_NAME_MOST](0i8);
 
 kept_read_lens: []int = new int[KEPT_READS_MOST](0);
 
+// Each read's span (a whole file's: offset 0, count -1).
+kept_read_offsets: []int = new int[KEPT_READS_MOST](0);
+
+kept_read_counts: []int = new int[KEPT_READS_MOST](0);
+
 kept_reads_n: int = 0;
 
 kept_reads_said: int = 0;
 
 tui_read_kept(id: int, name: []i8, name_n: int) {
+    tui_read_kept_range(id, name, name_n, 0, 0 - 1)
+}
+
+// count bytes from offset (count -1: to its end) of the kept file named.
+tui_read_kept_range(
+    id: int,
+    name: []i8,
+    name_n: int,
+    offset: int,
+    count: int
+) {
     if (kept_reads_n >= KEPT_READS_MOST || name_n > KEPT_READ_NAME_MOST) {
         tc_str("got ");
         tc_int(id);
@@ -262,7 +298,46 @@ tui_read_kept(id: int, name: []i8, name_n: int) {
     kept_read_ids[kept_reads_n] = id;
     for i in 0..name_n kept_read_names[kept_reads_n * KEPT_READ_NAME_MOST + i] = name[i];
     kept_read_lens[kept_reads_n] = name_n;
+    kept_read_offsets[kept_reads_n] = offset;
+    kept_read_counts[kept_reads_n] = count;
     kept_reads_n = kept_reads_n + 1
+}
+
+// The size of a read's span: the bytes there are from its offset, at most
+// its count (-1: no such file).
+kept_read_size(k: int): int {
+    size: int = file_size(kept_read_path(k));
+    if (size < 0) return size;
+    left: int = size - kept_read_offsets[k];
+    if (left < 0) left = 0;
+    count: int = kept_read_counts[k];
+    if (count >= 0 && count < left) count else left
+}
+
+// count bytes of data kept as the file named, answered `kept ID OK`.
+tui_keep(
+    id: int,
+    name: []i8,
+    name_n: int,
+    data: []i8,
+    count: int
+) {
+    ok: bool = true;
+    region {
+        tk_cat_n = 0;
+        tk_cat_buf(tk_kept_dir, tk_kept_dir_n);
+        tk_cat_str("/");
+        tk_cat_buf(name, name_n);
+        try {
+            files::replace_file_bytes(cstr(tk_cat_bytes()), data, count)
+        } with files::FileError _error -> {
+            ok = false
+        }
+    }
+    tc_str("kept ");
+    tc_int(id);
+    tc_str(if (ok) " 1" else " 0");
+    tc_end()
 }
 
 kept_read_find(id: int): int {
@@ -284,6 +359,8 @@ kept_read_forget(k: int) {
     for j in k..kept_reads_n - 1 {
         kept_read_ids[j] = kept_read_ids[j + 1];
         kept_read_lens[j] = kept_read_lens[j + 1];
+        kept_read_offsets[j] = kept_read_offsets[j + 1];
+        kept_read_counts[j] = kept_read_counts[j + 1];
         for i in 0..KEPT_READ_NAME_MOST kept_read_names[j * KEPT_READ_NAME_MOST + i] = kept_read_names[(j + 1) * KEPT_READ_NAME_MOST + i]
     }
     kept_reads_n = kept_reads_n - 1;
@@ -299,7 +376,7 @@ answer_kept_reads(): bool {
         fput_str("got ");
         fput_int(kept_read_ids[kept_reads_said]);
         fput(32);
-        fput_int(file_size(kept_read_path(kept_reads_said)));
+        fput_int(kept_read_size(kept_reads_said));
         fput(10);
         for i in 0..fbuf_n {
             hs_inbox[n] = fbuf[i];
@@ -629,6 +706,8 @@ main(argc: int, args: []str) noregion: int {
         file: &tui_file,
         fetch: &tui_fetch,
         read_kept: &tui_read_kept,
+        read_kept_range: &tui_read_kept_range,
+        keep: &tui_keep,
         say: &tui_say
     };
     hs_start();

@@ -157,15 +157,34 @@ async function fetchHeld(id, url, name) {
   send(`fetched ${id} ${status} ${status === 200 ? size : 0}`);
 }
 
-// A kept file read back for core as id (`got ID SIZE`; -1: not kept).
-async function readHeld(id, name) {
+// A kept file read back for core as id (`got ID SIZE`; -1: not kept): all
+// of it, or count bytes from offset (as many as it has there).
+async function readHeld(id, name, offset = 0, count = -1) {
   let bytes = null;
   try {
     const hit = await (await caches.open(HELD)).match(heldKey(name));
-    if (hit) bytes = new Uint8Array(await hit.arrayBuffer());
+    if (hit) {
+      if (count < 0 && offset === 0) bytes = new Uint8Array(await hit.arrayBuffer());
+      else {
+        const blob = await hit.blob();
+        bytes = new Uint8Array(await blob.slice(offset, count < 0 ? blob.size : offset + count).arrayBuffer());
+      }
+    }
   } catch {}
   if (bytes) files.set(id, bytes);
   send(`got ${id} ${bytes ? bytes.length : -1}`);
+}
+
+// Bytes core made kept as the file named, as core's fetches are kept
+// (`kept ID OK`).
+async function keepHeld(id, name, data) {
+  let ok = false;
+  try {
+    await (await caches.open(HELD)).put(heldKey(name), new Response(new Blob([data]), { headers: { "content-type": "application/octet-stream" } }));
+    keepStorage("sb.held");
+    ok = true;
+  } catch {}
+  send(`kept ${id} ${ok ? 1 : 0}`);
 }
 
 // A held recording as an address the player can seek in (none: not held).
@@ -227,8 +246,19 @@ const imports = {
   bw_http(id, b, n) {
     httpGet(Number(id), dec.decode(this.bytes().slice(Number(b), Number(b) + Number(n))));
     return 0n;
-  },  bw_read_kept(id, name, nameN) {
+  },
+  bw_read_kept(id, name, nameN) {
     readHeld(Number(id), dec.decode(this.bytes().slice(Number(name), Number(name) + Number(nameN))));
+    return 0n;
+  },
+  bw_read_kept_range(id, name, nameN, offset, count) {
+    readHeld(Number(id), dec.decode(this.bytes().slice(Number(name), Number(name) + Number(nameN))), Number(offset), Number(count));
+    return 0n;
+  },
+  bw_keep(id, name, nameN, data, count) {
+    const bytes = this.bytes();
+    // (Copied now: the memory is core's again once this returns.)
+    keepHeld(Number(id), dec.decode(bytes.slice(Number(name), Number(name) + Number(nameN))), bytes.slice(Number(data), Number(data) + Number(count)));
     return 0n;
   },
   bw_fetch(id, b, n, name, nameN) {
@@ -664,6 +694,11 @@ function line(w) {
       break;
     case "wake":
       reader.wake(w.num(1));
+      break;
+    case "next":
+      // (A turn core asked for: its work goes on a step at a time, the
+      // page drawn and answering between steps.)
+      setTimeout(() => send("next"), 0);
       break;
     case "title":
       bar.title(w.field(1));

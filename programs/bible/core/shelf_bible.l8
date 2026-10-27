@@ -262,32 +262,84 @@ bible_text_append(
     text.size = need
 }
 
-// Text t made from the module's Bible (as the app numbers it): its
-// records in its own arena, indexed; what could not be shown, in report.
-// Each book's blocks are decoded in a scratch region of their own, each
-// verse's markup in one of its own, on the process heap; only what is
-// added to the records is allocated in the text's arena. A failure leaves
-// no text behind (its arena is let go).
-bible_text_made(t: int, module: *VerseModule, report: *BibleReport) raises SwordError: owned *TextData {
-    kjv: *Versification = versification_named("KJV");
+// A Bible's module made a version (as the app numbers it) a book at a
+// time, into shelf_bible_next (core/shelf.l8's): its records in its own
+// arena, indexed at the end; what could not be shown, in report. Each
+// book's blocks are decoded in a scratch region of their own, each verse's
+// markup in one of its own, on the process heap; only what is added to the
+// records is allocated in the text's arena.
+//
+// Begun: report's extra books counted, and text t made empty.
+bible_text_begin(t: int, module: *VerseModule, report: *BibleReport) raises SwordError {
+    if (shelf_kjv == null) raise SwordError { failure: SwordFailure.UnknownVersification };
     system: *Versification = verse_module_system(module);
-    info: *ModuleInfo = verse_module_info(module);
-    // (Its books beyond the 66.)
-    for mb in 0..len(system.books)
-        if (versification_book(kjv, system.books[mb].osis) < 0) report.extra_books = report.extra_books + 1;
+    borrow shelf_kjv as kjv {
+        // (Its books beyond the 66.)
+        for mb in 0..len(system.books)
+            if (versification_book(kjv, system.books[mb].osis) < 0) report.extra_books = report.extra_books + 1
+    }
     next: owned *TextData = own {
         text_made(t, 0)
     };
-    try {
-        borrow next as text {
-            text.size = 0;
-            for b in 0..books {
-                osis: str = kjv.books[b].osis;
-                mb: int = versification_book(system, osis);
-                present: bool = mb >= 0 && verse_module_has_text(module, mb, 0);
-                if (!present) report.missing_books = report.missing_books + 1;
-                module_chapters: int = if (present) len(system.books[mb].verses) else 0;
-                if (module_chapters > book_count[b]) report.outside_chapters = report.outside_chapters + module_chapters - book_count[b];
+    borrow next as text {
+        text.size = 0
+    }
+    drop shelf_bible_next;
+    shelf_bible_next = move next
+}
+
+// Where the making of a Bible's records is: the app's book (books: all
+// made), its place in the module's numbering, the next chapter to make (0:
+// the book not yet begun), and the block last decoded, for the verses in
+// it, with the markup's state that goes on from verse to verse.
+type BibleBook = {
+    book: int;
+    module_book: int;
+    present: bool;
+    module_chapters: int;
+    chapter: int;
+    block_testament: int;
+    block_number: int;
+    block: []i8;
+    state: MarkupState
+}
+
+bible_book_new(): BibleBook@new {
+    BibleBook {
+        book: 0,
+        module_book: -1,
+        present: false,
+        module_chapters: 0,
+        chapter: 0,
+        block_testament: 0,
+        block_number: -1,
+        block: new i8[0](0i8),
+        state: markup_state_new()
+    }
+}
+
+// A chapter added to the records (a book's B line before its first);
+// whether every book is made. A block it decodes is allocated where the
+// call allocates (the making's arena: call it there); what is added to the
+// records, in the text's.
+bible_text_step(module: *VerseModule, place: *BibleBook@new, report: *BibleReport) raises SwordError: bool {
+    if (place.book >= books) return true;
+    if (shelf_kjv == null || shelf_bible_next == null) raise SwordError { failure: SwordFailure.UnknownVersification };
+    system: *Versification = verse_module_system(module);
+    info: *ModuleInfo = verse_module_info(module);
+    b: int = place.book;
+    borrow shelf_kjv as kjv {
+        borrow shelf_bible_next as text {
+            if (place.chapter == 0) {
+                place.module_book = versification_book(system, kjv.books[b].osis);
+                mb: int = place.module_book;
+                place.present = mb >= 0 && verse_module_has_text(module, mb, 0);
+                if (!place.present) report.missing_books = report.missing_books + 1;
+                place.module_chapters = (if (place.present) len(system.books[mb].verses) else 0);
+                if (place.module_chapters > book_count[b]) report.outside_chapters = report.outside_chapters + place.module_chapters - book_count[b];
+                place.block_number = -1;
+                place.state = markup_state_new();
+                place.chapter = 1;
                 region {
                     line: *ByteBuilder = builder_new(64);
                     builder_str(line, "B");
@@ -298,78 +350,84 @@ bible_text_made(t: int, module: *VerseModule, report: *BibleReport) raises Sword
                     allocate text {
                         bible_text_append(text, line.data, 0, line.size)
                     }
-                    // (The block last decoded, for the verses in it.)
-                    block_testament: int = 0;
-                    block_number: int = -1;
-                    block: []i8 = new i8[0](0i8);
-                    state: MarkupState = markup_state_new();
-                    for n in 1..book_count[b] + 1 {
-                        builder_clear(line);
-                        builder_str(line, "C");
-                        builder_int(line, n);
-                        builder_byte(line, 10i8);
-                        // (A chapter it lacks says so, as its references' small
-                        // line would: not an empty page.)
-                        if (n > module_chapters || !verse_module_has_text(module,
-                            mb, n)) {
-                            builder_str(line, "R");
-                            builder_str(line, if (len(info.abbreviation) > 0) info.abbreviation else info.name);
-                            builder_str(line, if (present) " doesn\â\€\™t include this chapter." else " doesn\â\€\™t include this book.");
-                            builder_byte(line, 10i8)
-                        }
+                }
+            }
+            n: int = place.chapter;
+            mb: int = place.module_book;
+            present: bool = place.present;
+            module_chapters: int = place.module_chapters;
+            region {
+                line: *ByteBuilder = builder_new(64);
+                builder_str(line, "C");
+                builder_int(line, n);
+                builder_byte(line, 10i8);
+                // (A chapter it lacks says so, as its references' small line
+                // would: not an empty page.)
+                if (n > module_chapters || !verse_module_has_text(module, mb, n)) {
+                    builder_str(line, "R");
+                    builder_str(line, if (len(info.abbreviation) > 0) info.abbreviation else info.name);
+                    builder_str(line, if (present) " doesn\â\€\™t include this chapter." else " doesn\â\€\™t include this book.");
+                    builder_byte(line, 10i8)
+                }
+                allocate text {
+                    bible_text_append(text, line.data, 0, line.size)
+                }
+            }
+            writing: BibleWriting = bible_writing_new();
+            last_verse: int = if (n <= module_chapters) system.books[mb].verses[n - 1] else 0;
+            // (Verse 0: the chapter's heading entry.)
+            for v in 0..last_verse + 1 {
+                entry: VerseEntry = verse_module_entry(module, verse_slot(system,
+                    mb, n, v));
+                if (entry.size > 0) {
+                    if (entry.block >= 0 && (entry.block != place.block_number || entry.testament != place.block_testament)) {
+                        place.block = verse_module_block(module, entry.testament,
+                            entry.block);
+                        place.block_number = entry.block;
+                        place.block_testament = entry.testament
+                    }
+                    region {
+                        // (From the block, or the testament's text uncompressed.)
+                        markup: []i8 = if (entry.block >= 0) verse_module_text(module,
+                            place.block, entry) else verse_module_text(module, verse_module_testament_text(module,
+                            entry.testament), entry);
+                        rich: *RichText = rich_new();
+                        markup_convert(rich, &place.state, info.markup, markup, 0,
+                            len(markup));
+                        verse_records: *ByteBuilder = builder_new(len(markup) + 64);
+                        writing.verse_written = false;
+                        bible_records(verse_records, &writing, rich, v);
+                        bible_end_line(verse_records);
+                        if (writing.verse_written) report.verses = report.verses + 1;
                         allocate text {
-                            bible_text_append(text, line.data, 0, line.size)
-                        }
-                        writing: BibleWriting = bible_writing_new();
-                        last_verse: int = if (n <= module_chapters) system.books[mb].verses[n - 1] else 0;
-                        // (Verse 0: the chapter's heading entry.)
-                        for v in 0..last_verse + 1 {
-                            entry: VerseEntry = verse_module_entry(module, verse_slot(system,
-                                mb, n, v));
-                            if (entry.size > 0) {
-                                if (entry.block >= 0 && (entry.block != block_number || entry.testament != block_testament)) {
-                                    block = verse_module_block(module, entry.testament,
-                                        entry.block);
-                                    block_number = entry.block;
-                                    block_testament = entry.testament
-                                }
-                                region {
-                                    source: []i8 = if (entry.block >= 0) block else verse_module_testament_text(module,
-                                        entry.testament);
-                                    markup: []i8 = verse_module_text(module, source,
-                                        entry);
-                                    rich: *RichText = rich_new();
-                                    markup_convert(rich, &state, info.markup, markup,
-                                        0, len(markup));
-                                    verse_records: *ByteBuilder = builder_new(len(markup) + 64);
-                                    writing.verse_written = false;
-                                    bible_records(verse_records, &writing, rich, v);
-                                    bible_end_line(verse_records);
-                                    if (writing.verse_written) report.verses = report.verses + 1;
-                                    allocate text {
-                                        bible_text_append(text, verse_records.data,
-                                            0, verse_records.size)
-                                    }
-                                }
-                            }
+                            bible_text_append(text, verse_records.data, 0, verse_records.size)
                         }
                     }
                 }
             }
-            // (A zero after the records, as text_made leaves one.)
-            size: int = text.size;
-            region {
-                zero: []i8 = new i8[1](0i8);
-                allocate text {
-                    bible_text_append(text, zero, 0, 1)
-                }
+            place.chapter = n + 1;
+            if (place.chapter > book_count[b]) {
+                place.book = b + 1;
+                place.chapter = 0
             }
-            text.size = size;
-            text_index(text)
         }
-    } with SwordError error -> {
-        drop next;
-        raise SwordError { failure: error.failure }
     }
-    move next
+    place.book >= books
+}
+
+// The records ended (a zero after them, as text_made leaves one) and
+// indexed.
+bible_text_finish() {
+    if (shelf_bible_next == null) return;
+    borrow shelf_bible_next as text {
+        size: int = text.size;
+        region {
+            zero: []i8 = new i8[1](0i8);
+            allocate text {
+                bible_text_append(text, zero, 0, 1)
+            }
+        }
+        text.size = size;
+        text_index(text)
+    }
 }

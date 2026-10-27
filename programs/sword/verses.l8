@@ -177,6 +177,184 @@ verse_module_block(module: *VerseModule, testament: int, block: int) raises Swor
     }
 }
 
+// A block's size once decoded (0: no such block).
+tag sword
+verse_block_size(module: *VerseModule, testament: int, block: int): int {
+    if (testament < 1 || testament > 2 || block < 0) return 0;
+    index: []i8 = module.block_index[testament - 1];
+    at: int = block * 12;
+    if (at + 12 > len(index)) return 0;
+    sword_u32(index, at + 8)
+}
+
+// ---- a block decoded a step at a time ----
+// A block's first want bytes (all of it, if want is its size or more)
+// decoded in steps of about a budget of bytes (verse_block_step), so that
+// a program can answer its user between them. The compressed block is
+// copied in, so the decoding needs nothing of the module's once begun (it
+// can be kept apart from it, in an arena of its own).
+tag sword
+type BlockDecoding = tag sword_internal {
+    testament: int;
+    block: int;
+    // The compressed bytes, and the block's first len(data) bytes decoded
+    // into data (as many as inflation has made).
+    source: []i8;
+    data: []i8;
+    inflation: ?*deflate::Inflation;
+    done: bool
+}
+
+tag sword
+verse_block_begin(
+    module: *VerseModule,
+    testament: int,
+    block: int,
+    want: int
+) raises SwordError: *BlockDecoding@new {
+    span: TextSpan = verse_block_span(module, testament, block);
+    text: []i8 = module.text[testament - 1];
+    if (span.offset + span.count > len(text)) raise SwordError { failure: SwordFailure.BadIndex { ending: "bzs", at: block * 12 } };
+    source: []i8 = new i8[span.count](0i8);
+    memcpy(source, 0, text, span.offset, span.count);
+    verse_block_begin_from(module, testament, block, source, want)
+}
+
+// Where a block's compressed bytes are (its testament's ot.bzz or nt.bzz),
+// for reading them alone (a module whose text is not held).
+tag sword
+verse_block_span(module: *VerseModule, testament: int, block: int) raises SwordError: TextSpan {
+    if (testament < 1 || testament > 2) raise SwordError { failure: SwordFailure.BadIndex { ending: "bzs", at: 0 } };
+    index: []i8 = module.block_index[testament - 1];
+    at: int = block * 12;
+    if (block < 0 || at + 12 > len(index)) raise SwordError { failure: SwordFailure.BadIndex { ending: "bzs", at: at } };
+    TextSpan { ending: if (testament == 1) "ot.bzz" else "nt.bzz", offset: sword_u32(index,
+        at), count: sword_u32(index, at + 4) }
+}
+
+// A block decoded whole, from its compressed bytes (count of source from
+// start: read alone, as part of a span of several), at once.
+tag sword
+verse_block_decoded_from(
+    module: *VerseModule,
+    testament: int,
+    block: int,
+    source: []i8,
+    start: int,
+    count: int
+) raises SwordError: []i8@new {
+    try {
+        sword_block_decode(module.info.compression, source, start, count, verse_block_size(module,
+            testament, block))
+    } with SwordError error -> {
+        match error.failure {
+            BadBlock _ -> raise SwordError { failure: SwordFailure.BadBlock { ending: "bzz", block: block } };
+            _ -> raise SwordError { failure: error.failure }
+        }
+    }
+}
+
+// A block's decoding begun from its compressed bytes (exactly its span's,
+// read alone), as verse_block_begin begins one.
+tag sword
+verse_block_begin_from(
+    module: *VerseModule,
+    testament: int,
+    block: int,
+    source: []i8@new,
+    want: int
+) raises SwordError: *BlockDecoding@new {
+    size: int = verse_block_size(module, testament, block);
+    count: int = len(source);
+    wanted: int = if (want < size) want else size;
+    data: []i8 = sword_empty;
+    inflation: ?*deflate::Inflation = null;
+    match module.info.compression {
+        Zip -> {
+            data = new i8[wanted](0i8);
+            try {
+                inflation = deflate::inflation_zlib(source, 0, count, data, wanted < size)
+            } with deflate::DeflateError _error -> {
+                raise SwordError { failure: SwordFailure.BadBlock { ending: "bzz", block: block } }
+            }
+        }
+        // (LZSS is decoded at once: SWORD's LZSS blocks are small.)
+        Lzss -> data = sword_lzss_decode(source, 0, count, size, wanted);
+        _ -> raise SwordError { failure: SwordFailure.NotSupported }
+    }
+    new BlockDecoding {
+        testament: testament,
+        block: block,
+        source: source,
+        data: data,
+        inflation: inflation,
+        done: inflation == null
+    }
+}
+
+// A decoding made to go on to the block's first len(output) bytes (more
+// than it has wanted: output allocated where the decoding is), the bytes
+// decoded so far kept, not decoded again. Then verse_block_step until it
+// says they all are, as before.
+tag sword
+verse_block_further(module: *VerseModule, decoding: *BlockDecoding, output: []i8@decoding) raises SwordError {
+    size: int = verse_block_size(module, decoding.testament, decoding.block);
+    if (len(output) > size || len(output) < len(decoding.data)) raise SwordError { failure: SwordFailure.BadBlock { ending: "bzz", block: decoding.block } };
+    inflation: ?*deflate::Inflation = decoding.inflation;
+    if (inflation != null) {
+        try {
+            deflate::inflation_grow(inflation, output, len(output) < size)
+        } with deflate::DeflateError _error -> {
+            raise SwordError { failure: SwordFailure.BadBlock { ending: "bzz", block: decoding.block } }
+        }
+    } else {
+        // (LZSS, decoded again: its blocks are small.)
+        region {
+            data: []i8 = sword_lzss_decode(decoding.source, 0, len(decoding.source),
+                size, len(output));
+            memcpy(output, 0, data, 0, len(output))
+        }
+    }
+    decoding.data = output;
+    decoding.done = inflation == null
+}
+
+// About budget more bytes decoded; whether the bytes wanted all are.
+tag sword
+verse_block_step(decoding: *BlockDecoding, budget: int) raises SwordError: bool {
+    if (decoding.done) return true;
+    inflation: ?*deflate::Inflation = decoding.inflation;
+    if (inflation != null) {
+        try {
+            decoding.done = deflate::inflation_step(inflation, budget)
+        } with deflate::DeflateError _error -> {
+            raise SwordError { failure: SwordFailure.BadBlock { ending: "bzz", block: decoding.block } }
+        }
+    }
+    decoding.done
+}
+
+// How much of what is wanted is decoded, in thousandths.
+tag sword
+verse_block_progress(decoding: *BlockDecoding): int {
+    if (decoding.done || len(decoding.data) == 0) return 1000;
+    inflation: ?*deflate::Inflation = decoding.inflation;
+    if (inflation == null) return 1000;
+    deflate::inflation_produced(inflation) * 1000 / len(decoding.data)
+}
+
+// The bytes decoded, once verse_block_step has said they all are: the
+// block's first len(...) bytes, the source for the entries within them.
+tag sword
+verse_block_data(decoding: *BlockDecoding): []i8@decoding {
+    decoding.data
+}
+
+tag sword
+verse_block_is(decoding: *BlockDecoding, testament: int, block: int): bool {
+    decoding.testament == testament && decoding.block == block
+}
+
 // The text of an uncompressed module's testament (its entries' source).
 tag sword
 verse_module_testament_text(module: *VerseModule, testament: int): []i8@module {

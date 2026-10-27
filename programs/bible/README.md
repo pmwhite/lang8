@@ -88,8 +88,12 @@ ESV access and caching rules live in `worker/` and `core/esv_*.l8`.
 `core/kept.l8` owns saved-file names and serialization. A skin supplies file
 operations; the web uses browser storage. The Bookshelf keeps its own files
 beside them (`core/shelf.l8`): `shelf.tsv` lists the modules installed or
-waiting, `shelf-catalog.tar.gz` is the library's catalog as CrossWire
-serves it, and `shelf-NAME.zip` is each module's package, read in place. Reading position, marks, notes,
+waiting and `shelf-catalog.tar.gz` is the library's catalog as CrossWire
+serves it. `shelf-NAME.zip`, each module's package, is kept only until it
+is unpacked: a Bible is made a version at once (`shelf-NAME.txt`, its
+records), and any other module's files are kept apart (`shelf-NAME.conf`,
+`shelf-NAME.ENDING` for each of its files, listed in `shelf-NAME.files`),
+its text read a span at a time. Reading position, marks, notes,
 plans and learning progress are local to each installation. There is no
 cross-device synchronization.
 

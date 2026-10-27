@@ -177,6 +177,22 @@ key_module_find(module: *KeyModule, key: str): int {
 // Entry i's text as UTF-8, its links followed (at most 8).
 tag sword
 key_module_text(module: *KeyModule, i: int) raises SwordError: []i8@new {
+    match key_module_place(module, i) {
+        InRecord r -> entry_utf8(module.info.utf8, module.data, r.from, r.to);
+        InBlock b -> key_module_block_text(module, b.block, b.entry)
+    }
+}
+
+// Where an entry's text is (its links followed): in its record in the
+// .dat file (held), or, in a compressed dictionary, an entry of a block in
+// the .zdt file, which can be read alone (key_module_block_span).
+tag sword
+type KeyTextPlace =
+    | InRecord { from: int, to: int }
+    | InBlock { block: int, entry: int }
+
+tag sword
+key_module_place(module: *KeyModule, i: int) raises SwordError: KeyTextPlace {
     entry: int = i;
     for _link in 0..8 {
         if (entry < 0 || entry >= module.count) raise SwordError { failure: SwordFailure.BadKey };
@@ -191,15 +207,23 @@ key_module_text(module: *KeyModule, i: int) raises SwordError: []i8@new {
         if (text_at > end) text_at = end;
         target: int = key_module_link(module, text_at, end);
         if (target == -2) {
-            if (!module.compressed) return entry_utf8(module.info.utf8, module.data,
-                text_at, end);
+            if (!module.compressed) return KeyTextPlace.InRecord { from: text_at, to: end };
             if (end - text_at < 8) raise SwordError { failure: SwordFailure.BadIndex { ending: ".dat", at: entry } };
-            return key_module_block_text(module, sword_u32(module.data, text_at),
-                sword_u32(module.data, text_at + 4))
+            return KeyTextPlace.InBlock { block: sword_u32(module.data, text_at), entry: sword_u32(module.data,
+                text_at + 4) }
         }
         entry = target
     }
     raise SwordError { failure: SwordFailure.BadKey }
+}
+
+// Where a compressed dictionary's block's bytes are in its .zdt file.
+tag sword
+key_module_block_span(module: *KeyModule, block: int) raises SwordError: TextSpan {
+    at: int = block * 8;
+    if (block < 0 || at + 8 > len(module.block_index)) raise SwordError { failure: SwordFailure.BadIndex { ending: ".zdx", at: at } };
+    TextSpan { ending: ".zdt", offset: sword_u32(module.block_index, at), count: sword_u32(module.block_index,
+        at + 4) }
 }
 
 // If the text from up to end is "@LINK KEY", KEY's entry (-1 none such);
@@ -217,12 +241,24 @@ key_module_link(module: *KeyModule, from: int, end: int): int {
 
 // Entry entry of zLD block block, decoded.
 key_module_block_text(module: *KeyModule, block: int, entry: int) raises SwordError: []i8@new {
-    at: int = block * 8;
-    if (block < 0 || at + 8 > len(module.block_index)) raise SwordError { failure: SwordFailure.BadIndex { ending: ".zdx", at: at } };
-    start: int = sword_u32(module.block_index, at);
-    count: int = sword_u32(module.block_index, at + 4);
-    if (start + count > len(module.blocks)) raise SwordError { failure: SwordFailure.BadIndex { ending: ".zdx", at: at } };
-    decoded: []i8 = key_module_block(module, start, count, block);
+    span: TextSpan = key_module_block_span(module, block);
+    if (span.offset + span.count > len(module.blocks)) raise SwordError { failure: SwordFailure.BadIndex { ending: ".zdx", at: block * 8 } };
+    key_module_block_text_from(module, module.blocks, span.offset, span.count, block,
+        entry)
+}
+
+// Entry entry of a compressed block, from its bytes (count of source from
+// start: as held, or read alone by its span).
+tag sword
+key_module_block_text_from(
+    module: *KeyModule,
+    source: []i8,
+    start: int,
+    count: int,
+    block: int,
+    entry: int
+) raises SwordError: []i8@new {
+    decoded: []i8 = key_module_block(module, source, start, count, block);
     if (len(decoded) < 4 || entry >= sword_u32(decoded, 0)) raise SwordError { failure: SwordFailure.BadBlock { ending: ".zdt", block: block } };
     meta: int = 4 + entry * 8;
     if (meta + 8 > len(decoded)) raise SwordError { failure: SwordFailure.BadBlock { ending: ".zdt", block: block } };
@@ -237,6 +273,7 @@ key_module_block_text(module: *KeyModule, block: int, entry: int) raises SwordEr
 // such a module can't be read).
 key_module_block(
     module: *KeyModule,
+    source: []i8,
     start: int,
     count: int,
     block: int
@@ -244,7 +281,7 @@ key_module_block(
     match module.info.compression {
         Zip -> {
             try {
-                deflate::zlib_decompress_leading(module.blocks, start, count, -1)
+                deflate::zlib_decompress_leading(source, start, count, -1)
             } with deflate::DeflateError _error -> {
                 raise SwordError { failure: SwordFailure.BadBlock { ending: ".zdt", block: block } }
             }

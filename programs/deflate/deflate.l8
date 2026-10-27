@@ -193,7 +193,9 @@ huffman_build(
 // One stream being decoded: the input between position and end not yet
 // in the bit buffer; the output written so far (produced bytes), at most
 // limit of them. Exact decoding writes output[produced]; measuring writes
-// a 32 KiB window, output[produced & mask].
+// a 32 KiB window, output[produced & mask]. Decoding can stop between
+// symbols (a step's pause) and go on where it stopped, so the block it is
+// in is kept, and whether that block is the stream's last.
 type Inflater = {
     source: []i8;
     position: int;
@@ -204,10 +206,60 @@ type Inflater = {
     produced: int;
     mask: int;
     limit: int;
+    // Output past limit is not wanted (only a prefix of the stream is):
+    // decoding stops there, where otherwise it is a SizeMismatch.
+    prefix: bool;
+    // Of a back-reference cut short by the prefix's end, the bytes left to
+    // copy and from how far back (the prefix may be made longer).
+    copy_left: int;
+    copy_distance: int;
+    block: BlockState;
+    last_block: bool;
+    // The stream's last block has ended.
+    ended: bool;
     literals: HuffmanCode;
     distances: HuffmanCode;
     lengths: HuffmanCode;
     code_lengths: []int
+}
+
+// Where decoding is in the stream: between blocks (its next header to
+// read), in a block of codes, or in a stored block with left bytes to copy.
+type BlockState =
+    | BetweenBlocks
+    | CodedBlock
+    | StoredBlock { left: int }
+
+inflater_new(
+    source: []i8@new,
+    start: int,
+    end: int,
+    output: []i8@new,
+    mask: int,
+    limit: int,
+    prefix: bool
+): Inflater@new {
+    Inflater {
+        source: source,
+        position: start,
+        end: end,
+        bits: 0,
+        bit_count: 0,
+        output: output,
+        produced: 0,
+        mask: mask,
+        limit: limit,
+        prefix: prefix,
+        copy_left: 0,
+        copy_distance: 0,
+        block: BlockState.BetweenBlocks,
+        last_block: false,
+        ended: false,
+        literals: huffman_code_new(288),
+        distances: huffman_code_new(32),
+        lengths: huffman_code_new(19),
+        code_lengths: new int[320](0)
+    }
 }
 
 WINDOW_SIZE: int = 32768;
@@ -294,9 +346,9 @@ decode_symbol(state: *Inflater, code: *HuffmanCode) raises DeflateError: int {
     0
 }
 
-inflate_stored(state: *Inflater) raises DeflateError {
-    // (To a byte boundary; then the length and its complement, and the
-    // bytes after them taken straight from the input.)
+// A stored block's header: its length and that length's complement, from
+// a byte boundary; its bytes follow, copied as they are.
+inflate_stored_start(state: *Inflater) raises DeflateError {
     _padding: int = take_bits(state, state.bit_count % 8);
     length: int = take_bits(state, 16);
     complement: int = take_bits(state, 16);
@@ -305,13 +357,29 @@ inflate_stored(state: *Inflater) raises DeflateError {
     state.bits = 0;
     state.bit_count = 0;
     if (length > state.end - state.position) inflater_fail(state, DeflateFailure.Truncated);
-    if (length > state.limit - state.produced) inflater_fail(state, DeflateFailure.SizeMismatch);
+    if (!state.prefix && length > state.limit - state.produced) inflater_fail(state,
+        DeflateFailure.SizeMismatch);
+    state.block = BlockState.StoredBlock { left: length }
+}
+
+// Of a stored block's left bytes, as many as go before the pause (and
+// within the prefix wanted).
+inflate_stored_part(state: *Inflater, left: int, pause_at: int) {
+    n: int = left;
+    if (n > pause_at - state.produced) n = pause_at - state.produced;
+    if (state.prefix && n > state.limit - state.produced) n = state.limit - state.produced;
     if (state.mask == EXACT_MASK) memcpy(state.output, state.produced, state.source,
-        state.position, length) else {
-        for i in 0..length state.output[state.produced + i & state.mask] = state.source[state.position + i]
+        state.position, n) else {
+        for i in 0..n state.output[state.produced + i & state.mask] = state.source[state.position + i]
     }
-    state.position = state.position + length;
-    state.produced = state.produced + length
+    state.position = state.position + n;
+    state.produced = state.produced + n;
+    if (n == left) inflate_block_ended(state) else state.block = BlockState.StoredBlock { left: left - n }
+}
+
+inflate_block_ended(state: *Inflater) {
+    state.block = BlockState.BetweenBlocks;
+    if (state.last_block) state.ended = true
 }
 
 inflate_fixed_codes(state: *Inflater) {
@@ -366,32 +434,43 @@ inflate_dynamic_codes(state: *Inflater) raises DeflateError {
         DeflateFailure.BadCodeLengths)
 }
 
-// A back-reference: length bytes from distance back.
+// A back-reference: length bytes from distance back (in a prefix, only
+// those within it).
 inflate_copy(state: *Inflater, distance: int, length: int) raises DeflateError {
     output: []i8 = state.output;
     mask: int = state.mask;
     at: int = state.produced;
     if (distance > at) inflater_fail(state, DeflateFailure.BadDistance);
-    if (length > state.limit - at) inflater_fail(state, DeflateFailure.SizeMismatch);
-    if (mask == EXACT_MASK && distance >= length) memcpy(output, at, output, at - distance,
-        length) else {
-        for i in at..at + length output[i & mask] = output[i - distance & mask]
+    n: int = length;
+    if (n > state.limit - at) {
+        if (!state.prefix) inflater_fail(state, DeflateFailure.SizeMismatch);
+        n = state.limit - at;
+        state.copy_left = length - n;
+        state.copy_distance = distance
     }
-    state.produced = at + length
+    if (mask == EXACT_MASK && distance >= n) memcpy(output, at, output, at - distance,
+        n) else {
+        for i in at..at + n output[i & mask] = output[i - distance & mask]
+    }
+    state.produced = at + n
 }
 
-// A block's codes, to its end-of-block symbol.
-inflate_codes(state: *Inflater) raises DeflateError {
+// A block's codes, to its end-of-block symbol, or until pause_at bytes are
+// out or the prefix wanted is.
+inflate_codes(state: *Inflater, pause_at: int) raises DeflateError {
     output: []i8 = state.output;
     mask: int = state.mask;
-    while (true) {
+    while (state.produced < pause_at && !(state.prefix && state.produced >= state.limit)) {
         symbol: int = decode_symbol(state, &state.literals);
         if (symbol < 256) {
             if (state.produced >= state.limit) inflater_fail(state, DeflateFailure.SizeMismatch);
             output[state.produced & mask] = symbol trunc i8;
             state.produced = state.produced + 1
         } else {
-            if (symbol == 256) return;
+            if (symbol == 256) {
+                inflate_block_ended(state);
+                return
+            }
             length_symbol: int = symbol - 257;
             if (length_symbol >= 29) inflater_fail(state, DeflateFailure.BadSymbol);
             length: int = length_bases[length_symbol] + take_bits(state, length_extra_bits[length_symbol]);
@@ -403,21 +482,34 @@ inflate_codes(state: *Inflater) raises DeflateError {
     }
 }
 
-// Decode the stream to its final block; the offset of the byte after it.
-inflate_blocks(state: *Inflater) raises DeflateError: int {
-    final: bool = false;
-    while (!final) {
-        final = take_bits(state, 1) == 1;
-        block_type: int = take_bits(state, 2);
-        if (block_type == 0) inflate_stored(state) else if (block_type == 1) {
-            inflate_fixed_codes(state);
-            inflate_codes(state)
-        } else if (block_type == 2) {
-            inflate_dynamic_codes(state);
-            inflate_codes(state)
-        } else inflater_fail(state, DeflateFailure.BadBlockType)
+// A block's header: whether it is the last, and its kind.
+inflate_block_start(state: *Inflater) raises DeflateError {
+    state.last_block = take_bits(state, 1) == 1;
+    block_type: int = take_bits(state, 2);
+    if (block_type == 0) inflate_stored_start(state) else if (block_type == 1) {
+        inflate_fixed_codes(state);
+        state.block = BlockState.CodedBlock
+    } else if (block_type == 2) {
+        inflate_dynamic_codes(state);
+        state.block = BlockState.CodedBlock
+    } else inflater_fail(state, DeflateFailure.BadBlockType)
+}
+
+// Decode until pause_at bytes are out, the prefix wanted is, or the
+// stream has ended.
+inflate_until(state: *Inflater, pause_at: int) raises DeflateError {
+    if (state.copy_left > 0 && state.produced < state.limit) {
+        left: int = state.copy_left;
+        state.copy_left = 0;
+        inflate_copy(state, state.copy_distance, left)
     }
-    inflater_offset(state)
+    while (!state.ended && state.produced < pause_at && !(state.prefix && state.produced >= state.limit)) {
+        match state.block {
+            BetweenBlocks -> inflate_block_start(state);
+            CodedBlock -> inflate_codes(state, pause_at);
+            StoredBlock s -> inflate_stored_part(state, s.left, pause_at)
+        }
+    }
 }
 
 // A stream's decoded size and the offset just after it.
@@ -438,22 +530,9 @@ inflate_run(
 ) raises DeflateError: StreamExtent {
     extent: StreamExtent = StreamExtent { size: 0, stream_end: 0 };
     region {
-        state: Inflater = Inflater {
-            source: source,
-            position: start,
-            end: end,
-            bits: 0,
-            bit_count: 0,
-            output: output,
-            produced: 0,
-            mask: mask,
-            limit: limit,
-            literals: huffman_code_new(288),
-            distances: huffman_code_new(32),
-            lengths: huffman_code_new(19),
-            code_lengths: new int[320](0)
-        };
-        extent.stream_end = inflate_blocks(&state);
+        state: Inflater = inflater_new(source, start, end, output, mask, limit, false);
+        inflate_until(&state, NO_LIMIT);
+        extent.stream_end = inflater_offset(&state);
         extent.size = state.produced
     }
     extent
@@ -554,11 +633,7 @@ zlib_decode(
     expected_size: int,
     leading: bool
 ) raises DeflateError: []i8@new {
-    check_span(source, start, count);
-    if (count < 6) raise DeflateError { failure: DeflateFailure.Truncated, at: start + count };
-    method: int = source[start] as int & 255;
-    flags: int = source[start + 1] as int & 255;
-    if ((method & 15) != 8 || method >> 4 > 7 || (method << 8 | flags) % 31 != 0 || (flags & 32) != 0) raise DeflateError { failure: DeflateFailure.BadHeader, at: start };
+    zlib_check_header(source, start, count);
     // (The stream's data: up to its checksum, or to the span's end when
     // more may follow it.)
     body_end: int = if (leading) start + count else start + count - 4;
@@ -571,6 +646,137 @@ zlib_decode(
     } else if (stream_end != body_end) raise DeflateError { failure: DeflateFailure.TrailingData, at: stream_end };
     if (adler32(output, 0, size) != big_endian_32(source, stream_end)) raise DeflateError { failure: DeflateFailure.BadChecksum, at: stream_end };
     output
+}
+
+// A zlib stream's header at start (and room for its checksum after it).
+zlib_check_header(source: []i8, start: int, count: int) raises DeflateError {
+    check_span(source, start, count);
+    if (count < 6) raise DeflateError { failure: DeflateFailure.Truncated, at: start + count };
+    method: int = source[start] as int & 255;
+    flags: int = source[start + 1] as int & 255;
+    if ((method & 15) != 8 || method >> 4 > 7 || (method << 8 | flags) % 31 != 0 || (flags & 32) != 0) raise DeflateError { failure: DeflateFailure.BadHeader, at: start }
+}
+
+// The first prefix_size bytes the zlib stream that begins source[start..
+// start + count) decodes to, decoding no further. Its checksum is of the
+// whole stream, so it is not checked; a stream that ends before
+// prefix_size bytes is a SizeMismatch.
+tag deflate
+zlib_decompress_prefix(
+    source: []i8,
+    start: int,
+    count: int,
+    prefix_size: int
+) raises DeflateError: []i8@new {
+    output: []i8 = new i8[prefix_size](0i8);
+    region {
+        job: *Inflation = inflation_zlib(source, start, count, output, true);
+        _done: bool = inflation_step(job, NO_LIMIT)
+    }
+    output
+}
+
+// ---- decoding a step at a time ----
+// A stream decoded in steps, each of about a budget of output, so that a
+// program can answer its user between them: begun by inflation_raw or
+// inflation_zlib into an output slice (all of the stream, or a prefix of
+// it), then inflation_step until it says it is done.
+tag deflate
+type Inflation = tag deflate_internal {
+    state: Inflater;
+    // A zlib stream's: its Adler-32 follows it, checked once it is whole,
+    // within the span (which may go on past it: padding).
+    zlib: bool;
+    span_end: int;
+    done: bool
+}
+
+// A raw DEFLATE stream in source[start..start + count) into output: all of
+// it (exactly output's size), or with prefix its first len(output) bytes.
+tag deflate
+inflation_raw(
+    source: []i8@new,
+    start: int,
+    count: int,
+    output: []i8@new,
+    prefix: bool
+) raises DeflateError: *Inflation@new {
+    check_span(source, start, count);
+    new Inflation {
+        state: inflater_new(source, start, start + count, output, EXACT_MASK, len(output),
+            prefix),
+        zlib: false,
+        span_end: start + count,
+        done: false
+    }
+}
+
+// A zlib stream beginning source[start..start + count) into output, as
+// inflation_raw; bytes after its checksum are left unread, as
+// zlib_decompress_leading leaves them.
+tag deflate
+inflation_zlib(
+    source: []i8@new,
+    start: int,
+    count: int,
+    output: []i8@new,
+    prefix: bool
+) raises DeflateError: *Inflation@new {
+    zlib_check_header(source, start, count);
+    new Inflation {
+        state: inflater_new(source, start + 2, start + count, output, EXACT_MASK,
+            len(output), prefix),
+        zlib: true,
+        span_end: start + count,
+        done: false
+    }
+}
+
+// About budget more bytes decoded (a little more: a back-reference is
+// copied whole); whether the stream is done: its prefix decoded, or all
+// of it, its size and checksum checked.
+tag deflate
+inflation_step(job: *Inflation, budget: int) raises DeflateError: bool {
+    if (job.done) return true;
+    state: *Inflater = &job.state;
+    pause_at: int = if (budget >= NO_LIMIT - state.produced) NO_LIMIT else state.produced + budget;
+    inflate_until(state, pause_at);
+    if (state.prefix && state.produced >= state.limit) {
+        job.done = true;
+        return true
+    }
+    if (!state.ended) return false;
+    stream_end: int = inflater_offset(state);
+    if (state.produced != state.limit) raise DeflateError { failure: DeflateFailure.SizeMismatch, at: stream_end };
+    if (job.zlib) {
+        if (stream_end + 4 > job.span_end) raise DeflateError { failure: DeflateFailure.Truncated, at: job.span_end };
+        if (adler32(state.output, 0, state.produced) != big_endian_32(state.source,
+            stream_end)) raise DeflateError { failure: DeflateFailure.BadChecksum, at: stream_end }
+    }
+    job.done = true;
+    true
+}
+
+// How many bytes are decoded so far.
+tag deflate
+inflation_produced(job: *Inflation): int {
+    job.state.produced
+}
+
+// A prefix's decoding made to go on into output (longer: what is decoded
+// copied in), as if begun into it: its first len(output) bytes wanted,
+// with prefix, else all of the stream (exactly output's size). Then
+// inflation_step until it says it is done, as before. An output shorter
+// than what is decoded is a SizeMismatch.
+tag deflate
+inflation_grow(job: *Inflation, output: []i8@job, prefix: bool) raises DeflateError {
+    state: *Inflater = &job.state;
+    if (len(output) < state.produced) raise DeflateError { failure: DeflateFailure.SizeMismatch, at: inflater_offset(state) };
+    memcpy(output, 0, state.output, 0, state.produced);
+    state.output = output;
+    state.limit = len(output);
+    state.prefix = prefix;
+    job.done = false
 }
 
 GZIP_HEADER_CRC_FLAG: int = 2;

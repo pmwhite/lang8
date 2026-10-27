@@ -48,7 +48,7 @@ a concrete implementation: `web/main.l8` (the platform) and
 - `kept_store = KeptStore { read, write, append, remove }`: one named file
   (`kp_name`) read into `fbuf`, written from it, added to, deleted
   (`core/kept.l8` names them and says what goes in each).
-- `host_io = HostIO { ask, http, file, fetch, read_kept, say }`: a data file asked
+- `host_io = HostIO { ask, http, file, fetch, read_kept, read_kept_range, keep, say }`: a data file asked
   for by name (the site's `data/` names: `bsb` ... `ylt`, `orig.txt`,
   `lang/*`, `help.txt`, `xrefs.bin`, `mhcc.txt`, `audio/*.tim`,
   `audio/henson.paths`), a GET, a file or answer's bytes, a recording
@@ -57,8 +57,14 @@ a concrete implementation: `web/main.l8` (the platform) and
   of backups) may be `null` where a platform cannot keep recordings; core
   then offers no Downloads. `read_kept` reads a kept file back as an id
   (answered `got ID SIZE`, -1 when there is no such file, its bytes by
-  `file`): the Bookshelf's catalog and modules, which `fetch` kept. Without
-  both, core offers no Bookshelf.
+  `file`): the Bookshelf's catalog and packages, which `fetch` kept.
+  `read_kept_range` reads COUNT bytes from OFFSET of one the same way
+  (SIZE fewer at the file's end): a span of a module's text, so that a
+  15 MB file is never read whole. `keep` writes bytes as a kept file of
+  the platform's (in place of any, and out of backups: they are copies of
+  what is online) and answers `kept ID OK` (1 written whole, 0 not): a
+  module's files as its package is unpacked, and a Bible's records.
+  Without all four, core offers no Bookshelf.
 - `hs_start()`, then what the platform is: `sk_device` (its name: "Device",
   "Phone"), `sk_follows_text_size`, `sk_fonts` (its reader's faces, in the
   settings' order), `hs_notify_off` (where notifications are turned back
@@ -74,7 +80,8 @@ a concrete implementation: `web/main.l8` (the platform) and
   STATUS SIZE` (an answer came), `api BASE` (the site's `/api/v1/`),
   `fetching ID GOT TOTAL` (a fetch's bytes so far, TOTAL 0 unknown; as
   often as it likes), `fetched ID STATUS BYTES` (its end: STATUS the
-  answer's, 0 none; BYTES the kept file's size), `network KIND` (as it
+  answer's, 0 none; BYTES the kept file's size), `kept ID OK` (a `keep`
+  done: 1 written whole, 0 not), `network KIND` (as it
   changes: 0 none, 1 not metered, 2 metered; until it is said, not
   metered). Core's host keeps the chapters held and the books asked for
   (`core/held.l8`), fetching one chapter at a time.
@@ -391,6 +398,7 @@ Other lines from core:
 | `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation |
 | `url` ADDRESS | a page outside the app to open |
 | `place C V FRAC`, `back` WORDS | the reader to a place (a ribbon's, the way back's); the capsule's words (none: away) |
+| `next` | core has work going on a step at a time (the Bookshelf opening a module, making a Bible a version, decoding a commentary's block): the skin answers `next` on its next turn, once it has drawn and taken input, so the app answers its reader between steps however slow it runs |
 | `awake MS` | Keep Screen On: the screen kept on MS more (after a `rest`, a tap), or let go now (0: a sheet opened, the setting off). A skin offers the setting with `sk_has_keep_on` |
 | `settings` | a setting changed that doesn't lay the text out again |
 
@@ -458,6 +466,7 @@ From the skin:
 | `trayact ACTION V`, `titlemenu`, `menuact ACTION ARG` | a tray's button; the title's menu's model, as screen 0; one of its items |
 | `versestudy C V` | verse C:V's Study, as core's screen (a skin's answer to `study_verse`) |
 | `spoke C V MS`, `spoken C V`, `listenstop` | the skin's voice began (MS its clock: following waits 8 s after a finger moves the reader) and finished saying verse C:V (0 the chapter's title), or was stopped: a skin speaks what core's session gives it (`say C V` WORDS, `player` TITLE STATE PLAYING READER VERSION (also for the platform's own player: a lock screen's, a headset's; its buttons `listenplay`, `listenpause`, `listenprev`, `listennext`, `listenstop`), `follow C V`, `listen_stop`) |
+| `next` | the turn core asked for with `next`: a step of its work |
 | `rest C V FRAC END ENDS_HI MS`, `moving MS`, `tick MS`, `jumped KIND` | the reader at rest (chapter, verse, thousandths of an em; its end on the screen; the last chapter whose end is; the skin's clock), begun to move (a finger's scroll), the time core asked for (`wake MS`), a jump (0 with a way back, 1 the capsule's, 2 neither): `core/reading.l8` counts chapters read (20 s at rest, end seen), moves the carried ribbon, and puts a chapter dwelt in 20 s onto the history |
 | `back` | the capsule tapped: core goes back (`place`), or opens the plan's day it came from |
 | `key NAME MODS` | a hardware keyboard's key (NAME its character, or `left`, `up`, `down`, `space`, `return`; MODS 1 ⌘ or Ctrl, 2 Shift, 4 Alt): `core/keys.l8` makes it a command and does it where it acts — Go To, Search, Library, Settings, chapters, Back, Listen, a page (`page 1` down, `page 0` up: the skin scrolls a screen less three lines), a plan's day's Mark Read and Next, Practice's Check and grades, Study beside the reader and its verses. A skin with menus or a command overlay makes them from core's `command` lines and offers each where `commands` says |
@@ -620,7 +629,10 @@ The host asks the page for the data files by id (`bw_ask`: the site's
 reads the reader's version and the plans first, then what is kept, and
 says `ready`; the language data comes after, and Study and Learn appear
 once it has. What is kept is `core/kept.l8`'s files, a key each in the
-browser's storage (`sb.NAME`).
+browser's storage (`sb.NAME`); the Bookshelf's downloads and the files it
+keeps (`bw_fetch`, `bw_keep`) are in Cache Storage (`sb-held`, as
+`/read/held/NAME`), read back whole or a span at a time by slicing their
+blobs (`bw_read_kept`, `bw_read_kept_range`).
 
 The skin is JavaScript (`web/page/skin.js`), drawing core's wire the web's
 way rather than the iPhone's: the reader is the page itself (its chapters

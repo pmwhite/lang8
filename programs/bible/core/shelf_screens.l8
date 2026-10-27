@@ -934,11 +934,19 @@ sk_build_shelf_commentary(id: int, arg: int) {
         return
     }
     shown: int = 0;
+    waiting: bool = false;
     borrow shelf_open[SHELF_USE_STUDY] as open {
         match open.reader {
-            Verses r -> shown = shelf_commentary_chapter(r.module, c);
+            Verses r -> {
+                if (commentary_chapter_ready(slot, r.module, c)) shown = shelf_commentary_chapter(slot,
+                    r.module, c) else waiting = true
+            }
             _ -> { }
         }
+    }
+    if (waiting) {
+        shelf_opening_rows(slot, i);
+        return
     }
     if (shown == 0) {
         fbuf_n = 0;
@@ -969,6 +977,17 @@ shelf_opening_rows(slot: int, i: int) {
     fput_shelf_abbreviation(i);
     fput_str("\â\€\¦");
     ui_set_title_fbuf();
+    // (Being opened now: how far it has come, as a download's progress.)
+    if (shelf_work_slot() == slot) {
+        ui_set_custom(CUSTOM_DOWNLOAD);
+        ui_rows[ui_last()].value = shelf_work_done;
+        fbuf_n = 0;
+        fput_int(shelf_work_done / 10);
+        fput(37);
+        ui_set_detail_fbuf();
+        ui_set_value_detail();
+        return
+    }
     ui_set_busy();
     ui_set_faint()
 }
@@ -977,14 +996,15 @@ shelf_credit_row(i: int) {
     ui_row(UI_TEXT, 0, 0);
     ui_rich_begin();
     fput_shelf_title(i);
-    fput_str(" \Â\· CrossWire");
+    fput_str(" \Â\· ");
+    fput_str(SHELF_SOURCE_SHORT_NAME);
     ui_rich(RUN_SMALL);
     ui_rich_title()
 }
 
 // Chapter c's commentary: each section's verses ("Verses 1â€“5"), then its
 // paragraphs. How many sections.
-shelf_commentary_chapter(module: *VerseModule, c: int): int {
+shelf_commentary_chapter(slot: int, module: *VerseModule, c: int): int {
     place: CommentaryPlace = commentary_place(module, c);
     if (place.book < 0) return 0;
     system: *Versification = verse_module_system(module);
@@ -997,11 +1017,63 @@ shelf_commentary_chapter(module: *VerseModule, c: int): int {
             through: int = v;
             while (through < last && verse_entries_same(entry, commentary_entry(module,
                 place, through + 1))) through = through + 1;
-            if (commentary_section(module, entry, v, through, ACT_SHELF_LINK)) shown = shown + 1;
+            if (commentary_section(slot, module, entry, v, through, ACT_SHELF_LINK)) shown = shown + 1;
             v = through + 1
         } else v = v + 1
     }
     shown
+}
+
+// Whether chapter c's comments are ready to show: a large block decoded as
+// far as the chapter's last (shelf_block_ready), or its small blocks' span
+// held (shelf_span_ready); either is asked for if not.
+commentary_chapter_ready(slot: int, module: *VerseModule, c: int): bool {
+    place: CommentaryPlace = commentary_place(module, c);
+    if (place.book < 0) return true;
+    system: *Versification = verse_module_system(module);
+    last: int = system.books[place.book].verses[place.chapter - 1];
+    testament: int = 0;
+    large: int = -1;
+    need: int = 0;
+    from: int = -1;
+    to: int = 0;
+    ending: str = "";
+    for v in 0..last + 1 {
+        entry: VerseEntry = commentary_entry(module, place, v);
+        if (entry.size > 0 && entry.block >= 0) {
+            if (testament == 0) testament = entry.testament;
+            if (entry.testament == testament) {
+                if (shelf_block_is_large(module, entry.testament, entry.block)) {
+                    if (large < 0) large = entry.block;
+                    if (entry.block == large && entry.start + entry.size > need) need = entry.start + entry.size
+                } else {
+                    try {
+                        span: TextSpan = verse_block_span(module, entry.testament,
+                            entry.block);
+                        ending = span.ending;
+                        if (from < 0 || span.offset < from) from = span.offset;
+                        if (span.offset + span.count > to) to = span.offset + span.count
+                    } with SwordError _error -> { }
+                }
+            }
+        }
+    }
+    if (large >= 0) return shelf_block_ready(slot, module, testament, large, need);
+    from < 0 || shelf_span_ready(slot, TextSpan { ending: ending, offset: from, count: to - from })
+}
+
+// Whether a comment found is ready to show (as commentary_chapter_ready
+// says of a chapter's).
+commentary_found_ready(slot: int, module: *VerseModule, found: CommentaryFound): bool {
+    entry: VerseEntry = found.entry;
+    if (entry.block < 0) return true;
+    if (shelf_block_is_large(module, entry.testament, entry.block)) return shelf_block_ready(slot,
+        module, entry.testament, entry.block, entry.start + entry.size);
+    try {
+        shelf_span_ready(slot, verse_block_span(module, entry.testament, entry.block))
+    } with SwordError _error -> {
+        true
+    }
 }
 
 // Where the app's chapter c is in a module's numbering (its book -1:
@@ -1028,9 +1100,10 @@ commentary_entry(module: *VerseModule, place: CommentaryPlace, v: int): VerseEnt
     }
 }
 
-// One section: "Verses 14â€“16" (or "Introduction" for verse 0), then the
-// entry's paragraphs, its references previews.
+// One section of the commentary in slot: "Verses 14â€“16" (or "Introduction"
+// for verse 0), then the entry's paragraphs, its references previews.
 commentary_section(
+    slot: int,
     module: *VerseModule,
     entry: VerseEntry,
     from: int,
@@ -1040,9 +1113,8 @@ commentary_section(
     shown: bool = true;
     region {
         try {
-            source: []i8 = if (entry.block >= 0) verse_module_block(module, entry.testament,
-                entry.block) else verse_module_testament_text(module, entry.testament);
-            markup: []i8 = verse_module_text(module, source, entry);
+            markup: []i8 = if (entry.block >= 0) shelf_block_text(slot, module, entry) else verse_module_text(module,
+                verse_module_testament_text(module, entry.testament), entry);
             rich: *RichText = rich_new();
             state: MarkupState = markup_state_new();
             markup_convert(rich, &state, verse_module_info(module).markup, markup,
@@ -1285,24 +1357,32 @@ sk_build_shelf_entry(id: int, arg: int) {
         shelf_opening_rows(slot, i);
         return
     }
+    waiting: bool = false;
     borrow shelf_open[SHELF_USE_ENTRIES] as open {
         match open.reader {
-            Keys r -> shelf_entry_rows(r.module, index);
+            Keys r -> {
+                if (shelf_key_text_ready(slot, r.module, index)) shelf_entry_rows(slot,
+                    r.module, index) else waiting = true
+            }
             _ -> { }
         }
+    }
+    if (waiting) {
+        shelf_opening_rows(slot, i);
+        return
     }
     ui_section("", "");
     shelf_credit_row(i)
 }
 
-shelf_entry_rows(module: *KeyModule, index: int) {
+shelf_entry_rows(slot: int, module: *KeyModule, index: int) {
     region {
         try {
             key: str = key_module_key(module, index);
             fbuf_n = 0;
             fput_entry_key(key_module_info(module), key);
             ui_set_screen_title_fbuf();
-            text: []i8 = key_module_text(module, index);
+            text: []i8 = shelf_key_text(slot, module, index);
             rich: *RichText = rich_new();
             state: MarkupState = markup_state_new();
             markup_convert(rich, &state, key_module_info(module).markup, text, 0,
@@ -1425,7 +1505,10 @@ shelf_book_rows(
                 ui_rich(RUN_STRONG);
                 ui_rich_title()
             }
-            text: []i8 = tree_module_text(module, node);
+            // (Its text once it is read; the contents meanwhile.)
+            text: []i8 = new i8[0](0i8);
+            if (shelf_tree_text_ready(slot, module, node)) text = shelf_tree_text(slot,
+                module, node) else shelf_opening_rows(slot, i);
             if (len(text) > 0) {
                 rich: *RichText = rich_new();
                 state: MarkupState = markup_state_new();

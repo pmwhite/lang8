@@ -933,6 +933,11 @@ public final class Bible extends Activity {
       case "follow":
         reader.follow(w.num(1), w.num(2));
         break;
+      case "next":
+        // (A turn core asked for: its work goes on a step at a time, the
+        // screen drawn between steps.)
+        timers.post(() -> Native.send("next"));
+        break;
       case "wake":
         try {
           reader.wake(Long.parseLong(w.word(1)));
