@@ -139,8 +139,13 @@ PXS_NEW: int = 4;
 // Whether a session is going (until its skin says it is gone: px_closed).
 px_live: bool = false;
 
+// How the session began (a PXS_): its end says "for today" only for
+// what was due.
+px_how: int = PXS_TODAY;
+
 px_start(language: *LanguageData, how: int, arg: int) {
     if (px_live) return;
+    px_how = how;
     n: int = if (how == PXS_ONE) px_queue_one(arg) else if (how == PXS_CARDS) px_queue_cards(arg) else if (how == PXS_READING) px_queue_reading(language,
         arg) else if (how == PXS_NEW) px_queue_new() else px_queue_today();
     if ((how == PXS_ONE || how == PXS_NEW) && n == 0) return;
@@ -579,19 +584,28 @@ px_finish() {
 // Practise Reading's "That's 10 words. Again?"), or the line under it.
 px_end_first() {
     fbuf_n = 0;
+    // (Practise Reading with nothing to read yet: why, and what to do.)
+    if (crd_reading >= 0 && px_qn == 0) {
+        fput_str("No words to read yet");
+        return
+    }
     if (px_step == PX_READ_END) {
         fput_str("That\â\€\™s ");
         fput_int(px_qn);
         fput_str(if (px_qn == 1) " word. Again?" else " words. Again?")
-    } else if (lc_learning_lang >= 0) fput_str("Another?") else fput_str("That\â\€\™s all for today.")
+    } else if (lc_learning_lang >= 0) fput_str("Another?") else if (px_how != PXS_TODAY && px_how != PXS_CARDS) fput_str("That\â\€\™s all of them.") else fput_str("That\â\€\™s all for today.")
 }
 
 px_end_words(language: *LanguageData) {
     fbuf_n = 0;
+    if (crd_reading >= 0 && px_qn == 0) {
+        fput_str(if (crd_reading == 1) "Practise Reading uses words made only of the letters and vowels you know. Learn a few more, then come back." else "Practise Reading uses words made only of the letters you know. Learn a few more, then come back.");
+        return
+    }
     if (px_step == PX_READ_END) return;
     // (Learning the next in line: what comes after this one.)
     if (lc_learning_lang >= 0) {
-        fput_next_in_line(language, lc_learning_lang);
+        fput_next_both(language, lc_learning_lang);
         return
     }
     // (A session of one passage: its own next review, whatever came after
@@ -845,7 +859,10 @@ px_card_grade(language: *LanguageData, g: int) {
     next: int = learn_judged(language, k, g, ret, sk_today_now(), time(0), crd_vi);
     sk_kept(SK_KEPT_CARDS);
     ui_effect("felt", PX_FELT_GRADE, -1);
-    if (next == RET_RETRY && px_qn < len(px_q)) {
+    // (Once more at the end, if anything else comes first: straight after,
+    // it would be remembered for a moment, not known. It is struggling,
+    // and comes back tomorrow.)
+    if (next == RET_RETRY && px_qn < len(px_q) && px_at + 1 < px_qn) {
         px_q[px_qn] = -k - 1;
         px_back[px_qn] = true;
         crd_ret[px_qn] = RET_RETRY;
@@ -1021,10 +1038,12 @@ px_card_part(language: *LanguageData, part: int) {
         if (!reading) fput_str("New");
         if (crd_hint && (crd_first || reading)) {
             if (!reading) fput_str("\n");
-            if (reading) fput_str("Read it to yourself, then Check.") else fput_str(if (cd_kind[k] == CK_LETTER) "Say its name and sound, then Check." else "Say what it means, then Check.")
+            if (reading) fput_str("Read it to yourself, then Check.") else fput_str(if (cd_kind[k] == CK_LETTER) "Say its sound, then Check." else "Say what it means, then Check.")
         }
     } else if (part == PXC_WORD) {
-        if (form) {
+        // (A word in review as the verse has it, to be read there; met for
+        // the first time, its dictionary form.)
+        if (form || word && !crd_first && crd_w >= 0) {
             form_of(language, crd_w);
             fput_bytes(language.forms, wf_b, wf_e)
         } else if (reading) {
@@ -1033,7 +1052,7 @@ px_card_part(language: *LanguageData, part: int) {
         } else if (letter) fput_lt(language, i, LF_GLYPH) else if (word) fput_lemma(language,
             lang, cd_key[k], 0)
     } else if (part == PXC_TR) {
-        if (form) {
+        if (form || word && !crd_first && crd_w >= 0) {
             form_of(language, crd_w);
             fput_bytes(language.forms, wt_b, wt_e)
         } else if (reading) {
@@ -1082,9 +1101,23 @@ px_card_part(language: *LanguageData, part: int) {
                 fput_str(" \Â\· ");
                 fput_lt_sound(language, i, sk_ln_pron(lang))
             }
-        } else if (word && !fput_words_here(language, crd_vi, crd_w)) {
-            fbuf_n = 0;
-            px_card_gloss(language)
+        } else if (word) {
+            // (Its meaning, the answer: then, faint, the BSB's words for it
+            // here, where they differ: "and Â· here, but".)
+            pxc_b = 0;
+            fput_lemma(language, lang, cd_key[k], 3);
+            pxc_e = fbuf_n;
+            at: int = fbuf_n;
+            fput_str(" \Â\· here, ");
+            from: int = fbuf_n;
+            if (!fput_words_here(language, crd_vi, crd_w) || fbuf_n == from) fbuf_n = at else {
+                same: bool = fbuf_n - from == pxc_e;
+                if (same) {
+                    for x in 0..pxc_e
+                        if (fbuf[from + x] != fbuf[x]) same = false
+                }
+                if (same) fbuf_n = at
+            }
         }
     } else if (part == PXC_FORM) {
         // ("Ï„á½´Î½, a form of á½: article, accusative feminine singular"; the
@@ -1387,9 +1420,14 @@ sk_build_practice(language: *LanguageData, id: int) {
             ACT_PX_TYPE, 0, UI_TOOL_PLAIN, 1) else if (k == PXT_AGAIN) ui_tool("Again",
             "", ACT_PX_AGAIN, 0, UI_TOOL_PLAIN, 2) else if (k == PXT_MAIN) ui_tool(px_main_now(),
             "", ACT_PX_MAIN, 0, UI_TOOL_PROMINENT, 2) else if (k == PXT_READ_AGAIN) ui_tool("Again",
-            "", ACT_PX_READ_AGAIN, 0, UI_TOOL_PLAIN, 0) else if (k == PXT_ANOTHER) ui_tool("Learn Another",
-            "", ACT_PX_ANOTHER, 0, UI_TOOL_PROMINENT, 1) else if (k == PXT_DONE) ui_tool("Done",
-            "", ACT_PX_DONE, 0, UI_TOOL_PROMINENT, 2) else if (k == PXT_GRADES) {
+            "", ACT_PX_READ_AGAIN, 0, UI_TOOL_PLAIN, 0) else if (k == PXT_ANOTHER) {
+            // (Which way to go on is theirs: a letter, a word, or both.)
+            if (lc_next_letter(lc_learning_lang) >= 0) ui_tool("Another Letter", "",
+                ACT_PX_ANOTHER, 0, UI_TOOL_PROMINENT, 1);
+            if (lc_next_word(lc_learning_lang) >= 0) ui_tool("Another Word", "", ACT_PX_ANOTHER,
+                1, UI_TOOL_PROMINENT, 1)
+        } else if (k == PXT_DONE) ui_tool("Done", "", ACT_PX_DONE, 0, UI_TOOL_PROMINENT,
+            2) else if (k == PXT_GRADES) {
             s: int = px_grade_suggested();
             for g in px_grades ui_tool(px_grade_titles[g], "", ACT_PX_GRADE, g, if (g == s) UI_TOOL_PROMINENT else UI_TOOL_PLAIN,
                 1)
@@ -1499,7 +1537,7 @@ sk_px_card(language: *LanguageData) {
     if (form) sk_px_part(language, PXC_META, RUN_FAINT, RUN_FAINT);
     sk_px_part(language, PXC_ASK, RUN_FAINT, RUN_FAINT);
     if (!crd_checked) return;
-    sk_px_part(language, PXC_ANSWER, if (form) RUN_PLAIN else RUN_STRONG, RUN_STRONG);
+    sk_px_part(language, PXC_ANSWER, if (letter) RUN_STRONG else RUN_PLAIN, RUN_STRONG);
     sk_px_part(language, PXC_VERSE, RUN_SCRIPTURE, RUN_STRONG);
     // (A word's form in plain words once it has been met: the first time,
     // the word and its meaning are enough.)
@@ -1578,7 +1616,8 @@ sk_px_act(
         return
     }
     if (action == ACT_PX_ANOTHER) {
-        k: int = if (lc_learning_lang >= 0) lc_next_one(language, lc_learning_lang) else -1;
+        k: int = if (lc_learning_lang >= 0) lc_next_of(language, lc_learning_lang,
+            arg == 1) else -1;
         if (k >= 0) {
             px_q[0] = -k - 1;
             px_back[0] = false;
