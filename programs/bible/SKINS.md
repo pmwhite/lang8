@@ -328,6 +328,7 @@ A screen, from core:
 |---|---|
 | `screen ID KIND ARG GROUP` TITLE SEARCH | a screen built; GROUP 0 is the sheet, 1 the side panel; then the lines below, its `section`, `row` and `cell` lines, then `end` |
 | `focus N [MODE]` | the screen opens at its Nth row (of all, from 0), at the top; MODE 1 selected and in the middle, 2 in the middle, 3 at the top and washed (a Manual's part gone to by a link); `focus N 4 FROM TO`: the row's words FROM to TO (UTF-16) are to be kept in sight, which the `reveal` effect asks for (Practice's words practised, the word being typed) |
+| `subtitle` TEXT | a line under the title, in the bar: what a reading is of (a commentary's, a book's or a dictionary's title) |
 | `intro` TEXT RUNS QUOTE | words above the first section (a plan's description; the language page's); QUOTE 1, a quote (an accent's bar beside it) |
 | `left` ACTION TITLE ICON STYLE | a button at the left of the bar, in place of Back (a note's Cancel; Practice's count, inert) |
 | `hero` WORD SCRIPT SUB LINE RUNS | a word as the heading: large in its script (`RUN_GREEK`, `RUN_HEBREW`), its transliteration, a line under them |

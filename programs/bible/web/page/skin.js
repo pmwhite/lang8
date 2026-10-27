@@ -509,6 +509,9 @@ function screenLine(w) {
       // (Mode 4: the row's words FROM to TO, UTF-16, kept in sight.)
       if (s.focusMode === 4) s.focusWords = [w.num(3), w.num(4)];
       break;
+    case "subtitle":
+      s.subtitle = w.field(1);
+      break;
     case "intro":
       Object.assign(s, { intro: w.field(1), introRuns: parseRuns(w.field(2)), introQuote: w.fnum(3) === 1 });
       break;
@@ -572,7 +575,7 @@ function newScreen(w) {
   return {
     id: w.num(1), kind: w.num(2), arg: w.num(3), group: w.num(4), title: w.field(1), search: w.field(2), sections: [], tools: [],
     commands: [], focus: -1, focusMode: 0, focusWords: null, segments: [], filterColors: [], sorts: [], scopes: [], searchText: "",
-    intro: "", hero: "", left: "", confirm: "", button: "", emptyTitle: "", emptyLine: "",
+    intro: "", subtitle: "", hero: "", left: "", confirm: "", button: "", emptyTitle: "", emptyLine: "",
   };
 }
 
@@ -1657,7 +1660,10 @@ const panel = {
     const focused = typingIn && document.activeElement === typingIn ? [typingIn.selectionStart, typingIn.selectionEnd] : null;
     const list = $(".plist", p);
     const scroll = fresh ? 0 : list.scrollTop;
-    $(".ptitle", p).textContent = s.title;
+    // (Its title, and under it what it is of.)
+    const title = $(".ptitle", p);
+    title.textContent = s.title;
+    if (s.subtitle) title.appendChild(el("small", "", s.subtitle));
     const back = $(".pback", p);
     const depth = this.current().length;
     back.replaceChildren(s.left ? document.createTextNode(s.left) : icon(depth > 1 ? "chevron-left" : "x"));
@@ -1669,6 +1675,7 @@ const panel = {
     const sweeps = full !== document.body.classList.contains("full") && !p.hidden && !matchMedia("(prefers-reduced-motion: reduce)").matches;
     const from = sweeps ? p.getBoundingClientRect() : null;
     p.classList.toggle("under", beside && !full);
+    p.classList.toggle("beside", beside);
     document.body.classList.toggle("beside-under", beside && !full);
     document.body.classList.toggle("full", full);
     const fb = $(".pfull", p);

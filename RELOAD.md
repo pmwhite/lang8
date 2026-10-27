@@ -200,8 +200,9 @@ node web/devctl.mjs log
 `wire` lines go to the app rather than the host: a Smooth Bible build for
 hot reload (`programs/bible/ios/devwire.l8`) long-polls the server's
 `/wire` and gives each line to core as its skin would (`select C V`,
-`trayact ACTION 0`, `act ID ACTION ARG VALUE`; `|` separates several, and
-`!screens` writes the screens shown to the log). While it is connected the
+`trayact ACTION 0`, `act ID ACTION ARG VALUE`; `|` separates several;
+`!screens` writes the screens shown to the log, and `!close` closes the
+sheets shown, as their Done does). While it is connected the
 app keeps the screen on and writes its diagnostics. A build without a
 server set asks nothing.
 
