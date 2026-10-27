@@ -1,0 +1,646 @@
+tag deflate_internal;
+
+use_tag std;
+
+// DEFLATE decoding (RFC 1951) and its zlib (RFC 1950) and gzip (RFC 1952)
+// containers, with the CRC-32 and Adler-32 checksums they use. See
+// README.md for the contract.
+//
+// The decoder reads the stream least significant bit first through a
+// bit buffer of at most 56 bits, so the buffer never reaches the sign bit
+// of an int. Huffman codes of at most FAST_BITS bits decode with one table
+// lookup; longer codes (rare) decode by walking the canonical code.
+tag deflate
+type DeflateFailure =
+    // The span to decode lies outside the source.
+    | InvalidSpan
+    // The input ended before the stream did.
+    | Truncated
+    // A block's type was 3, which is reserved.
+    | BadBlockType
+    // A stored block's length disagrees with its complement.
+    | BadStoredLength
+    // A dynamic block's code lengths describe no valid Huffman code.
+    | BadCodeLengths
+    // The bits read are no code, or a code for a reserved symbol.
+    | BadSymbol
+    // A back-reference reaches before the start of the output.
+    | BadDistance
+    // The output is not the size the caller or the container said.
+    | SizeMismatch
+    // Bytes follow the end of the stream (or of a gzip member: several
+    // members are not supported).
+    | TrailingData
+    // A zlib or gzip header is malformed or uses an unsupported feature.
+    | BadHeader
+    // The decoded data does not match the container's checksum.
+    | BadChecksum
+
+// Decoding failed: why, and the byte offset into the source near which
+// it was found.
+tag deflate
+exception DeflateError {
+    failure: DeflateFailure;
+    at: int
+}
+
+tag deflate
+deflate_failure_name(failure: DeflateFailure): str {
+    match failure {
+        InvalidSpan -> "span outside the source";
+        Truncated -> "input ends before the stream";
+        BadBlockType -> "reserved block type";
+        BadStoredLength -> "stored block length and complement disagree";
+        BadCodeLengths -> "invalid Huffman code lengths";
+        BadSymbol -> "invalid Huffman code";
+        BadDistance -> "back-reference before the start of the output";
+        SizeMismatch -> "output size differs from the expected size";
+        TrailingData -> "data after the end of the stream";
+        BadHeader -> "malformed or unsupported header";
+        BadChecksum -> "checksum mismatch"
+    }
+}
+
+// ---- checksums ----
+crc32_table: []int = crc32_table_make();
+
+crc32_table_make(): []int@new {
+    table: []int = new int[256](0);
+    for n in 0..256 {
+        c: int = n;
+        for _k in 0..8 c = (if ((c & 1) != 0) 3988292384 ^ c >> 1 else c >> 1);
+        table[n] = c
+    }
+    table
+}
+
+// CRC-32 (the polynomial zip and gzip use) of count bytes of data from
+// start, as a value from 0 to 2^32 - 1. Continue a checksum over several
+// spans with crc32_update, starting from 0.
+tag deflate
+crc32(data: []i8, start: int, count: int): int {
+    crc32_update(0, data, start, count)
+}
+
+tag deflate
+crc32_update(
+    crc: int,
+    data: []i8,
+    start: int,
+    count: int
+): int {
+    c: int = crc ^ 4294967295;
+    for i in start..start + count c = crc32_table[(c ^ data[i] as int) & 255] ^ c >> 8;
+    c ^ 4294967295
+}
+
+// Adler-32 (zlib's checksum) of count bytes of data from start.
+tag deflate
+adler32(data: []i8, start: int, count: int): int {
+    a: int = 1;
+    b: int = 0;
+    i: int = start;
+    end: int = start + count;
+    while (i < end) {
+        // (5552 bytes is the most that cannot overflow 32-bit sums in
+        // zlib; with 64-bit ints, reducing at the same pace is ample.)
+        stop: int = if (end - i > 5552) i + 5552 else end;
+        while (i < stop) {
+            a = a + (data[i] as int & 255);
+            b = b + a;
+            i = i + 1
+        }
+        a = a % 65521;
+        b = b % 65521
+    }
+    b << 16 | a
+}
+
+// ---- Huffman codes ----
+FAST_BITS: int = 10;
+
+FAST_MASK: int = 1023;
+
+MAX_CODE_BITS: int = 15;
+
+// A canonical Huffman code: fast[next FAST_BITS bits] is symbol << 4 |
+// code length for codes of at most FAST_BITS bits (0: a longer code, or
+// none); counts[n] is how many codes are n bits long, and symbols lists
+// the symbols in code order, for decoding longer codes.
+type HuffmanCode = {
+    fast: []int;
+    counts: []int;
+    symbols: []int
+}
+
+huffman_code_new(most_symbols: int): HuffmanCode@new {
+    HuffmanCode { fast: new int[FAST_MASK + 1](0), counts: new int[MAX_CODE_BITS + 1](0), symbols: new int[most_symbols](0) }
+}
+
+// Code n symbols whose lengths are lengths[first..first + n] (0: unused).
+// The result says how complete the code is: 0 complete (or no codes at
+// all), above 0 incomplete, below 0 over-subscribed.
+huffman_build(
+    code: *HuffmanCode,
+    lengths: []int,
+    first: int,
+    n: int
+): int {
+    for bits in 0..MAX_CODE_BITS + 1 code.counts[bits] = 0;
+    for symbol in 0..n code.counts[lengths[first + symbol]] = code.counts[lengths[first + symbol]] + 1;
+    for i in 0..FAST_MASK + 1 code.fast[i] = 0;
+    if (code.counts[0] == n) return 0;
+    left: int = 1;
+    for bits in 1..MAX_CODE_BITS + 1 {
+        left = left * 2 - code.counts[bits];
+        if (left < 0) return left
+    }
+    // Each length's first index into symbols, and its first code.
+    offsets: [16]int = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    next_code: [16]int = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for bits in 1..MAX_CODE_BITS offsets[bits + 1] = offsets[bits] + code.counts[bits];
+    // (Canonical codes, as RFC 1951 §3.2.2 assigns them.)
+    value: int = 0;
+    for bits in 1..MAX_CODE_BITS + 1 {
+        value = value + (if (bits == 1) 0 else code.counts[bits - 1]) << 1;
+        next_code[bits] = value
+    }
+    for symbol in 0..n {
+        bits: int = lengths[first + symbol];
+        if (bits != 0) {
+            code.symbols[offsets[bits]] = symbol;
+            offsets[bits] = offsets[bits] + 1;
+            canonical: int = next_code[bits];
+            next_code[bits] = canonical + 1;
+            if (bits <= FAST_BITS) {
+                // (Codes are read most significant bit first; the buffer
+                // holds them reversed.)
+                reversed: int = 0;
+                for b in 0..bits reversed = reversed << 1 | canonical >> b & 1;
+                entry: int = symbol << 4 | bits;
+                index: int = reversed;
+                while (index <= FAST_MASK) {
+                    code.fast[index] = entry;
+                    index = index + (1 << bits)
+                }
+            }
+        }
+    }
+    left
+}
+
+// ---- the decoder ----
+// One stream being decoded: the input between position and end not yet
+// in the bit buffer; the output written so far (produced bytes), at most
+// limit of them. Exact decoding writes output[produced]; measuring writes
+// a 32 KiB window, output[produced & mask].
+type Inflater = {
+    source: []i8;
+    position: int;
+    end: int;
+    bits: int;
+    bit_count: int;
+    output: []i8;
+    produced: int;
+    mask: int;
+    limit: int;
+    literals: HuffmanCode;
+    distances: HuffmanCode;
+    lengths: HuffmanCode;
+    code_lengths: []int
+}
+
+WINDOW_SIZE: int = 32768;
+
+EXACT_MASK: int = -1;
+
+// The limit when measuring: the largest int.
+NO_LIMIT: int = 9223372036854775807;
+
+length_bases: []int = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35,
+    43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+
+length_extra_bits: []int = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3,
+    3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+
+distance_bases: []int = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+    257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+
+distance_extra_bits: []int = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7,
+    8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+
+// The order a dynamic block lists its code-length code's lengths in.
+code_length_order: []int = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2,
+    14, 1, 15];
+
+// The offset of the first input byte not wholly consumed.
+inflater_offset(state: *Inflater): int {
+    state.position - state.bit_count / 8
+}
+
+inflater_fail(state: *Inflater, failure: DeflateFailure) raises DeflateError {
+    raise DeflateError { failure: failure, at: inflater_offset(state) }
+}
+
+refill(state: *Inflater) {
+    while (state.bit_count <= 48 && state.position < state.end) {
+        state.bits = state.bits | (state.source[state.position] as int & 255) << state.bit_count;
+        state.position = state.position + 1;
+        state.bit_count = state.bit_count + 8
+    }
+}
+
+take_bits(state: *Inflater, n: int) raises DeflateError: int {
+    if (state.bit_count < n) {
+        refill(state);
+        if (state.bit_count < n) inflater_fail(state, DeflateFailure.Truncated)
+    }
+    value: int = state.bits & (1 << n) - 1;
+    state.bits = state.bits >> n;
+    state.bit_count = state.bit_count - n;
+    value
+}
+
+decode_symbol(state: *Inflater, code: *HuffmanCode) raises DeflateError: int {
+    if (state.bit_count < MAX_CODE_BITS) refill(state);
+    entry: int = code.fast[state.bits & FAST_MASK];
+    if (entry != 0) {
+        bits: int = entry & 15;
+        if (bits > state.bit_count) inflater_fail(state, DeflateFailure.Truncated);
+        state.bits = state.bits >> bits;
+        state.bit_count = state.bit_count - bits;
+        return entry >> 4
+    }
+    // (A longer code, or none: walk the canonical code a bit at a time.)
+    pending: int = state.bits;
+    value: int = 0;
+    first: int = 0;
+    index: int = 0;
+    for bits in 1..MAX_CODE_BITS + 1 {
+        if (bits > state.bit_count) inflater_fail(state, DeflateFailure.Truncated);
+        value = value | pending & 1;
+        pending = pending >> 1;
+        count: int = code.counts[bits];
+        if (value - first < count) {
+            state.bits = state.bits >> bits;
+            state.bit_count = state.bit_count - bits;
+            return code.symbols[index + value - first]
+        }
+        index = index + count;
+        first = first + count << 1;
+        value = value << 1
+    }
+    inflater_fail(state, DeflateFailure.BadSymbol);
+    0
+}
+
+inflate_stored(state: *Inflater) raises DeflateError {
+    // (To a byte boundary; then the length and its complement, and the
+    // bytes after them taken straight from the input.)
+    _padding: int = take_bits(state, state.bit_count % 8);
+    length: int = take_bits(state, 16);
+    complement: int = take_bits(state, 16);
+    if (length != (complement ^ 65535)) inflater_fail(state, DeflateFailure.BadStoredLength);
+    state.position = state.position - state.bit_count / 8;
+    state.bits = 0;
+    state.bit_count = 0;
+    if (length > state.end - state.position) inflater_fail(state, DeflateFailure.Truncated);
+    if (length > state.limit - state.produced) inflater_fail(state, DeflateFailure.SizeMismatch);
+    if (state.mask == EXACT_MASK) memcpy(state.output, state.produced, state.source,
+        state.position, length) else {
+        for i in 0..length state.output[state.produced + i & state.mask] = state.source[state.position + i]
+    }
+    state.position = state.position + length;
+    state.produced = state.produced + length
+}
+
+inflate_fixed_codes(state: *Inflater) {
+    lengths: []int = state.code_lengths;
+    for symbol in 0..288 lengths[symbol] = (if (symbol < 144) 8 else if (symbol < 256) 9 else if (symbol < 280) 7 else 8);
+    for symbol in 0..30 lengths[288 + symbol] = 5;
+    _literals: int = huffman_build(&state.literals, lengths, 0, 288);
+    _distances: int = huffman_build(&state.distances, lengths, 288, 30)
+}
+
+inflate_dynamic_codes(state: *Inflater) raises DeflateError {
+    literal_count: int = take_bits(state, 5) + 257;
+    distance_count: int = take_bits(state, 5) + 1;
+    length_code_count: int = take_bits(state, 4) + 4;
+    if (literal_count > 286 || distance_count > 30) inflater_fail(state, DeflateFailure.BadCodeLengths);
+    lengths: []int = state.code_lengths;
+    for i in 0..19 lengths[i] = 0;
+    for i in 0..length_code_count lengths[code_length_order[i]] = take_bits(state,
+        3);
+    if (huffman_build(&state.lengths, lengths, 0, 19) != 0) inflater_fail(state, DeflateFailure.BadCodeLengths);
+    total: int = literal_count + distance_count;
+    index: int = 0;
+    while (index < total) {
+        symbol: int = decode_symbol(state, &state.lengths);
+        if (symbol < 16) {
+            lengths[index] = symbol;
+            index = index + 1
+        } else {
+            repeated: int = 0;
+            times: int = 0;
+            if (symbol == 16) {
+                if (index == 0) inflater_fail(state, DeflateFailure.BadCodeLengths);
+                repeated = lengths[index - 1];
+                times = 3 + take_bits(state, 2)
+            } else if (symbol == 17) times = 3 + take_bits(state, 3) else times = 11 + take_bits(state,
+                7);
+            if (index + times > total) inflater_fail(state, DeflateFailure.BadCodeLengths);
+            for _i in 0..times {
+                lengths[index] = repeated;
+                index = index + 1
+            }
+        }
+    }
+    // (A block must be able to end.)
+    if (lengths[256] == 0) inflater_fail(state, DeflateFailure.BadCodeLengths);
+    // (An incomplete code is allowed only as a single code.)
+    literals: int = huffman_build(&state.literals, lengths, 0, literal_count);
+    if (literals < 0 || literals > 0 && literal_count - state.literals.counts[0] != 1) inflater_fail(state,
+        DeflateFailure.BadCodeLengths);
+    distances: int = huffman_build(&state.distances, lengths, literal_count, distance_count);
+    if (distances < 0 || distances > 0 && distance_count - state.distances.counts[0] != 1) inflater_fail(state,
+        DeflateFailure.BadCodeLengths)
+}
+
+// A back-reference: length bytes from distance back.
+inflate_copy(state: *Inflater, distance: int, length: int) raises DeflateError {
+    output: []i8 = state.output;
+    mask: int = state.mask;
+    at: int = state.produced;
+    if (distance > at) inflater_fail(state, DeflateFailure.BadDistance);
+    if (length > state.limit - at) inflater_fail(state, DeflateFailure.SizeMismatch);
+    if (mask == EXACT_MASK && distance >= length) memcpy(output, at, output, at - distance,
+        length) else {
+        for i in at..at + length output[i & mask] = output[i - distance & mask]
+    }
+    state.produced = at + length
+}
+
+// A block's codes, to its end-of-block symbol.
+inflate_codes(state: *Inflater) raises DeflateError {
+    output: []i8 = state.output;
+    mask: int = state.mask;
+    while (true) {
+        symbol: int = decode_symbol(state, &state.literals);
+        if (symbol < 256) {
+            if (state.produced >= state.limit) inflater_fail(state, DeflateFailure.SizeMismatch);
+            output[state.produced & mask] = symbol trunc i8;
+            state.produced = state.produced + 1
+        } else {
+            if (symbol == 256) return;
+            length_symbol: int = symbol - 257;
+            if (length_symbol >= 29) inflater_fail(state, DeflateFailure.BadSymbol);
+            length: int = length_bases[length_symbol] + take_bits(state, length_extra_bits[length_symbol]);
+            distance_symbol: int = decode_symbol(state, &state.distances);
+            if (distance_symbol >= 30) inflater_fail(state, DeflateFailure.BadSymbol);
+            distance: int = distance_bases[distance_symbol] + take_bits(state, distance_extra_bits[distance_symbol]);
+            inflate_copy(state, distance, length)
+        }
+    }
+}
+
+// Decode the stream to its final block; the offset of the byte after it.
+inflate_blocks(state: *Inflater) raises DeflateError: int {
+    final: bool = false;
+    while (!final) {
+        final = take_bits(state, 1) == 1;
+        block_type: int = take_bits(state, 2);
+        if (block_type == 0) inflate_stored(state) else if (block_type == 1) {
+            inflate_fixed_codes(state);
+            inflate_codes(state)
+        } else if (block_type == 2) {
+            inflate_dynamic_codes(state);
+            inflate_codes(state)
+        } else inflater_fail(state, DeflateFailure.BadBlockType)
+    }
+    inflater_offset(state)
+}
+
+// A stream's decoded size and the offset just after it.
+type StreamExtent = {
+    size: int;
+    stream_end: int
+}
+
+// Decode source[start..end) into output, at most limit bytes, writing
+// output[produced & mask] (EXACT_MASK: output is the whole result).
+inflate_run(
+    source: []i8,
+    start: int,
+    end: int,
+    output: []i8,
+    mask: int,
+    limit: int
+) raises DeflateError: StreamExtent {
+    extent: StreamExtent = StreamExtent { size: 0, stream_end: 0 };
+    region {
+        state: Inflater = Inflater {
+            source: source,
+            position: start,
+            end: end,
+            bits: 0,
+            bit_count: 0,
+            output: output,
+            produced: 0,
+            mask: mask,
+            limit: limit,
+            literals: huffman_code_new(288),
+            distances: huffman_code_new(32),
+            lengths: huffman_code_new(19),
+            code_lengths: new int[320](0)
+        };
+        extent.stream_end = inflate_blocks(&state);
+        extent.size = state.produced
+    }
+    extent
+}
+
+// The stream's extent, found by decoding through a window (the output is
+// not kept).
+inflate_measure(source: []i8, start: int, end: int) raises DeflateError: StreamExtent {
+    extent: StreamExtent = StreamExtent { size: 0, stream_end: 0 };
+    region {
+        window: []i8 = new i8[WINDOW_SIZE](0i8);
+        extent = inflate_run(source, start, end, window, WINDOW_SIZE - 1, NO_LIMIT)
+    }
+    extent
+}
+
+// Decode the stream into all of output, which must be its exact size; the
+// offset just after the stream.
+inflate_exact(
+    source: []i8,
+    start: int,
+    end: int,
+    output: []i8
+) raises DeflateError: int {
+    extent: StreamExtent = inflate_run(source, start, end, output, EXACT_MASK, len(output));
+    if (extent.size != len(output)) raise DeflateError { failure: DeflateFailure.SizeMismatch, at: extent.stream_end };
+    extent.stream_end
+}
+
+check_span(source: []i8, start: int, count: int) raises DeflateError {
+    if (start < 0 || count < 0 || start > len(source) - count) raise DeflateError { failure: DeflateFailure.InvalidSpan, at: 0 }
+}
+
+// Decode source[start..start + count) into a new slice of exactly the
+// stream's size. expected_size is that size when known (a mismatch is an
+// error); -1 decodes twice, first only to measure. The span must hold the
+// stream and nothing after it.
+tag deflate
+inflate(
+    source: []i8,
+    start: int,
+    count: int,
+    expected_size: int
+) raises DeflateError: []i8@new {
+    check_span(source, start, count);
+    end: int = start + count;
+    size: int = if (expected_size >= 0) expected_size else inflate_measure(source,
+        start, end).size;
+    output: []i8 = new i8[size](0i8);
+    stream_end: int = inflate_exact(source, start, end, output);
+    if (stream_end != end) raise DeflateError { failure: DeflateFailure.TrailingData, at: stream_end };
+    output
+}
+
+big_endian_32(source: []i8, at: int): int {
+    (source[at] as int & 255) << 24 | (source[at + 1] as int & 255) << 16 | (source[at + 2] as int & 255) << 8 | source[at + 3] as int & 255
+}
+
+little_endian_16(source: []i8, at: int): int {
+    source[at] as int & 255 | (source[at + 1] as int & 255) << 8
+}
+
+little_endian_32(source: []i8, at: int): int {
+    little_endian_16(source, at) | little_endian_16(source, at + 2) << 16
+}
+
+// A zlib stream (a two-byte header, DEFLATE data and its Adler-32) in
+// source[start..start + count), decoded as inflate decodes. Preset
+// dictionaries are not supported (BadHeader).
+tag deflate
+zlib_decompress(
+    source: []i8,
+    start: int,
+    count: int,
+    expected_size: int
+) raises DeflateError: []i8@new {
+    zlib_decode(source, start, count, expected_size, false)
+}
+
+// The zlib stream that begins source[start..start + count), decoded as
+// zlib_decompress decodes; bytes after its checksum are left unread
+// (padding that some formats leave after a stream, as SWORD's compressed
+// blocks do), so the span need only hold the stream.
+tag deflate
+zlib_decompress_leading(
+    source: []i8,
+    start: int,
+    count: int,
+    expected_size: int
+) raises DeflateError: []i8@new {
+    zlib_decode(source, start, count, expected_size, true)
+}
+
+zlib_decode(
+    source: []i8,
+    start: int,
+    count: int,
+    expected_size: int,
+    leading: bool
+) raises DeflateError: []i8@new {
+    check_span(source, start, count);
+    if (count < 6) raise DeflateError { failure: DeflateFailure.Truncated, at: start + count };
+    method: int = source[start] as int & 255;
+    flags: int = source[start + 1] as int & 255;
+    if ((method & 15) != 8 || method >> 4 > 7 || (method << 8 | flags) % 31 != 0 || (flags & 32) != 0) raise DeflateError { failure: DeflateFailure.BadHeader, at: start };
+    // (The stream's data: up to its checksum, or to the span's end when
+    // more may follow it.)
+    body_end: int = if (leading) start + count else start + count - 4;
+    size: int = if (expected_size >= 0) expected_size else inflate_measure(source,
+        start + 2, body_end).size;
+    output: []i8 = new i8[size](0i8);
+    stream_end: int = inflate_exact(source, start + 2, body_end, output);
+    if (leading) {
+        if (stream_end + 4 > start + count) raise DeflateError { failure: DeflateFailure.Truncated, at: start + count }
+    } else if (stream_end != body_end) raise DeflateError { failure: DeflateFailure.TrailingData, at: stream_end };
+    if (adler32(output, 0, size) != big_endian_32(source, stream_end)) raise DeflateError { failure: DeflateFailure.BadChecksum, at: stream_end };
+    output
+}
+
+GZIP_HEADER_CRC_FLAG: int = 2;
+
+GZIP_EXTRA_FLAG: int = 4;
+
+GZIP_NAME_FLAG: int = 8;
+
+GZIP_COMMENT_FLAG: int = 16;
+
+// The offset after a zero-terminated header field from at.
+gzip_skip_string(source: []i8, at: int, end: int) raises DeflateError: int {
+    p: int = at;
+    while (p < end && source[p] as int != 0) p = p + 1;
+    if (p >= end) raise DeflateError { failure: DeflateFailure.Truncated, at: end };
+    p + 1
+}
+
+// One gzip member in source[start..start + count), its whole span: the
+// data, checked against the member's CRC-32 and size. A file of several
+// members fails with TrailingData.
+// The most a DEFLATE stream makes of each byte: a 258-byte match coded
+// in two bits, four to a byte.
+DEFLATE_MOST_EXPANSION: int = 1032;
+
+tag deflate
+gzip_decompress(source: []i8, start: int, count: int) raises DeflateError: []i8@new {
+    check_span(source, start, count);
+    end: int = start + count;
+    if (count < 18) raise DeflateError { failure: DeflateFailure.Truncated, at: end };
+    if ((source[start] as int & 255) != 31 || (source[start + 1] as int & 255) != 139 || source[start + 2] as int != 8) raise DeflateError { failure: DeflateFailure.BadHeader, at: start };
+    flags: int = source[start + 3] as int & 255;
+    if ((flags & 224) != 0) raise DeflateError { failure: DeflateFailure.BadHeader, at: start + 3 };
+    trailer: int = end - 8;
+    p: int = start + 10;
+    if ((flags & GZIP_EXTRA_FLAG) != 0) {
+        if (p + 2 > trailer) raise DeflateError { failure: DeflateFailure.Truncated, at: p };
+        p = p + 2 + little_endian_16(source, p)
+    }
+    if ((flags & GZIP_NAME_FLAG) != 0) p = gzip_skip_string(source, p, trailer);
+    if ((flags & GZIP_COMMENT_FLAG) != 0) p = gzip_skip_string(source, p, trailer);
+    if ((flags & GZIP_HEADER_CRC_FLAG) != 0) {
+        if (p + 2 > trailer) raise DeflateError { failure: DeflateFailure.Truncated, at: p };
+        if ((crc32(source, start, p - start) & 65535) != little_endian_16(source,
+            p)) raise DeflateError { failure: DeflateFailure.BadChecksum, at: p };
+        p = p + 2
+    }
+    if (p > trailer) raise DeflateError { failure: DeflateFailure.Truncated, at: p };
+    // (ISIZE is the size modulo 2^32: members of 4 GiB or more fail.)
+    size: int = little_endian_32(source, trailer + 4);
+    // (More than the stream could ever make is damage, found before so
+    // much is allocated.)
+    if (size > (trailer - p) * DEFLATE_MOST_EXPANSION) raise DeflateError { failure: DeflateFailure.SizeMismatch, at: trailer + 4 };
+    output: []i8 = new i8[size](0i8);
+    stream_end: int = 0;
+    try {
+        stream_end = inflate_exact(source, p, trailer, output)
+    } with DeflateError error -> {
+        // (A stream that ends before the last member's trailer is
+        // followed by another member: say so rather than a size.)
+        match error.failure {
+            SizeMismatch -> {
+                extent: StreamExtent = inflate_measure(source, p, trailer);
+                if (extent.stream_end < trailer) raise DeflateError { failure: DeflateFailure.TrailingData, at: extent.stream_end }
+            }
+            _ -> { }
+        }
+        raise DeflateError { failure: error.failure, at: error.at }
+    }
+    if (stream_end != trailer) raise DeflateError { failure: DeflateFailure.TrailingData, at: stream_end };
+    if (crc32(output, 0, size) != little_endian_32(source, trailer)) raise DeflateError { failure: DeflateFailure.BadChecksum, at: trailer };
+    output
+}

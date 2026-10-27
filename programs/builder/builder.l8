@@ -1,0 +1,129 @@
+tag builder_internal;
+
+import "../../stdlib/print.l8";
+
+// Bytes gathered into one growing slice: text or binary data whose size
+// is not known before it is made. Its first `size` bytes of `data` are what
+// was added; the rest is room. It grows from the allocation destination of
+// the call that adds to it, so add to a builder where it was allocated (the
+// compiler checks this): in its own region or arena, or through a caller's
+// parameter at that caller's destination.
+tag builder
+type ByteBuilder = {
+    data: []i8;
+    size: int
+}
+
+tag builder
+builder_new(capacity: int): *ByteBuilder@new {
+    new ByteBuilder { data: new i8[if (capacity < 16) 16 else capacity](0i8), size: 0 }
+}
+
+// Room for count more bytes.
+tag builder
+builder_reserve(builder: *ByteBuilder@new, count: int) {
+    need: int = builder.size + count;
+    if (need <= len(builder.data)) return;
+    capacity: int = len(builder.data) * 2;
+    while (capacity < need) capacity = capacity * 2;
+    grown: []i8 = new i8[capacity](0i8);
+    memcpy(grown, 0, builder.data, 0, builder.size);
+    builder.data = grown
+}
+
+tag builder
+builder_byte(builder: *ByteBuilder@new, byte: i8) {
+    if (builder.size == len(builder.data)) builder_reserve(builder, 1);
+    builder.data[builder.size] = byte;
+    builder.size = builder.size + 1
+}
+
+// Bytes from up to (not including) to of source.
+tag builder
+builder_bytes(
+    builder: *ByteBuilder@new,
+    source: []i8,
+    from: int,
+    to: int
+) {
+    if (to <= from) return;
+    builder_reserve(builder, to - from);
+    memcpy(builder.data, builder.size, source, from, to - from);
+    builder.size = builder.size + to - from
+}
+
+tag builder
+builder_str(builder: *ByteBuilder@new, text: str) {
+    builder_reserve(builder, len(text));
+    for byte in text {
+        builder.data[builder.size] = byte;
+        builder.size = builder.size + 1
+    }
+}
+
+// A whole number in decimal, with a minus sign if negative.
+tag builder
+builder_int(builder: *ByteBuilder@new, value: int) {
+    if (value < 0) {
+        builder_byte(builder, '-' as i8);
+        // (The most negative number has no positive counterpart.)
+        if (value == 0 - 9223372036854775807 - 1) {
+            builder_str(builder, "9223372036854775808");
+            return
+        }
+        value = 0 - value
+    }
+    divisor: int = 1;
+    while (divisor <= value / 10) divisor = divisor * 10;
+    while (divisor > 0) {
+        builder_byte(builder, (48 + value / divisor % 10) trunc i8);
+        divisor = divisor / 10
+    }
+}
+
+// Everything added, as a slice exactly its length.
+tag builder
+builder_slice(builder: *ByteBuilder): []i8@new {
+    out: []i8 = new i8[builder.size](0i8);
+    memcpy(out, 0, builder.data, 0, builder.size);
+    out
+}
+
+// Bytes from up to to of what was added, as a string; a NUL among them is
+// an error, as cstr reports it. A span outside what was added fails as a
+// slice's bounds do (it is copied from a slice exactly that long).
+tag builder
+builder_text(builder: *ByteBuilder, from: int, to: int): str@new {
+    added: []i8 = builder_slice(builder);
+    piece: []i8 = new i8[to - from](0i8);
+    memcpy(piece, 0, added, from, to - from);
+    cstr(piece)
+}
+
+// What was added, forgotten; its room kept.
+tag builder
+builder_clear(builder: *ByteBuilder) {
+    builder.size = 0
+}
+
+test "a builder gathers text and numbers" {
+    text: *ByteBuilder = builder_new(1);
+    builder_str(text, "Psalm ");
+    builder_int(text, 119);
+    builder_str(text, " has ");
+    builder_int(text, 176);
+    builder_bytes(text, bytes(" verses, the most"), 0, 7);
+    std::print(builder_text(text, 0, text.size));
+    // (Its first word again, from where it is.)
+    std::print(builder_text(text, 0, 5));
+    builder_clear(text);
+    builder_int(text, 0 - 40);
+    std::print(builder_text(text, 0, text.size));
+    std::print_int(len(builder_slice(text)));
+    expect {|
+        Psalm 119 has 176 verses
+        Psalm
+        -40
+        3
+    |}
+}

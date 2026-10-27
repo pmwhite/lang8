@@ -56,13 +56,20 @@ TEXT_ORIG: int = 6;
 // only, made for one passage at a time (esv_cache.l8). Not a version.
 TEXT_PIN: int = 7;
 
+// Bibles from the bookshelf (core/shelf.l8): from here on, a slot each
+// (TEXT_SHELF_FIRST plus its slot number there), at most TEXT_SHELF_MOST.
+TEXT_SHELF_FIRST: int = 8;
+
+TEXT_SHELF_MOST: int = 32;
+
 text_cur: int = 0;
 
 // Each text's verses a chapter (its last verse's number): plain numbers,
 // kept per text (each process-long), so they are read without the text.
-tx_ch_verses: [][]int = new []int[8](new int[0](0));
+tx_ch_verses: [][]int = new []int[TEXT_SHELF_FIRST + TEXT_SHELF_MOST](new int[0](0));
 
-// Their names, short and in full.
+// The bundled versions' names, short and in full (text_abbr, text_name:
+// any text's, the bookshelf's included).
 text_abbrs: []str = ["BSB", "KJV", "WEB", "ASV", "YLT", "ESV", "Hebrew and Greek"];
 
 text_names: []str = ["Berean Standard Bible", "King James Version", "World English Bible",
@@ -76,6 +83,136 @@ version_lines: []str = ["BSB \Â\· Modern, word-for-word and readable", "KJV \Â\·
 // Whether a version marks the words of Jesus (W records): the ASV and the
 // YLT do not.
 version_red: []bool = [true, true, true, false, false, true, false];
+
+// The versions past the bundled ones (a bookshelf Bible's, from
+// TEXT_SHELF_FIRST): their names as the bookshelf says them
+// (text_name_version), kept in a pool of their own, so that naming one
+// allocates nothing. One never named, or let go, is not a version.
+type VersionNames = {
+    named: bool;
+    red: bool;
+    // Its short name, name and Versions' line: bytes of the pool, each
+    // from its start up to its end.
+    abbreviation_at: int;
+    abbreviation_end: int;
+    name_at: int;
+    name_end: int;
+    line_at: int;
+    line_end: int
+}
+
+no_version_names: VersionNames = VersionNames {
+    named: false,
+    red: false,
+    abbreviation_at: 0,
+    abbreviation_end: 0,
+    name_at: 0,
+    name_end: 0,
+    line_at: 0,
+    line_end: 0
+};
+
+text_extra_names: []VersionNames = new VersionNames[TEXT_SHELF_MOST](no_version_names);
+
+// Each version's names take at most 768 bytes (their makers cut them).
+TEXT_NAMES_MOST: int = 768;
+
+text_names_pool: []i8 = new i8[TEXT_SHELF_MOST * TEXT_NAMES_MOST](0i8);
+
+// Text t (a bookshelf Bible's) named: short name, name and line, each the
+// bytes of source from up to to, and whether it marks the words of Jesus.
+// Whether it could be (t is a bookshelf slot and its names fit).
+text_name_version(
+    t: int,
+    abbreviation: str,
+    name: str,
+    line: str,
+    red: bool
+): bool {
+    k: int = t - TEXT_SHELF_FIRST;
+    if (k < 0 || k >= TEXT_SHELF_MOST || len(abbreviation) + len(name) + len(line) > TEXT_NAMES_MOST) return false;
+    at: int = k * TEXT_NAMES_MOST;
+    names: VersionNames = VersionNames {
+        named: true,
+        red: red,
+        abbreviation_at: at,
+        abbreviation_end: at + len(abbreviation),
+        name_at: at + len(abbreviation),
+        name_end: at + len(abbreviation) + len(name),
+        line_at: at + len(abbreviation) + len(name),
+        line_end: at + len(abbreviation) + len(name) + len(line)
+    };
+    for i in 0..len(abbreviation) text_names_pool[at + i] = abbreviation[i];
+    for i in 0..len(name) text_names_pool[names.name_at + i] = name[i];
+    for i in 0..len(line) text_names_pool[names.line_at + i] = line[i];
+    text_extra_names[k] = names;
+    true
+}
+
+// Text t (a bookshelf Bible's) no longer a version.
+text_unname_version(t: int) {
+    k: int = t - TEXT_SHELF_FIRST;
+    if (k >= 0 && k < TEXT_SHELF_MOST) text_extra_names[k] = no_version_names
+}
+
+text_extra(t: int): VersionNames {
+    k: int = t - TEXT_SHELF_FIRST;
+    if (k >= 0 && k < TEXT_SHELF_MOST) text_extra_names[k] else no_version_names
+}
+
+// Text t's short name (BSB), name (Berean Standard Bible) and line about
+// it in Versions, onto fbuf; whether it marks the words of Jesus.
+fput_text_abbr(t: int) {
+    if (t >= 0 && t < TEXTS) fput_str(text_abbrs[t]) else {
+        names: VersionNames = text_extra(t);
+        fput_bytes(text_names_pool, names.abbreviation_at, names.abbreviation_end)
+    }
+}
+
+fput_text_name(t: int) {
+    if (t >= 0 && t < TEXTS) fput_str(text_names[t]) else {
+        names: VersionNames = text_extra(t);
+        fput_bytes(text_names_pool, names.name_at, names.name_end)
+    }
+}
+
+fput_version_line(t: int) {
+    if (t >= 0 && t < TEXTS) fput_str(version_lines[t]) else {
+        names: VersionNames = text_extra(t);
+        fput_bytes(text_names_pool, names.line_at, names.line_end)
+    }
+}
+
+version_marks_red(t: int): bool {
+    if (t >= 0 && t < TEXTS) version_red[t] else text_extra(t).red
+}
+
+// Whether line's bytes from b up to e are text t's short name.
+text_abbr_is(
+    t: int,
+    line: []i8,
+    b: int,
+    e: int
+): bool {
+    if (t >= 0 && t < TEXTS) {
+        abbreviation: str = text_abbrs[t];
+        if (e - b != len(abbreviation)) return false;
+        for i in 0..len(abbreviation)
+            if (line[b + i] != abbreviation[i]) return false;
+        return true
+    }
+    names: VersionNames = text_extra(t);
+    if (!names.named || e - b != names.abbreviation_end - names.abbreviation_at) return false;
+    for i in 0..e - b
+        if (line[b + i] != text_names_pool[names.abbreviation_at + i]) return false;
+    true
+}
+
+// Whether t is a version's slot (bundled, or a named bookshelf Bible's),
+// as opposed to Memory's passages (TEXT_PIN) or none.
+text_is_version(t: int): bool {
+    t >= 0 && t < TEXTS || text_extra(t).named
+}
 
 // ---- each text: a dataset of its own ----
 // A version's records (the format above) and where each chapter's are:
@@ -128,7 +265,7 @@ texts: []?owned *TextData = texts_begin();
 
 texts_begin() noregion: []?owned *TextData@new {
     bible_numbering();
-    slots: []?owned *TextData = new ?owned *TextData[TEXT_PIN + 1](null);
+    slots: []?owned *TextData = new ?owned *TextData[TEXT_SHELF_FIRST + TEXT_SHELF_MOST](null);
     for t in 0..len(slots) {
         slots[t] = text_empty(t);
         tx_ch_verses[t] = new int[chapters](0)
@@ -166,7 +303,7 @@ text_empty(t: int): owned *TextData {
 
 // Whether text t's records have come.
 text_ready(t: int): bool {
-    if (t < 0 || t > TEXT_PIN) return false;
+    if (t < 0 || t >= len(texts)) return false;
     borrow texts[t] as text {
         text.ready
     }
@@ -174,7 +311,7 @@ text_ready(t: int): bool {
 
 // Whether text t holds chapter c's records (the ESV's: once fetched).
 text_holds(t: int, c: int): bool {
-    if (t < 0 || t > TEXT_PIN || c < 0 || c >= chapters) return false;
+    if (t < 0 || t >= len(texts) || c < 0 || c >= chapters) return false;
     borrow texts[t] as text {
         text.starts[c] >= 0
     }
@@ -242,7 +379,7 @@ text_replace(t: int, next: owned *TextData) {
 
 // Whether text t has verse v of chapter c (scanned, as verse_text does).
 text_has(t: int, c: int, v: int): bool {
-    if (t < 0 || t > TEXT_PIN) return false;
+    if (t < 0 || t >= len(texts)) return false;
     if (!text_ready(t)) return false;
     borrow texts[t] as source {
         source_has_verse(source, c, v)
@@ -1006,7 +1143,7 @@ verse_text(c: int, v: int): int {
 // An unavailable version has no words; never quote the current one instead.
 verse_text_of(t: int, c: int, v: int): int {
     vt_n = 0;
-    if (t < 0 || t > TEXT_PIN) return 0;
+    if (t < 0 || t >= len(texts)) return 0;
     if (!text_ready(t)) return 0;
     borrow texts[t] as source {
         source_verse_text(source, c, v)
@@ -1919,16 +2056,26 @@ xr_ce: int = 0;
 
 xr_ve: int = 0;
 
+// A place packed as a start is (book 0 and up) or an end (book 0).
+xref_place(book: int, c: int, v: int): int {
+    book * 16777216 + c * 4096 + v
+}
+
+// A start and an end in one number.
+xref_pair(start: int, end: int): int {
+    start * 16777216 + end
+}
+
 xref_start(): int {
-    xr_book * 16777216 + xr_c * 4096 + xr_v
+    xref_place(xr_book, xr_c, xr_v)
 }
 
 xref_end(): int {
-    if (xr_ce == 0) 0 else xr_ce * 4096 + xr_ve
+    if (xr_ce == 0) 0 else xref_place(0, xr_ce, xr_ve)
 }
 
 xref_both(): int {
-    xref_start() * 16777216 + xref_end()
+    xref_pair(xref_start(), xref_end())
 }
 
 // A reference from its numbers (both in one, or start and end): xr_book

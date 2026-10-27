@@ -1,0 +1,430 @@
+tag compiler_internal;
+
+type DiagnosticSource = {
+    path: []i8;
+    text: []i8;
+    length: int
+}
+
+type DiagnosticSpan = {
+    file: int;
+    pos: int;
+    length: int
+}
+
+type LifetimeDiagnostics = {
+    output: *StrBuf;
+    count: int
+}
+
+check_integer_literal_range(
+    pos: int,
+    spelling: []i8,
+    value: int,
+    ty: *Type,
+    maximum: int
+) noregion raises Error {
+    if (value >= 0 && value <= maximum) return;
+    message: *StrBuf = sb_new();
+    append_type(message, ty);
+    sb_puts(message, " literal ");
+    sb_puts(message, spelling);
+    sb_puts(message, " is outside 0..");
+    sb_uint(message, maximum);
+    error_at(pos, sb_finish(message))
+}
+
+error_expression_requirement(value: *Expr, requirement: []i8) noregion raises Error: noreturn {
+    message: *StrBuf = sb_new();
+    sb_puts(message, requirement);
+    sb_puts(message, ", got ");
+    append_expr_ty(message, value);
+    pos: int = value.pos;
+    if (value.source_end > value.source_start) pos = value.source_start;
+    error_at_file(value.file, pos, sb_finish(message))
+}
+
+error_nullable_use(value: *Expr, operation: []i8) noregion raises Error: noreturn {
+    message: *StrBuf = sb_new();
+    match value.kind {
+        Var reference -> sb_puts(message, reference.name);
+        _ -> sb_puts(message, "this value")
+    }
+    sb_puts(message, " may be null; ");
+    if (opt_local_var(value) == null) sb_puts(message, "bind it once to a local and ");
+    sb_puts(message, "check for null before ");
+    sb_puts(message, operation);
+    pos: int = value.pos;
+    if (pos == 0) pos = value.source_start;
+    error_at_file(value.file, pos, sb_finish(message))
+}
+
+error_builtin_argument_type(name: []i8, value: *Expr, expected: []i8) noregion raises Error: noreturn {
+    message: *StrBuf = sb_new();
+    sb_puts(message, name);
+    sb_puts(message, " expects ");
+    sb_puts(message, expected);
+    sb_puts(message, ", got ");
+    append_expr_ty(message, value);
+    pos: int = value.pos;
+    if (value.source_end > value.source_start) pos = value.source_start;
+    error_at_file(value.file, pos, sb_finish(message))
+}
+
+// The position where a written element access begins: its innermost base.
+element_start_pos(element: *Expr): int {
+    base: *Expr = element;
+    descending: bool = true;
+    while (descending) {
+        match base.kind {
+            Index k -> base = k.lhs;
+            _ -> descending = false
+        }
+    }
+    if (base.source_end > base.source_start) return base.source_start;
+    if (base.pos == 0) return element.pos;
+    base.pos
+}
+
+// An element of a []?owned *T read as a value would become a second owner.
+error_owner_element_copy(element: *Expr) raises Error: noreturn {
+    error_at_file(element.file, element_start_pos(element), "an owner element cannot be copied; take it with `move xs[i]`, or use its root with `borrow xs[i] as name { ... }`")
+}
+
+error_owner_elements_iterated(collection: *Expr) raises Error: noreturn {
+    pos: int = collection.pos;
+    if (collection.source_end > collection.source_start) pos = collection.source_start;
+    error_at_file(collection.file, pos, "for cannot copy owner elements; loop over indexes (for i in 0..len(xs)) and move or borrow each xs[i]")
+}
+
+error_immutable_string_bytes(value: *Expr) noregion raises Error: noreturn {
+    message: *StrBuf = sb_new();
+    match value.kind {
+        Var reference -> sb_puts(message, reference.name);
+        _ -> sb_puts(message, "this value")
+    }
+    sb_puts(message, " is immutable str; use bytes(");
+    match value.kind {
+        Var reference -> sb_puts(message, reference.name);
+        _ -> sb_puts(message, "...")
+    }
+    sb_puts(message, ") for a separate mutable copy or a []i8 buffer for shared changes");
+    pos: int = value.pos;
+    if (pos == 0) pos = value.source_start;
+    error_at_file(value.file, pos, sb_finish(message))
+}
+
+error_duplicate_match_arm_at(file: int, pos: int, pattern: []i8) noregion raises Error: noreturn {
+    message: *StrBuf = sb_new();
+    sb_puts(message, "match arm for ");
+    sb_puts(message, pattern);
+    sb_puts(message, " repeats an earlier arm");
+    error_at_file(file, pos, sb_finish(message))
+}
+
+diagnostic_source(file: int): DiagnosticSource {
+    imported: ?*ImportedFile = imported_files;
+    while (imported != null) {
+        if (imported.id == file) return DiagnosticSource { path: imported.path, text: imported.src, length: imported.src_len };
+        imported = imported.next
+    }
+    DiagnosticSource { path: source_path, text: source, length: source_len }
+}
+
+append_diagnostic_location(output: *StrBuf@new, file: int, pos: int) raises Error {
+    input: DiagnosticSource = diagnostic_source(file);
+    line: int = 1;
+    column: int = 1;
+    cursor: int = 0;
+    while (cursor < pos && cursor < input.length && cursor < len(input.text)) {
+        if (input.text[cursor] == '\n') {
+            line = line + 1;
+            column = 1
+        } else column = column + 1;
+        cursor = cursor + 1
+    }
+    sb_puts(output, diag_relative(input.path));
+    sb_putc(output, ':');
+    sb_uint(output, line);
+    sb_putc(output, ':');
+    sb_uint(output, column)
+}
+
+append_diagnostic_excerpt(output: *StrBuf@new, location: DiagnosticSpan) raises Error {
+    input: DiagnosticSource = diagnostic_source(location.file);
+    append_diagnostic_location(output, location.file, location.pos);
+    sb_puts(output, """
+
+
+""");
+    limit: int = input.length;
+    if (limit > len(input.text)) limit = len(input.text);
+    if (location.pos < 0 || location.pos >= limit) return;
+    start: int = location.pos;
+    while (start > 0 && input.text[start - 1] != '\n') start = start - 1;
+    end: int = location.pos;
+    while (end < limit && input.text[end] != '\n' && input.text[end] != '\r') end = end + 1;
+    for cursor in start..end sb_putc(output, input.text[cursor]);
+    sb_putc(output, '\n');
+    for cursor in start..location.pos {
+        if (input.text[cursor] == '\t') sb_putc(output, '\t') else sb_putc(output,
+            ' ')
+    }
+    span: int = location.length;
+    if (span < 1) span = 1;
+    if (span > end - location.pos) span = end - location.pos;
+    for _cursor in 0..span sb_putc(output, '^');
+    sb_puts(output, """
+
+
+""")
+}
+
+// Wrap prose between words, preserving complete identifiers even when a name is long.
+append_diagnostic_paragraph(output: *StrBuf@new, text: []i8) raises Error {
+    column: int = 0;
+    cursor: int = 0;
+    while (cursor < len(text)) {
+        while (cursor < len(text) && text[cursor] == ' ') cursor = cursor + 1;
+        start: int = cursor;
+        while (cursor < len(text) && text[cursor] != ' ') cursor = cursor + 1;
+        width: int = cursor - start;
+        if (width > 0) {
+            if (column > 0) {
+                if (column + 1 + width > 72) {
+                    sb_putc(output, '\n');
+                    column = 0
+                } else {
+                    sb_putc(output, ' ');
+                    column = column + 1
+                }
+            }
+            for index in start..cursor sb_putc(output, text[index]);
+            column = column + width
+        }
+    }
+    sb_puts(output, """
+
+
+""")
+}
+
+call_argument_span(call: *Expr, argument: *Expr): DiagnosticSpan {
+    argument_pos: int = argument.pos;
+    argument_file: int = argument.file;
+    argument_length: int = argument.toklen;
+    if (argument.source_end > argument.source_start) {
+        argument_pos = argument.source_start;
+        argument_length = argument.source_end - argument.source_start
+    }
+    if (argument_pos == 0) {
+        argument_pos = call.pos;
+        argument_file = call.file
+    }
+    DiagnosticSpan { file: argument_file, pos: argument_pos, length: argument_length }
+}
+
+error_nullable_argument(
+    call: *Expr,
+    callee: *Function,
+    argument: *Expr,
+    parameter: *Obj
+) noregion raises Error: noreturn {
+    output: *StrBuf = sb_new();
+    append_diagnostic_excerpt(output, call_argument_span(call, argument));
+    local: ?*Obj = opt_local_var(argument);
+    paragraph: *StrBuf = sb_new();
+    match argument.kind {
+        Var reference -> sb_puts(paragraph, reference.name);
+        _ -> sb_puts(paragraph, "This argument")
+    }
+    sb_puts(paragraph, " may be null; parameter ");
+    sb_puts(paragraph, parameter.name);
+    sb_puts(paragraph, " of ");
+    callee_name: []i8 = callee.name;
+    if (len(callee_name) == 0) callee_name = "this function value";
+    sb_puts(paragraph, callee_name);
+    sb_puts(paragraph, " requires ");
+    append_type(paragraph, parameter.ty);
+    sb_putc(paragraph, '.');
+    append_diagnostic_paragraph(output, sb_finish(paragraph));
+    paragraph.used = 0;
+    if (local == null) sb_puts(paragraph, "Bind the argument once to a local and handle null before calling, or ") else sb_puts(paragraph,
+        "Handle null before calling, or ");
+    if (callee.is_extern) sb_puts(paragraph, "if the external function accepts null, ");
+    sb_puts(paragraph, "let ");
+    sb_puts(paragraph, callee_name);
+    sb_puts(paragraph, " accept ");
+    append_type(paragraph, argument.ty);
+    sb_puts(paragraph, " and handle null there.");
+    append_diagnostic_paragraph(output, sb_finish(paragraph));
+    raise Error { diagnostic: Diagnostic.Document { text: sb_finish(output) } }
+}
+
+error_string_argument(
+    call: *Expr,
+    callee: *Function,
+    argument: *Expr,
+    parameter: *Obj
+) noregion raises Error: noreturn {
+    output: *StrBuf = sb_new();
+    append_diagnostic_excerpt(output, call_argument_span(call, argument));
+    paragraph: *StrBuf = sb_new();
+    match argument.kind {
+        Var reference -> sb_puts(paragraph, reference.name);
+        _ -> sb_puts(paragraph, "This argument")
+    }
+    sb_puts(paragraph, " is immutable str; parameter ");
+    sb_puts(paragraph, parameter.name);
+    sb_puts(paragraph, " of ");
+    if (len(callee.name) == 0) sb_puts(paragraph, "this function value") else sb_puts(paragraph,
+        callee.name);
+    sb_puts(paragraph, " requires mutable []i8.");
+    append_diagnostic_paragraph(output, sb_finish(paragraph));
+    paragraph.used = 0;
+    sb_puts(paragraph, "bytes(");
+    match argument.kind {
+        Var reference -> sb_puts(paragraph, reference.name);
+        _ -> sb_puts(paragraph, "...")
+    }
+    sb_puts(paragraph, ") makes a separate mutable copy. For shared changes, pass a []i8 buffer; for read-only use, ");
+    if (callee.is_extern) sb_puts(paragraph, "use a function accepting str.") else sb_puts(paragraph,
+        "change the parameter to str.");
+    append_diagnostic_paragraph(output, sb_finish(paragraph));
+    raise Error { diagnostic: Diagnostic.Document { text: sb_finish(output) } }
+}
+
+error_call_argument_type(
+    call: *Expr,
+    callee: *Function,
+    argument: *Expr,
+    parameter: *Obj
+) noregion raises Error: noreturn {
+    have: ?*Type = argument.ty;
+    want: ?*Type = parameter.ty;
+    if (have != null && want != null && is_str(have) && is_slice(want) && is_i8_ty(type_base(want))) error_string_argument(call,
+        callee, argument, parameter);
+    if (have != null && want != null && is_optional(have) && !is_optional(want)) {
+        if (types_equal(unwrap_optional(have), want)) error_nullable_argument(call,
+            callee, argument, parameter)
+    }
+    callee_name: []i8 = callee.name;
+    if (len(callee_name) == 0) error_have_expr_want(argument_type_mismatch_message("function value",
+        parameter.name), argument, want);
+    error_have_expr_want_at(call.file, call.pos, argument_type_mismatch_message(callee_name,
+        parameter.name), argument, want)
+}
+
+// A propagated cause points to a function that already needed noregion, so the
+// recorded explanation chains terminate even when the program's call graph cycles.
+noregion_origin(fn: *Function): *Function@fn {
+    origin: *Function = fn;
+    while (origin.noregion_cause != null) {
+        cause: *NoregionCause = origin.noregion_cause;
+        match cause.reason {
+            Call call -> {
+                callee: ?*Function = find_function(call.callee);
+                if (callee == null) return origin;
+                origin = callee
+            }
+            _ -> return origin
+        }
+    }
+    origin
+}
+
+missing_noregion(fn: *Function): bool {
+    !fn.is_extern && fn.test_id < 0 && fn.need_imm_heap != 0 && fn.decl_imm_heap == 0
+}
+
+primary_noregion_diagnostic(fn: *Function): bool {
+    root: *Function = noregion_origin(fn);
+    if (missing_noregion(root)) return fn == root;
+    earlier: ?*Function = functions;
+    while (earlier != null && earlier != fn) {
+        if (missing_noregion(earlier) && noregion_origin(earlier) == root) return false;
+        earlier = earlier.next
+    }
+    true
+}
+
+append_noregion_callers(output: *StrBuf@new, root: *Function, primary: *Function) raises Error {
+    paragraph: *StrBuf = sb_new();
+    caller: ?*Function = functions;
+    while (caller != null) {
+        if (caller != primary && missing_noregion(caller) && noregion_origin(caller) == root) {
+            if (paragraph.used == 0) sb_puts(paragraph, "Callers also needing noregion: ") else sb_puts(paragraph,
+                ", ");
+            sb_puts(paragraph, caller.name)
+        }
+        caller = caller.next
+    }
+    if (paragraph.used > 0) {
+        sb_putc(paragraph, '.');
+        append_diagnostic_paragraph(output, sb_finish(paragraph))
+    }
+}
+
+append_noregion_diagnostic(output: *StrBuf@new, fn: *Function) raises Error {
+    cause: ?*NoregionCause = fn.noregion_cause;
+    if (cause != null) append_diagnostic_excerpt(output, DiagnosticSpan { file: cause.file, pos: cause.pos, length: cause.span }) else {
+        append_diagnostic_location(output, fn.browse_file, fn.browse_pos);
+        sb_puts(output, """
+
+
+""")
+    }
+    paragraph: *StrBuf = sb_new();
+    sb_puts(paragraph, fn.name);
+    if (cause != null) {
+        match cause.reason {
+            GlobalStore global -> {
+                sb_puts(paragraph, " stores this allocation in global ");
+                sb_puts(paragraph, global.name);
+                sb_puts(paragraph, ", which can outlive its region.")
+            }
+            Store -> sb_puts(paragraph, " stores this allocation where it can outlive its region.");
+            Payload -> sb_puts(paragraph, " puts this allocation in an exception payload, which can outlive its region.");
+            Argument argument -> {
+                sb_puts(paragraph, " passes this allocation to parameter ");
+                sb_puts(paragraph, argument.parameter);
+                sb_puts(paragraph, " of ");
+                sb_puts(paragraph, argument.callee);
+                sb_puts(paragraph, ", whose @immortal contract allows it to retain the value.")
+            }
+            Call call -> {
+                sb_puts(paragraph, " calls ");
+                sb_puts(paragraph, call.callee);
+                sb_puts(paragraph, ", which requires noregion and cannot run inside a region.")
+            }
+            HeldArgument held -> {
+                sb_puts(paragraph, " passes immortal storage to parameter ");
+                sb_puts(paragraph, held.parameter);
+                sb_puts(paragraph, " of ");
+                sb_puts(paragraph, held.callee);
+                sb_puts(paragraph, ", which stores its allocations there, so they must not belong to a region.")
+            }
+        }
+    } else sb_puts(paragraph, " requires noregion because it retains memory allocated in the caller's region.");
+    append_diagnostic_paragraph(output, sb_finish(paragraph));
+    paragraph.used = 0;
+    if (cause != null) {
+        match cause.reason {
+            Call _ -> sb_puts(paragraph, "Declare ");
+            _ -> sb_puts(paragraph, "For retained storage, declare ")
+        }
+    } else sb_puts(paragraph, "For retained storage, declare ");
+    sb_puts(paragraph, fn.name);
+    sb_puts(paragraph, " and its callers as noregion (unavailable inside regions), or ");
+    if (cause != null) {
+        match cause.reason {
+            Call _ -> sb_puts(paragraph, "use a callee that can run inside a region.");
+            Payload -> sb_puts(paragraph, "keep temporary data local instead of in the exception payload.");
+            Argument _ -> sb_puts(paragraph, "use a borrowing parameter if the callee does not retain the value.");
+            HeldArgument _ -> sb_puts(paragraph, "keep the storage it grows local to the region that uses it.");
+            _ -> sb_puts(paragraph, "keep temporary data local to its region.")
+        }
+    } else sb_puts(paragraph, "keep temporary data local to its region.");
+    append_diagnostic_paragraph(output, sb_finish(paragraph));
+    append_noregion_callers(output, noregion_origin(fn), fn)
+}

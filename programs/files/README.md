@@ -1,4 +1,4 @@
-# File replacement
+# Files
 
 Import `files.l8` and use the `files` tag. `replace_file_bytes(path, data, count)`
 replaces a saved value with the first `count` bytes of `data`. It creates a
@@ -6,6 +6,11 @@ private (0600) temporary sibling, completes the write, checks close, then rename
 it over the destination. A reported failure preserves the previous destination.
 The parent directory must already exist. Concurrent successful replacements
 follow rename order: the last one wins.
+
+`read_file_bytes(path)` reads a whole file into a new slice exactly its
+length, in the caller's region. Its size is taken as it is opened: a file
+that grows meanwhile gives that many bytes, and one that shrinks gives
+what was left.
 
 `FileError` identifies the failed `FileOperation`, a positive errno, and a
 separate `cleanup_code` if temporary-file cleanup also failed. Invalid byte

@@ -130,8 +130,11 @@ hold owners.
 
 `allocate pointer { ... }` selects the arena recorded for a local borrowed
 pointer or its local alias. A `borrow` alone does not change where `new`
-allocates. A `region` inside `own` or `allocate` provides scratch storage in the
-selected arena and rewinds it on exit. Scratch cannot be retained in the arena.
+allocates. A `region` inside `own` or `allocate` provides scratch storage on the
+process heap, with the arena set aside until the region ends, and rewinds it
+on exit. Scratch cannot be retained in the arena. An `allocate` of the same
+arena inside that region adds to the arena, and what it adds outlives the
+region.
 An independent arena can capture immortal pointers, but cannot retain pointers
 into another arena, a caller's borrowed data, or a lexical region. Copy that data
 into the new arena instead. Existing `@new` contracts refer to the allocation

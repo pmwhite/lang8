@@ -55,6 +55,8 @@ new_token(
 }
 
 ident_kind(s: []i8, off: int, end: int): TokKind {
+    if (name_eq_span("break", s, off, end - off)) return TokKind.Break;
+    if (name_eq_span("continue", s, off, end - off)) return TokKind.Continue;
     n: int = end - off;
     if (n < 2 || n > 9) return TokKind.Ident;
     if (end == off + 2) {
@@ -226,7 +228,7 @@ com_last(h: ?*Com): ?*Com@h {
     last
 }
 
-com_concat(a: ?*Com, b: ?*Com@a) raises Error: ?*Com@b {
+com_concat(a: ?*Com, b: ?*Com@a) raises Error: ?*Com@a {
     if (a == null) return b;
     t: *Com = com_last(a) or error("internal");
     t.next = b;
@@ -627,6 +629,13 @@ tokenize(data: []i8@new, used: int) noregion raises Error: *Token@new {
             t = new_token(ident_kind(text, start, end), s, n, start);
             cur.next = t;
             cur = t
+        } else if (compound_token(data, current, used) != TokKind.Eof) {
+            kind: TokKind = compound_token(data, current, used);
+            width: int = if (kind == TokKind.ShlAssign || kind == TokKind.ShrAssign) 3 else 2;
+            t = new_token(kind, &data[current], width, current);
+            cur.next = t;
+            cur = t;
+            pos = current + width
         } else if (c == ':' && data[pos + 1] == ':') {
             t = new_token(TokKind.ColonColon, &data[pos], 2, pos);
             cur.next = t;
@@ -723,8 +732,70 @@ tokenize(data: []i8@new, used: int) noregion raises Error: *Token@new {
     head.next
 }
 
-skip(kind: TokKind) raises Error {
-    if (tok.kind != kind) error("unexpected token");
+compound_token(data: []i8, at: int, used: int): TokKind {
+    if (at + 1 >= used) return TokKind.Eof;
+    c: i8 = data[at];
+    if (at + 2 < used && data[at + 2] == '=') {
+        if (c == '<' && data[at + 1] == '<') return TokKind.ShlAssign;
+        if (c == '>' && data[at + 1] == '>') return TokKind.ShrAssign
+    }
+    if (data[at + 1] != '=') return TokKind.Eof;
+    match c {
+        '+' -> TokKind.AddAssign;
+        '-' -> TokKind.SubAssign;
+        '*' -> TokKind.MulAssign;
+        '/' -> TokKind.DivAssign;
+        '%' -> TokKind.ModAssign;
+        '&' -> TokKind.AndAssign;
+        '|' -> TokKind.OrAssign;
+        '^' -> TokKind.XorAssign;
+        _ -> TokKind.Eof
+    }
+}
+
+is_compound_assignment(kind: TokKind): bool {
+    kind == TokKind.AddAssign || kind == TokKind.SubAssign || kind == TokKind.MulAssign || kind == TokKind.DivAssign || kind == TokKind.ModAssign || kind == TokKind.AndAssign || kind == TokKind.OrAssign || kind == TokKind.XorAssign || kind == TokKind.ShlAssign || kind == TokKind.ShrAssign
+}
+
+expected_token_text(kind: TokKind) raises Error: []i8 {
+    match kind {
+        Arrow -> "->";
+        Assign -> "=";
+        At -> "@";
+        Colon -> ":";
+        Comma -> ",";
+        Dot -> ".";
+        If -> "if";
+        Match -> "match";
+        LBrace -> "{";
+        LParen -> "(";
+        RBrace -> "}";
+        RBrack -> "]";
+        RParen -> ")";
+        Semi -> ";";
+        _ -> error("internal: missing expected token spelling")
+    }
+}
+
+skip(kind: TokKind) noregion raises Error {
+    if (tok.kind != kind) {
+        message: *StrBuf = sb_new();
+        sb_puts(message, "expected `");
+        sb_puts(message, expected_token_text(kind));
+        sb_puts(message, "`, found ");
+        match tok.kind {
+            Eof -> sb_puts(message, "end of file");
+            Str -> sb_puts(message, "a string literal");
+            Text -> sb_puts(message, "an expect text block");
+            Char -> sb_puts(message, "a character literal");
+            _ -> {
+                sb_putc(message, '`');
+                for cursor in tok.pos..tok.pos + tok.len sb_putc(message, source[cursor]);
+                sb_putc(message, '`')
+            }
+        }
+        error_at(tok.pos, sb_finish(message))
+    }
     tok = tok.next
 }
 
@@ -733,13 +804,13 @@ skip_optional_semi() {
 }
 
 // A closing brace or else already marks the end of a statement body.
-skip_stmt_semi() raises Error {
+skip_stmt_semi() noregion raises Error {
     if (tok.kind == TokKind.RBrace || tok.kind == TokKind.Else || at_expect()) return;
     skip(TokKind.Semi)
 }
 
 // At the end of a file, no following declaration needs separating.
-skip_file_semi() raises Error {
+skip_file_semi() noregion raises Error {
     if (tok.kind == TokKind.Eof) return;
     skip(TokKind.Semi)
 }
@@ -784,19 +855,7 @@ attach_stmt_inner(s: *Stmt, end_pos: int) raises Error {
             k.body = attach_one_stmt(k.body, end_pos);
             return
         }
-        Match k -> {
-            arm: ?*MatchArm = k.arms;
-            while (arm != null) {
-                arm.lead = com_concat(arm.lead, com_take_until(arm.pos));
-                nxt: ?*MatchArm = arm.next;
-                np: int = end_pos;
-                if (nxt != null) np = nxt.pos;
-                arm.body = attach_one_stmt(arm.body, np);
-                arm.trail = com_concat(arm.trail, com_take_trail(np));
-                arm = nxt
-            }
-            return
-        }
+        Match k -> attach_match_arms(k.arms, end_pos);
         Try k -> {
             k.body = attach_one_stmt(k.body, end_pos);
             a: ?*CatchArm = k.arms;
@@ -815,7 +874,73 @@ attach_stmt_inner(s: *Stmt, end_pos: int) raises Error {
             k.body = attach_one_stmt(k.body, end_pos);
             return
         }
+        Borrow k -> {
+            k.body = attach_one_stmt(k.body, end_pos);
+            return
+        }
+        Allocate k -> {
+            k.body = attach_one_stmt(k.body, end_pos);
+            return
+        }
+        ExprStmt k -> attach_expr_inner(k.lhs, end_pos);
+        Decl k -> {
+            init: ?*Expr = k.init;
+            if (init != null) attach_expr_inner(init, end_pos)
+        }
+        Return k -> {
+            value: ?*Expr = k.lhs;
+            if (value != null) attach_expr_inner(value, end_pos)
+        }
         _ -> return
+    }
+}
+
+attach_match_arms(arms: ?*MatchArm, end_pos: int) raises Error {
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        arm.lead = com_concat(arm.lead, com_take_until(arm.pos));
+        nxt: ?*MatchArm = arm.next;
+        np: int = end_pos;
+        if (nxt != null) np = nxt.pos;
+        arm.body = attach_one_stmt(arm.body, np);
+        arm.trail = com_concat(arm.trail, com_take_trail(np));
+        arm = nxt
+    }
+}
+
+// Comments in the statements of an expression's blocks (`if`, `match`,
+// `own` and block expressions, and what is assigned) and among a
+// literal's fields stay in them.
+attach_expr_inner(e: *Expr, end_pos: int) raises Error {
+    match e.kind {
+        If k -> {
+            attach_expr_inner(k.then, end_pos);
+            attach_expr_inner(k.els, end_pos)
+        }
+        Block k -> k.body = attach_stmts(k.body, end_pos);
+        Own k -> k.body = attach_one_stmt(k.body, end_pos);
+        Match k -> attach_match_arms(k.arms, end_pos);
+        Assign k -> attach_expr_inner(k.rhs, end_pos);
+        StructLit k -> attach_inits(k.inits, end_pos);
+        VariantLit k -> attach_inits(k.inits, end_pos);
+        New k -> attach_inits(k.inits, end_pos);
+        _ -> { }
+    }
+}
+
+// A literal's fields: the comments before each, and after each but the
+// last on its line (the last's are its statement's, after the literal).
+attach_inits(inits: ?*FieldInit, end_pos: int) raises Error {
+    field: ?*FieldInit = inits;
+    while (field != null) {
+        field.lead = com_concat(field.lead, com_take_until(field.pos));
+        next_field: ?*FieldInit = field.next;
+        value: ?*Expr = field.lhs;
+        if (next_field != null) {
+            if (value != null) attach_expr_inner(value, next_field.pos);
+            field.trail = com_concat(field.trail, com_take_trail(next_field.pos))
+        } else if (value != null) attach_expr_inner(value, end_pos);
+        field = next_field
     }
 }
 
@@ -917,6 +1042,10 @@ cur_tokstr() noregion raises Error: []i8@new {
     intern(source, tok.pos, tok.len)
 }
 
+at_word(word: []i8): bool {
+    tok.kind == TokKind.Ident && streq_n(source, tok.pos, word, 0, tok.len) && len(word) == tok.len
+}
+
 intern(s: []i8, off: int, n: int) noregion: []i8@new {
     b: int = hash_n(s, off, n) & 4095;
     e: ?*InternEnt = intern_table.buckets[b].head;
@@ -973,6 +1102,8 @@ mk_expr(k: ExprKind@new): *Expr@new {
         pos: 0,
         file: 0,
         toklen: 0,
+        source_start: 0,
+        source_end: 0,
         cg_temp: 0,
         arg_label: "",
         arg_order: 0,
@@ -1029,7 +1160,7 @@ new_binary(op: BinOp, lhs: *Expr@new, rhs: *Expr@new): *Expr@new {
 }
 
 new_assign(lhs: *Expr@new, rhs: *Expr@new): *Expr@new {
-    n: *Expr = mk_expr(ExprKind.Assign { lhs: lhs, rhs: rhs });
+    n: *Expr = mk_expr(ExprKind.Assign { lhs: lhs, rhs: rhs, compound: null });
     n.pos = lhs.pos;
     n.file = lhs.file;
     n.toklen = lhs.toklen;
@@ -1111,12 +1242,13 @@ new_if(cond: *Expr@new, then: *Stmt@new, els: ?*Stmt@new): *Stmt@new {
     mk_stmt(StmtKind.If { cond: cond, then: then, els: els })
 }
 
-new_while(cond: *Expr@new, body: *Stmt@new): *Stmt@new {
-    mk_stmt(StmtKind.While { cond: cond, body: body })
+new_while(cond: *Expr@new, body: *Stmt@new, has_break: bool): *Stmt@new {
+    mk_stmt(StmtKind.While { cond: cond, body: body, has_break: has_break })
 }
 
 new_for(
     item: *Obj@new,
+    index: ?*Obj@new,
     coll: ?*Obj@new,
     idx: ?*Obj@new,
     n: *Obj@new,
@@ -1126,6 +1258,7 @@ new_for(
 ): *Stmt@new {
     mk_stmt(StmtKind.For {
         item: item,
+        index: index,
         coll: coll,
         idx: idx,
         n: n,
@@ -1233,16 +1366,16 @@ new_if_expr(cond: *Expr@new, then: *Expr@new, els: *Expr@new): *Expr@new {
     mk_expr(ExprKind.If { cond: cond, then: then, els: els })
 }
 
-new_match_expr(cond: *Expr@new, arms: ?*MatchArm@new, representation: ?*RepresentationSite@new): *Expr@new {
-    mk_expr(ExprKind.Match { cond: cond, arms: arms, representation: representation })
+new_match_expr(cond: *Expr@new, arms: ?*MatchArm@new, site: *MatchSite@new): *Expr@new {
+    mk_expr(ExprKind.Match { cond: cond, arms: arms, site: site })
 }
 
 new_block_expr(body: ?*Stmt@new): *Expr@new {
     mk_expr(ExprKind.Block { body: body })
 }
 
-new_match(cond: *Expr@new, arms: ?*MatchArm@new, representation: ?*RepresentationSite@new): *Stmt@new {
-    mk_stmt(StmtKind.Match { cond: cond, arms: arms, representation: representation })
+new_match(cond: *Expr@new, arms: ?*MatchArm@new, site: *MatchSite@new): *Stmt@new {
+    mk_stmt(StmtKind.Match { cond: cond, arms: arms, site: site })
 }
 
 new_match_arm(
@@ -1262,14 +1395,14 @@ new_match_arm(
         is_literal: is_literal,
         binder: binder,
         binder_name: binder_name,
+        binder_pos: 0,
         body: body,
         next: null,
         lead: null,
         trail: null,
         pos: 0,
         file: 0,
-        toklen: 0,
-        end: 0
+        toklen: 0
     }
 }
 
@@ -1293,6 +1426,14 @@ new_try(body: *Stmt@new, arms: ?*CatchArm@new, buf: *Obj@new): *Stmt@new {
 
 new_region(body: *Stmt@new, mark: *Obj@new): *Stmt@new {
     mk_stmt(StmtKind.Region { body: body, mark: mark })
+}
+
+new_own(body: *Stmt@new, slot: *Obj@new): *Expr@new {
+    mk_expr(ExprKind.Own { body: body, slot: slot })
+}
+
+new_move(lhs: *Expr@new): *Expr@new {
+    mk_expr(ExprKind.Move { lhs: lhs })
 }
 
 new_catch_arm(
@@ -1368,8 +1509,8 @@ leave_scope() raises Error {
     scope_locals = null
 }
 
-new_obj(name: []i8@new, is_local: bool) noregion: *Obj@new {
-    o: *Obj = new Obj {
+new_unbound_obj(name: []i8@new, is_local: bool): *Obj@new {
+    new Obj {
         name: name,
         is_local: is_local,
         is_func: false,
@@ -1389,11 +1530,16 @@ new_obj(name: []i8@new, is_local: bool) noregion: *Obj@new {
         param_label: "",
         hash_next: null,
         life: 0,
+        carried_life: 0,
         storage_life: 0,
         life_bound: "",
         bound_need_imm: false,
         bound_need_new: false,
+        bound_holds_new: false,
+        is_tainted: false,
         bound_named: null,
+        declared_type_pos: 0,
+        declared_type_end: 0,
         browse_id: browse_fresh(),
         browse_pos: browse_tok_pos,
         browse_file: browse_tok_file,
@@ -1401,7 +1547,11 @@ new_obj(name: []i8@new, is_local: bool) noregion: *Obj@new {
         lead: null,
         trail: null,
         wasm_slot: 0
-    };
+    }
+}
+
+new_obj(name: []i8@new, is_local: bool) noregion: *Obj@new {
+    o: *Obj = new_unbound_obj(name, is_local);
     if (is_local) {
         o.scope_depth = scope_depth;
         if (region_depth == 0) o.storage_life = 1 else o.storage_life = region_depth + 1;
@@ -1480,13 +1630,22 @@ decl_spec() noregion raises Error: *Type@new {
     error("expected type")
 }
 
+// A slice can hold owners only as optional elements: each may be empty.
+check_owner_slice_element(element: *Type, element_pos: int) raises Error {
+    // The formatter accepts the type; compiling rejects it.
+    if (parse_resolve && is_owned_ty(element) && !is_opt_owned(element)) error_at(element_pos,
+        "owner slice elements must be optional (each may be empty): write ?owned *T")
+}
+
 parse_type() noregion raises Error: *Type@new {
     if (at_function_type()) return parse_fnptr_type(false);
     if (tok.kind == TokKind.LBrack) {
         tok = tok.next;
         if (tok.kind == TokKind.RBrack) {
             tok = tok.next;
+            element_pos: int = tok.pos;
             base0: *Type = parse_type();
+            check_owner_slice_element(base0, element_pos);
             if (is_noreturn_ty(base0)) error("noreturn cannot be a slice element");
             return slice_of(base0)
         }
@@ -1496,6 +1655,7 @@ parse_type() noregion raises Error: *Type@new {
             tok = tok.next;
             skip(TokKind.RBrack);
             base4: *Type = parse_type();
+            if (is_owned_ty(base4)) error("owned handles cannot be array elements");
             if (is_noreturn_ty(base4)) error("noreturn cannot be an array element");
             return array_of(base4, n)
         }
@@ -1511,30 +1671,66 @@ parse_type() noregion raises Error: *Type@new {
         if (tok.kind == TokKind.Star) {
             tok = tok.next;
             base: *Type = parse_type();
+            if (is_owned_ty(base)) error("owned handles cannot be pointed to");
             if (is_noreturn_ty(base)) error("noreturn cannot be pointed to");
             return opt_ptr_to(base)
+        }
+        if (at_word("owned")) {
+            tok = tok.next;
+            if (tok.kind != TokKind.Star) error("expected * after owned");
+            tok = tok.next;
+            obase: *Type = parse_type();
+            if (is_owned_ty(obase)) error("owned handles cannot be pointed to");
+            if (is_noreturn_ty(obase)) error("noreturn cannot be pointed to");
+            return owned_type(obase, true)
         }
         if (tok.kind == TokKind.LBrack) {
             tok = tok.next;
             if (tok.kind != TokKind.RBrack) error("expected [] after ? in optional slice type");
             tok = tok.next;
+            optional_element_pos: int = tok.pos;
             sbase: *Type = parse_type();
+            check_owner_slice_element(sbase, optional_element_pos);
             if (is_noreturn_ty(sbase)) error("noreturn cannot be a slice element");
             return opt_slice_of(sbase)
         }
-        error("expected str, *, or [] after ?")
+        error("expected str, *, owned, or [] after ?")
+    }
+    if (at_word("owned")) {
+        tok = tok.next;
+        if (tok.kind != TokKind.Star) error("expected * after owned");
+        tok = tok.next;
+        owned_base: *Type = parse_type();
+        if (is_owned_ty(owned_base)) error("owned handles cannot be pointed to");
+        if (is_noreturn_ty(owned_base)) error("noreturn cannot be pointed to");
+        return owned_type(owned_base, false)
     }
     if (tok.kind == TokKind.Star) {
         tok = tok.next;
         base: *Type = parse_type();
+        if (is_owned_ty(base)) error("owned handles cannot be pointed to");
         if (is_noreturn_ty(base)) error("noreturn cannot be pointed to");
         return ptr_to(base)
     }
     decl_spec()
 }
 
+token_span_end(first: *Token, after: *Token): int {
+    last: *Token = first;
+    while (last.next != after && last.kind != TokKind.Eof) last = last.next;
+    last.pos + last.len
+}
+
 parse_expr() noregion raises Error: *Expr@new {
-    parse_assign()
+    first: *Token = tok;
+    expression: *Expr = parse_assign();
+    if (expression.pos == 0) expression.file = current_file_id;
+    if (expression.source_end == 0) {
+        expression.source_start = first.pos;
+        if (len(first.qualifier) != 0) expression.source_start = first.pos - len(first.qualifier) - 2;
+        expression.source_end = token_span_end(first, tok)
+    }
+    expression
 }
 
 parse_field_inits(members: ?*Member@new) noregion raises Error: ?*FieldInit@new {
@@ -1544,20 +1740,39 @@ parse_field_inits(members: ?*Member@new) noregion raises Error: ?*FieldInit@new 
     while (tok.kind != TokKind.RBrace) {
         if (cur != null) skip(TokKind.Comma);
         if (tok.kind != TokKind.Ident) error("expected field name");
-        fname: []i8 = cur_tokstr();
+        field_name: []i8 = cur_tokstr();
+        field_pos: int = tok.pos;
         browse_note();
         tok = tok.next;
         skip(TokKind.Colon);
-        m: ?*Member = find_field(members, fname);
-        if (m == null && parse_resolve && members != null) error("unknown field");
+        member: ?*Member = find_field(members, field_name);
+        if (member == null && parse_resolve && members != null) {
+            message: *StrBuf = sb_new();
+            sb_puts(message, "unknown field ");
+            sb_puts(message, field_name);
+            sb_puts(message, "; available fields: ");
+            available: ?*Member = members;
+            while (available != null) {
+                sb_puts(message, available.name);
+                available = available.next;
+                if (available != null) sb_puts(message, ", ")
+            }
+            error_at(field_pos, sb_finish(message))
+        }
         i: ?*FieldInit = head;
         while (i != null) {
-            if (streq(i.name, fname)) error("duplicate field");
+            if (streq(i.name, field_name)) {
+                message: *StrBuf = sb_new();
+                sb_puts(message, "field ");
+                sb_puts(message, field_name);
+                sb_puts(message, " is initialized more than once");
+                error_at(field_pos, sb_finish(message))
+            }
             i = i.next
         }
         e: *Expr = parse_expr();
         lhs: ?*Expr = e;
-        init: *FieldInit = new_field_init(fname, m, lhs);
+        init: *FieldInit = new_field_init(field_name, member, lhs);
         if (cur != null) {
             cur.next = init;
             cur = init
@@ -1567,16 +1782,31 @@ parse_field_inits(members: ?*Member@new) noregion raises Error: ?*FieldInit@new 
         }
     }
     if (parse_resolve) {
-        m2: ?*Member = members;
-        while (m2 != null) {
+        missing_names: ?*StrBuf = null;
+        missing_count: int = 0;
+        member: ?*Member = members;
+        while (member != null) {
             found: bool = false;
-            i2: ?*FieldInit = head;
-            while (i2 != null) {
-                if (i2.member == m2) found = true;
-                i2 = i2.next
+            initializer: ?*FieldInit = head;
+            while (initializer != null) {
+                if (initializer.member == member) found = true;
+                initializer = initializer.next
             }
-            if (!found) error("missing field");
-            m2 = m2.next
+            if (!found) {
+                names: *StrBuf = missing_names or sb_new();
+                if (missing_count > 0) sb_puts(names, ", ");
+                sb_puts(names, member.name);
+                missing_names = names;
+                missing_count = missing_count + 1
+            }
+            member = member.next
+        }
+        if (missing_names != null) {
+            message: *StrBuf = sb_new();
+            if (missing_count == 1) sb_puts(message, "missing field: ") else sb_puts(message,
+                "missing fields: ");
+            sb_puts(message, sb_finish(missing_names));
+            error(sb_finish(message))
         }
     }
     skip(TokKind.RBrace);
@@ -1591,9 +1821,9 @@ parse_struct_field_inits(sty: *Type) noregion raises Error: ?*FieldInit@new {
     parse_field_inits(ms)
 }
 
-parse_exn_field_inits(ed: *ExnDef@new) noregion raises Error: ?*FieldInit@new {
+parse_exn_field_inits(ed: *ExnDef@new, file: int, pos: int) noregion raises Error: ?*FieldInit@new {
     if (ed.members == null) {
-        if (parse_resolve) error("unit exception does not take fields");
+        if (parse_resolve) error_unit_exception_at(file, pos, ed);
         if (tok.kind != TokKind.LBrace) return null
     }
     parse_field_inits(ed.members)
@@ -1605,6 +1835,18 @@ parse_variant_field_inits(v: *Variant@new) noregion raises Error: ?*FieldInit@ne
 
 parse_primary() noregion raises Error: *Expr@new {
     n: *Expr;
+    if (at_word("own") && tok.next.kind == TokKind.LBrace) {
+        own_pos: int = tok.pos;
+        own_file: int = current_file_id;
+        tok = tok.next;
+        slot: *Obj = new_obj(".own", true);
+        region_depth = region_depth + 1;
+        obody: *Stmt = parse_compound();
+        region_depth = region_depth - 1;
+        owned_expr: *Expr = new_own(obody, slot);
+        place_expr(owned_expr, own_pos, own_file);
+        return owned_expr
+    }
     if (tok.kind == TokKind.New) {
         new_pos: int = tok.pos;
         new_file: int = current_file_id;
@@ -1624,17 +1866,20 @@ parse_primary() noregion raises Error: *Expr@new {
             hvfile: int = browse_tok_file;
             tok = tok.next;
             vo: ?*Variant = find_variant(type_enum_def(ety), vname);
-            if (vo == null && parse_resolve) error("unknown variant");
+            if (vo == null && parse_resolve) error_unknown_variant_at(hvfile, hvpos,
+                type_enum_def(ety), vname);
             args: ?*FieldInit = null;
             tag: int = 0;
             if (vo != null) {
                 v: *Variant = vo;
                 tag = v.tag;
                 if (tok.kind == TokKind.LBrace) {
-                    if (v.fields == null) error("unit variant does not take fields");
+                    if (parse_resolve && v.fields == null) error_unit_variant_at(hvfile,
+                        hvpos, v);
                     args = parse_variant_field_inits(v)
                 } else {
-                    if (v.fields != null) error("variant requires field initializers")
+                    if (parse_resolve && v.fields != null) error_variant_requires_fields_at(hvfile,
+                        hvpos, v)
                 }
             } else {
                 if (tok.kind == TokKind.LBrace) args = parse_field_inits(null)
@@ -1645,20 +1890,25 @@ parse_primary() noregion raises Error: *Expr@new {
             hn.toklen = hvlen;
             return hn
         }
+        base_pos: int = tok.pos;
         base: *Type = parse_type();
         if (tok.kind == TokKind.LBrack) {
             tok = tok.next;
             len: *Expr = parse_expr();
             skip(TokKind.RBrack);
             if (is_noreturn_ty(base)) error("new [n] element type cannot be noreturn");
+            check_owner_slice_element(base, base_pos);
             if (tok.kind != TokKind.LParen) error("new T[n] requires an initial value (new T[n](v))");
             tok = tok.next;
             fill: *Expr = parse_expr();
+            allocation_end: int = tok.pos + tok.len;
             skip(TokKind.RParen);
             hn1: *Expr = new_heap_node(len, 1, null, null, fill, "", slice_of(base));
             place_expr(hn1, new_pos, new_file);
+            hn1.toklen = allocation_end - new_pos;
             return hn1
         }
+        if (is_owned_ty(base)) error("owned handles cannot be allocated inside other storage");
         if (is_pointer(base)) error("new expects a non-pointer type");
         if (tok.kind != TokKind.LBrace) error("expected {, [, or .Variant after new");
         if (is_enum_ty(base)) error("use new Enum.Variant { ... } for sum types");
@@ -1692,6 +1942,7 @@ parse_primary() noregion raises Error: *Expr@new {
         return n
     }
     if (tok.kind == TokKind.Num || tok.kind == TokKind.Float) {
+        literal_pos: int = tok.pos;
         is_fl: bool = false;
         if (tok.kind == TokKind.Float) is_fl = true;
         ival: int = tok.val;
@@ -1721,7 +1972,7 @@ parse_primary() noregion raises Error: *Expr@new {
             return n
         }
         if (tok.kind == TokKind.I8) {
-            if (ival < 0 || ival > 255) error("i8 literal out of range");
+            check_integer_literal_range(literal_pos, spell, ival, ty_i8, 255);
             tok = tok.next;
             n = mk_expr(ExprKind.Num {
                 val: ival,
@@ -1733,7 +1984,7 @@ parse_primary() noregion raises Error: *Expr@new {
             return n
         }
         if (tok.kind == TokKind.I32) {
-            if (ival < 0 || ival > 2147483647) error("i32 literal out of range");
+            check_integer_literal_range(literal_pos, spell, ival, ty_i32, 2147483647);
             tok = tok.next;
             n = mk_expr(ExprKind.Num {
                 val: ival,
@@ -1745,7 +1996,7 @@ parse_primary() noregion raises Error: *Expr@new {
             return n
         }
         if (tok.kind == TokKind.U32) {
-            if (ival < 0 || ival > 4294967295) error("u32 literal out of range");
+            check_integer_literal_range(literal_pos, spell, ival, ty_u32, 4294967295);
             tok = tok.next;
             n = mk_expr(ExprKind.Num {
                 val: ival,
@@ -1838,17 +2089,20 @@ parse_primary() noregion raises Error: *Expr@new {
             vfile: int = browse_tok_file;
             tok = tok.next;
             vo: ?*Variant = find_variant(type_enum_def(ety), vname);
-            if (vo == null && parse_resolve) error("unknown variant");
+            if (vo == null && parse_resolve) error_unknown_variant_at(vfile, vpos,
+                type_enum_def(ety), vname);
             args: ?*FieldInit = null;
             tag: int = 0;
             if (vo != null) {
                 v: *Variant = vo;
                 tag = v.tag;
                 if (tok.kind == TokKind.LBrace) {
-                    if (v.fields == null) error("unit variant does not take fields");
+                    if (parse_resolve && v.fields == null) error_unit_variant_at(vfile,
+                        vpos, v);
                     args = parse_variant_field_inits(v)
                 } else {
-                    if (v.fields != null) error("variant requires field initializers")
+                    if (parse_resolve && v.fields != null) error_variant_requires_fields_at(vfile,
+                        vpos, v)
                 }
             } else {
                 if (tok.kind == TokKind.LBrace) args = parse_field_inits(null)
@@ -1877,7 +2131,8 @@ parse_primary() noregion raises Error: *Expr@new {
         npos: int = browse_tok_pos;
         nlen: int = browse_tok_len;
         nfile: int = browse_tok_file;
-        qualified: bool = len(tok.qualifier) != 0;
+        qualifier: []i8 = tok.qualifier;
+        qualified: bool = len(qualifier) != 0;
         if (qualified || find_local(name) == null) note_tag_reference();
         tok = tok.next;
         if (tok.kind == TokKind.LParen && (qualified || find_var(name) == null || find_function(name) != null && !local_name)) {
@@ -1895,17 +2150,30 @@ parse_primary() noregion raises Error: *Expr@new {
                     cur = arg
                 }
             }
+            call_end: int = tok.pos + tok.len;
             skip(TokKind.RParen);
             fe: *Expr = new_funcall(name, head);
             fe.pos = npos;
             fe.file = nfile;
             fe.toklen = nlen;
+            fe.source_start = npos;
+            if (qualified) fe.source_start = npos - len(qualifier) - 2;
+            fe.source_end = call_end;
             return fe
         }
         varo: ?*Obj = find_var(name);
         if (qualified) varo = find_global(name);
         if (varo == null) {
-            if (parse_resolve) error("undefined variable");
+            if (parse_resolve) {
+                message: *StrBuf = sb_new();
+                sb_puts(message, "unknown name ");
+                if (qualified) {
+                    sb_puts(message, qualifier);
+                    sb_puts(message, "::")
+                }
+                sb_puts(message, name);
+                error_at_file(nfile, npos, sb_finish(message))
+            }
             ve0: *Expr = mk_expr(ExprKind.Var { var: null, name: name, member: null });
             ve0.pos = npos;
             ve0.file = nfile;
@@ -1976,7 +2244,7 @@ loop_kills() noregion {
             if (depth < 0 || depth == 0 && braced && k == TokKind.RBrace) return
         } else if (depth == 0 && (k == TokKind.Semi || k == TokKind.Else)) return;
         if (k == TokKind.Ident && len(t.qualifier) == 0 && prev != TokKind.Dot) {
-            if (t.next.kind == TokKind.Assign || prev == TokKind.Amp) {
+            if (t.next.kind == TokKind.Assign || is_compound_assignment(t.next.kind) || prev == TokKind.Amp) {
                 v: ?*Obj = find_var(intern(source, t.pos, t.len));
                 if (v != null && v.is_local) kill_var_facts(v)
             }
@@ -2014,20 +2282,19 @@ parse_if_expr() noregion raises Error: *Expr@new {
 parse_match_expr() noregion raises Error: *Expr@new {
     skip(TokKind.Match);
     mcond: *Expr = parse_expr();
-    representation: ?*RepresentationSite = match_representation_site();
-    new_match_expr(mcond, parse_match_arms(), representation)
+    parsed: ParsedMatch = parse_match_arms(mcond);
+    new_match_expr(mcond, parsed.arms, parsed.site)
 }
 
-// The saved bootstrap treats a subject's position as a reference escaping the
-// borrowed AST. Use the match brace until its lifetime checker is promoted;
-// the current compiler uses the subject's position.
-match_representation_site() noregion raises Error: ?*RepresentationSite@new {
-    representation_site("", tok.pos)
+type ParsedMatch = {
+    arms: ?*MatchArm;
+    site: *MatchSite
 }
 
 // The subject may be an inferred local, untyped until its declaration is
 // checked; resolve_match_arms checks the arms against its type.
-parse_match_arms() noregion raises Error: ?*MatchArm@new {
+parse_match_arms(subject: *Expr) noregion raises Error: ParsedMatch@new {
+    representation: ?*RepresentationSite = representation_site("", subject.pos);
     skip(TokKind.LBrace);
     arms: ?*MatchArm = null;
     acur: ?*MatchArm = null;
@@ -2058,6 +2325,7 @@ parse_match_arms() noregion raises Error: ?*MatchArm@new {
         }
         is_wild: bool = streq(vname, "_");
         binder_name: []i8 = "";
+        binder_pos: int = 0;
         have_binder: bool = false;
         if (is_literal && (tok.kind == TokKind.Ident || tok.kind == TokKind.LParen)) error("literal match arm cannot bind a payload");
         if (tok.kind == TokKind.LParen) {
@@ -2066,6 +2334,7 @@ parse_match_arms() noregion raises Error: ?*MatchArm@new {
             tok = tok.next;
             if (tok.kind != TokKind.Ident) error("expected payload binding name");
             binder_name = cur_tokstr();
+            binder_pos = tok.pos;
             browse_note();
             have_binder = true;
             tok = tok.next;
@@ -2074,6 +2343,7 @@ parse_match_arms() noregion raises Error: ?*MatchArm@new {
             if (tok.kind == TokKind.Ident) {
                 if (is_wild) error("wildcard match arm cannot bind a payload");
                 binder_name = cur_tokstr();
+                binder_pos = tok.pos;
                 browse_note();
                 have_binder = true;
                 tok = tok.next
@@ -2083,7 +2353,6 @@ parse_match_arms() noregion raises Error: ?*MatchArm@new {
         }
         skip(TokKind.Arrow);
         enter_scope();
-        arm_variant_n: ?*Variant = null;
         arm_binder: ?*Obj = null;
         if (is_wild) {
             chk: ?*MatchArm = arms;
@@ -2095,12 +2364,12 @@ parse_match_arms() noregion raises Error: ?*MatchArm@new {
         } else if (have_binder) arm_binder = new_obj(binder_name, true);
         arm_body_n: *Stmt = parse_stmt();
         leave_scope();
-        arm: *MatchArm = new_match_arm(vname, arm_variant_n, literal, is_literal,
-            arm_binder, binder_name, arm_body_n);
+        arm: *MatchArm = new_match_arm(vname, null, literal, is_literal, arm_binder,
+            binder_name, arm_body_n);
+        arm.binder_pos = binder_pos;
         arm.pos = vpos;
         arm.file = vfile;
         arm.toklen = vlen;
-        arm.end = tok.pos;
         if (acur != null) {
             acur.next = arm;
             acur = arm
@@ -2112,9 +2381,16 @@ parse_match_arms() noregion raises Error: ?*MatchArm@new {
             if (tok.kind != TokKind.RBrace) error("wildcard `_` must be the last match arm")
         }
     }
+    site: *MatchSite = new MatchSite { file: current_file_id, close_pos: tok.pos, representation: representation };
     tok = tok.next;
-    arms
+    ParsedMatch { arms: arms, site: site }
 }
+
+// Whether a postfix chain continues through `as` and `trunc` conversions.
+// A borrowed place stops before them: `borrow xs[i] as name { ... }`.
+type PostfixConversions =
+    | Included
+    | Excluded
 
 // Labels belong to call arguments, never to assignment expressions.
 parse_call_argument() noregion raises Error: *Expr@new {
@@ -2131,6 +2407,12 @@ parse_call_argument() noregion raises Error: *Expr@new {
 }
 
 parse_postfix() noregion raises Error: *Expr@new {
+    parse_postfix_chain(PostfixConversions.Included)
+}
+
+parse_postfix_chain(conversions: PostfixConversions) noregion raises Error: *Expr@new {
+    call_start: int = tok.pos;
+    if (len(tok.qualifier) != 0) call_start = call_start - len(tok.qualifier) - 2;
     n: *Expr = parse_primary();
     while (true) {
         if (tok.kind == TokKind.LParen) {
@@ -2143,13 +2425,20 @@ parse_postfix() noregion raises Error: *Expr@new {
                 if (tail != null) tail.next = arg else head = arg;
                 tail = arg
             }
+            call_end: int = tok.pos + tok.len;
             skip(TokKind.RParen);
-            n = mk_expr(ExprKind.Funcall {
+            call: *Expr = mk_expr(ExprKind.Funcall {
                 funcname: "",
                 args: head,
                 fn: null,
                 target: n
-            })
+            });
+            call.pos = n.pos;
+            call.file = n.file;
+            call.toklen = n.toklen;
+            call.source_start = call_start;
+            call.source_end = call_end;
+            n = call
         } else if (tok.kind == TokKind.LBrack) {
             access_pos: int = tok.pos;
             base: *Expr = n;
@@ -2183,7 +2472,7 @@ parse_postfix() noregion raises Error: *Expr@new {
                     n.toklen = mlen
                 }
             } else {
-                if (tok.kind == TokKind.As || tok.kind == TokKind.Trunc) {
+                if ((tok.kind == TokKind.As || tok.kind == TokKind.Trunc) && conversions == PostfixConversions.Included) {
                     is_trunc: bool = tok.kind == TokKind.Trunc;
                     cast_pos: int = tok.pos;
                     tok = tok.next;
@@ -2202,8 +2491,20 @@ place_expr(e: *Expr, pos: int, file: int) {
     e.file = file
 }
 
+move_operand_next(): bool {
+    nxt: *Token = tok.next;
+    k: TokKind = nxt.kind;
+    k == TokKind.Ident || k == TokKind.Num || k == TokKind.Null || k == TokKind.LParen || k == TokKind.LBrace || k == TokKind.New || k == TokKind.Sizeof || k == TokKind.Star || k == TokKind.Amp || k == TokKind.Not || k == TokKind.Minus || k == TokKind.Plus || k == TokKind.Tilde || k == TokKind.Str || k == TokKind.Char || k == TokKind.Float
+}
+
 parse_unary() noregion raises Error: *Expr@new {
     op_pos: int = tok.pos;
+    if (at_word("move") && move_operand_next()) {
+        tok = tok.next;
+        moved: *Expr = new_move(parse_unary());
+        place_expr(moved, op_pos, current_file_id);
+        return moved
+    }
     if (tok.kind == TokKind.Plus) {
         tok = tok.next;
         return parse_unary()
@@ -2250,7 +2551,7 @@ parse_unary() noregion raises Error: *Expr@new {
     parse_postfix()
 }
 
-add_type(n: ?*Expr@new) noregion raises Error {
+add_type(n: ?*Expr@immortal) noregion raises Error {
     if (!parse_resolve) return;
     if (n != null) {
         outer_pos: int = diag_expr_pos;
@@ -2281,15 +2582,15 @@ add_type_stmt(s: ?*Stmt) noregion raises Error {
     }
 }
 
-add_type_field_inits(inits: ?*FieldInit@new) noregion raises Error {
+add_type_field_inits(inits: ?*FieldInit@immortal) noregion raises Error {
     add_type_field_inits_opt(inits, 0)
 }
 
-add_type_field_inits_heap(inits: ?*FieldInit@new) noregion raises Error {
+add_type_field_inits_heap(inits: ?*FieldInit@immortal) noregion raises Error {
     add_type_field_inits_opt(inits, 1)
 }
 
-add_type_field_inits_opt(inits: ?*FieldInit@new, heap: int) noregion raises Error {
+add_type_field_inits_opt(inits: ?*FieldInit@immortal, heap: int) noregion raises Error {
     a: ?*FieldInit = inits;
     while (a != null) {
         add_type(a.lhs);
@@ -2297,36 +2598,36 @@ add_type_field_inits_opt(inits: ?*FieldInit@new, heap: int) noregion raises Erro
             mem: *Member = a.member or error("internal");
             if (!assignable(decay(mem.ty), a.lhs)) error_have_expr_want_at(a.file,
                 a.pos, "field initializer type mismatch", a.lhs, decay(mem.ty));
-            if (heap == 1) check_store(a.lhs, life_heap);
+            if (heap == 1) check_store(a.lhs, life_heap, null);
             if (heap == 2) check_exc_payload(a.lhs)
         }
         a = a.next
     }
 }
 
-type_index_expr(p: *Expr, lhs: *Expr@new, idx: *Expr@new) noregion raises Error {
+type_index_expr(p: *Expr, lhs: *Expr@immortal, idx: *Expr@immortal) noregion raises Error {
+    // Move, drop, assignment, borrow, and null tests may name an owner
+    // element; the slice and index are ordinary reads.
+    owner_place: bool = owner_read_ok > 0;
+    saved_owner: int = owner_read_ok;
+    owner_read_ok = 0;
     add_type(lhs);
     add_type(idx);
+    owner_read_ok = saved_owner;
     idt: ?*Type = decay(idx.ty);
-    if (idt == null || !is_int_ty(idt)) error("array index must be int");
+    if (idt == null || !is_int_ty(idt)) error_expression_requirement(idx, "array index must be int");
     raw: ?*Type = lhs.ty;
-    if (raw == null) error_ty("index of untyped expression", raw);
-    if (is_opt_pointer(raw)) error_ty("index of optional pointer (use if (p != null) to narrow)",
-        raw);
-    if (is_opt_slice(raw)) error_ty("index of optional slice (use if (s != null) to narrow)",
-        raw);
-    if (is_opt_str(raw)) error_ty("index of optional str (use if (s != null) to narrow)",
-        raw);
-    if (is_pointer(raw)) error_ty("pointer indexing is not allowed (use []T, [N]T, or str)",
-        raw);
-    if (!is_indexable(raw)) error_ty("index of non-array", raw);
-    p.ty = type_base(raw)
+    if (raw != null && (is_opt_slice(raw) || is_opt_str(raw))) error_nullable_use(lhs,
+        "indexing it");
+    if (raw == null || !is_indexable(raw)) error_expression_requirement(lhs, "indexing requires str, []T, or [N]T");
+    p.ty = type_base(raw);
+    if (!owner_place && is_owned_ty(decay(p.ty))) error_owner_element_copy(p)
 }
 
 type_log(
     p: *Expr,
-    lhs: *Expr@new,
-    rhs: *Expr@new,
+    lhs: *Expr@immortal,
+    rhs: *Expr@immortal,
     and_op: bool
 ) noregion raises Error {
     add_type(lhs);
@@ -2343,15 +2644,20 @@ type_log(
     p.ty = ty_bool
 }
 
-type_or_else(p: *Expr@new, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
+or_unwrapped(t: *Type) noregion raises Error: *Type@new {
+    if (is_optional(t)) return unwrap_optional(t);
+    t
+}
+
+type_or_else(p: *Expr@new, lhs: *Expr@immortal, rhs: *Expr@immortal) noregion raises Error {
     add_type(lhs);
     add_type(rhs);
     lt: ?*Type = decay(lhs.ty);
     rt: ?*Type = decay(rhs.ty);
     if (lt == null) error_ty("or requires a pointer, slice, or function on the left",
         lt);
-    unwrapped: *Type = lt;
-    if (is_optional(lt)) unwrapped = unwrap_optional(lt) else {
+    unwrapped: *Type = or_unwrapped(lt);
+    if (!is_optional(lt)) {
         if (!is_pointer(lt) && !is_slice(lt) && !is_fnptr(lt)) error_ty("or requires a pointer, slice, or function on the left",
             lt)
     }
@@ -2388,7 +2694,7 @@ type_or_else(p: *Expr@new, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error
     error_have_want("or right-hand side must be []T or noreturn", rt, unwrapped)
 }
 
-type_int_arith(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
+type_int_arith(p: *Expr, lhs: *Expr@immortal, rhs: *Expr@immortal) noregion raises Error {
     add_type(lhs);
     add_type(rhs);
     lt: ?*Type = decay(lhs.ty);
@@ -2424,14 +2730,14 @@ type_int_arith(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
     error_have_and("arithmetic type mismatch", lt, rt)
 }
 
-type_int_only_arith(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
+type_int_only_arith(p: *Expr, lhs: *Expr@immortal, rhs: *Expr@immortal) noregion raises Error {
     type_int_arith(p, lhs, rhs);
     pt: ?*Type = p.ty;
     if (pt != null && is_float_ty(pt)) error_ty("operator requires integer operands",
         pt)
 }
 
-type_shift(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
+type_shift(p: *Expr, lhs: *Expr@immortal, rhs: *Expr@immortal) noregion raises Error {
     add_type(lhs);
     add_type(rhs);
     lt: ?*Type = decay(lhs.ty);
@@ -2458,9 +2764,9 @@ type_shift(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
     error_have_and("shift requires an integer left operand", lt, rt)
 }
 
-type_eq_cmp(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
-    add_type(lhs);
-    add_type(rhs);
+type_eq_cmp(p: *Expr, lhs: *Expr@immortal, rhs: *Expr@immortal) noregion raises Error {
+    add_type_null_test(lhs, rhs);
+    add_type_null_test(rhs, lhs);
     lt: ?*Type = decay(lhs.ty);
     rt: ?*Type = decay(rhs.ty);
     if (lt != null && rt != null) {
@@ -2503,6 +2809,32 @@ type_eq_cmp(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
     error_ty_vs_expr(lhs, "comparison type mismatch", lt, rt)
 }
 
+add_type_null_test(value: *Expr@immortal, other: *Expr) noregion raises Error {
+    match value.kind {
+        Var k -> {
+            variable: ?*Obj = k.var;
+            if (variable != null && is_owned_ty(decay(variable.ty)) && is_null_expr(other)) {
+                owner_read_ok = owner_read_ok + 1;
+                add_type(value);
+                owner_read_ok = owner_read_ok - 1;
+                return
+            }
+        }
+        // Indexing admits an owner element only where the place itself is
+        // allowed; its operands are typed as ordinary reads.
+        Index _ -> {
+            if (is_null_expr(other)) {
+                owner_read_ok = owner_read_ok + 1;
+                add_type(value);
+                owner_read_ok = owner_read_ok - 1;
+                return
+            }
+        }
+        _ -> { }
+    }
+    add_type(value)
+}
+
 // The type e is declared with, whatever narrowing gives it here.
 declared_ty(e: *Expr): ?*Type@e {
     match e.kind {
@@ -2518,7 +2850,7 @@ declared_ty(e: *Expr): ?*Type@e {
     }
 }
 
-type_ord_cmp(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
+type_ord_cmp(p: *Expr, lhs: *Expr@immortal, rhs: *Expr@immortal) noregion raises Error {
     add_type(lhs);
     add_type(rhs);
     lt: ?*Type = decay(lhs.ty);
@@ -2533,8 +2865,8 @@ type_ord_cmp(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
 type_binary(
     p: *Expr,
     op: BinOp,
-    lhs: *Expr@new,
-    rhs: *Expr@new
+    lhs: *Expr@immortal,
+    rhs: *Expr@immortal
 ) noregion raises Error {
     match op {
         Add -> {
@@ -2620,7 +2952,7 @@ type_binary(
     }
 }
 
-unify_value_ty(a: ?*Type, b: ?*Type) noregion raises Error: ?*Type@b {
+unify_value_ty(a: ?*Type@b, b: ?*Type) noregion raises Error: ?*Type@b {
     if (a == null && b == null) return null;
     if (a == null) {
         if (b != null && is_noreturn_ty(b)) return null;
@@ -2672,7 +3004,7 @@ opt_ptr_of(t: ?*Type) noregion raises Error: *Type@new {
 }
 
 unify_value_results(
-    a: ?*Type,
+    a: ?*Type@b,
     a_null: bool,
     b: ?*Type,
     b_null: bool
@@ -2792,6 +3124,8 @@ match_result_ty(arms: ?*MatchArm) noregion raises Error: ?*Type@new {
 stmt_result_ty(s: ?*Stmt) noregion raises Error: ?*Type@new {
     if (s == null) return null;
     match s.kind {
+        Break -> ty_noreturn;
+        Continue -> ty_noreturn;
         ExprStmt k -> decay(k.lhs.ty);
         Return _p -> ty_noreturn;
         Raise _p -> ty_noreturn;
@@ -2816,6 +3150,8 @@ stmt_result_ty(s: ?*Stmt) noregion raises Error: ?*Type@new {
             t
         }
         Region k -> stmt_result_ty(k.body);
+        Borrow k -> stmt_result_ty(k.body);
+        Allocate k -> stmt_result_ty(k.body);
         _ -> null
     }
 }
@@ -2875,15 +3211,17 @@ check_stmt_result_node(s: *Stmt, want: *Type@immortal) noregion raises Error: bo
             true
         }
         Region k -> check_stmt_result(k.body, want);
+        Borrow k -> check_stmt_result(k.body, want);
+        Allocate k -> check_stmt_result(k.body, want);
         _ -> false
     }
 }
 
 type_if_expr(
     p: *Expr@new,
-    cond: *Expr@new,
-    then: *Expr@new,
-    els: *Expr@new
+    cond: *Expr@immortal,
+    then: *Expr@immortal,
+    els: *Expr@immortal
 ) noregion raises Error {
     add_type(cond);
     ct: ?*Type = decay(cond.ty);
@@ -2913,9 +3251,11 @@ type_if_expr(
     if (en) bind_null_to_pointer(p.ty, els)
 }
 
-// Match subjects may be inferred locals. Resolve payload bindings only after
-// preceding declarations have been checked, in the surrounding effect context.
-resolve_match_arms(cond: *Expr, arms: ?*MatchArm, representation: ?*RepresentationSite) noregion raises Error {
+// Match subjects may be inferred locals. Resolve the arms and their payload
+// bindings only after preceding declarations have been checked, in the
+// surrounding effect context.
+resolve_match_arms(cond: *Expr@immortal, arms: ?*MatchArm, site: *MatchSite) noregion raises Error {
+    add_type(cond);
     et: *Type = decay(cond.ty) or error_ty("match requires an enum or integer value",
         null);
     enum_subject: bool = is_enum_ty(et);
@@ -2928,31 +3268,47 @@ resolve_match_arms(cond: *Expr, arms: ?*MatchArm, representation: ?*Representati
             if (enum_subject) error_at_file(arm.file, arm.pos, "enum match arm requires a variant");
             literal: int = arm.literal;
             if (is_i8_ty(et) && (literal < 0 || literal > 255) || is_i32_ty(et) && (literal < -2147483648 || literal > 2147483647) || is_u32_ty(et) && (literal < 0 || literal > 4294967295)) error_at_file(arm.file,
-                arm.body.pos, "match literal out of range")
+                arm.body.pos, "match literal out of range");
+            prior: ?*MatchArm = arms;
+            while (prior != arm) {
+                earlier: *MatchArm = prior or error("internal: match arm order");
+                if (earlier.is_literal && earlier.literal == literal) error_duplicate_match_arm_at(arm.file,
+                    arm.pos, arm.name);
+                prior = earlier.next
+            }
         } else {
             if (!enum_subject) error_at_file(arm.file, arm.pos, "integer match arm requires a literal or `_`");
-            variant: *Variant = find_variant(type_enum_def(et), arm.name) or error_at_file(arm.file,
-                arm.pos, "unknown variant");
+            enum_def: *EnumDef = type_enum_def(et);
+            variant: *Variant = find_variant(enum_def, arm.name) or error_unknown_variant_at(arm.file,
+                arm.pos, enum_def, arm.name);
+            prior: ?*MatchArm = arms;
+            while (prior != arm) {
+                earlier: *MatchArm = prior or error("internal: match arm order");
+                if (earlier.variant == variant) error_duplicate_match_arm_at(arm.file,
+                    arm.pos, arm.name);
+                prior = earlier.next
+            }
             arm.variant = variant;
             binder: ?*Obj = arm.binder;
-            if (binder != null) binder.ty = variant.payload_ty or error_at_file(arm.file,
-                arm.pos, "unit variant cannot bind a payload")
-        }
-        prior: ?*MatchArm = arms;
-        while (prior != null && prior != arm) {
-            if (prior.is_literal == arm.is_literal && streq(prior.name, arm.name) || prior.is_literal && arm.is_literal && prior.literal == arm.literal) error_at_file(arm.file,
-                arm.body.pos, "duplicate match arm");
-            prior = prior.next
+            if (binder != null) {
+                if (variant.payload_ty == null) {
+                    message: *StrBuf = sb_new();
+                    sb_puts(message, enum_def.name);
+                    sb_putc(message, '.');
+                    sb_puts(message, variant.name);
+                    sb_puts(message, " has no payload; remove the binding name ");
+                    sb_puts(message, arm.binder_name);
+                    error_at_file(arm.file, arm.binder_pos, sb_finish(message))
+                }
+                binder.ty = variant.payload_ty
+            }
         }
         arm = arm.next
     }
     if (!has_wild) {
-        if (!enum_subject) {
-            last: ?*MatchArm = arms;
-            while (last != null && last.next != null) last = last.next;
-            if (last != null) error_at_file(last.file, last.end, "integer match requires a wildcard arm");
-            error("integer match requires a wildcard arm")
-        }
+        if (!enum_subject) error_at_file(site.file, site.close_pos, "integer match requires a wildcard arm");
+        missing_names: ?*StrBuf = null;
+        missing_count: int = 0;
         variant: ?*Variant = type_enum_def(et).variants;
         while (variant != null) {
             found: bool = false;
@@ -2961,23 +3317,36 @@ resolve_match_arms(cond: *Expr, arms: ?*MatchArm, representation: ?*Representati
                 if (arm.variant == variant) found = true;
                 arm = arm.next
             }
-            if (!found) error_at_file(cond.file, cond.pos, "match not exhaustive");
+            if (!found) {
+                names: *StrBuf = missing_names or sb_new();
+                if (missing_count > 0) sb_puts(names, ", ");
+                sb_puts(names, variant.name);
+                missing_names = names;
+                missing_count = missing_count + 1
+            }
             variant = variant.next
         }
+        if (missing_names != null) {
+            message: *StrBuf = sb_new();
+            if (missing_count == 1) sb_puts(message, "match not exhaustive; missing variant: ") else sb_puts(message,
+                "match not exhaustive; missing variants: ");
+            sb_puts(message, sb_finish(missing_names));
+            error_at_file(site.file, site.close_pos, sb_finish(message))
+        }
     }
-    if (enum_subject) check_representation_site(et, representation, RepresentationOperation.MatchVariants)
+    if (enum_subject) check_representation_site(et, site.representation, RepresentationOperation.MatchVariants)
 }
 
 type_match_expr(
     p: *Expr@new,
-    cond: *Expr@new,
+    cond: *Expr@immortal,
     arms: ?*MatchArm,
-    representation: ?*RepresentationSite
+    site: *MatchSite
 ) noregion raises Error {
-    add_type(cond);
-    resolve_match_arms(cond, arms, representation);
+    resolve_match_arms(cond, arms, site);
     arm: ?*MatchArm = arms;
     while (arm != null) {
+        note_copied_life(cond, arm.binder);
         add_type_stmt(arm.body);
         arm = arm.next
     }
@@ -3025,7 +3394,7 @@ inferred_local_target(lhs: *Expr): ?*Obj {
 
 // The type a `name := init` local takes from its initializer, which has a
 // value of one fixed type.
-type_inferred_initializer(init: *Expr@new) noregion raises Error: *Type@init {
+type_inferred_initializer(init: *Expr@immortal) noregion raises Error: *Type@init {
     add_type(init);
     inferred: *Type = init.ty or ({
         if (is_null_value_expr(init)) error("cannot infer local type; add an explicit annotation");
@@ -3035,7 +3404,7 @@ type_inferred_initializer(init: *Expr@new) noregion raises Error: *Type@init {
     inferred
 }
 
-add_type_expr(p: *Expr@new) noregion raises Error {
+add_type_expr(p: *Expr@immortal) noregion raises Error {
     match p.kind {
         FuncAddr q -> {
             type_function_address(p, q.name);
@@ -3044,6 +3413,15 @@ add_type_expr(p: *Expr@new) noregion raises Error {
         Var q -> {
             if (count_var_use) mark_var_use(q.var);
             p.ty = var_view_ty(q.var);
+            if (owner_read_ok == 0 && is_owned_ty(decay(p.ty))) error("move the owner, or borrow it to use its value");
+            return
+        }
+        Own k -> {
+            type_own_expr(p, k.body, k.slot);
+            return
+        }
+        Move k -> {
+            type_move_expr(p, k.lhs);
             return
         }
         As q -> {
@@ -3061,15 +3439,18 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             add_type(lhs);
             if (lhs != null) {
                 lht: ?*Type = decay(lhs.ty);
-                if (lht == null) error_ty("array length must be int", lht);
-                if (!is_int_ty(lht)) error_ty("array length must be int", lht);
+                if (lht == null || !is_int_ty(lht)) error_expression_requirement(lhs,
+                    "allocation length must be int");
                 fill: ?*Expr = k.fill;
                 if (fill == null) error("new T[n] requires an initial value (new T[n](v))");
-                add_type(fill);
                 elem: *Type = type_base(p.ty or error("missing type"));
+                // One handle cannot fill several elements.
+                if (is_owned_ty(elem) && !is_null_expr(fill)) error_at_file(fill.file,
+                    fill.source_start, "an owner slice starts empty: write new ?owned *T[n](null), then fill elements with xs[i] = move h");
+                add_type(fill);
                 if (!assignable(elem, fill)) error_have_expr_want("new T[n] fill type mismatch",
                     fill, elem);
-                check_store(fill, life_heap)
+                check_store(fill, life_heap, null)
             }
             add_type_field_inits_heap(k.inits);
             return
@@ -3089,13 +3470,14 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             et0: ?*Type = e.ty;
             if (et0 == null) error("array literal element has no type");
             et: *Type = et0;
-            check_store(e, life_heap);
+            if (is_owned_ty(decay(et))) error("array literals cannot hold owners; use new ?owned *T[n](null) and move each handle in");
+            check_store(e, life_heap, null);
             e = e.next;
             while (e != null) {
                 add_type(e);
                 if (!assignable(et, e)) error_have_expr_want("array element type mismatch",
                     e, et);
-                check_store(e, life_heap);
+                check_store(e, life_heap, null);
                 e = e.next
             }
             p.ty = slice_of(et);
@@ -3110,12 +3492,19 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             if (member == null) {
                 sty: *Type = t0 or error("missing type");
                 if (is_pointer(sty)) sty = type_base(sty);
-                if (is_exn_ty(sty)) member = find_exn_member(type_exn_def(sty), q.name) else {
+                if (is_exn_ty(sty)) {
+                    exception_def: *ExnDef = type_exn_def(sty);
+                    member = find_exn_member(exception_def, q.name);
+                    if (member == null) error_unknown_member_at(p.file, p.pos, exception_def.name,
+                        exception_def.members, q.name)
+                } else {
                     if (!is_struct_ty(sty)) error_ty("member access on non-struct",
                         q.lhs.ty);
-                    member = find_member(type_struct_def(sty), q.name)
+                    struct_def: *StructDef = type_struct_def(sty);
+                    member = find_member(struct_def, q.name);
+                    if (member == null) error_unknown_member_at(p.file, p.pos, struct_def.name,
+                        struct_def.members, q.name)
                 }
-                if (member == null) error("unknown member");
                 check_representation_site(sty, q.representation, RepresentationOperation.AccessField);
                 p.kind = ExprKind.MemberAccess {
                     lhs: q.lhs,
@@ -3157,7 +3546,7 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             return
         }
         Match q -> {
-            type_match_expr(p, q.cond, q.arms, q.representation);
+            type_match_expr(p, q.cond, q.arms, q.site);
             return
         }
         Block q -> {
@@ -3245,11 +3634,19 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             match q.lhs.kind {
                 Var _p -> {
                     saveu: bool = count_var_use;
-                    count_var_use = false;
+                    count_var_use = q.compound != null;
+                    saved_owner: int = owner_read_ok;
+                    owner_read_ok = owner_read_ok + 1;
                     add_type(q.lhs);
+                    owner_read_ok = saved_owner;
                     count_var_use = saveu
                 }
-                _ -> add_type(q.lhs)
+                _ -> {
+                    saved_owner2: int = owner_read_ok;
+                    owner_read_ok = owner_read_ok + 1;
+                    add_type(q.lhs);
+                    owner_read_ok = saved_owner2
+                }
             }
             if (inferred == null) add_type(q.rhs);
             lt: ?*Type = null;
@@ -3258,7 +3655,12 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 Var vp -> {
                     var: ?*Obj = vp.var;
                     if (var != null) {
-                        if (var.is_const) error("cannot assign to const global");
+                        if (var.is_const) {
+                            message: *StrBuf = sb_new();
+                            sb_puts(message, var.name);
+                            sb_puts(message, " is const and cannot be assigned; remove const if it must change");
+                            error_at_file(q.lhs.file, q.lhs.pos, sb_finish(message))
+                        }
                         storage = var.ty;
                         lt = decay(var.ty)
                     } else lt = decay(q.lhs.ty)
@@ -3274,9 +3676,52 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 }
                 _ -> lt = decay(q.lhs.ty)
             }
-            if (!assignable(lt, q.rhs)) error_have_expr_want("assignment type mismatch",
-                q.rhs, lt);
-            check_store(q.rhs, dest_life(q.lhs));
+            assigned: *Expr = q.rhs;
+            update: ?*CompoundAssignment = q.compound;
+            if (update != null) {
+                operation: *Expr = new_binary(update.op, q.lhs, q.rhs);
+                operation.pos = p.pos;
+                operation.file = p.file;
+                type_binary(operation, update.op, q.lhs, q.rhs);
+                assigned = operation;
+                value_type: *Type = storage or error("missing assignment type");
+                update.address.ty = ptr_to(value_type);
+                update.value.ty = value_type
+            }
+            if (!assignable(lt, assigned)) error_have_expr_want("assignment type mismatch",
+                assigned, lt);
+            check_store(q.rhs, dest_life(q.lhs), q.lhs);
+            match q.lhs.kind {
+                MemberAccess _ma -> note_aggregate_store(q.lhs, assigned);
+                Index _ia -> note_aggregate_store(q.lhs, assigned);
+                _ -> { }
+            }
+            if (is_owned_ty(lt)) {
+                match q.lhs.kind {
+                    Var _ -> { }
+                    // At run time the element must be empty; null would
+                    // not change it.
+                    Index _ -> {
+                        if (is_null_value_expr(assigned)) error("assigning null does not empty an owner element; drop it to free its arena, or move it out")
+                    }
+                    _ -> error("an owner can only be assigned through its variable or a []?owned *T element")
+                }
+                fresh: bool = false;
+                match assigned.kind {
+                    Move _ -> fresh = true;
+                    Own _ -> fresh = true;
+                    Null -> fresh = true;
+                    Funcall _ -> fresh = true;
+                    _ -> fresh = false
+                }
+                if (!fresh && !is_null_value_expr(assigned)) {
+                    match assigned.kind {
+                        Var _ -> error("move the owner to transfer it");
+                        _ -> { }
+                    }
+                }
+            }
+            note_assigned_arena(q.lhs, assigned);
             if (is_tainted_expr(q.rhs)) {
                 match q.lhs.kind {
                     Var vp -> {
@@ -3295,7 +3740,12 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                         vu: *Obj = vo;
                         if (vu.is_local && !is_current_param(vu)) {
                             if (type_has_pointers(vu.ty) || is_tainted_expr(q.rhs)) vu.life = life_meet(vu.life,
-                                expr_life(q.rhs))
+                                expr_life(q.rhs));
+                            if (type_has_pointers(vu.ty)) {
+                                carried: int = carried_life_of(q.rhs);
+                                if (carried != 0 || vu.carried_life != 0) vu.carried_life = life_meet(vu.carried_life,
+                                    carried)
+                            }
                         }
                     }
                 }
@@ -3308,11 +3758,14 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 }
                 Index ik -> {
                     ilt: ?*Type = ik.lhs.ty;
-                    if (ilt != null && is_str(ilt)) error("cannot assign through str index")
+                    if (ilt != null && is_str(ilt)) error_immutable_string_bytes(ik.lhs)
                 }
                 _ -> { }
             }
             p.ty = storage;
+            // Returning the stored handle would create a second owner when
+            // this assignment is nested in another expression.
+            if (is_owned_ty(lt)) p.ty = null;
             return
         }
         Addr q -> {
@@ -3321,13 +3774,19 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 Var vk -> {
                     vo: ?*Obj = vk.var;
                     if (vo != null) {
-                        if (vo.is_const) error("cannot take address of const global");
+                        if (vo.is_const) {
+                            message: *StrBuf = sb_new();
+                            sb_puts(message, "cannot take the address of const ");
+                            sb_puts(message, vo.name);
+                            sb_puts(message, "; copy its value to a variable first");
+                            error_at_file(q.lhs.file, q.lhs.pos, sb_finish(message))
+                        }
                         mark_addr_taken(vo)
                     }
                 }
                 Index ik -> {
                     ilt: ?*Type = ik.lhs.ty;
-                    if (ilt != null && is_str(ilt)) error("cannot take the address of a str byte");
+                    if (ilt != null && is_str(ilt)) error_immutable_string_bytes(ik.lhs);
                     if (ilt != null && is_indexable(ilt)) {
                         p.ty = ptr_to(type_base(ilt));
                         return
@@ -3344,11 +3803,16 @@ add_type_expr(p: *Expr@new) noregion raises Error {
         Deref q -> {
             add_type(q.lhs);
             t: ?*Type = decay(q.lhs.ty);
-            if (t == null) error_ty("dereferencing non-pointer", t);
-            if (is_opt_pointer(t)) error_ty_expr(q.lhs, "dereferencing optional pointer (use if (p != null) / while (p != null) to narrow)",
-                t);
-            if (is_pointer(t)) p.ty = type_base(t) else error_ty("dereferencing non-pointer",
-                t);
+            if (t != null && is_opt_pointer(t)) error_nullable_use(q.lhs, "dereferencing it");
+            if (t != null && is_pointer(t)) p.ty = type_base(t) else {
+                message: *StrBuf = sb_new();
+                sb_puts(message, "cannot dereference ");
+                append_expr_ty(message, q.lhs);
+                sb_puts(message, "; expected a pointer");
+                pos: int = q.lhs.pos;
+                if (pos == 0) pos = q.lhs.source_start;
+                error_at_file(q.lhs.file, pos, sb_finish(message))
+            }
             return
         }
         Funcall q -> {
@@ -3369,13 +3833,11 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             }
             lenarg: ?*Expr = q.args;
             if (streq(q.funcname, "len")) {
-                if (lenarg == null) error("len takes one argument");
-                if (lenarg.next != null) error("len takes one argument");
+                check_call_argument_count(p, "len", 1);
+                if (lenarg == null) error("internal: missing len argument");
                 at: ?*Type = lenarg.ty;
-                if (at != null && is_opt_slice(at)) error_ty("len of optional slice (use if (s != null) to narrow)",
-                    at);
-                if (at != null && is_opt_str(at)) error_ty("len of optional str (use if (s != null) to narrow)",
-                    at);
+                if (at != null && (is_opt_slice(at) || is_opt_str(at))) error_nullable_use(lenarg,
+                    "taking its length");
                 if (at != null && (is_slice(at) || is_str(at))) {
                     p.kind = ExprKind.Funcall {
                         funcname: q.funcname,
@@ -3396,14 +3858,14 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                     p.ty = ty_int;
                     return
                 }
-                error_ty("len requires str, []T, or [N]T", at)
+                error_builtin_argument_type("len", lenarg, "str, []T, or [N]T")
             }
             if (streq(q.funcname, "cstr")) {
-                if (lenarg == null) error("cstr takes one argument");
-                if (lenarg.next != null) error("cstr takes one argument");
+                check_call_argument_count(p, "cstr", 1);
+                if (lenarg == null) error("internal: missing cstr argument");
                 ct: ?*Type = decay(lenarg.ty);
-                if (ct == null || !is_slice(ct) || !is_i8_ty(type_base(ct))) error_ty("cstr requires []i8",
-                    ct);
+                if (ct == null || !is_slice(ct) || !is_i8_ty(type_base(ct))) error_builtin_argument_type("cstr",
+                    lenarg, "[]i8");
                 p.kind = ExprKind.Funcall {
                     funcname: "l8_cstr",
                     args: q.args,
@@ -3414,10 +3876,11 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 return
             }
             if (streq(q.funcname, "bytes")) {
-                if (lenarg == null) error("bytes takes one argument");
-                if (lenarg.next != null) error("bytes takes one argument");
+                check_call_argument_count(p, "bytes", 1);
+                if (lenarg == null) error("internal: missing bytes argument");
                 bt: ?*Type = decay(lenarg.ty);
-                if (bt == null || !is_str(bt)) error_ty("bytes requires str", bt);
+                if (bt == null || !is_str(bt)) error_builtin_argument_type("bytes",
+                    lenarg, "str");
                 p.kind = ExprKind.Funcall {
                     funcname: "l8_bytes",
                     args: q.args,
@@ -3428,7 +3891,7 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 return
             }
             if (streq(q.funcname, "memcpy")) {
-                check_memcpy_args(q.args);
+                check_memcpy_args(p);
                 p.kind = ExprKind.Funcall {
                     funcname: q.funcname,
                     args: q.args,
@@ -3458,6 +3921,7 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             }
             fnu: *Function = fno;
             call_args: ?*Expr = bind_call_arguments(fnu, q.args, p);
+            check_argument_count(p, call_args, q.funcname, fnu.nparams);
             check_call_lifetimes(fnu, call_args);
             p.kind = ExprKind.Funcall {
                 funcname: q.funcname,
@@ -3467,21 +3931,14 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             };
             add_callee(fnu);
             p.ty = fnu.return_ty;
-            na: int = 0;
-            a = call_args;
-            while (a != null) {
-                na = na + 1;
-                a = a.next
-            }
-            if (na != fnu.nparams) error("wrong number of arguments");
             a = call_args;
             po: ?*Obj = fnu.params;
             while (a != null) {
                 if (po != null) {
                     if (po.ty != null) {
                         pt: ?*Type = decay(po.ty);
-                        if (!assignable(pt, a)) error_have_expr_want_at(p.file, p.pos,
-                            "argument type mismatch", a, pt)
+                        if (!assignable(pt, a)) error_call_argument_type(p, fnu, a,
+                            po)
                     }
                     po = po.param_next
                 }
@@ -3559,10 +4016,10 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
                 add_type(hk);
                 lt: ?*Type = decay(k.iter.ty);
                 rt: ?*Type = decay(hk.ty);
-                if (lt == null || !is_int_ty(lt)) error_ty("range start must be int",
-                    lt);
-                if (rt == null || !is_int_ty(rt)) error_ty("range end must be int",
-                    rt);
+                if (lt == null || !is_int_ty(lt)) error_expression_requirement(k.iter,
+                    "range start must be int");
+                if (rt == null || !is_int_ty(rt)) error_expression_requirement(hk,
+                    "range end must be int");
                 k.item.ty = ty_int;
                 hu: *Expr = hk;
                 add_type_stmt(k.body);
@@ -3571,8 +4028,8 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
                 return
             }
             it: ?*Type = decay(k.iter.ty);
-            if (it != null && (is_opt_slice(it) || is_opt_str(it))) error_ty("for requires a counted array ([]T); narrow ?[]T first",
-                it);
+            if (it != null && (is_opt_slice(it) || is_opt_str(it))) error_nullable_use(k.iter,
+                "iterating over it");
             if (it == null || !is_slice(it) && !is_str(it) && !is_array(it)) error_ty("for requires str, a counted array ([]T or [N]T), or int range (a..b)",
                 it);
             itu: *Type = it;
@@ -3582,7 +4039,9 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             cu: *Obj = co;
             iu: *Obj = ix;
             cu.ty = itu;
+            if (is_owned_ty(type_base(itu))) error_owner_elements_iterated(k.iter);
             k.item.ty = type_base(itu);
+            note_copied_life(k.iter, k.item);
             add_type_stmt(k.body);
             add_type_stmt(new_expr_stmt(new_assign(new_var_node(cu), k.iter)));
             add_type_stmt(new_expr_stmt(new_assign(new_var_node(k.n), new_funcall("len",
@@ -3634,14 +4093,40 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             lhs: ?*Expr = k.lhs;
             add_type(lhs);
             if (lhs != null) {
-                if (current_return_ty == null) error("return with a value in a non-returning function");
+                if (current_return_ty == null) {
+                    fn: *Function = current_fn or error("internal: return outside a function");
+                    message: *StrBuf = sb_new();
+                    sb_puts(message, fn.name);
+                    sb_puts(message, " has no declared return type");
+                    returned_type: ?*Type = lhs.ty;
+                    match lhs.kind {
+                        Funcall call -> {
+                            callee: ?*Function = call.fn;
+                            if (callee != null) returned_type = callee.return_ty
+                        }
+                        _ -> { }
+                    }
+                    if (returned_type != null || is_null_expr(lhs)) {
+                        sb_puts(message, ", but returns ");
+                        append_expr_ty(message, lhs);
+                        sb_puts(message, "; remove the value or declare a return type")
+                    } else sb_puts(message, "; evaluate this expression separately and use return without a value");
+                    error(sb_finish(message))
+                }
                 rt: ?*Type = decay(current_return_ty);
                 if (!assignable(rt, lhs)) error_have_expr_want("return type mismatch",
                     lhs, rt);
                 check_return(lhs)
             } else {
-                if (current_return_ty != null) error_ty("return missing a value",
-                    current_return_ty)
+                if (current_return_ty != null) {
+                    fn: *Function = current_fn or error("internal: return outside a function");
+                    message: *StrBuf = sb_new();
+                    sb_puts(message, fn.name);
+                    sb_puts(message, " must return ");
+                    append_type(message, current_return_ty);
+                    sb_puts(message, "; return a value or remove the declared return type");
+                    error(sb_finish(message))
+                }
             }
             return
         }
@@ -3650,10 +4135,10 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             return
         }
         Match k -> {
-            add_type(k.cond);
-            resolve_match_arms(k.cond, k.arms, k.representation);
+            resolve_match_arms(k.cond, k.arms, k.site);
             a5: ?*MatchArm = k.arms;
             while (a5 != null) {
+                note_copied_life(k.cond, a5.binder);
                 add_type_stmt(a5.body);
                 a5 = a5.next
             }
@@ -3665,6 +4150,20 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             _rf: int = life_enter_region();
             add_type_stmt(k.body);
             life_leave_region(old_cur, old_heap);
+            return
+        }
+        Borrow k -> {
+            type_borrow_stmt(k.place, k.shadow, k.header, k.body);
+            return
+        }
+        Allocate k -> {
+            type_allocate_stmt(k.owner, k.body);
+            arena: *ObjArena = obj_arena(k.owner) or error("allocate needs a borrowed arena");
+            p.kind = StmtKind.Allocate { owner: k.owner, header: arena.header, body: k.body };
+            return
+        }
+        Drop k -> {
+            type_drop_stmt(k.target);
             return
         }
         Decl k -> {
@@ -3824,6 +4323,31 @@ parse_assign() noregion raises Error: *Expr@new {
         tok = tok.next;
         return new_assign(n, parse_assign())
     }
+    compound: bool = true;
+    op: BinOp = BinOp.Add;
+    match tok.kind {
+        AddAssign -> op = BinOp.Add;
+        SubAssign -> op = BinOp.Sub;
+        MulAssign -> op = BinOp.Mul;
+        DivAssign -> op = BinOp.Div;
+        ModAssign -> op = BinOp.Mod;
+        AndAssign -> op = BinOp.And;
+        OrAssign -> op = BinOp.Or;
+        XorAssign -> op = BinOp.Xor;
+        ShlAssign -> op = BinOp.Shl;
+        ShrAssign -> op = BinOp.Shr;
+        _ -> compound = false
+    }
+    if (compound) {
+        tok = tok.next;
+        address: *Obj = new_unbound_obj(".compound-address", true);
+        value: *Obj = new_unbound_obj(".compound-value", true);
+        assignment: *Expr = mk_expr(ExprKind.Assign { lhs: n, rhs: parse_assign(), compound: new CompoundAssignment { op: op, address: address, value: value } });
+        assignment.pos = n.pos;
+        assignment.file = n.file;
+        assignment.toklen = n.toklen;
+        return assignment
+    }
     n
 }
 
@@ -3849,9 +4373,14 @@ parse_decl(is_local: bool, allow_at: bool) noregion raises Error: *Obj@new {
     if (tok.kind != TokKind.Ident) error("expected identifier");
     name: []i8 = cur_tokstr();
     browse_note();
+    name_pos: int = browse_tok_pos;
+    name_file: int = browse_tok_file;
+    name_length: int = browse_tok_len;
     tok = tok.next;
     skip(TokKind.Colon);
+    first_type_token: *Token = tok;
     ty: *Type = parse_type();
+    type_end: int = token_span_end(first_type_token, tok);
     if (is_noreturn_ty(ty)) error("noreturn is only valid as a function return type");
     bound: []i8 = "";
     if (tok.kind == TokKind.At) {
@@ -3866,6 +4395,11 @@ parse_decl(is_local: bool, allow_at: bool) noregion raises Error: *Obj@new {
         } else bound = name
     }
     o: *Obj = new_obj(name, is_local);
+    o.browse_pos = name_pos;
+    o.browse_file = name_file;
+    o.browse_len = name_length;
+    o.declared_type_pos = first_type_token.pos;
+    o.declared_type_end = type_end;
     o.ty = ty;
     o.life_bound = bound;
     o
@@ -3899,6 +4433,26 @@ parse_brace_stmts() noregion raises Error: ?*Stmt@new {
     head
 }
 
+type ParseLoop = {
+    has_break: bool
+}
+
+type ParsedLoopBody = {
+    body: *Stmt;
+    has_break: bool
+}
+
+parse_loop: ?*ParseLoop = null;
+
+parse_loop_body() noregion raises Error: ParsedLoopBody@new {
+    outer: ?*ParseLoop = parse_loop;
+    loop: *ParseLoop = new ParseLoop { has_break: false };
+    parse_loop = loop;
+    body: *Stmt = parse_stmt();
+    parse_loop = outer;
+    ParsedLoopBody { body: body, has_break: loop.has_break }
+}
+
 parse_stmt() noregion raises Error: *Stmt@new {
     spos: int = tok.pos;
     s: *Stmt = parse_stmt_body();
@@ -3907,6 +4461,20 @@ parse_stmt() noregion raises Error: *Stmt@new {
 }
 
 parse_stmt_body() noregion raises Error: *Stmt@new {
+    if (tok.kind == TokKind.Break || tok.kind == TokKind.Continue) {
+        loop: ?*ParseLoop = parse_loop;
+        if (loop == null) {
+            if (tok.kind == TokKind.Break) error("break is only allowed inside a loop") else error("continue is only allowed inside a loop")
+        }
+        kind: StmtKind = StmtKind.Continue;
+        if (tok.kind == TokKind.Break) {
+            loop.has_break = true;
+            kind = StmtKind.Break
+        }
+        tok = tok.next;
+        skip_stmt_semi();
+        return mk_stmt(kind)
+    }
     if (at_expect()) {
         tok = tok.next;
         site: *ExpectSite = parse_expect_text();
@@ -3926,22 +4494,25 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         if (tok.kind != TokKind.Ident) error("expected exception name after raise");
         ename: []i8 = reference_tokstr();
         browse_note();
+        ename_pos: int = browse_tok_pos;
+        ename_file: int = browse_tok_file;
         ed: ?*ExnDef = find_exn(ename);
         if (ed == null) {
-            if (parse_resolve) error("unknown exception");
+            if (parse_resolve) error_unknown_exception(ename);
             ed = exn_stub(ename)
         }
-        edu: *ExnDef = ed or error("unknown exception");
+        edu: *ExnDef = ed or error_unknown_exception(ename);
         browse_add(browse_tok_file, browse_tok_pos, browse_tok_len, edu.browse_id,
             false, BROWSE_TY, ename);
         tok = tok.next;
         rargs: ?*FieldInit = null;
         rhas: bool = false;
         if (tok.kind == TokKind.LBrace) {
-            rargs = parse_exn_field_inits(edu);
+            rargs = parse_exn_field_inits(edu, ename_file, ename_pos);
             rhas = true
         } else {
-            if (edu.members != null) error("exception requires field initializers")
+            if (parse_resolve && edu.members != null) error_exception_requires_fields_at(ename_file,
+                ename_pos, edu)
         }
         skip_stmt_semi();
         return new_raise(ename, edu, rargs, rhas)
@@ -3959,10 +4530,10 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
             browse_note();
             ced: ?*ExnDef = find_exn(cname);
             if (ced == null) {
-                if (parse_resolve) error("unknown exception");
+                if (parse_resolve) error_unknown_exception(cname);
                 ced = exn_stub(cname)
             }
-            cedu: *ExnDef = ced or error("unknown exception");
+            cedu: *ExnDef = ced or error_unknown_exception(cname);
             cpos: int = browse_tok_pos;
             clen: int = browse_tok_len;
             cfile: int = browse_tok_file;
@@ -3970,7 +4541,12 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
             tok = tok.next;
             a: ?*CatchArm = arms_h;
             while (a != null) {
-                if (a.exn == cedu) error("duplicate with arm");
+                if (a.exn == cedu) {
+                    message: *StrBuf = sb_new();
+                    sb_puts(message, cedu.name);
+                    sb_puts(message, " is already handled by an earlier with arm");
+                    error_at_file(cfile, cpos, sb_finish(message))
+                }
                 a = a.next
             }
             enter_scope();
@@ -3995,7 +4571,14 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
                     bo2.ty = exn_type(cedu);
                     binder = bo2
                 } else {
-                    if (cedu.members != null) error("payload exception requires a binder (Name name)")
+                    if (cedu.members != null) {
+                        message: *StrBuf = sb_new();
+                        sb_puts(message, cedu.name);
+                        sb_puts(message, " carries a payload; bind it with `with ");
+                        sb_puts(message, cname);
+                        sb_puts(message, " payload -> { ... }`");
+                        error_at_file(cfile, cpos, sb_finish(message))
+                    }
                 }
             }
             skip(TokKind.Arrow);
@@ -4069,11 +4652,11 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         save2: ?*NarrowFrame = narrow_top;
         narrow_push_ne_nulls(cond2);
         enter_scope();
-        body: *Stmt = parse_stmt();
+        loop_body: ParsedLoopBody = parse_loop_body();
         leave_scope();
         narrow_reset(save2);
         kill_again(loop_killed, kill_n);
-        return new_while(cond2, body)
+        return new_while(cond2, loop_body.body, loop_body.has_break)
     }
     if (tok.kind == TokKind.For) {
         tok = tok.next;
@@ -4085,11 +4668,24 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         ilen: int = tok.len;
         ifile: int = current_file_id;
         tok = tok.next;
+        index_name: []i8 = "";
+        index_pos: int = ipos;
+        index_len: int = ilen;
+        if (tok.kind == TokKind.Comma) {
+            index_name = iname;
+            tok = tok.next;
+            if (tok.kind != TokKind.Ident) error("expected value name after index name");
+            iname = cur_tokstr();
+            ipos = tok.pos;
+            ilen = tok.len;
+            tok = tok.next
+        }
         if (tok.kind != TokKind.In) error("expected in");
         tok = tok.next;
         fiter: *Expr = parse_expr();
         fhi: ?*Expr = null;
         if (tok.kind == TokKind.DotDot) {
+            if (len(index_name) != 0) error("index and value bindings require a collection, not a range");
             tok = tok.next;
             fhi = parse_expr()
         }
@@ -4098,6 +4694,15 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         fidx: ?*Obj = null;
         fn: *Obj = new_obj(".forn", true);
         fn.ty = ty_int;
+        index: ?*Obj = null;
+        if (len(index_name) != 0) {
+            bound_index: *Obj = new_obj(index_name, true);
+            bound_index.ty = ty_int;
+            bound_index.browse_pos = index_pos;
+            bound_index.browse_file = ifile;
+            bound_index.browse_len = index_len;
+            index = bound_index
+        }
         if (fhi == null) {
             fcoll = new_obj(".forxs", true);
             ix0: *Obj = new_obj(".fori", true);
@@ -4110,16 +4715,16 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         fitem.browse_len = ilen;
         if (fhi != null) fitem.ty = ty_int;
         enter_scope();
-        fbody: *Stmt = parse_stmt();
+        fbody: ParsedLoopBody = parse_loop_body();
         leave_scope();
         leave_scope();
-        return new_for(fitem, fcoll, fidx, fn, fiter, fhi, fbody)
+        return new_for(fitem, index, fcoll, fidx, fn, fiter, fhi, fbody.body)
     }
     if (tok.kind == TokKind.Match) {
         tok = tok.next;
         mcond: *Expr = parse_expr();
-        representation: ?*RepresentationSite = match_representation_site();
-        return new_match(mcond, parse_match_arms(), representation)
+        parsed: ParsedMatch = parse_match_arms(mcond);
+        return new_match(mcond, parsed.arms, parsed.site)
     }
     if (tok.kind == TokKind.LBrace) return parse_compound();
     if (tok.kind == TokKind.Ident && tok.next.kind == TokKind.Colon && tok.next.next.kind == TokKind.Assign) {
@@ -4150,6 +4755,57 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         }
         skip_stmt_semi();
         return new_decl(o.name, dty, null, o)
+    }
+    if (at_word("borrow") && tok.next.kind == TokKind.Ident) {
+        tok = tok.next;
+        place: *Expr;
+        shadow_name: []i8;
+        if (tok.next.kind == TokKind.LBrace) {
+            // `borrow owner { ... }` exposes the root through the owner's name.
+            shadow_name = cur_tokstr();
+            bowner: ?*Obj = find_var(shadow_name);
+            if (bowner == null && parse_resolve) error("unknown owner");
+            place = new_var_node(bowner or new_obj(shadow_name, true));
+            place_expr(place, tok.pos, current_file_id);
+            tok = tok.next
+        } else {
+            place = parse_postfix_chain(PostfixConversions.Excluded);
+            if (tok.kind != TokKind.As || tok.next.kind != TokKind.Ident || tok.next.next.kind != TokKind.LBrace) error("name the borrowed root: borrow xs[i] as name { ... }");
+            tok = tok.next;
+            shadow_name = cur_tokstr();
+            tok = tok.next
+        }
+        enter_scope();
+        region_depth = region_depth + 1;
+        // type_borrow_stmt gives shadow its type once place is typed.
+        shadow: *Obj = new_obj(shadow_name, true);
+        bbody: *Stmt = parse_compound();
+        region_depth = region_depth - 1;
+        leave_scope();
+        header: *Obj = new_obj(".borrow_owner", true);
+        header.ty = ty_int;
+        return mk_stmt(StmtKind.Borrow {
+            place: place,
+            shadow: shadow,
+            header: header,
+            body: bbody
+        })
+    }
+    if (at_word("allocate") && tok.next.kind == TokKind.Ident && tok.next.next.kind == TokKind.LBrace) {
+        tok = tok.next;
+        aname: []i8 = cur_tokstr();
+        aslot: ?*Obj = find_var(aname);
+        if (aslot == null && parse_resolve) error("unknown name");
+        alloc_obj: *Obj = aslot or new_obj(aname, true);
+        tok = tok.next;
+        abody: *Stmt = parse_compound();
+        return mk_stmt(StmtKind.Allocate { owner: alloc_obj, header: null, body: abody })
+    }
+    if (at_word("drop") && move_operand_next()) {
+        tok = tok.next;
+        dropped: *Expr = parse_expr();
+        skip_stmt_semi();
+        return mk_stmt(StmtKind.Drop { target: dropped })
     }
     e: *Expr = parse_expr();
     skip_stmt_semi();
@@ -4203,10 +4859,12 @@ new_function(name: []i8@new): *Function@new {
         ret_bound: "",
         ret_life: 0,
         need_imm_heap: 0,
+        noregion_cause: null,
         decl_imm_heap: 0,
         bound_ret_need_new: false,
         bound_ret_param: null,
         bound_calls: null,
+        hold_checks: null,
         callees: null,
         browse_id: browse_fresh(),
         browse_pos: browse_tok_pos,
@@ -4219,6 +4877,7 @@ new_function(name: []i8@new): *Function@new {
 }
 
 parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@new {
+    parse_loop = null;
     fn: *Function = new_function(name);
     locals = null;
     scope_locals = null;
@@ -4236,7 +4895,15 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
         parameter_name: []i8 = cur_tokstr();
         previous: ?*Obj = fn.params;
         while (previous != null) {
-            if (streq(previous.name, parameter_name)) error("duplicate parameter name");
+            if (streq(previous.name, parameter_name)) {
+                message: *StrBuf = sb_new();
+                sb_puts(message, "parameter ");
+                sb_puts(message, parameter_name);
+                sb_puts(message, " is declared more than once in ");
+                if (len(name) == 0) sb_puts(message, "this function type") else sb_puts(message,
+                    name);
+                error_at(tok.pos, sb_finish(message))
+            }
             previous = previous.param_next
         }
         p: *Obj = parse_decl(true, true);
@@ -4261,14 +4928,25 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
             browse_note();
             ed: ?*ExnDef = find_exn(ename);
             if (ed == null) {
-                if (parse_resolve) error("unknown exception");
+                if (parse_resolve) error_unknown_exception(ename);
                 ed = exn_stub(ename)
             }
-            edu: *ExnDef = ed or error("unknown exception");
+            edu: *ExnDef = ed or error_unknown_exception(ename);
             browse_add(browse_tok_file, browse_tok_pos, browse_tok_len, edu.browse_id,
                 false, BROWSE_TY, ename);
-            if (exn_in_list(fn.raises_list, edu)) error("duplicate raises");
-            el: *ExnList = new ExnList { exn: edu, seen: false, next: null };
+            if (exn_in_list(fn.raises_list, edu)) {
+                message: *StrBuf = sb_new();
+                sb_puts(message, edu.name);
+                sb_puts(message, " appears more than once in the raises list");
+                error_at_file(browse_tok_file, browse_tok_pos, sb_finish(message))
+            }
+            el: *ExnList = new ExnList {
+                exn: edu,
+                source_file: browse_tok_file,
+                source_pos: browse_tok_pos,
+                seen: false,
+                next: null
+            };
             if (rtail != null) {
                 rtail.next = el;
                 rtail = el
@@ -4354,11 +5032,18 @@ parse_field_list(base_offset: int) noregion raises Error: *Member {
     while (tok.kind != TokKind.RBrace) {
         if (tok.kind != TokKind.Ident) error("expected field name");
         mname: []i8 = cur_tokstr();
-        if (find_field(head, mname) != null) error("duplicate field name");
+        if (find_field(head, mname) != null) {
+            message: *StrBuf = sb_new();
+            sb_puts(message, "field ");
+            sb_puts(message, mname);
+            sb_puts(message, " is declared more than once");
+            error_at(tok.pos, sb_finish(message))
+        }
         browse_note();
         tok = tok.next;
         skip(TokKind.Colon);
         mty: *Type = parse_type();
+        if (is_owned_ty(mty)) error("owned handles cannot be record or variant fields");
         if (is_noreturn_ty(mty)) error("noreturn cannot be a field type");
         sz: int = type_size(mty);
         al: int = type_align(mty);
@@ -4398,15 +5083,24 @@ parse_field_list(base_offset: int) noregion raises Error: *Member {
     head or error("empty members")
 }
 
-check_enum_tag(tag: int, tag_ty: *Type) raises Error {
-    if (is_i8_ty(tag_ty)) {
-        if (tag < 0 || tag > 255) error("enum tag out of range for i8")
-    } else if (is_i32_ty(tag_ty)) {
-        lo: int = 0 - 2147483647 - 1;
-        if (tag < lo || tag > 2147483647) error("enum tag out of range for i32")
-    } else if (is_u32_ty(tag_ty)) {
-        if (tag < 0 || tag > 4294967295) error("enum tag out of range for u32")
-    }
+check_enum_tag(tag: int, tag_ty: *Type, pos: int) noregion raises Error {
+    minimum: int = 0;
+    maximum: int = 0;
+    if (is_i8_ty(tag_ty)) maximum = 255 else if (is_i32_ty(tag_ty)) {
+        minimum = -2147483648;
+        maximum = 2147483647
+    } else if (is_u32_ty(tag_ty)) maximum = 4294967295 else return;
+    if (tag >= minimum && tag <= maximum) return;
+    message: *StrBuf = sb_new();
+    sb_puts(message, "enum tag ");
+    sb_uint(message, tag);
+    sb_puts(message, " is outside the ");
+    append_type(message, tag_ty);
+    sb_puts(message, " range ");
+    sb_uint(message, minimum);
+    sb_puts(message, "..");
+    sb_uint(message, maximum);
+    error_at(pos, sb_finish(message))
 }
 
 parse_enum_tag() raises Error: int {
@@ -4563,13 +5257,34 @@ parse_type_def() noregion raises Error {
     done: bool = false;
     while (!done) {
         tag: int = next_tag;
+        tag_pos: int = tok.pos;
         if (tok.kind == TokKind.Minus || tok.kind == TokKind.Num) tag = parse_enum_tag();
-        check_enum_tag(tag, tag_ty);
+        check_enum_tag(tag, tag_ty, tag_pos);
         v: *Variant = parse_variant(tag, name, tag_size);
         x: ?*Variant = head;
         while (x != null) {
-            if (streq(x.name, v.name)) error("duplicate variant");
-            if (x.tag == v.tag) error("duplicate variant tag");
+            if (streq(x.name, v.name)) {
+                message: *StrBuf = sb_new();
+                sb_puts(message, "variant ");
+                sb_puts(message, name);
+                sb_putc(message, '.');
+                sb_puts(message, v.name);
+                sb_puts(message, " is declared more than once");
+                error_at_file(v.browse_file, v.browse_pos, sb_finish(message))
+            }
+            if (x.tag == v.tag) {
+                message: *StrBuf = sb_new();
+                sb_puts(message, name);
+                sb_putc(message, '.');
+                sb_puts(message, v.name);
+                sb_puts(message, " uses tag ");
+                sb_uint(message, v.tag);
+                sb_puts(message, ", already used by ");
+                sb_puts(message, name);
+                sb_putc(message, '.');
+                sb_puts(message, x.name);
+                error_at_file(v.browse_file, v.browse_pos, sb_finish(message))
+            }
             x = x.next
         }
         end: int = v.payload_offset + v.payload_size;
@@ -4678,6 +5393,7 @@ at_expect(): bool {
 // test "name" { body }. The body is an ordinary function with no parameters
 // that may raise any exception; only `l8 test` calls it.
 parse_test() noregion raises Error {
+    parse_loop = null;
     tpos: int = tok.pos;
     tok = tok.next;
     if (tok.val != 0) error("test name must be a one-line string");
@@ -4687,7 +5403,13 @@ parse_test() noregion raises Error {
     }
     previous: ?*TestCase = test_cases;
     while (previous != null) {
-        if (streq(previous.name, name)) error("duplicate test name");
+        if (streq(previous.name, name)) {
+            message: *StrBuf = sb_new();
+            sb_puts(message, "test \"");
+            sb_puts(message, name);
+            sb_puts(message, "\" is declared more than once");
+            error_at(tok.pos, sb_finish(message))
+        }
         previous = previous.next
     }
     browse_note();
@@ -4994,7 +5716,7 @@ parse_skip_initializer() {
     }
 }
 
-parse_global_init(o2: *Obj@new, is_const_decl: bool) noregion raises Error {
+parse_global_init(o2: *Obj@immortal, is_const_decl: bool) noregion raises Error {
     o2.init = parse_expr();
     if (is_const_decl && parse_resolve) {
         if (!const_global_type(o2.ty)) error("const global must have a scalar numeric or bool type");
@@ -5061,6 +5783,7 @@ parse_run_deferred() noregion raises Error {
 }
 
 parse_enter_deferred(item: *ParseDeferred@immortal) {
+    parse_loop = null;
     source = item.source;
     source_len = item.source_len;
     source_path = item.path;
@@ -5200,7 +5923,6 @@ parse_program_unit() noregion raises Error {
 }
 
 parse_program(entry_path: []i8) noregion raises Error {
-    mark_nerr = 0;
     functions = null;
     function_tail = null;
     globals = null;

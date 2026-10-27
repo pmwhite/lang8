@@ -220,16 +220,22 @@
     ldp x9, x30, [sp], #16
     ret
 
+// A region is always on the process heap: entered in an arena (frame kind
+// 5), the arena is suspended until it ends, so what an allocate of that
+// arena adds within it stays.
 .Larm_arena_region_push:
     stp x9, x30, [sp, #-16]!
     bl .Larm_arena_state_address
     mov x2, x0
     ldr x1, [x15]
     mov x3, #0
-    cbz x1, 1f
-    ldr x3, [x1, #24]
-1:
     mov x0, #0
+    cbz x1, 1f
+    ldr x2, [x15, #16]
+    ldr x2, [x2]
+    str xzr, [x15]
+    mov x0, #5
+1:
     bl .Larm_arena_frame_push
     ldp x9, x30, [sp], #16
     ret
@@ -251,32 +257,23 @@
     add x20, x20, x5, lsl #5
     ldp x0, x21, [x20]
     ldp x22, x23, [x20, #16]
-    cbz x0, 1f
+    cbz x0, 4f
     cmp x0, #1
     b.eq 5f
     cmp x0, #3
     b.eq 6f
+    cmp x0, #5
+    b.eq 7f
     str x22, [x19]
-    b 9f
-1:
-    cbz x21, 4f
-2:
-    ldr x0, [x21, #24]
-    cmp x0, x23
-    b.eq 3f
-    ldp x2, x1, [x0]
-    str x2, [x21, #24]
-    bl .Larm_arena_unmap
-    b 2b
-3:
-    str x22, [x21, #8]
-    ldr x0, [x23, #8]
-    add x0, x0, x23
-    str x0, [x21, #16]
     b 9f
 4:
     ldr x0, [x19, #16]
     str x22, [x0]
+    b 9f
+7:
+    ldr x0, [x19, #16]
+    str x22, [x0]
+    str x21, [x19]
     b 9f
 5:
     str x22, [x19]

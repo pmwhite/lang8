@@ -360,3 +360,59 @@ A persistent global (RELOAD.md) keeps its word, as a const does:
   main(): int {
       count + LIMIT
   }
+
+A loop over a count whose body begins by declaring a string is a loop,
+not a record literal:
+
+  $ printf 'tag example;\ncount: int = 2;\nmain(): int { for b in 0..count { name: str = "x"; b } 0 }\n' > loop.l8
+  $ l8 fmt loop.l8
+  tag example;
+  
+  count: int = 2;
+  
+  main(): int {
+      for b in 0..count {
+          name: str = "x";
+          b
+      }
+      0
+  }
+
+Comments in the blocks of `borrow`, `allocate`, `own` and an `if`
+expression, and among a literal's fields, stay where they are:
+
+  $ cat > blocks.l8 <<'L8'
+  > tag example;
+  > 
+  > type Box = {
+  >     size: int;
+  >     count: int
+  > }
+  > 
+  > main(): int {
+  >     box: owned *Box = own {
+  >         // (Made.)
+  >         new Box {
+  >             size: 0, // (Empty.)
+  >             // (None yet.)
+  >             count: 0
+  >         }
+  >     };
+  >     borrow box as root {
+  >         // (Borrowed.)
+  >         size: int = if (root.size == 0) {
+  >             // (Chosen.)
+  >             1
+  >         } else 2;
+  >         root.size = size
+  >     }
+  >     allocate box {
+  >         // (Allocated.)
+  >         0
+  >     }
+  >     drop box;
+  >     0
+  > }
+  > L8
+  $ l8 fmt blocks.l8 | diff blocks.l8 - && echo unchanged
+  unchanged

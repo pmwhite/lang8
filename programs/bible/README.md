@@ -7,7 +7,10 @@ learning, memorization and recorded or synthesized readings.
 
 The BSB, KJV, WEB, ASV and YLT are bundled. The original Hebrew and Greek
 and study data are in `data/`. The ESV requires the online proxy and is
-available when the proxy reports that it can serve it.
+available when the proxy reports that it can serve it. The Bookshelf
+downloads further Bibles, commentaries, dictionaries, devotionals and
+books from CrossWire's SWORD library and reads them with
+[`programs/sword`](../sword/README.md).
 
 ## Build and run
 
@@ -83,7 +86,10 @@ to datasets must preserve those notices and the app's acknowledgements.
 ESV access and caching rules live in `worker/` and `core/esv_*.l8`.
 
 `core/kept.l8` owns saved-file names and serialization. A skin supplies file
-operations; the web uses browser storage. Reading position, marks, notes,
+operations; the web uses browser storage. The Bookshelf keeps its own files
+beside them (`core/shelf.l8`): `shelf.tsv` lists the modules installed or
+waiting, `shelf-catalog.tar.gz` is the library's catalog as CrossWire
+serves it, and `shelf-NAME.zip` is each module's package, read in place. Reading position, marks, notes,
 plans and learning progress are local to each installation. There is no
 cross-device synchronization.
 

@@ -228,7 +228,7 @@ com_last(h: ?*Com): ?*Com@h {
     last
 }
 
-com_concat(a: ?*Com, b: ?*Com@a) raises Error: ?*Com@b {
+com_concat(a: ?*Com, b: ?*Com@a) raises Error: ?*Com@a {
     if (a == null) return b;
     t: *Com = com_last(a) or error("internal");
     t.next = b;
@@ -855,19 +855,7 @@ attach_stmt_inner(s: *Stmt, end_pos: int) raises Error {
             k.body = attach_one_stmt(k.body, end_pos);
             return
         }
-        Match k -> {
-            arm: ?*MatchArm = k.arms;
-            while (arm != null) {
-                arm.lead = com_concat(arm.lead, com_take_until(arm.pos));
-                nxt: ?*MatchArm = arm.next;
-                np: int = end_pos;
-                if (nxt != null) np = nxt.pos;
-                arm.body = attach_one_stmt(arm.body, np);
-                arm.trail = com_concat(arm.trail, com_take_trail(np));
-                arm = nxt
-            }
-            return
-        }
+        Match k -> attach_match_arms(k.arms, end_pos);
         Try k -> {
             k.body = attach_one_stmt(k.body, end_pos);
             a: ?*CatchArm = k.arms;
@@ -886,7 +874,73 @@ attach_stmt_inner(s: *Stmt, end_pos: int) raises Error {
             k.body = attach_one_stmt(k.body, end_pos);
             return
         }
+        Borrow k -> {
+            k.body = attach_one_stmt(k.body, end_pos);
+            return
+        }
+        Allocate k -> {
+            k.body = attach_one_stmt(k.body, end_pos);
+            return
+        }
+        ExprStmt k -> attach_expr_inner(k.lhs, end_pos);
+        Decl k -> {
+            init: ?*Expr = k.init;
+            if (init != null) attach_expr_inner(init, end_pos)
+        }
+        Return k -> {
+            value: ?*Expr = k.lhs;
+            if (value != null) attach_expr_inner(value, end_pos)
+        }
         _ -> return
+    }
+}
+
+attach_match_arms(arms: ?*MatchArm, end_pos: int) raises Error {
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        arm.lead = com_concat(arm.lead, com_take_until(arm.pos));
+        nxt: ?*MatchArm = arm.next;
+        np: int = end_pos;
+        if (nxt != null) np = nxt.pos;
+        arm.body = attach_one_stmt(arm.body, np);
+        arm.trail = com_concat(arm.trail, com_take_trail(np));
+        arm = nxt
+    }
+}
+
+// Comments in the statements of an expression's blocks (`if`, `match`,
+// `own` and block expressions, and what is assigned) and among a
+// literal's fields stay in them.
+attach_expr_inner(e: *Expr, end_pos: int) raises Error {
+    match e.kind {
+        If k -> {
+            attach_expr_inner(k.then, end_pos);
+            attach_expr_inner(k.els, end_pos)
+        }
+        Block k -> k.body = attach_stmts(k.body, end_pos);
+        Own k -> k.body = attach_one_stmt(k.body, end_pos);
+        Match k -> attach_match_arms(k.arms, end_pos);
+        Assign k -> attach_expr_inner(k.rhs, end_pos);
+        StructLit k -> attach_inits(k.inits, end_pos);
+        VariantLit k -> attach_inits(k.inits, end_pos);
+        New k -> attach_inits(k.inits, end_pos);
+        _ -> { }
+    }
+}
+
+// A literal's fields: the comments before each, and after each but the
+// last on its line (the last's are its statement's, after the literal).
+attach_inits(inits: ?*FieldInit, end_pos: int) raises Error {
+    field: ?*FieldInit = inits;
+    while (field != null) {
+        field.lead = com_concat(field.lead, com_take_until(field.pos));
+        next_field: ?*FieldInit = field.next;
+        value: ?*Expr = field.lhs;
+        if (next_field != null) {
+            if (value != null) attach_expr_inner(value, next_field.pos);
+            field.trail = com_concat(field.trail, com_take_trail(next_field.pos))
+        } else if (value != null) attach_expr_inner(value, end_pos);
+        field = next_field
     }
 }
 
@@ -1481,6 +1535,7 @@ new_unbound_obj(name: []i8@new, is_local: bool): *Obj@new {
         life_bound: "",
         bound_need_imm: false,
         bound_need_new: false,
+        bound_holds_new: false,
         is_tainted: false,
         bound_named: null,
         declared_type_pos: 0,
@@ -2897,7 +2952,7 @@ type_binary(
     }
 }
 
-unify_value_ty(a: ?*Type, b: ?*Type) noregion raises Error: ?*Type@b {
+unify_value_ty(a: ?*Type@b, b: ?*Type) noregion raises Error: ?*Type@b {
     if (a == null && b == null) return null;
     if (a == null) {
         if (b != null && is_noreturn_ty(b)) return null;
@@ -2949,7 +3004,7 @@ opt_ptr_of(t: ?*Type) noregion raises Error: *Type@new {
 }
 
 unify_value_results(
-    a: ?*Type,
+    a: ?*Type@b,
     a_null: bool,
     b: ?*Type,
     b_null: bool
@@ -4809,6 +4864,7 @@ new_function(name: []i8@new): *Function@new {
         bound_ret_need_new: false,
         bound_ret_param: null,
         bound_calls: null,
+        hold_checks: null,
         callees: null,
         browse_id: browse_fresh(),
         browse_pos: browse_tok_pos,

@@ -19,11 +19,13 @@
 //       remembered for 30 days in D1 (the address only), so a chapter
 //       costs one query a month (DESIGN.md §12.6). The Worker never
 //       fetches or streams the ESV's sound itself.
-//   GET /api/v1/audio/relay?u=https://openbible.com/audio/souer/BSB_43_Jhn_003.mp3
-//       the recording, streamed through (audio/mpeg): for the web app to
-//       keep a chapter (core/held.l8's downloads), since the readers' hosts
-//       give pages no access to their files. Only those hosts' recordings
-//       (RELAYED), kept at Cloudflare's edge for 30 days.
+//   GET /api/v1/relay?u=https://openbible.com/audio/souer/BSB_43_Jhn_003.mp3
+//       a file the web app keeps, streamed through: a recording (core/
+//       held.l8's downloads), or the SWORD library's catalog or a module's
+//       package (core/shelf.l8's bookshelf), since their hosts give pages
+//       no access to their files. Only what RELAYED allows, kept at
+//       Cloudflare's edge (packages and recordings 30 days, the catalog a
+//       day). /api/v1/audio/relay is the same, for older pages.
 //
 // It also serves the site's pages (ASSETS), and the reader on the web at
 // /read/ with its headers, a reader's address with no page answered by the
@@ -52,13 +54,19 @@ const headers = { "content-type": "application/json", "cache-control": "no-store
 const reply = (status, body) => new Response(JSON.stringify(body), { status, headers });
 const fail = (status, error, message, retry = 0) => reply(status, { error, message, retry });
 
-// Where a recording may be relayed from: the folders of the readers'
-// recordings (core/audio.l8's audio_url), their .mp3 files alone.
-export const RELAYED = ["https://openbible.com/audio/", "https://ebible.org/eng-web/audio/"];
-const RELAY_KEEP = 30 * 86400;
+// What may be relayed: the readers' recordings (core/audio.l8's
+// audio_url), their .mp3 files alone; the SWORD library's module packages
+// (core/shelf.l8), their .zip files; and its catalog, that one file. Each
+// with the type it is served as and how long the edge keeps it (seconds).
+export const RELAYED = [
+  { prefix: "https://openbible.com/audio/", ending: ".mp3", type: "audio/mpeg", keep: 30 * 86400 },
+  { prefix: "https://ebible.org/eng-web/audio/", ending: ".mp3", type: "audio/mpeg", keep: 30 * 86400 },
+  { prefix: "https://www.crosswire.org/ftpmirror/pub/sword/packages/rawzip/", ending: ".zip", type: "application/zip", keep: 30 * 86400 },
+  { exact: "https://www.crosswire.org/ftpmirror/pub/sword/raw/mods.d.tar.gz", type: "application/gzip", keep: 86400 },
+];
 
-// The address to relay, or null: one of RELAYED's .mp3 files, as the URL
-// parser reads it (dots and escapes resolved), with no query.
+// The address to relay and its rule, or null: one RELAYED allows, as the
+// URL parser reads it (dots and escapes resolved), with no query.
 export const relayable = (u) => {
   let url;
   try {
@@ -66,21 +74,22 @@ export const relayable = (u) => {
   } catch {
     return null;
   }
-  if (url.search || url.hash || url.username || url.password || !url.pathname.endsWith(".mp3")) return null;
-  return RELAYED.some((p) => url.href.startsWith(p)) ? url : null;
+  if (url.search || url.hash || url.username || url.password) return null;
+  const rule = RELAYED.find((r) => (r.exact ? url.href === r.exact : url.href.startsWith(r.prefix) && url.pathname.endsWith(r.ending)));
+  return rule ? { url, rule } : null;
 };
 
 async function relay(params) {
-  const url = relayable(params.get("u") ?? "");
-  if (!url) return fail(400, "bad_request", "Not a recording Smooth Bible relays.");
+  const found = relayable(params.get("u") ?? "");
+  if (!found) return fail(400, "bad_request", "Not a file Smooth Bible relays.");
   let r;
   try {
-    r = await fetch(url, { cf: { cacheEverything: true, cacheTtl: RELAY_KEEP } });
+    r = await fetch(found.url, { cf: { cacheEverything: true, cacheTtl: found.rule.keep } });
   } catch {
-    return fail(504, "timeout", "The recording didn't come.");
+    return fail(504, "timeout", "The file didn't come.");
   }
-  if (r.status !== 200 || !r.body) return fail(502, "upstream", "The recording isn't available right now.");
-  const h = { "content-type": "audio/mpeg", "cache-control": "no-store" };
+  if (r.status !== 200 || !r.body) return fail(502, "upstream", "The file isn't available right now.");
+  const h = { "content-type": found.rule.type, "cache-control": "no-store" };
   const n = r.headers.get("content-length");
   if (n) h["content-length"] = n;
   return new Response(r.body, { status: 200, headers: h });
@@ -415,7 +424,7 @@ export default {
     if (path === "/esv/chapters") return chapters(env, url.searchParams, now);
     if (path === "/esv/search") return search(env, url.searchParams, now);
     if (path === "/esv/audio") return audio(env, url.searchParams, now);
-    if (path === "/audio/relay") return relay(url.searchParams);
+    if (path === "/relay" || path === "/audio/relay") return relay(url.searchParams);
     return fail(400, "bad_request", "No such request.");
   },
 };

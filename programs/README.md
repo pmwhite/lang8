@@ -9,10 +9,14 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `x11/` | `x.l8` | `x11` | X11 types and bindings |
 | `skate/` | `math.l8` | `skate_math` | Deterministic scalar math, vectors and column-major matrices; imports libm for square root and floor |
 | `freetype/` | `ft.l8` | `freetype` | Font loading, glyph atlases, and text vertices |
-| `files/` | `files.l8` | `files` | Atomic replacement of private saved files on native Linux; reports write, close, rename and cleanup failures |
+| `files/` | `files.l8` | `files` | Atomic replacement of private saved files, and whole-file reads, on native Linux; reports open, read, write, close, rename and cleanup failures ([README](files/README.md)) |
 | `base64/` | `base64.l8` | `base64` | Padded RFC 4648 Base64 encoding of binary data; native and Wasm |
 | `sha1/` | `sha1.l8` | `sha1` | SHA-1 digests for protocol compatibility; native and Wasm |
 | `utf8/` | `utf8.l8` | `utf8` | Strict UTF-8 prefix validation; native and Wasm |
+| `deflate/` | `deflate.l8` | `deflate` | DEFLATE, zlib and gzip decoding with CRC-32 and Adler-32; native and Wasm ([README](deflate/README.md)) |
+| `archive/` | `archive.l8` | `archive` | Zip and tar reading from memory; imports deflate; native and Wasm ([README](archive/README.md)) |
+| `builder/` | `builder.l8` | `builder` | A growing byte slice for text or data of unknown size; native and Wasm ([README](builder/README.md)) |
+| `sword/` | `sword.l8` | `sword` | CrossWire SWORD modules read from their packages: Bibles, commentaries, dictionaries and books, their verse numbering and markup as rich text; imports deflate, archive and builder; native and Wasm ([README](sword/README.md)) |
 | `http/` | `http.l8` | `http` | HTTP/1.1 client, server, and streaming APIs |
 | `websocket/` | `websocket.l8` | `websocket` | RFC 6455 client, server, and message APIs; imports HTTP |
 | `block-game/` | `block-game.l8` | — | Game, editor, level model, and assets |

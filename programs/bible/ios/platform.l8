@@ -192,6 +192,52 @@ path_read(path: int, out: []i8) {
     _c: int = close_fd(fd)
 }
 
+// ---- kept files read back for core (HostIO.read_kept) ----
+// Each read asked for: its id and kept name, answered as asks are (a turn
+// of the run loop later: asks_pump) and forgotten once its file is taken.
+// Core reads a module's file once at a time (the catalog, each module
+// opened): far fewer than KEPT_READS_MOST are ever waiting.
+KEPT_READS_MOST: int = 32;
+
+// The longest kept name a read can be asked for (a module's package:
+// shelf-NAME.zip).
+KEPT_READ_NAME_MOST: int = 64;
+
+kept_read_ids: []int = new int[KEPT_READS_MOST](0);
+
+kept_read_names: []i8 = new i8[KEPT_READS_MOST * KEPT_READ_NAME_MOST](0i8);
+
+kept_read_lens: []int = new int[KEPT_READS_MOST](0);
+
+kept_reads_n: int = 0;
+
+kept_reads_said: int = 0;
+
+ios_read_kept(id: int, name: []i8, name_n: int) {
+    if (kept_reads_n >= KEPT_READS_MOST || name_n > KEPT_READ_NAME_MOST) wire_fail("core asked to read too many kept files at once");
+    kept_read_ids[kept_reads_n] = id;
+    for i in 0..name_n kept_read_names[kept_reads_n * KEPT_READ_NAME_MOST + i] = name[i];
+    kept_read_lens[kept_reads_n] = name_n;
+    kept_reads_n = kept_reads_n + 1;
+    asks_pump_soon()
+}
+
+kept_read_find(id: int): int {
+    for k in 0..kept_reads_n
+        if (kept_read_ids[k] == id) return k;
+    -1
+}
+
+kept_read_forget(k: int) {
+    for j in k..kept_reads_n - 1 {
+        kept_read_ids[j] = kept_read_ids[j + 1];
+        kept_read_lens[j] = kept_read_lens[j + 1];
+        for i in 0..KEPT_READ_NAME_MOST kept_read_names[j * KEPT_READ_NAME_MOST + i] = kept_read_names[(j + 1) * KEPT_READ_NAME_MOST + i]
+    }
+    kept_reads_n = kept_reads_n - 1;
+    if (kept_reads_said > k) kept_reads_said = kept_reads_said - 1
+}
+
 asks_timer: int = 0;
 
 asks_pump_soon() {
@@ -203,6 +249,19 @@ asks_pump_soon() {
 // not in the bundle); core's host then reads it (ios_file).
 asks_pump(_self: int, _cmd: int, _timer: int): int {
     asks_timer = 0;
+    if (kept_reads_said < kept_reads_n) {
+        k: int = kept_reads_said;
+        kept_reads_said = kept_reads_said + 1;
+        path: int = kept_path_of(nsstring_at(bytes_address(kept_read_names) + k * KEPT_READ_NAME_MOST,
+            kept_read_lens[k]));
+        to_core_str("got ");
+        to_core_int(kept_read_ids[k]);
+        to_core_byte(32);
+        to_core_int(path_bytes(path));
+        to_core_end();
+        asks_pump_soon();
+        return 0
+    }
     if (ask_queue_n == 0) return 0;
     id: int = ask_queue[0];
     for i in 1..ask_queue_n ask_queue[i - 1] = ask_queue[i];
@@ -529,6 +588,15 @@ network_watch() {
 
 // Answer id (a request's body: the files are mapped) into out, and let go.
 ios_file(id: int, out: []i8): int {
+    // (A kept file read back: from where it is kept.)
+    k: int = kept_read_find(id);
+    if (k >= 0) {
+        path: int = kept_path_of(nsstring_at(bytes_address(kept_read_names) + k * KEPT_READ_NAME_MOST,
+            kept_read_lens[k]));
+        kept_read_forget(k);
+        path_read(path, out);
+        return path_bytes(path)
+    }
     // (A data file asked for: read from the bundle.)
     if (id >= 0 && id < ASK_MOST) {
         path: int = bundle_path(id);
@@ -617,6 +685,7 @@ platform_begin() {
         http: &ios_http,
         file: &ios_file,
         fetch: &ios_fetch,
+        read_kept: &ios_read_kept,
         say: &from_core
     };
     legacy_export();

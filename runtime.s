@@ -89,8 +89,9 @@ l8_handler_top: .skip 8
 # Nested region marks (heap_ptr at each enter). Raise pops down to the
 # catcher's snapshot so a caught exception still rewinds those heaps.
 l8_region_n: .skip 8
-# Frames are 32 bytes: kind, a, b, saved chunk. Kinds: 0 region, 1 own, 2 allocate,
-# 3 borrow, 4 suspend. 64 frames.
+# Frames are 32 bytes: kind, a, b, saved chunk. Kinds: 0 region (b the heap's
+# mark), 1 own, 2 allocate, 3 borrow, 4 suspend, 5 a region entered in an arena
+# (a the arena, suspended while it lasts; b the heap's mark). 64 frames.
 l8_region_marks: .skip 2048
 l8_arena_current: .skip 8
 l8_arena_count: .skip 8
@@ -711,16 +712,21 @@ l8_heap_reset:
     mov %rdi, heap_ptr(%rip)
     ret
 
-# void l8_region_push(long mark) — checkpoint the current destination
+# void l8_region_push(long mark) — checkpoint the process heap. A region is
+# always on the process heap: entered in an arena, the arena is suspended
+# until it ends, so what an allocate of that arena adds within it stays.
 l8_region_push:
     mov l8_arena_current(%rip), %rsi
     xor %rcx, %rcx
     test %rsi, %rsi
-    jz 1f
-    mov 24(%rsi), %rcx
-1:
+    jne 1f
     mov %rdi, %rdx
     xor %rdi, %rdi
+    jmp l8_frame_push
+1:
+    mov heap_ptr(%rip), %rdx
+    movq $0, l8_arena_current(%rip)
+    mov $5, %rdi
     jmp l8_frame_push
 
 # void l8_region_pop(void) — leave one frame. Preserves rax.
@@ -744,38 +750,16 @@ l8_region_pop:
     je .Lpop_own
     cmp $3, %rax
     je .Lpop_borrow
+    cmp $5, %rax
+    je .Lpop_arena_region
     mov %rdx, l8_arena_current(%rip)
     jmp 9f
 .Lpop_region:
-    test %rsi, %rsi
-    jz 1f
-    push %rbx
-    push %r12
-    push %r13
-    mov %rsi, %rbx
-    mov %rdx, %r12
-    mov 24(%rcx), %r13
-2:
-    mov 24(%rbx), %rdi
-    cmp %r13, %rdi
-    je 3f
-    mov 0(%rdi), %rax
-    mov %rax, 24(%rbx)
-    mov 8(%rdi), %rsi
-    mov $11, %rax
-    syscall
-    jmp 2b
-3:
-    mov %r12, 8(%rbx)
-    mov 8(%r13), %rax
-    add %r13, %rax
-    mov %rax, 16(%rbx)
-    pop %r13
-    pop %r12
-    pop %rbx
-    jmp 9f
-1:
     mov %rdx, heap_ptr(%rip)
+    jmp 9f
+.Lpop_arena_region:
+    mov %rdx, heap_ptr(%rip)
+    mov %rsi, l8_arena_current(%rip)
     jmp 9f
 .Lpop_own:
     mov %rdx, l8_arena_current(%rip)
@@ -825,8 +809,17 @@ malloc:
     mov $0, %rax
     ret
 .Lmalloc_arena:
+    # (As the heap's path does, only rax, rcx and rdi change: the runtime's
+    # own callers, l8_cstr and l8_bytes, keep values in the others, and a
+    # chunk's growth is a system call.)
     push %rbx
     push %r12
+    push %rdx
+    push %rsi
+    push %r8
+    push %r9
+    push %r10
+    push %r11
     mov %rax, %rbx
     add $7, %rdi
     and $-8, %rdi
@@ -837,9 +830,7 @@ malloc:
     cmp %r11, %rcx
     ja .Lmalloc_arena_grow
     mov %rcx, 8(%rbx)
-    pop %r12
-    pop %rbx
-    ret
+    jmp .Lmalloc_arena_done
 .Lmalloc_arena_grow:
     mov %rdi, %r12
     mov %r12, %rcx
@@ -855,7 +846,7 @@ malloc:
     call l8_arena_mmap
     pop %rcx
     test %rax, %rax
-    jz 3f
+    jz .Lmalloc_arena_done
     mov 24(%rbx), %rdx
     mov %rdx, 0(%rax)
     mov %rcx, 8(%rax)
@@ -867,11 +858,13 @@ malloc:
     add %rcx, %rax
     mov %rax, 16(%rbx)
     mov %r11, %rax
-    pop %r12
-    pop %rbx
-    ret
-3:
-    xor %rax, %rax
+.Lmalloc_arena_done:
+    pop %r11
+    pop %r10
+    pop %r9
+    pop %r8
+    pop %rsi
+    pop %rdx
     pop %r12
     pop %rbx
     ret

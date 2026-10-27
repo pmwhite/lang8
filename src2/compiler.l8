@@ -606,6 +606,10 @@ type Obj = {
     // Declaration position fits the padding before the last-use boundary.
     bound_need_imm: bool;
     bound_need_new: bool;
+    // Allocations from the call's destination are stored into what this
+    // parameter points at (a builder grown), so its argument must not
+    // outlive that destination.
+    bound_holds_new: bool;
     // Set when a copy carries the address of a local without joining the taint list.
     is_tainted: bool;
     bound_named: ?*Obj;
@@ -629,6 +633,27 @@ type BoundCall = {
     next: ?*BoundCall
 }
 
+// An argument to a callee's @new parameter that outlives the call's
+// allocation destination: an error once the parameter is known to hold
+// what the callee allocates (bound_holds_new), unless the argument is
+// immortal and the caller allocates from the process heap (it becomes
+// noregion). A function value's @new parameters are taken to hold.
+type HeldArgument =
+    | Outlives
+    | Immortal
+
+type HoldCheck = {
+    callee_name: []i8;
+    callee_param: *Obj;
+    // The callee is a function value (its body unknown).
+    indirect: bool;
+    argument: HeldArgument;
+    file: int;
+    pos: int;
+    span: int;
+    next: ?*HoldCheck
+}
+
 type CallEdge = {
     callee: *Function;
     next: ?*CallEdge
@@ -639,6 +664,7 @@ type NoregionReason =
     | Store
     | Payload
     | Argument { callee: []i8, parameter: []i8 }
+    | HeldArgument { callee: []i8, parameter: []i8 }
     | Call { callee: []i8 }
 
 type NoregionCause = {
@@ -673,6 +699,7 @@ type Function = {
     bound_ret_need_new: bool;
     bound_ret_param: ?*Obj;
     bound_calls: ?*BoundCall;
+    hold_checks: ?*HoldCheck;
     callees: ?*CallEdge;
     browse_id: int;
     browse_pos: int;
@@ -1239,7 +1266,7 @@ emit_flush() {
     }
 }
 
-emit(s: []i8) raises Error {
+emit(s: []i8) noregion raises Error {
     n: int = len(s);
     if (n <= 0) return;
     if (n > emit_cap) {
@@ -1252,19 +1279,19 @@ emit(s: []i8) raises Error {
     sb_puts(&emit_state, s)
 }
 
-emit_ch(c: i8) raises Error {
+emit_ch(c: i8) noregion raises Error {
     if (emit_state.used >= emit_cap) emit_flush();
     sb_putc(&emit_state, c)
 }
 
-emit_digits(n: int) raises Error {
+emit_digits(n: int) noregion raises Error {
     if (n <= -10 || n >= 10) emit_digits(n / 10);
     digit: int = n % 10;
     if (digit < 0) digit = 0 - digit;
     emit_ch(('0' as int + digit) trunc i8)
 }
 
-emit_num(n: int) raises Error {
+emit_num(n: int) noregion raises Error {
     if (n < 0) emit_ch('-');
     emit_digits(n)
 }
@@ -2573,7 +2600,7 @@ syntax_fields_after_brace(inner: *Token): bool {
     if (inner.kind != TokKind.Ident) return false;
     if (inner.next.kind != TokKind.Colon) return false;
     v: *Token = inner.next.next;
-    if (v.kind == TokKind.Ident && name_eq_span("fn", source, v.pos, v.len) && v.next.kind == TokKind.LParen || v.kind == TokKind.Int || v.kind == TokKind.I8 || v.kind == TokKind.I32 || v.kind == TokKind.U32 || v.kind == TokKind.F32 || v.kind == TokKind.F64 || v.kind == TokKind.Bool || v.kind == TokKind.Noreturn) return false;
+    if (v.kind == TokKind.Ident && name_eq_span("fn", source, v.pos, v.len) && v.next.kind == TokKind.LParen || v.kind == TokKind.Int || v.kind == TokKind.I8 || v.kind == TokKind.I32 || v.kind == TokKind.U32 || v.kind == TokKind.F32 || v.kind == TokKind.F64 || v.kind == TokKind.Bool || v.kind == TokKind.StrTy || v.kind == TokKind.Noreturn) return false;
     if (v.kind == TokKind.Star || v.kind == TokKind.Question || v.kind == TokKind.LBrack) return false;
     if (v.kind == TokKind.Ident) {
         n: TokKind = v.next.kind;

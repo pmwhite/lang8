@@ -1,0 +1,955 @@
+tag sword_internal;
+
+use_tag builder;
+
+// An entry's markup (OSIS, ThML, GBF, TEI or plain text) as rich text:
+// words in styles, paragraph and line breaks, headings, notes and links,
+// the same whatever markup they came in. Markup the reader would not see
+// is left out: Strong's numbers and morphology, variant readings' tags,
+// a book's or chapter's markers, table-of-contents milestones.
+//
+// A RichText gathers what entries become; MarkupState is what goes on
+// from one entry to the next (the words of Jesus or a paragraph begun by
+// a milestone in one verse may end in a later one). Give each module's
+// run of entries (a book of a Bible) a state of its own.
+tag sword
+type RichStyle = {
+    italic: bool;
+    bold: bool;
+    // The words of Jesus (red letters, where shown).
+    jesus: bool;
+    // Words the translators supplied (italic in the KJV).
+    added: bool;
+    // The divine name (LORD: small capitals).
+    divine: bool;
+    small_caps: bool;
+    superscript: bool
+}
+
+tag sword
+type NoteKind =
+    | Footnote
+    | CrossReference
+    | StudyNote
+
+// What a link points to. Its target is text in the rich text's pool: an
+// OSIS reference (Gen.1.1-Gen.1.3, John.3), a passage as a reader writes it
+// (ThML's scripRef: "John 3:16; Rom 5:8"), a Strong's number (G25, H7225),
+// or a key in the same or another module.
+tag sword
+type LinkKind =
+    | OsisReference
+    | Passage
+    | Strongs
+    | EntryKey
+
+// What a heading heads: a section of text, a whole book or a chapter (a
+// Bible's own titles for them), or a psalm (its canonical title, part of
+// the text itself).
+tag sword
+type HeadingRole =
+    | Section
+    | BookTitle
+    | ChapterTitle
+    | PsalmTitle
+    // A letter heading a stanza of an acrostic psalm (Psalm 119's ALEPH).
+    | Acrostic
+
+tag sword
+type RichPiece =
+    | Words { from: int, to: int, style: RichStyle }
+    | Paragraph
+    // A line of poetry begins (indent: its level, 1 the first).
+    | Line { indent: int }
+    | LineBreak
+    | HeadingStart { level: int, role: HeadingRole }
+    | HeadingEnd
+    | NoteStart { kind: NoteKind }
+    | NoteEnd
+    | LinkStart { kind: LinkKind, from: int, to: int }
+    | LinkEnd
+
+tag sword
+type RichText = {
+    // Words' and targets' bytes (UTF-8).
+    text: *ByteBuilder;
+    pieces: []RichPiece;
+    count: int
+}
+
+tag sword
+type MarkupState = {
+    // Milestones begun and not yet ended (OSIS's sID/eID forms).
+    jesus: int;
+    // A heading is open: words go into it (closed at its end).
+    heading: int;
+    // Inside a note (its words are the note's), and whether the outermost
+    // is shown (else its words are hidden: Strong's tags made notes).
+    note: int;
+    note_shown: bool;
+    // Inside an element whose words are not shown (a ThML sync, a
+    // Strong's tag's number, an OSIS note within a note).
+    hidden: int;
+    // Words were added and a space may be wanted before the next: in the
+    // style where the space was (between elements, not inside the next).
+    space_pending: bool;
+    space_style: RichStyle;
+    // Styles from elements still open (counts, since they nest).
+    italic: int;
+    bold: int;
+    jesus_containers: int;
+    added: int;
+    divine: int;
+    small_caps: int;
+    superscript: int;
+    // What each open element of a kind began (STYLE_ codes, 3 bits a
+    // level, the innermost lowest), and how deep they are: a closing tag
+    // ends its innermost (OSIS's hi and q, TEI's hi, ThML's span and font).
+    hi_stack: int;
+    hi_depth: int;
+    quote_stack: int;
+    quote_depth: int;
+    span_stack: int;
+    span_depth: int;
+    // GBF's footnote and title tags are begun and ended by pairs.
+    gbf_note: bool
+}
+
+// What an open element began.
+MARKUP_STYLE_NONE: int = 0;
+
+MARKUP_STYLE_ITALIC: int = 1;
+
+MARKUP_STYLE_BOLD: int = 2;
+
+MARKUP_STYLE_SMALL_CAPS: int = 3;
+
+MARKUP_STYLE_SUPERSCRIPT: int = 4;
+
+MARKUP_STYLE_JESUS: int = 5;
+
+// (Deeper than this, an element's style is not shown: there is no room to
+// remember what its end takes off.)
+MARKUP_STYLE_STACK_MOST: int = 20;
+
+markup_style_count(state: *MarkupState, style: int, change: int) {
+    if (style == MARKUP_STYLE_ITALIC) state.italic = state.italic + change else if (style == MARKUP_STYLE_BOLD) state.bold = state.bold + change else if (style == MARKUP_STYLE_SMALL_CAPS) state.small_caps = state.small_caps + change else if (style == MARKUP_STYLE_SUPERSCRIPT) state.superscript = state.superscript + change else if (style == MARKUP_STYLE_JESUS) state.jesus_containers = state.jesus_containers + change
+}
+
+// An element of a stack's kind opened (beginning style) or closed: the
+// stack's packed value and depth as they become, by a pointer to each.
+markup_style_open(
+    state: *MarkupState,
+    stack: *int,
+    depth: *int,
+    style: int
+) {
+    depth.* = depth.* + 1;
+    if (depth.* > MARKUP_STYLE_STACK_MOST) return;
+    stack.* = stack.* << 3 | style;
+    markup_style_count(state, style, 1)
+}
+
+markup_style_close(state: *MarkupState, stack: *int, depth: *int) {
+    if (depth.* == 0) return;
+    depth.* = depth.* - 1;
+    if (depth.* >= MARKUP_STYLE_STACK_MOST) return;
+    style: int = stack.* & 7;
+    stack.* = stack.* >> 3;
+    if (style != MARKUP_STYLE_NONE) markup_style_count(state, style, -1)
+}
+
+tag sword
+rich_new(): *RichText@new {
+    new RichText { text: builder_new(256), pieces: new RichPiece[32](RichPiece.Paragraph), count: 0 }
+}
+
+tag sword
+rich_plain_style: RichStyle = RichStyle {
+    italic: false,
+    bold: false,
+    jesus: false,
+    added: false,
+    divine: false,
+    small_caps: false,
+    superscript: false
+};
+
+tag sword
+markup_state_new(): MarkupState {
+    MarkupState {
+        jesus: 0,
+        heading: 0,
+        note: 0,
+        note_shown: false,
+        hidden: 0,
+        space_pending: false,
+        space_style: rich_plain_style,
+        italic: 0,
+        bold: 0,
+        jesus_containers: 0,
+        added: 0,
+        divine: 0,
+        small_caps: 0,
+        superscript: 0,
+        hi_stack: 0,
+        hi_depth: 0,
+        quote_stack: 0,
+        quote_depth: 0,
+        span_stack: 0,
+        span_depth: 0,
+        gbf_note: false
+    }
+}
+
+rich_add(rich: *RichText@new, piece: RichPiece) {
+    if (rich.count == len(rich.pieces)) {
+        grown: []RichPiece = new RichPiece[len(rich.pieces) * 2](RichPiece.Paragraph);
+        for i in 0..rich.count grown[i] = rich.pieces[i];
+        rich.pieces = grown
+    }
+    rich.pieces[rich.count] = piece;
+    rich.count = rich.count + 1
+}
+
+markup_style(state: *MarkupState): RichStyle {
+    RichStyle {
+        italic: state.italic > 0,
+        bold: state.bold > 0,
+        // (A note within his words is not his.)
+        jesus: state.note == 0 && (state.jesus > 0 || state.jesus_containers > 0),
+        added: state.added > 0,
+        divine: state.divine > 0,
+        small_caps: state.small_caps > 0,
+        superscript: state.superscript > 0
+    }
+}
+
+// A note begun: shown (its words the note's), or not (its words hidden). A
+// note inside a note is not shown.
+markup_note_open(
+    rich: *RichText@new,
+    state: *MarkupState,
+    kind: NoteKind,
+    shown: bool
+) {
+    state.note = state.note + 1;
+    if (state.note > 1 || !shown) {
+        if (state.note == 1) state.note_shown = false;
+        state.hidden = state.hidden + 1;
+        return
+    }
+    state.note_shown = true;
+    rich_mark(rich, state, RichPiece.NoteStart { kind: kind })
+}
+
+// A note ended: its hidden words' end, or the shown note's.
+markup_note_close(rich: *RichText@new, state: *MarkupState) {
+    if (state.note == 0) return;
+    state.note = state.note - 1;
+    if (state.note > 0 || !state.note_shown) state.hidden = state.hidden - 1 else rich_mark(rich,
+        state, RichPiece.NoteEnd)
+}
+
+rich_styles_equal(a: RichStyle, b: RichStyle): bool {
+    a.italic == b.italic && a.bold == b.bold && a.jesus == b.jesus && a.added == b.added && a.divine == b.divine && a.small_caps == b.small_caps && a.superscript == b.superscript
+}
+
+// Text (bytes from up to to of source, entities decoded, whitespace as
+// single spaces) added in the state's style.
+rich_words(
+    rich: *RichText@new,
+    state: *MarkupState,
+    source: []i8,
+    from: int,
+    to: int,
+    keep_spaces: bool
+) {
+    if (state.hidden > 0) return;
+    style: RichStyle = markup_style(state);
+    start: int = rich.text.size;
+    at: int = from;
+    while (at < to) {
+        byte: int = source[at] as int & 255;
+        if (!keep_spaces && (byte == 32 || byte == 9 || byte == 10 || byte == 13)) {
+            if (!state.space_pending) state.space_style = style;
+            state.space_pending = true;
+            at = at + 1
+        } else if (keep_spaces && byte == 13) at = at + 1 else {
+            if (state.space_pending) {
+                if (rich.text.size == start && !rich_styles_equal(state.space_style,
+                    style)) {
+                    rich_flush_space(rich, state);
+                    start = rich.text.size
+                } else {
+                    state.space_pending = false;
+                    if (rich_wants_space(rich, start)) builder_byte(rich.text, ' ' as i8)
+                }
+            }
+            if (byte == 38) at = rich_entity(rich, source, at, to) else {
+                builder_byte(rich.text, source[at]);
+                at = at + 1
+            }
+        }
+    }
+    if (rich.text.size == start) return;
+    // (Joined to the words before when they are in the same style.)
+    if (rich.count > 0) {
+        match rich.pieces[rich.count - 1] {
+            Words last -> {
+                if (last.to == start && rich_styles_equal(last.style, style)) {
+                    rich.pieces[rich.count - 1] = RichPiece.Words { from: last.from, to: rich.text.size, style: style };
+                    return
+                }
+            }
+            _ -> { }
+        }
+    }
+    rich_add(rich, RichPiece.Words { from: start, to: rich.text.size, style: style })
+}
+
+// A pending space, where one is wanted, added in the style of the words
+// before it (not inside the words, link or style that follows).
+rich_flush_space(rich: *RichText@new, state: *MarkupState) {
+    if (!state.space_pending) return;
+    state.space_pending = false;
+    start: int = rich.text.size;
+    if (!rich_wants_space(rich, start)) return;
+    builder_byte(rich.text, ' ' as i8);
+    style: RichStyle = state.space_style;
+    if (rich.count > 0) {
+        match rich.pieces[rich.count - 1] {
+            Words last -> {
+                if (last.to == start && rich_styles_equal(last.style, style)) {
+                    rich.pieces[rich.count - 1] = RichPiece.Words { from: last.from, to: rich.text.size, style: style };
+                    return
+                }
+            }
+            _ -> { }
+        }
+    }
+    rich_add(rich, RichPiece.Words { from: start, to: rich.text.size, style: style })
+}
+
+// Whether a pending space is wanted where words begin at start: not at the
+// start of a paragraph, line, heading or note.
+rich_wants_space(rich: *RichText, start: int): bool {
+    if (rich.text.size > 0 && rich.text.data[rich.text.size - 1] as int == 32) return false;
+    if (rich.text.size > start) return true;
+    if (rich.count == 0) return start > 0;
+    match rich.pieces[rich.count - 1] {
+        Words _ -> true;
+        LinkStart _ -> true;
+        LinkEnd -> true;
+        NoteEnd -> true;
+        HeadingEnd -> true;
+        _ -> false
+    }
+}
+
+// A break or structure piece: a pending space is dropped before it.
+rich_mark(rich: *RichText@new, state: *MarkupState, piece: RichPiece) {
+    if (state.hidden > 0) return;
+    match piece {
+        // (A note keeps to the word it is on; a space before it waits.)
+        NoteStart _ -> { }
+        NoteEnd -> { }
+        LinkEnd -> { }
+        LinkStart _ -> rich_flush_space(rich, state);
+        _ -> state.space_pending = false
+    }
+    rich_add(rich, piece)
+}
+
+// ---- entities ----
+markup_entity_names: []str = ["amp", "lt", "gt", "quot", "apos", "nbsp", "mdash",
+    "ndash", "lsquo", "rsquo", "ldquo", "rdquo", "hellip", "middot", "para", "sect",
+    "dagger", "Dagger", "deg", "copy", "reg", "laquo", "raquo", "times", "frac12",
+    "frac14", "frac34", "eacute", "egrave", "ecirc", "euml", "aacute", "agrave", "acirc",
+    "auml", "iacute", "icirc", "iuml", "oacute", "ocirc", "ouml", "uacute", "ucirc",
+    "uuml", "ccedil", "ntilde", "Eacute", "Agrave", "Ccedil", "aelig", "AElig", "oelig",
+    "OElig", "szlig", "thinsp", "ensp", "emsp", "shy", "bull", "prime", "Prime", "aleph",
+    "alpha", "beta"];
+
+markup_entity_points: []int = [38, 60, 62, 34, 39, 160, 8212, 8211, 8216, 8217, 8220,
+    8221, 8230, 183, 182, 167, 8224, 8225, 176, 169, 174, 171, 187, 215, 189, 188,
+    190, 233, 232, 234, 235, 225, 224, 226, 228, 237, 238, 239, 243, 244, 246, 250,
+    251, 252, 231, 241, 201, 192, 199, 230, 198, 339, 338, 223, 8201, 8194, 8195,
+    173, 8226, 8242, 8243, 8501, 945, 946];
+
+// An entity at at (&...;): its character added; where the text goes on.
+// One not known, or not ended, is kept as written.
+rich_entity(
+    rich: *RichText@new,
+    source: []i8,
+    at: int,
+    to: int
+): int {
+    end: int = at + 1;
+    while (end < to && end - at < 12 && source[end] as int != 59 && source[end] as int != 38 && source[end] as int != 32) end = end + 1;
+    if (end >= to || source[end] as int != 59) {
+        builder_byte(rich.text, source[at]);
+        return at + 1
+    }
+    code: int = -1;
+    if (end > at + 2 && source[at + 1] as int == 35) {
+        hex: bool = source[at + 2] as int == 120 || source[at + 2] as int == 88;
+        digits_from: int = if (hex) at + 3 else at + 2;
+        value: int = 0;
+        valid: bool = digits_from < end;
+        for i in digits_from..end {
+            k: int = source[i] as int;
+            digit: int = if (k >= 48 && k <= 57) k - 48 else if (hex && k >= 97 && k <= 102) k - 87 else if (hex && k >= 65 && k <= 70) k - 55 else -1;
+            if (digit < 0) valid = false else value = value * (if (hex) 16 else 10) + digit
+        }
+        if (valid && value > 0 && value < 1114112) code = value
+    } else {
+        for e in 0..len(markup_entity_names) {
+            name: str = markup_entity_names[e];
+            if (len(name) == end - at - 1) {
+                same: bool = true;
+                for k in 0..len(name)
+                    if (source[at + 1 + k] != name[k]) same = false;
+                if (same) code = markup_entity_points[e]
+            }
+        }
+    }
+    if (code < 0) {
+        builder_bytes(rich.text, source, at, end + 1);
+        return end + 1
+    }
+    room: []i8 = new i8[4](0i8);
+    n: int = utf8_put(room, 0, if (code == 160) 32 else code);
+    builder_bytes(rich.text, room, 0, n);
+    end + 1
+}
+
+// ---- tags ----
+// A tag in source: <name attributes>, </name>, or <name attributes/>.
+type Tag = {
+    name_from: int;
+    name_to: int;
+    // The bytes after the name, up to > (or />).
+    attributes_from: int;
+    attributes_to: int;
+    closing: bool;
+    empty: bool;
+    // Where the text goes on after it.
+    end: int
+}
+
+// The tag at at (its <), or one whose end is past to if it is not ended.
+markup_read_tag(source: []i8, at: int, to: int): Tag {
+    p: int = at + 1;
+    closing: bool = p < to && source[p] as int == 47;
+    if (closing) p = p + 1;
+    name_from: int = p;
+    while (p < to && markup_name_byte(source[p] as int)) p = p + 1;
+    name_to: int = p;
+    attributes_from: int = p;
+    quote: int = 0;
+    while (p < to && (quote != 0 || source[p] as int != 62)) {
+        k: int = source[p] as int;
+        if (quote == 0 && (k == 34 || k == 39)) quote = k else if (k == quote) quote = 0;
+        p = p + 1
+    }
+    attributes_to: int = p;
+    empty: bool = attributes_to > attributes_from && source[attributes_to - 1] as int == 47;
+    if (empty) attributes_to = attributes_to - 1;
+    Tag {
+        name_from: name_from,
+        name_to: name_to,
+        attributes_from: attributes_from,
+        attributes_to: attributes_to,
+        closing: closing,
+        empty: empty,
+        end: p + 1
+    }
+}
+
+markup_name_byte(k: int): bool {
+    k >= 97 && k <= 122 || k >= 65 && k <= 90 || k >= 48 && k <= 57 || k == 58 || k == 95 || k == 45
+}
+
+markup_tag_is(source: []i8, tag: Tag, name: str): bool {
+    if (tag.name_to - tag.name_from != len(name)) return false;
+    for i in 0..len(name)
+        if (sword_lower(source[tag.name_from + i] as int) != sword_lower(name[i] as int)) return false;
+    true
+}
+
+// Where attribute name's value is in tag (its quotes left out): from and
+// to packed as from * 2^32 + to; -1 if the tag has no such attribute.
+markup_attribute(source: []i8, tag: Tag, name: str): int {
+    p: int = tag.attributes_from;
+    while (p < tag.attributes_to) {
+        while (p < tag.attributes_to && !markup_name_byte(source[p] as int)) p = p + 1;
+        key_from: int = p;
+        while (p < tag.attributes_to && markup_name_byte(source[p] as int)) p = p + 1;
+        key_to: int = p;
+        while (p < tag.attributes_to && source[p] as int == 32) p = p + 1;
+        if (p < tag.attributes_to && source[p] as int == 61) {
+            p = p + 1;
+            while (p < tag.attributes_to && source[p] as int == 32) p = p + 1;
+            quote: int = if (p < tag.attributes_to) source[p] as int else 0;
+            value_from: int = p;
+            value_to: int = p;
+            if (quote == 34 || quote == 39) {
+                value_from = p + 1;
+                value_to = value_from;
+                while (value_to < tag.attributes_to && source[value_to] as int != quote) value_to = value_to + 1;
+                p = value_to + 1
+            } else {
+                while (value_to < tag.attributes_to && source[value_to] as int != 32) value_to = value_to + 1;
+                p = value_to
+            }
+            same: bool = key_to - key_from == len(name);
+            if (same) {
+                for i in 0..len(name)
+                    if (source[key_from + i] != name[i]) same = false
+            }
+            if (same) return value_from << 32 | value_to
+        } else if (key_to == key_from) p = p + 1
+    }
+    -1
+}
+
+markup_attribute_is(
+    source: []i8,
+    tag: Tag,
+    name: str,
+    value: str
+): bool {
+    at: int = markup_attribute(source, tag, name);
+    if (at < 0) return false;
+    from: int = at >> 32;
+    to: int = at & 4294967295;
+    if (to - from != len(value)) return false;
+    for i in 0..len(value)
+        if (source[from + i] != value[i]) return false;
+    true
+}
+
+// Whether attribute name's value begins with start (type="x-s3").
+markup_attribute_starts(
+    source: []i8,
+    tag: Tag,
+    name: str,
+    start: str
+): bool {
+    at: int = markup_attribute(source, tag, name);
+    if (at < 0) return false;
+    from: int = at >> 32;
+    to: int = at & 4294967295;
+    if (to - from < len(start)) return false;
+    for i in 0..len(start)
+        if (source[from + i] != start[i]) return false;
+    true
+}
+
+// A link to the attribute's value (copied into the pool).
+rich_link_start(
+    rich: *RichText@new,
+    state: *MarkupState,
+    kind: LinkKind,
+    source: []i8,
+    tag: Tag,
+    name: str
+): bool {
+    at: int = markup_attribute(source, tag, name);
+    if (at < 0 || state.hidden > 0) return false;
+    from: int = rich.text.size;
+    builder_bytes(rich.text, source, at >> 32, at & 4294967295);
+    // (The target is not words: it is skipped as text, kept as a range.)
+    rich_mark(rich, state, RichPiece.LinkStart { kind: kind, from: from, to: rich.text.size });
+    true
+}
+
+// ---- converting ----
+// Bytes from up to to of source, in markup, added to rich.
+tag sword
+markup_convert(
+    rich: *RichText@new,
+    state: *MarkupState,
+    markup: Markup,
+    source: []i8,
+    from: int,
+    to: int
+) {
+    match markup {
+        Plain -> {
+            markup_plain(rich, state, source, from, to);
+            return
+        }
+        Gbf -> {
+            markup_gbf(rich, state, source, from, to);
+            return
+        }
+        _ -> { }
+    }
+    at: int = from;
+    while (at < to) {
+        text_end: int = at;
+        while (text_end < to && source[text_end] as int != 60) text_end = text_end + 1;
+        if (text_end > at) rich_words(rich, state, source, at, text_end, false);
+        if (text_end >= to) return;
+        tag: Tag = markup_read_tag(source, text_end, to);
+        // (A < with no end is not a tag: words, as written.)
+        if (tag.end > to) {
+            rich_words(rich, state, source, text_end, to, false);
+            return
+        }
+        match markup {
+            Osis -> markup_osis_tag(rich, state, source, tag);
+            Thml -> markup_thml_tag(rich, state, source, tag);
+            Tei -> markup_tei_tag(rich, state, source, tag);
+            _ -> { }
+        }
+        at = tag.end
+    }
+}
+
+// An element begun or ended: count goes up or down (never below 0).
+markup_counted(count: int, tag: Tag): int {
+    if (tag.empty) return count;
+    if (tag.closing) {
+        if (count > 0) count - 1 else 0
+    } else count + 1
+}
+
+// OSIS (https://crosswire.org/osis/): containers and their milestone forms
+// (sID/eID) alike.
+markup_osis_tag(
+    rich: *RichText@new,
+    state: *MarkupState,
+    source: []i8,
+    tag: Tag
+) {
+    starts: bool = !tag.closing && markup_attribute(source, tag, "eID") < 0;
+    if (markup_tag_is(source, tag, "hi")) {
+        if (tag.closing) markup_style_close(state, &state.hi_stack, &state.hi_depth) else if (!tag.empty) {
+            style: int = if (markup_attribute_is(source, tag, "type", "bold")) MARKUP_STYLE_BOLD else if (markup_attribute_is(source,
+                tag, "type", "small-caps")) MARKUP_STYLE_SMALL_CAPS else if (markup_attribute_is(source,
+                tag, "type", "super")) MARKUP_STYLE_SUPERSCRIPT else if (markup_attribute_is(source,
+                tag, "type", "underline") || markup_attribute_is(source, tag, "type",
+                "sub")) MARKUP_STYLE_NONE else MARKUP_STYLE_ITALIC;
+            markup_style_open(state, &state.hi_stack, &state.hi_depth, style)
+        }
+        return
+    }
+    if (markup_tag_is(source, tag, "transChange")) {
+        state.added = markup_counted(state.added, tag);
+        return
+    }
+    if (markup_tag_is(source, tag, "divineName")) {
+        state.divine = markup_counted(state.divine, tag);
+        return
+    }
+    if (markup_tag_is(source, tag, "foreign") || markup_tag_is(source, tag, "catchWord") || markup_tag_is(source,
+        tag, "rdg") || markup_tag_is(source, tag, "emph")) {
+        state.italic = markup_counted(state.italic, tag);
+        return
+    }
+    if (markup_tag_is(source, tag, "q")) {
+        // (Milestones: who="Jesus" begins with sID, ends with eID.)
+        if (tag.empty) {
+            if (markup_attribute(source, tag, "eID") >= 0) {
+                if (state.jesus > 0) state.jesus = state.jesus - 1
+            } else if (markup_attribute_is(source, tag, "who", "Jesus")) state.jesus = state.jesus + 1;
+            return
+        }
+        if (tag.closing) markup_style_close(state, &state.quote_stack, &state.quote_depth) else markup_style_open(state,
+            &state.quote_stack, &state.quote_depth, if (markup_attribute_is(source,
+            tag, "who", "Jesus")) MARKUP_STYLE_JESUS else MARKUP_STYLE_NONE);
+        return
+    }
+    if (markup_tag_is(source, tag, "title")) {
+        if (tag.closing || markup_attribute(source, tag, "eID") >= 0) {
+            if (state.heading > 0) {
+                state.heading = state.heading - 1;
+                rich_mark(rich, state, RichPiece.HeadingEnd)
+            }
+            return
+        }
+        if (tag.empty) return;
+        role: HeadingRole = if (markup_attribute_is(source, tag, "type", "main")) HeadingRole.BookTitle else if (markup_attribute_is(source,
+            tag, "type", "chapter")) HeadingRole.ChapterTitle else if (markup_attribute_is(source,
+            tag, "type", "acrostic")) HeadingRole.Acrostic else if (markup_attribute_is(source,
+            tag, "type", "psalm") || markup_attribute_is(source, tag, "canonical",
+            "true")) HeadingRole.PsalmTitle else HeadingRole.Section;
+        level: int = if (markup_attribute_is(source, tag, "type", "main") || markup_attribute_is(source,
+            tag, "type", "x-ms")) 1 else if (markup_attribute_is(source, tag, "type",
+            "psalm")) 3 else if (markup_attribute_is(source, tag, "type", "x-s3") || markup_attribute_is(source,
+            tag, "type", "x-s4") || markup_attribute_is(source, tag, "type", "sub")) 3 else 2;
+        state.heading = state.heading + 1;
+        rich_mark(rich, state, RichPiece.HeadingStart { level: level, role: role });
+        return
+    }
+    if (markup_tag_is(source, tag, "note")) {
+        if (tag.closing) {
+            markup_note_close(rich, state);
+            return
+        }
+        if (tag.empty) return;
+        kind: NoteKind = if (markup_attribute_is(source, tag, "type", "crossReference")) NoteKind.CrossReference else if (markup_attribute_is(source,
+            tag, "type", "study") || markup_attribute_is(source, tag, "type", "x-study")) NoteKind.StudyNote else NoteKind.Footnote;
+        // (Markup that is not a note for readers: Strong's tags made notes.)
+        markup_note_open(rich, state, kind, !markup_attribute_starts(source, tag,
+            "type", "x-strongsMarkup"));
+        return
+    }
+    if (markup_tag_is(source, tag, "reference")) {
+        if (tag.closing) rich_mark(rich, state, RichPiece.LinkEnd) else if (!tag.empty) {
+            if (!rich_link_start(rich, state, LinkKind.OsisReference, source, tag,
+                "osisRef")) rich_mark(rich, state, RichPiece.LinkStart { kind: LinkKind.Passage, from: 0, to: 0 })
+        }
+        return
+    }
+    if (markup_tag_is(source, tag, "lb")) {
+        if (!tag.closing && markup_attribute_is(source, tag, "type", "x-end-paragraph")) rich_mark(rich,
+            state, RichPiece.Paragraph) else if (!tag.closing) rich_mark(rich, state,
+            RichPiece.LineBreak);
+        return
+    }
+    if (markup_tag_is(source, tag, "l")) {
+        if (starts) {
+            level: int = 1;
+            at: int = markup_attribute(source, tag, "level");
+            if (at >= 0 && (at & 4294967295) > at >> 32) level = source[at >> 32] as int - 48;
+            rich_mark(rich, state, RichPiece.Line { indent: if (level >= 1 && level <= 4) level else 1 })
+        }
+        return
+    }
+    if (markup_tag_is(source, tag, "lg") || markup_tag_is(source, tag, "p") || markup_tag_is(source,
+        tag, "list") || markup_tag_is(source, tag, "item")) {
+        if (starts) rich_mark(rich, state, RichPiece.Paragraph);
+        return
+    }
+    if (markup_tag_is(source, tag, "div")) {
+        if (starts && (markup_attribute_is(source, tag, "type", "paragraph") || markup_attribute_is(source,
+            tag, "type", "x-p") || markup_attribute_is(source, tag, "type", "introduction") || markup_attribute_is(source,
+            tag, "type", "section"))) rich_mark(rich, state, RichPiece.Paragraph);
+        return
+    }
+    if (markup_tag_is(source, tag, "milestone")) {
+        if (markup_attribute_is(source, tag, "type", "x-p") || markup_attribute_is(source,
+            tag, "type", "x-paragraph")) rich_mark(rich, state, RichPiece.Paragraph) else if (markup_attribute_is(source,
+            tag, "type", "line")) rich_mark(rich, state, RichPiece.LineBreak);
+        return
+    }
+    // (w, seg, abbr, inscription, speaker, chapter, verse and the rest:
+    // their words as they are.)
+}
+
+// ThML (https://www.ccel.org/ThML/): HTML with notes, scripture references
+// and Strong's syncs.
+markup_thml_tag(
+    rich: *RichText@new,
+    state: *MarkupState,
+    source: []i8,
+    tag: Tag
+) {
+    if (markup_tag_is(source, tag, "i") || markup_tag_is(source, tag, "em") || markup_tag_is(source,
+        tag, "cite")) {
+        state.italic = markup_counted(state.italic, tag);
+        return
+    }
+    if (markup_tag_is(source, tag, "b") || markup_tag_is(source, tag, "strong")) {
+        state.bold = markup_counted(state.bold, tag);
+        return
+    }
+    if (markup_tag_is(source, tag, "sup")) {
+        state.superscript = markup_counted(state.superscript, tag);
+        return
+    }
+    if (markup_tag_is(source, tag, "font") || markup_tag_is(source, tag, "span")) {
+        // (A red span: the words of Jesus, as some modules mark them.)
+        if (tag.closing) markup_style_close(state, &state.span_stack, &state.span_depth) else if (!tag.empty) markup_style_open(state,
+            &state.span_stack, &state.span_depth, if (markup_attribute_is(source,
+            tag, "color", "red") || markup_attribute_is(source, tag, "class", "red")) MARKUP_STYLE_JESUS else MARKUP_STYLE_NONE);
+        return
+    }
+    if (markup_tag_is(source, tag, "br")) {
+        rich_mark(rich, state, RichPiece.LineBreak);
+        return
+    }
+    if (markup_tag_is(source, tag, "p") || markup_tag_is(source, tag, "div") || markup_tag_is(source,
+        tag, "li") || markup_tag_is(source, tag, "blockquote") || markup_tag_is(source,
+        tag, "tr")) {
+        if (!tag.closing) rich_mark(rich, state, RichPiece.Paragraph);
+        return
+    }
+    if (tag.name_to - tag.name_from == 2 && sword_lower(source[tag.name_from] as int) == 104 && source[tag.name_from + 1] as int >= 49 && source[tag.name_from + 1] as int <= 54) {
+        // (h1 to h6.)
+        if (tag.closing) {
+            if (state.heading > 0) {
+                state.heading = state.heading - 1;
+                rich_mark(rich, state, RichPiece.HeadingEnd)
+            }
+        } else if (!tag.empty) {
+            state.heading = state.heading + 1;
+            level: int = source[tag.name_from + 1] as int - 48;
+            rich_mark(rich, state, RichPiece.HeadingStart { level: if (level > 3) 3 else level, role: HeadingRole.Section })
+        }
+        return
+    }
+    if (markup_tag_is(source, tag, "note")) {
+        if (tag.closing) markup_note_close(rich, state) else if (!tag.empty) markup_note_open(rich,
+            state, NoteKind.Footnote, true);
+        return
+    }
+    if (markup_tag_is(source, tag, "scripRef")) {
+        if (tag.closing) rich_mark(rich, state, RichPiece.LinkEnd) else if (!tag.empty) {
+            if (!rich_link_start(rich, state, LinkKind.Passage, source, tag, "passage")) rich_mark(rich,
+                state, RichPiece.LinkStart { kind: LinkKind.Passage, from: 0, to: 0 })
+        }
+        return
+    }
+    if (markup_tag_is(source, tag, "sync") || markup_tag_is(source, tag, "scripture") && tag.empty) return;
+    if (markup_tag_is(source, tag, "a")) {
+        if (tag.closing) rich_mark(rich, state, RichPiece.LinkEnd) else if (!tag.empty) {
+            if (!rich_link_start(rich, state, LinkKind.EntryKey, source, tag, "href")) rich_mark(rich,
+                state, RichPiece.LinkStart { kind: LinkKind.EntryKey, from: 0, to: 0 })
+        }
+        return
+    }
+}
+
+// TEI (dictionaries: https://tei-c.org/): an entry's headword, its
+// pronunciation and senses, and references to other entries.
+markup_tei_tag(
+    rich: *RichText@new,
+    state: *MarkupState,
+    source: []i8,
+    tag: Tag
+) {
+    if (markup_tag_is(source, tag, "orth")) {
+        // (Its forms in another writing: a transliteration's old coding.)
+        if (!tag.closing && markup_attribute_is(source, tag, "type", "writing")) {
+            state.hidden = state.hidden + 1;
+            return
+        }
+        if (tag.closing && state.hidden > 0) {
+            state.hidden = state.hidden - 1;
+            return
+        }
+        state.bold = markup_counted(state.bold, tag);
+        return
+    }
+    if (markup_tag_is(source, tag, "hi") || markup_tag_is(source, tag, "emph") || markup_tag_is(source,
+        tag, "pron") || markup_tag_is(source, tag, "foreign") || markup_tag_is(source,
+        tag, "title")) {
+        if (tag.closing) markup_style_close(state, &state.hi_stack, &state.hi_depth) else if (!tag.empty) markup_style_open(state,
+            &state.hi_stack, &state.hi_depth, if (markup_attribute_is(source, tag,
+            "rend", "bold")) MARKUP_STYLE_BOLD else MARKUP_STYLE_ITALIC);
+        return
+    }
+    if (markup_tag_is(source, tag, "lb")) {
+        rich_mark(rich, state, RichPiece.LineBreak);
+        return
+    }
+    if (markup_tag_is(source, tag, "def") || markup_tag_is(source, tag, "sense") || markup_tag_is(source,
+        tag, "p") || markup_tag_is(source, tag, "etym") || markup_tag_is(source, tag,
+        "cit")) {
+        if (!tag.closing && !tag.empty) rich_mark(rich, state, RichPiece.Paragraph);
+        return
+    }
+    if (markup_tag_is(source, tag, "ref")) {
+        if (tag.closing) rich_mark(rich, state, RichPiece.LinkEnd) else if (!tag.empty) {
+            kind: LinkKind = if (markup_attribute(source, tag, "osisRef") >= 0) LinkKind.OsisReference else LinkKind.EntryKey;
+            name: str = if (markup_attribute(source, tag, "osisRef") >= 0) "osisRef" else "target";
+            if (!rich_link_start(rich, state, kind, source, tag, name)) rich_mark(rich,
+                state, RichPiece.LinkStart { kind: LinkKind.EntryKey, from: 0, to: 0 })
+        }
+        return
+    }
+}
+
+// Whether the tag at at (its <) is GBF's code, two letters.
+gbf_tag_is(source: []i8, at: int, code: str): bool {
+    source[at + 1] == code[0] && source[at + 2] == code[1]
+}
+
+// GBF (General Bible Format): tags of two capitals, a lower-case second
+// letter ending what the upper-case one began: <FI>words<Fi> italic.
+markup_gbf(
+    rich: *RichText@new,
+    state: *MarkupState,
+    source: []i8,
+    from: int,
+    to: int
+) {
+    at: int = from;
+    while (at < to) {
+        text_end: int = at;
+        while (text_end < to && source[text_end] as int != 60) text_end = text_end + 1;
+        if (text_end > at) rich_words(rich, state, source, at, text_end, false);
+        if (text_end >= to) return;
+        end: int = text_end + 1;
+        while (end < to && source[end] as int != 62) end = end + 1;
+        // (A < with no end is not a tag: words, as written.)
+        if (end >= to) {
+            rich_words(rich, state, source, text_end, to, false);
+            return
+        }
+        if (end - text_end >= 3) {
+            if (gbf_tag_is(source, text_end, "FI") || gbf_tag_is(source, text_end,
+                "FO")) state.added = state.added + 1 else if (gbf_tag_is(source, text_end,
+                "Fi") || gbf_tag_is(source, text_end, "Fo")) {
+                if (state.added > 0) state.added = state.added - 1
+            } else if (gbf_tag_is(source, text_end, "FR")) state.jesus_containers = state.jesus_containers + 1 else if (gbf_tag_is(source,
+                text_end, "Fr")) {
+                if (state.jesus_containers > 0) state.jesus_containers = state.jesus_containers - 1
+            } else if (gbf_tag_is(source, text_end, "FB")) state.bold = state.bold + 1 else if (gbf_tag_is(source,
+                text_end, "Fb")) {
+                if (state.bold > 0) state.bold = state.bold - 1
+            } else if (gbf_tag_is(source, text_end, "FS")) state.superscript = state.superscript + 1 else if (gbf_tag_is(source,
+                text_end, "Fs")) {
+                if (state.superscript > 0) state.superscript = state.superscript - 1
+            } else if (gbf_tag_is(source, text_end, "CM")) rich_mark(rich, state,
+                RichPiece.Paragraph) else if (gbf_tag_is(source, text_end, "CL")) rich_mark(rich,
+                state, RichPiece.LineBreak) else if (gbf_tag_is(source, text_end,
+                "RF")) {
+                rich_mark(rich, state, RichPiece.NoteStart { kind: NoteKind.Footnote });
+                state.gbf_note = true
+            } else if (gbf_tag_is(source, text_end, "Rf")) {
+                if (state.gbf_note) rich_mark(rich, state, RichPiece.NoteEnd);
+                state.gbf_note = false
+            } else if (gbf_tag_is(source, text_end, "TS")) {
+                state.heading = state.heading + 1;
+                rich_mark(rich, state, RichPiece.HeadingStart { level: 2, role: HeadingRole.Section })
+            } else if (gbf_tag_is(source, text_end, "Ts")) {
+                if (state.heading > 0) {
+                    state.heading = state.heading - 1;
+                    rich_mark(rich, state, RichPiece.HeadingEnd)
+                }
+            }
+            // (WH, WG, WT: Strong's and morphology, not shown.)
+        }
+        at = end + 1
+    }
+}
+
+// Plain text: a blank line a paragraph, other line breaks kept.
+markup_plain(
+    rich: *RichText@new,
+    state: *MarkupState,
+    source: []i8,
+    from: int,
+    to: int
+) {
+    at: int = from;
+    while (at < to) {
+        end: int = at;
+        while (end < to && source[end] as int != 10) end = end + 1;
+        line_end: int = end;
+        while (line_end > at && (source[line_end - 1] as int == 13 || source[line_end - 1] as int == 32)) line_end = line_end - 1;
+        line_start: int = at;
+        while (line_start < line_end && source[line_start] as int == 32) line_start = line_start + 1;
+        if (line_end == line_start) rich_mark(rich, state, RichPiece.Paragraph) else {
+            rich_words(rich, state, source, line_start, line_end, false);
+            state.space_pending = true
+        }
+        at = end + 1
+    }
+}

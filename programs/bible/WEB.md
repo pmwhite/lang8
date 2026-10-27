@@ -40,6 +40,12 @@ take saved information out of an installation.
 The service worker caches the shell and data files as they are loaded.
 Offline use requires a prior visit and the relevant data to have been
 cached. API responses and recordings are not part of that offline cache.
+
+Downloads (recordings, and the Bookshelf's catalog and modules) come
+through the Worker's `/api/v1/relay?u=ADDRESS`, because their hosts don't
+allow pages to read their files. The Worker relays only the addresses its
+`RELAYED` rules allow. The page keeps each download in the browser's
+`sb-held` cache under `/read/held/NAME` and reads it back for core by name.
 The manifest supports installation where the browser offers it.
 
 ## Development and deployment

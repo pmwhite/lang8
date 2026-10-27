@@ -1,0 +1,1679 @@
+tag bible;
+
+use_tag std, sword, builder;
+
+// The bookshelf's screens (core/shelf.l8's modules), as core's screens for
+// every skin:
+//
+//   Bookshelf   what is installed, by kind, and what is downloading; a tap
+//               reads it, its ‚ìò its details; Browse the Library
+//   Browse      the library's catalog by kind (Bibles, Commentaries,
+//               Dictionaries, Books): English first, then each language a
+//               row of its own; a search field over titles and languages
+//   Details     a module: Download (its size) or its progress, Read and
+//               Remove; About, its license, and what this app can't show
+//   Commentary  a commentary on a chapter, a section a verse or passage
+//   Entries     a dictionary's keys (a search field to find one), and an
+//               entry; a devotional opens at today's
+//   Book        a book's contents: a part's text, then its parts
+//
+// A module's Details screen names it by its place in the catalog (made
+// again when the catalog is: shelf_catalog_renumber), or, installed and
+// not in the catalog read, by its slot as -1 - slot.
+import "shelf.l8";
+
+SCR_SHELF: int = 60;
+
+SCR_SHELF_BROWSE: int = 61;
+
+SCR_SHELF_ITEM: int = 62;
+
+SCR_SHELF_COMMENTARY: int = 63;
+
+SCR_SHELF_ENTRIES: int = 64;
+
+SCR_SHELF_ENTRY: int = 65;
+
+SCR_SHELF_BOOK: int = 66;
+
+// A row of Bookshelf tapped (arg its item's slot): read it; its ‚ìò: its
+// details. Browse's kind chosen (value), a language shown (arg its row's
+// language: interned index; -1 all), a catalog row (arg its name's
+// interned index). Details': Download, Stop, Read, Remove (arg the name's
+// interned index). Check for Updates. Try Again. An entry or part shown
+// (arg slot * SHELF_PLACE + its index), a link in a module's text (arg a
+// packed reference: a preview), the entry or part before or after (arg -1,
+// 1).
+ACT_SHELF_READ: int = 300;
+
+ACT_SHELF_INFO: int = 301;
+
+ACT_SHELF_KIND: int = 302;
+
+ACT_SHELF_LANGUAGE: int = 303;
+
+ACT_SHELF_ITEM: int = 304;
+
+ACT_SHELF_DOWNLOAD: int = 305;
+
+ACT_SHELF_STOP: int = 306;
+
+ACT_SHELF_OPEN: int = 307;
+
+ACT_SHELF_REMOVE: int = 308;
+
+ACT_SHELF_REFRESH: int = 309;
+
+ACT_SHELF_RETRY: int = 310;
+
+ACT_SHELF_ENTRY: int = 311;
+
+ACT_SHELF_LINK: int = 312;
+
+ACT_SHELF_STEP: int = 313;
+
+ACT_SHELF_BROWSE: int = 314;
+
+ACT_SHELF_DELETE: int = 315;
+
+// (An entry's or part's place in a screen's argument.)
+SHELF_PLACE: int = 1000000;
+
+// Browse: its kind (0 Bibles, 1 Commentaries, 2 Dictionaries, 3 Books),
+// the language it shows (its name's bytes; none: English, then the others'
+// rows), and what its field searches for (lower case).
+shelf_browse_kind: int = 0;
+
+// The catalog entry whose language Browse shows (-1: English, then the
+// others' rows). A catalog made again shows English (shelf_catalog_came).
+shelf_browse_language_at: int = -1;
+
+shelf_query: []i8 = new i8[256](0i8);
+
+shelf_query_n: int = 0;
+
+// Browse's segments, the kinds of module each lists (shelf_segment_of).
+shelf_segment_titles: []str = ["Bibles", "Commentaries", "Dictionaries", "Books"];
+
+SHELF_SEGMENTS: int = 4;
+
+// The Browse segment a module's kind is listed in (-1: none).
+shelf_segment_of(kind: ModuleKind): int {
+    match kind {
+        Bible -> 0;
+        Commentary -> 1;
+        Dictionary -> 2;
+        Glossary -> 2;
+        Devotional -> 3;
+        Book -> 3;
+        _ -> -1
+    }
+}
+
+// Browse shown in the language of catalog entry at (-1: English, then the
+// others' rows).
+shelf_browse_language_set(at: int) {
+    shelf_browse_language_at = -1;
+    if (at < 0 || shelf_catalog == null) return;
+    borrow shelf_catalog as catalog {
+        if (at < catalog.count) shelf_browse_language_at = at
+    }
+}
+
+// The Details screen's argument for item i: its catalog place, else -1 -
+// its slot.
+shelf_item_arg(i: int): int {
+    at: int = shelf_catalog_find_item(i);
+    if (at >= 0) at else -1 - shelf_slot_at(i)
+}
+
+// The item a Details argument names (-1: none on the shelf), and its
+// catalog entry (-1: none).
+shelf_arg_item(arg: int): int {
+    if (arg < 0) return shelf_find_slot(-1 - arg);
+    if (shelf_catalog == null) return -1;
+    i: int = -1;
+    borrow shelf_catalog as catalog {
+        if (arg < catalog.count) i = shelf_find(catalog.entries[arg].info.name)
+    }
+    i
+}
+
+shelf_arg_entry(arg: int): int {
+    if (arg >= 0) return if (arg < shelf_catalog_count()) arg else -1;
+    shelf_catalog_find_item(shelf_find_slot(-1 - arg))
+}
+
+shelf_catalog_count(): int {
+    if (shelf_catalog == null) return 0;
+    n: int = 0;
+    borrow shelf_catalog as catalog {
+        n = catalog.count
+    }
+    n
+}
+
+// ---- opening ----
+// Bookshelf, or Browse at kind (from Versions' More Versions, Study's
+// More Commentaries).
+sk_shelf_opening(kind: int, arg: int) {
+    if (kind == SCR_SHELF_BROWSE) {
+        if (arg >= 0 && arg < SHELF_SEGMENTS) shelf_browse_kind = arg;
+        shelf_browse_language_at = -1;
+        shelf_query_n = 0;
+        shelf_want_catalog()
+    }
+    if (kind == SCR_SHELF_ITEM) shelf_want_catalog()
+}
+
+// The screens that show the shelf made again (a download's progress, the
+// catalog come, a module opened).
+shelf_screens_changed() {
+    for i in 0..sk_n {
+        k: int = sk_kinds[i];
+        if (k >= SCR_SHELF && k <= SCR_SHELF_BOOK || k == SCR_VERSIONS || k == SCR_VERSE_STUDY) {
+            sk_build(i);
+            ui_effect("update", sk_ids[i], -1)
+        }
+    }
+}
+
+sk_build_shelf_screen(id: int, kind: int, arg: int) {
+    if (kind == SCR_SHELF) sk_build_shelf(id) else if (kind == SCR_SHELF_BROWSE) sk_build_shelf_browse(id) else if (kind == SCR_SHELF_ITEM) sk_build_shelf_item(id,
+        arg) else if (kind == SCR_SHELF_COMMENTARY) sk_build_shelf_commentary(id,
+        arg) else if (kind == SCR_SHELF_ENTRIES) sk_build_shelf_entries(id, arg) else if (kind == SCR_SHELF_ENTRY) sk_build_shelf_entry(id,
+        arg) else if (kind == SCR_SHELF_BOOK) sk_build_shelf_book(id, arg)
+}
+
+// ---- Bookshelf ----
+shelf_section_titles: []str = ["Bibles", "Commentaries", "Dictionaries", "Glossaries",
+    "Devotionals", "Books", "Pictures", "Other"];
+
+sk_build_shelf(id: int) {
+    ui_begin(id, SCR_SHELF, 0, "Bookshelf");
+    if (!shelf_can_fetch()) {
+        ui_set_empty("books.vertical", "Not Available Here", "Downloads aren\‚\Ä\ôt available on this platform.");
+        return
+    }
+    count: int = shelf_count();
+    // (What is coming first: its progress, or why it stopped.)
+    wanted: int = 0;
+    for i in 0..count
+        if (!shelf_ready_at(i)) wanted = wanted + 1;
+    if (wanted > 0) {
+        ui_section("Downloading", "");
+        for i in 0..count {
+            if (!shelf_ready_at(i)) shelf_downloading_row(i)
+        }
+    }
+    for kind in 0..len(shelf_section_titles) {
+        n: int = 0;
+        for i in 0..count {
+            if (shelf_ready_at(i) && shelf_kind_at(i) == kind) {
+                if (n == 0) ui_section(shelf_section_titles[kind], "");
+                n = n + 1;
+                ui_row(UI_ITEM, ACT_SHELF_READ, shelf_slot_at(i));
+                fbuf_n = 0;
+                fput_shelf_abbreviation(i);
+                ui_set_title_fbuf();
+                fbuf_n = 0;
+                fput_shelf_title(i);
+                ui_set_detail_fbuf();
+                ui_set_small();
+                ui_set_lines(2);
+                ui_set_info(ACT_SHELF_INFO);
+                ui_set_delete(ACT_SHELF_DELETE);
+                if (kind == SHELF_KIND_BIBLE && shelf_text_of(i) == text_cur) ui_set_acc(ACC_CHECK) else ui_set_acc(ACC_MORE)
+            }
+        }
+    }
+    fbuf_n = 0;
+    if (count == 0) {
+        fput_str("Bibles, commentaries, dictionaries and books from ");
+        fput_str(SHELF_SOURCE_NAME);
+        fput_str("\‚\Ä\ôs library, kept on this ");
+        fput_str(sk_device_prose);
+        fput_str(" to read without a connection.")
+    } else {
+        fput_str("Kept on this ");
+        fput_str(sk_device_prose);
+        fput_str(": ");
+        fput_size(shelf_bytes());
+        fput(46)
+    }
+    ui_section("", "");
+    ui_set_footer_fbuf();
+    ui_row(UI_ITEM, ACT_SHELF_BROWSE, -1);
+    ui_set_title("Browse the Library");
+    ui_set_icon("magnifyingglass");
+    ui_set_tinted();
+    ui_set_acc(ACC_MORE)
+}
+
+shelf_bytes(): int {
+    n: int = 0;
+    for i in 0..shelf_count()
+        if (shelf_ready_at(i)) n = n + shelf_size_at(i);
+    n
+}
+
+// A module downloading or waiting its turn: its progress, else whether it
+// waits or why it stopped (a tap tries again).
+shelf_downloading_row(i: int) {
+    slot: int = shelf_slot_at(i);
+    ui_row(UI_ITEM, ACT_SHELF_RETRY, slot);
+    fbuf_n = 0;
+    fput_shelf_abbreviation(i);
+    ui_set_title_fbuf();
+    ui_set_delete(ACT_SHELF_DELETE);
+    fbuf_n = 0;
+    progress: int = shelf_progress(slot);
+    if (progress >= 0) {
+        ui_set_custom(CUSTOM_DOWNLOAD);
+        ui_rows[ui_last()].value = progress;
+        fput_int(progress / 10);
+        fput(37);
+        ui_set_detail_fbuf();
+        ui_set_value_detail();
+        return
+    }
+    if (slot == shelf_failed_slot) {
+        fput_str(if (shelf_failed_offline) "Waiting for a connection \¬\∑ Tap to Try Again" else "Couldn\‚\Ä\ôt download \¬\∑ Tap to Try Again");
+        ui_set_detail_fbuf();
+        ui_set_small();
+        ui_set_icon("exclamationmark.triangle");
+        return
+    }
+    fput_str(if (hd_network == NET_NONE) "Waiting for a connection" else "Waiting");
+    fput_str(" \¬\∑ ");
+    fput_size(shelf_size_at(i));
+    ui_set_detail_fbuf();
+    ui_set_small();
+    ui_set_faint()
+}
+
+// Slot's download's progress in thousandths (-1: not coming now).
+shelf_progress(slot: int): int {
+    match shelf_fetch {
+        FetchingPackage p -> {
+            if (p.slot != slot) return -1;
+            if (shelf_fetch_total <= 0) return 0;
+            got: int = shelf_fetch_got * 1000 / shelf_fetch_total;
+            if (got > 999) 999 else got
+        }
+        _ -> -1
+    }
+}
+
+// ---- Browse ----
+sk_build_shelf_browse(id: int) {
+    ui_begin(id, SCR_SHELF_BROWSE, 0, "Library");
+    fbuf_n = 0;
+    for segment in 0..SHELF_SEGMENTS {
+        if (segment > 0) fput(124);
+        fput_str(shelf_segment_titles[segment])
+    }
+    ui_set_segments_fbuf(shelf_browse_kind, ACT_SHELF_KIND);
+    ui_set_search("Titles and Languages");
+    ui_set_search_text(shelf_query, shelf_query_n);
+    if (!shelf_can_fetch()) {
+        ui_set_empty("books.vertical", "Not Available Here", "Downloads aren\‚\Ä\ôt available on this platform.");
+        return
+    }
+    if (shelf_catalog == null) {
+        match shelf_catalog_state {
+            Failed f -> {
+                ui_section("", "");
+                fbuf_n = 0;
+                if (f.offline) {
+                    fput_str("The library\‚\Ä\ôs list comes from ");
+                    fput_str(SHELF_SOURCE_NAME);
+                    fput_str(". Connect to the internet, then try again.")
+                } else {
+                    fput_str(SHELF_SOURCE_SHORT_NAME);
+                    fput_str("\‚\Ä\ôs library couldn\‚\Ä\ôt be reached. Try again in a while.")
+                }
+                ui_set_footer_fbuf();
+                ui_row(UI_ITEM, 0, 0);
+                ui_set_title(if (f.offline) "No Connection" else "The Library Didn\‚\Ä\ôt Answer");
+                ui_set_icon("wifi.exclamationmark");
+                ui_row(UI_BUTTON, ACT_SHELF_REFRESH, 0);
+                ui_set_title("Try Again")
+            }
+            _ -> {
+                ui_section("", "");
+                ui_row(UI_ITEM, 0, 0);
+                ui_set_title("Getting the library\‚\Ä\ôs list\‚\Ä\¶");
+                ui_set_busy();
+                ui_set_faint()
+            }
+        }
+        return
+    }
+    borrow shelf_catalog as catalog {
+        searching: bool = shelf_query_n > 0;
+        shown: int = 0;
+        section_language: str = "-";
+        section_kind: int = -1;
+        // (Each kind's matches when searching, the language in each row;
+        // else the kind chosen's, a section each language.)
+        for i in 0..catalog.count {
+            entry: *CatalogEntry = &catalog.entries[i];
+            segment: int = shelf_segment_of(entry.info.kind);
+            // (The English modules, or the language chosen's, or every match.)
+            if (segment >= 0 && (searching || segment == shelf_browse_kind) && shelf_browse_shows(catalog,
+                entry, searching)) {
+                if (searching) {
+                    if (segment != section_kind) {
+                        section_kind = segment;
+                        ui_section(shelf_segment_titles[segment], "")
+                    }
+                } else {
+                    language: str = language_name(entry.info.language);
+                    if (language != section_language) {
+                        section_language = language;
+                        ui_section(language, "")
+                    }
+                }
+                shelf_catalog_row(entry, i, searching);
+                shown = shown + 1
+            }
+        }
+        if (searching && shown == 0) {
+            ui_section("", "");
+            ui_row(UI_ITEM, 0, 0);
+            fbuf_n = 0;
+            fput_str("Nothing matches \‚\Ä\ú");
+            fput_bytes(shelf_query, 0, shelf_query_n);
+            fput_str("\‚\Ä\ù");
+            ui_set_title_fbuf();
+            ui_set_faint()
+        }
+        // (The other languages, a row each with how many it has.)
+        if (!searching && shelf_browse_language_at < 0) shelf_language_rows(catalog);
+        if (!searching && shelf_browse_language_at >= 0) {
+            ui_section("", "");
+            ui_row(UI_ITEM, ACT_SHELF_LANGUAGE, -1);
+            ui_set_title("All Languages");
+            ui_set_tinted()
+        }
+    }
+    ui_section("", "");
+    fbuf_n = 0;
+    fput_str("From ");
+    fput_str(SHELF_SOURCE_NAME);
+    fput_str("\‚\Ä\ôs SWORD library");
+    day: int = shelf_catalog_day();
+    today: int = sk_local_day(time(0));
+    if (day > 0) {
+        fput_str(" \¬\∑ Updated ");
+        if (day == today) fput_str("today") else if (day == today - 1) fput_str("yesterday") else fput_date(day)
+    }
+    fput(46);
+    ui_set_footer_fbuf();
+    match shelf_catalog_state {
+        Coming -> {
+            ui_row(UI_ITEM, 0, 0);
+            ui_set_title("Checking for Updates\‚\Ä\¶");
+            ui_set_busy();
+            ui_set_faint()
+        }
+        _ -> {
+            ui_row(UI_ITEM, ACT_SHELF_REFRESH, 0);
+            ui_set_title("Check for Updates");
+            ui_set_tinted()
+        }
+    }
+}
+
+// Whether a Bible in the catalog is one that comes with the app (by its
+// module's name: BSB, KJV, WEB, ASV, YLT).
+shelf_bundled(info: *ModuleInfo): bool {
+    match info.kind {
+        Bible -> { }
+        _ -> return false
+    }
+    for t in 0..TEXT_ESV
+        if (info.name == text_abbrs[t]) return true;
+    false
+}
+
+// Whether Browse lists the entry: when searching, if its title, short
+// name or language holds what is typed; else if it is in the language
+// shown (English when none is chosen).
+shelf_browse_shows(catalog: *ShelfCatalog, entry: *CatalogEntry, searching: bool): bool {
+    if (searching) return shelf_matches(entry.info.description) || shelf_matches(entry.info.name) || shelf_matches(language_name(entry.info.language));
+    if (shelf_browse_language_at < 0 || shelf_browse_language_at >= catalog.count) return language_is_english(entry.info.language);
+    language_name(entry.info.language) == language_name(catalog.entries[shelf_browse_language_at].info.language)
+}
+
+shelf_matches(text: str): bool {
+    if (shelf_query_n == 0) return true;
+    for start in 0..len(text) - shelf_query_n + 1 {
+        same: bool = true;
+        k: int = 0;
+        while (same && k < shelf_query_n) {
+            x: int = text[start + k] as int & 255;
+            if (x >= 65 && x <= 90) x = x + 32;
+            if (x != (shelf_query[k] as int & 255)) same = false;
+            k = k + 1
+        }
+        if (same) return true
+    }
+    false
+}
+
+// A row of the catalog: its title, its short name and size (and whether it
+// is installed, or why it can't be read), its details on a tap.
+shelf_catalog_row(entry: *CatalogEntry, at_catalog: int, with_language: bool) {
+    ui_row(UI_ITEM, ACT_SHELF_ITEM, at_catalog);
+    ui_set_title(entry.info.description);
+    ui_set_title_lines(2);
+    fbuf_n = 0;
+    fput_str(shelf_short_name(&entry.info));
+    if (with_language) {
+        fput_str(" \¬\∑ ");
+        fput_str(language_name(entry.info.language))
+    }
+    fput_str(" \¬\∑ ");
+    fput_size(entry.info.install_size);
+    i: int = shelf_find(entry.info.name);
+    readable: bool = match entry.support {
+        Readable -> true;
+        Unreadable _ -> false
+    };
+    if (i >= 0) fput_str(if (shelf_ready_at(i)) " \¬\∑ On Your Bookshelf" else " \¬\∑ Downloading") else if (!readable) fput_str(" \¬\∑ Can\‚\Ä\ôt be read here") else if (shelf_bundled(&entry.info)) fput_str(" \¬\∑ Comes with Smooth Bible");
+    ui_set_detail_fbuf();
+    ui_set_small();
+    if (i >= 0 && shelf_ready_at(i)) ui_set_acc(ACC_CHECK) else ui_set_acc(ACC_MORE);
+    if (!readable) ui_set_faint()
+}
+
+// The languages other than English with modules of the kind shown, a row
+// each: its name, how many.
+shelf_language_rows(catalog: *ShelfCatalog) {
+    header: bool = false;
+    last: str = "";
+    last_at: int = -1;
+    count: int = 0;
+    for i in 0..catalog.count + 1 {
+        language: str = "";
+        listed: bool = false;
+        if (i < catalog.count) {
+            entry: *CatalogEntry = &catalog.entries[i];
+            listed = shelf_segment_of(entry.info.kind) == shelf_browse_kind && !language_is_english(entry.info.language);
+            if (listed) language = language_name(entry.info.language)
+        }
+        if (i == catalog.count || listed && language != last) {
+            if (count > 0) {
+                if (!header) {
+                    ui_section("Other Languages", "");
+                    header = true
+                }
+                ui_row(UI_ITEM, ACT_SHELF_LANGUAGE, last_at);
+                ui_set_title(last);
+                fbuf_n = 0;
+                fput_int(count);
+                ui_set_detail_fbuf();
+                ui_set_value_detail();
+                ui_set_acc(ACC_MORE)
+            }
+            last = language;
+            last_at = i;
+            count = 0
+        }
+        if (listed) count = count + 1
+    }
+}
+
+// ---- a module's details ----
+shelf_kind_words: []str = ["Bible", "Commentary", "Dictionary", "Glossary", "Devotional",
+    "Book", "Pictures", "Other"];
+
+sk_build_shelf_item(id: int, arg: int) {
+    i: int = shelf_arg_item(arg);
+    at: int = shelf_arg_entry(arg);
+    if (at < 0 && i < 0) {
+        ui_begin(id, SCR_SHELF_ITEM, arg, "");
+        ui_set_empty("books.vertical", "Not in the Library", "");
+        return
+    }
+    if (at < 0) {
+        // (Installed, but not in the catalog read: what the shelf keeps.)
+        ui_begin(id, SCR_SHELF_ITEM, arg, "");
+        fbuf_n = 0;
+        fput_shelf_abbreviation(i);
+        ui_set_screen_title_fbuf();
+        ui_section("", "");
+        ui_row(UI_TEXT, 0, 0);
+        ui_rich_begin();
+        fput_shelf_title(i);
+        ui_rich(RUN_STRONG);
+        ui_rich_title();
+        shelf_item_actions(i, arg, true, false, 0);
+        shelf_item_report(i);
+        return
+    }
+    borrow shelf_catalog as catalog {
+        entry: *CatalogEntry = &catalog.entries[at];
+        info: *ModuleInfo = &entry.info;
+        ui_begin(id, SCR_SHELF_ITEM, arg, shelf_short_name(info));
+        ui_page = true;
+        ui_section("", "");
+        ui_row(UI_TEXT, 0, 0);
+        ui_rich_begin();
+        fput_str(info.description);
+        ui_rich(RUN_STRONG);
+        fput(10);
+        fput_str(shelf_kind_words[shelf_kind_code(info.kind)]);
+        fput_str(" \¬\∑ ");
+        fput_str(language_name(info.language));
+        if (len(info.version) > 0) {
+            fput_str(" \¬\∑ Version ");
+            fput_str(info.version)
+        }
+        ui_rich(RUN_SMALL);
+        ui_rich_title();
+        readable: bool = true;
+        why: str = "";
+        match entry.support {
+            Unreadable u -> {
+                readable = false;
+                why = shelf_unreadable_words(u.reason)
+            }
+            Readable -> { }
+        }
+        shelf_item_actions(i, arg, readable, shelf_full_for(info.kind), info.install_size);
+        if (!readable) {
+            ui_row(UI_TEXT, 0, 0);
+            ui_rich_begin();
+            fput_str(why);
+            ui_rich(RUN_FAINT);
+            ui_rich_title()
+        }
+        if (shelf_bundled(info)) {
+            ui_row(UI_TEXT, 0, 0);
+            ui_rich_begin();
+            fput_str("Smooth Bible comes with its own ");
+            fput_str(info.name);
+            fput_str(", in Versions. This is CrossWire\‚\Ä\ôs edition of it.");
+            ui_rich(RUN_FAINT);
+            ui_rich_title()
+        }
+        if (info.questionable) {
+            ui_row(UI_TEXT, 0, 0);
+            ui_rich_begin();
+            fput_str(SHELF_SOURCE_SHORT_NAME);
+            fput_str(" lists this among works whose teaching is outside mainstream Christianity.");
+            ui_rich(RUN_FAINT);
+            ui_rich_title()
+        }
+        if (i >= 0) shelf_item_report(i);
+        about: []str = about_paragraphs(info.about);
+        if (len(about) > 0) {
+            ui_section("About", "");
+            for p in about shelf_text_row(p)
+        }
+        ui_section("Details", "");
+        shelf_detail_row("Size", "");
+        fbuf_n = 0;
+        fput_size(info.install_size);
+        ui_set_detail_fbuf();
+        if (len(info.date) > 0) shelf_detail_row("Updated", info.date);
+        match info.storage {
+            ByVerse _ -> shelf_detail_row("Verse Numbering", info.versification);
+            _ -> { }
+        }
+        shelf_detail_row("Format", shelf_markup_words(info.markup));
+        shelf_detail_row("Module", info.name);
+        if (len(info.license) > 0 || len(info.copyright) > 0) {
+            ui_section("License", "");
+            if (len(info.license) > 0)
+                for p in about_paragraphs(info.license) shelf_text_row(p);
+            if (len(info.copyright) > 0)
+                for p in about_paragraphs(info.copyright) shelf_text_row(p)
+        }
+        ui_section("", "");
+        fbuf_n = 0;
+        fput_str("From ");
+        fput_str(SHELF_SOURCE_NAME);
+        fput_str("\‚\Ä\ôs SWORD library.");
+        ui_set_footer_fbuf()
+    }
+}
+
+shelf_text_row(text: str) {
+    ui_row(UI_TEXT, 0, 0);
+    ui_rich_begin();
+    fput_str(text);
+    ui_rich(RUN_PLAIN);
+    ui_rich_title()
+}
+
+shelf_detail_row(title: str, value: str) {
+    ui_row(UI_ITEM, 0, 0);
+    ui_set_title(title);
+    ui_set_detail(value);
+    ui_set_value_detail()
+}
+
+shelf_markup_words(markup: Markup): str {
+    match markup {
+        Osis -> "OSIS";
+        Thml -> "ThML";
+        Gbf -> "GBF";
+        Tei -> "TEI";
+        Plain -> "Plain text"
+    }
+}
+
+shelf_unreadable_words(reason: UnsupportedReason): str {
+    match reason {
+        Locked -> "Its publisher locks it with a key it sells, which this app can\‚\Ä\ôt use yet.";
+        Storage _ -> "It\‚\Ä\ôs stored in a way this app can\‚\Ä\ôt read yet.";
+        Compressed _ -> "It\‚\Ä\ôs compressed in a way this app can\‚\Ä\ôt read yet.";
+        Numbering _ -> "Its verses are numbered in a way this app doesn\‚\Ä\ôt know yet.";
+        Pictures -> "It\‚\Ä\ôs a collection of maps or pictures, which this app can\‚\Ä\ôt show yet."
+    }
+}
+
+// Details' buttons: Download (its size) for one not on the shelf (not
+// while the shelf has no room for it: full); its progress and Stop
+// Download while it comes; Read and Remove once here.
+shelf_item_actions(
+    i: int,
+    arg: int,
+    readable: bool,
+    full: bool,
+    size: int
+) {
+    ui_section("", "");
+    if (i < 0) {
+        if (full) {
+            fbuf_n = 0;
+            fput_str("Your bookshelf has room for ");
+            fput_int(TEXT_SHELF_MOST);
+            fput_str(" Bibles. Remove one to download another.");
+            ui_set_footer_fbuf()
+        }
+        ui_row(UI_BUTTON, ACT_SHELF_DOWNLOAD, arg);
+        fbuf_n = 0;
+        fput_str("Download \¬\∑ ");
+        fput_size(size);
+        ui_set_title_fbuf();
+        if (!readable || full) ui_set_disabled(true);
+        return
+    }
+    slot: int = shelf_slot_at(i);
+    if (!shelf_ready_at(i)) {
+        shelf_downloading_row(i);
+        ui_row(UI_BUTTON, ACT_SHELF_STOP, slot);
+        ui_set_title("Stop Download");
+        ui_set_destructive();
+        return
+    }
+    bible: bool = shelf_kind_at(i) == SHELF_KIND_BIBLE;
+    ui_row(UI_BUTTON, ACT_SHELF_OPEN, slot);
+    ui_set_title(if (bible) if (shelf_text_of(i) == text_cur) "Reading Now" else "Read" else "Open");
+    if (bible && shelf_text_of(i) == text_cur) ui_set_disabled(true);
+    ui_row(UI_BUTTON, ACT_SHELF_REMOVE, slot);
+    ui_set_title("Remove from Bookshelf");
+    ui_set_destructive()
+}
+
+// A Bible's report, once it has been opened: what it lacks, and what of
+// it this app can't show.
+shelf_item_report(i: int) {
+    if (shelf_kind_at(i) != SHELF_KIND_BIBLE) return;
+    report: BibleReport = shelf_report_at(i);
+    if (report.verses < 0) return;
+    if (report.missing_books == 0 && report.outside_chapters <= 0 && report.extra_books == 0) return;
+    ui_row(UI_TEXT, 0, 0);
+    ui_rich_begin();
+    if (report.missing_books == 39) fput_str("It has the New Testament only.") else if (report.missing_books == 27) fput_str("It has the Old Testament only.") else if (report.missing_books > 0) {
+        fput_str("It has ");
+        fput_int(66 - report.missing_books);
+        fput_str(" of the 66 books.")
+    }
+    if (report.extra_books > 0) {
+        if (fbuf_n > 0) fput(32);
+        fput_int(report.extra_books);
+        fput_str(if (report.extra_books == 1) " book beyond the 66 isn\‚\Ä\ôt shown yet." else " books beyond the 66 aren\‚\Ä\ôt shown yet.")
+    }
+    if (report.outside_chapters > 0) {
+        if (fbuf_n > 0) fput(32);
+        fput_int(report.outside_chapters);
+        fput_str(if (report.outside_chapters == 1) " chapter numbered differently from this app\‚\Ä\ôs isn\‚\Ä\ôt shown." else " chapters numbered differently from this app\‚\Ä\ôs aren\‚\Ä\ôt shown.")
+    }
+    ui_rich(RUN_FAINT);
+    ui_rich_title()
+}
+
+// ---- a module's text as rows ----
+// What rich holds as page paragraphs: a row each paragraph (a heading's
+// its own, marked as one), its words in their styles, its links (scripture
+// references, previewed; others not linked) on link_action. Notes in
+// brackets, small. At the rows' limit, a last row says the rest isn't
+// shown.
+SHELF_RUNS_MOST: int = 240;
+
+SHELF_LINKS_MOST: int = 120;
+
+type RichRows = {
+    // The paragraph being made: its runs and links so far.
+    open: bool;
+    heading: bool;
+    runs: int;
+    link_from: []int;
+    link_to: []int;
+    link_ref: []int;
+    links: int;
+    // The link open: where it began (UTF-16) and where it goes (-1: not
+    // a reference this app can show).
+    link_at: int;
+    link_target: int;
+    stopped: bool
+}
+
+rich_rows_new(): RichRows@new {
+    RichRows {
+        open: false,
+        heading: false,
+        runs: 0,
+        link_from: new int[SHELF_LINKS_MOST](0),
+        link_to: new int[SHELF_LINKS_MOST](0),
+        link_ref: new int[SHELF_LINKS_MOST](0),
+        links: 0,
+        link_at: -1,
+        link_target: -1,
+        stopped: false
+    }
+}
+
+rich_rows_end(rows: *RichRows, link_action: int) {
+    if (!rows.open) return;
+    ui_rich_title();
+    if (rows.heading) ui_set_heading();
+    for l in 0..rows.links ui_add_link(rows.link_from[l], rows.link_to[l], link_action,
+        rows.link_ref[l]);
+    rows.open = false;
+    rows.runs = 0;
+    rows.links = 0
+}
+
+rich_rows_begin(rows: *RichRows, heading: bool) {
+    if (rows.open || rows.stopped) return;
+    // (Room for the paragraph and what says the rest isn't shown.)
+    if (ui_rows_n + 2 >= UI_ROWS_MOST || ui_pool_n > len(ui_pool) - 65536 || ui_runs_n + 2 * SHELF_RUNS_MOST + 4 > len(ui_runs) || ui_links_n + SHELF_LINKS_MOST > len(ui_links)) {
+        rows.stopped = true;
+        ui_row(UI_TEXT, 0, 0);
+        ui_rich_begin();
+        fput_str("The rest is too long to show here.");
+        ui_rich(RUN_FAINT);
+        ui_rich_title();
+        return
+    }
+    ui_row(UI_TEXT, 0, 0);
+    ui_rich_begin();
+    rows.open = true;
+    rows.heading = heading;
+    rows.runs = 0;
+    rows.links = 0
+}
+
+shelf_rich_rows(rich: *RichText, link_action: int, verse_paragraph: bool) {
+    rows: RichRows = rich_rows_new();
+    in_note: bool = false;
+    for i in 0..rich.count {
+        if (rows.stopped) return;
+        match rich.pieces[i] {
+            Paragraph -> rich_rows_end(&rows, link_action);
+            HeadingStart h -> {
+                rich_rows_end(&rows, link_action);
+                match h.role {
+                    BookTitle -> { }
+                    ChapterTitle -> { }
+                    _ -> rich_rows_begin(&rows, true)
+                }
+            }
+            HeadingEnd -> rich_rows_end(&rows, link_action);
+            Line _l -> {
+                if (rows.open && fbuf_n > 0) fput(10)
+            }
+            LineBreak -> {
+                if (rows.open && fbuf_n > 0) fput(10)
+            }
+            NoteStart _n -> {
+                rich_rows_begin(&rows, false);
+                in_note = true;
+                fput_str(" [")
+            }
+            NoteEnd -> {
+                if (in_note && rows.open) {
+                    fput(93);
+                    ui_rich(RUN_SMALL)
+                }
+                in_note = false
+            }
+            LinkStart l -> {
+                rich_rows_begin(&rows, false);
+                ui_rich(if (in_note) RUN_SMALL else RUN_PLAIN);
+                // (A paragraph of more links goes on in a row of its own.)
+                if (rows.links >= SHELF_LINKS_MOST) {
+                    heading: bool = rows.heading;
+                    rich_rows_end(&rows, link_action);
+                    rich_rows_begin(&rows, heading)
+                }
+                rows.link_at = ui_rich_u;
+                rows.link_target = (match l.kind {
+                    OsisReference -> shelf_osis_ref(rich.text.data, l.from, l.to);
+                    Passage -> shelf_passage_ref(rich.text.data, l.from, l.to);
+                    _ -> -1
+                })
+            }
+            LinkEnd -> {
+                if (rows.open && rows.link_at >= 0) {
+                    ui_rich(if (rows.link_target >= 0) RUN_ACCENT else RUN_PLAIN);
+                    if (rows.link_target >= 0 && ui_rich_u > rows.link_at) {
+                        rows.link_from[rows.links] = rows.link_at;
+                        rows.link_to[rows.links] = ui_rich_u;
+                        rows.link_ref[rows.links] = rows.link_target;
+                        rows.links = rows.links + 1
+                    }
+                }
+                rows.link_at = -1
+            }
+            Words w -> {
+                rich_rows_begin(&rows, false);
+                if (rows.open) {
+                    // (The words, the divine name in capitals.)
+                    for x in w.from..w.to {
+                        k: int = rich.text.data[x] as int & 255;
+                        if (w.style.divine && k >= 97 && k <= 122) fput(k - 32) else fput(k)
+                    }
+                    if (rows.link_at < 0) {
+                        ui_rich(if (in_note) RUN_SMALL else if (rows.heading || w.style.bold) RUN_STRONG else if (w.style.italic || w.style.added) RUN_ITALIC else if (w.style.superscript) RUN_SMALL else if (verse_paragraph) RUN_SCRIPTURE else RUN_PLAIN);
+                        rows.runs = rows.runs + 1;
+                        // (A paragraph of more runs goes on in a row of its own.)
+                        if (rows.runs >= SHELF_RUNS_MOST) rich_rows_end(&rows, link_action)
+                    }
+                }
+            }
+        }
+    }
+    rich_rows_end(&rows, link_action)
+}
+
+// ---- a commentary on a chapter (from Bookshelf) ----
+// Its arg: slot * SHELF_PLACE + the chapter (through the Bible).
+sk_build_shelf_commentary(id: int, arg: int) {
+    slot: int = arg / SHELF_PLACE;
+    c: int = arg % SHELF_PLACE;
+    i: int = shelf_find_slot(slot);
+    fbuf_n = 0;
+    fput_title(c);
+    ui_begin(id, SCR_SHELF_COMMENTARY, arg, "");
+    ui_set_screen_title_fbuf();
+    ui_page = true;
+    ui_tool("", "chevron.left", ACT_SHELF_STEP, -1, if (c > 0) UI_TOOL_PLAIN else UI_TOOL_OFF,
+        0);
+    fbuf_n = 0;
+    fput_str("Previous Chapter");
+    ui_set_tool_label_fbuf();
+    ui_tool("", "chevron.right", ACT_SHELF_STEP, 1, if (c + 1 < chapters) UI_TOOL_PLAIN else UI_TOOL_OFF,
+        2);
+    fbuf_n = 0;
+    fput_str("Next Chapter");
+    ui_set_tool_label_fbuf();
+    if (i < 0) {
+        ui_set_empty("books.vertical", "Not on Your Bookshelf", "");
+        return
+    }
+    if (!shelf_ensure_open(slot)) {
+        shelf_opening_rows(slot, i);
+        return
+    }
+    shown: int = 0;
+    borrow shelf_open[SHELF_USE_STUDY] as open {
+        match open.reader {
+            Verses r -> shown = shelf_commentary_chapter(r.module, c);
+            _ -> { }
+        }
+    }
+    if (shown == 0) {
+        fbuf_n = 0;
+        fput_shelf_abbreviation(i);
+        fput_str(" has no comment on ");
+        fput_title(c);
+        fput(46);
+        ui_set_empty("text.book.closed", "No Commentary Here", "");
+        ui_empty_line = ui_put_fbuf()
+    }
+    ui_section("", "");
+    shelf_credit_row(i)
+}
+
+// A module being opened (or one that could not be): a row that says so.
+shelf_opening_rows(slot: int, i: int) {
+    ui_section("", "");
+    ui_row(UI_ITEM, 0, 0);
+    fbuf_n = 0;
+    if (shelf_broken_at(i)) {
+        fput_shelf_abbreviation(i);
+        fput_str(" couldn\‚\Ä\ôt be opened. Remove it, then download it again.");
+        ui_set_title_fbuf();
+        ui_set_icon("exclamationmark.triangle");
+        return
+    }
+    fput_str("Opening ");
+    fput_shelf_abbreviation(i);
+    fput_str("\‚\Ä\¶");
+    ui_set_title_fbuf();
+    ui_set_busy();
+    ui_set_faint()
+}
+
+shelf_credit_row(i: int) {
+    ui_row(UI_TEXT, 0, 0);
+    ui_rich_begin();
+    fput_shelf_title(i);
+    fput_str(" \¬\∑ CrossWire");
+    ui_rich(RUN_SMALL);
+    ui_rich_title()
+}
+
+// Chapter c's commentary: each section's verses ("Verses 1‚Äì5"), then its
+// paragraphs. How many sections.
+shelf_commentary_chapter(module: *VerseModule, c: int): int {
+    place: CommentaryPlace = commentary_place(module, c);
+    if (place.book < 0) return 0;
+    system: *Versification = verse_module_system(module);
+    last: int = system.books[place.book].verses[place.chapter - 1];
+    shown: int = 0;
+    v: int = 0;
+    while (v <= last) {
+        entry: VerseEntry = commentary_entry(module, place, v);
+        if (entry.size > 0) {
+            through: int = v;
+            while (through < last && verse_entries_same(entry, commentary_entry(module,
+                place, through + 1))) through = through + 1;
+            if (commentary_section(module, entry, v, through, ACT_SHELF_LINK)) shown = shown + 1;
+            v = through + 1
+        } else v = v + 1
+    }
+    shown
+}
+
+// Where the app's chapter c is in a module's numbering (its book -1:
+// the module lacks it).
+type CommentaryPlace = {
+    book: int;
+    chapter: int
+}
+
+commentary_place(module: *VerseModule, c: int): CommentaryPlace {
+    system: *Versification = verse_module_system(module);
+    mb: int = shelf_module_book(system, ch_book[c]);
+    n: int = ch_num[c];
+    if (mb < 0 || !verse_module_has(module, system.books[mb].testament) || n > len(system.books[mb].verses)) return CommentaryPlace { book: -1, chapter: 0 };
+    CommentaryPlace { book: mb, chapter: n }
+}
+
+commentary_entry(module: *VerseModule, place: CommentaryPlace, v: int): VerseEntry {
+    try {
+        verse_module_entry(module, verse_slot(verse_module_system(module), place.book,
+            place.chapter, v))
+    } with SwordError _error -> {
+        verse_no_entry
+    }
+}
+
+// One section: "Verses 14‚Äì16" (or "Introduction" for verse 0), then the
+// entry's paragraphs, its references previews.
+commentary_section(
+    module: *VerseModule,
+    entry: VerseEntry,
+    from: int,
+    through: int,
+    link_action: int
+): bool {
+    shown: bool = true;
+    region {
+        try {
+            source: []i8 = if (entry.block >= 0) verse_module_block(module, entry.testament,
+                entry.block) else verse_module_testament_text(module, entry.testament);
+            markup: []i8 = verse_module_text(module, source, entry);
+            rich: *RichText = rich_new();
+            state: MarkupState = markup_state_new();
+            markup_convert(rich, &state, verse_module_info(module).markup, markup,
+                0, len(markup));
+            // (An entry with no words of its own, only a chapter's titles,
+            // is not a section.)
+            shown = rich_has_words(rich);
+            if (shown) {
+                // (One that heads its parts itself is not headed again: its
+                // links may not reach as far as its words do.)
+                if (rich_has_sections(rich)) ui_section("", "") else commentary_section_label(from,
+                    through);
+                shelf_rich_rows(rich, link_action, false)
+            }
+        } with SwordError _error -> {
+            commentary_section_label(from, through);
+            ui_row(UI_TEXT, 0, 0);
+            ui_rich_begin();
+            fput_str("This part of the commentary is damaged.");
+            ui_rich(RUN_FAINT);
+            ui_rich_title()
+        }
+    }
+    shown
+}
+
+// "Verses 14‚Äì16" (or "Introduction" for a chapter's verse 0) heading a
+// section of its own.
+commentary_section_label(from: int, through: int) {
+    ui_section("", "");
+    ui_row(UI_TEXT, 0, 0);
+    ui_rich_begin();
+    if (from == 0 && through == 0) fput_str("Introduction") else if (through > from) {
+        fput_str("Verses ");
+        fput_int(if (from == 0) 1 else from);
+        fput_str("\‚\Ä\ì");
+        fput_int(through)
+    } else {
+        fput_str("Verse ");
+        fput_int(from)
+    }
+    ui_rich(RUN_SMALL);
+    ui_rich_title();
+    ui_set_heading()
+}
+
+// Whether rich has headings of its own parts (not a book's or chapter's
+// titles).
+rich_has_sections(rich: *RichText): bool {
+    for i in 0..rich.count {
+        match rich.pieces[i] {
+            HeadingStart h -> {
+                match h.role {
+                    Section -> return true;
+                    _ -> { }
+                }
+            }
+            _ -> { }
+        }
+    }
+    false
+}
+
+// Whether rich has words outside a book's or chapter's titles.
+rich_has_words(rich: *RichText): bool {
+    in_title: bool = false;
+    for i in 0..rich.count {
+        match rich.pieces[i] {
+            HeadingStart h -> in_title = (match h.role {
+                BookTitle -> true;
+                ChapterTitle -> true;
+                _ -> false
+            });
+            HeadingEnd -> in_title = false;
+            Words w -> {
+                if (!in_title) {
+                    for x in w.from..w.to
+                        if (rich.text.data[x] as int != 32) return true
+                }
+            }
+            _ -> { }
+        }
+    }
+    false
+}
+
+// The commentary's section on verse v of chapter c (for Study): the one
+// whose verses hold it, else the nearest before it in the chapter. Its
+// first and last verse into the place found (verse -1: none).
+type CommentaryFound = {
+    entry: VerseEntry;
+    from: int;
+    through: int
+}
+
+commentary_on(module: *VerseModule, c: int, v: int): CommentaryFound {
+    none: CommentaryFound = CommentaryFound { entry: verse_no_entry, from: -1, through: -1 };
+    place: CommentaryPlace = commentary_place(module, c);
+    if (place.book < 0) return none;
+    system: *Versification = verse_module_system(module);
+    last: int = system.books[place.book].verses[place.chapter - 1];
+    at: int = if (v > last) last else v;
+    while (at >= 1 && commentary_entry(module, place, at).size == 0) at = at - 1;
+    if (at < 1) return none;
+    entry: VerseEntry = commentary_entry(module, place, at);
+    from: int = at;
+    while (from > 1 && verse_entries_same(entry, commentary_entry(module, place, from - 1))) from = from - 1;
+    through: int = at;
+    while (through < last && verse_entries_same(entry, commentary_entry(module, place,
+        through + 1))) through = through + 1;
+    CommentaryFound { entry: entry, from: from, through: through }
+}
+
+// ---- a dictionary's entries, and one entry ----
+// Entries' arg: its slot. Entry's: slot * SHELF_PLACE + its index.
+sk_build_shelf_entries(id: int, slot: int) {
+    i: int = shelf_find_slot(slot);
+    ui_begin(id, SCR_SHELF_ENTRIES, slot, "");
+    fbuf_n = 0;
+    fput_shelf_abbreviation(i);
+    ui_set_screen_title_fbuf();
+    ui_set_search("Look Up a Word");
+    ui_set_search_text(shelf_query, shelf_query_n);
+    if (i < 0) return;
+    if (!shelf_ensure_open(slot)) {
+        shelf_opening_rows(slot, i);
+        return
+    }
+    borrow shelf_open[SHELF_USE_ENTRIES] as open {
+        match open.reader {
+            Keys r -> shelf_entries_rows(r.module, slot);
+            _ -> { }
+        }
+    }
+}
+
+// Its keys, made as they are wanted: from what is typed on (the first that
+// is not before it), or with nothing typed every key (a devotional's
+// today's first).
+shelf_entries_rows(module: *KeyModule, slot: int) {
+    count: int = key_module_count(module);
+    if (shelf_query_n == 0) {
+        today: int = match key_module_info(module).kind {
+            Devotional -> shelf_today_entry(module);
+            _ -> -1
+        };
+        if (today >= 0) {
+            ui_section("Today", "");
+            shelf_entry_row(module, slot, today);
+            ui_set_strong()
+        }
+        ui_section("", "");
+        shelf_entries_lazy_from(slot, 0, count);
+        return
+    }
+    region {
+        typed: str = shelf_bytes_text(shelf_query, 0, shelf_query_n);
+        from: int = key_module_seek(module, typed);
+        ui_section("", "");
+        n: int = count - from;
+        if (n > 0) shelf_entries_lazy_from(slot, from, n);
+        if (n <= 0) {
+            ui_row(UI_ITEM, 0, 0);
+            ui_set_title("No entries after this");
+            ui_set_faint()
+        }
+    }
+}
+
+// The lazy rows' dictionary, and the entry their first row is.
+shelf_lazy_module_slot: int = -1;
+
+shelf_lazy_first: int = 0;
+
+// Count rows of slot's entries from first on, made as they are wanted.
+shelf_entries_lazy_from(slot: int, first: int, count: int) {
+    shelf_lazy_module_slot = slot;
+    shelf_lazy_first = first;
+    ui_set_lazy(count);
+    ui_lazy_fn = &shelf_entries_lazy
+}
+
+shelf_entries_lazy(_s: int, r: int) {
+    if (!shelf_open_is(SHELF_USE_ENTRIES, shelf_lazy_module_slot)) return;
+    borrow shelf_open[SHELF_USE_ENTRIES] as open {
+        match open.reader {
+            Keys k -> shelf_entry_row(k.module, shelf_lazy_module_slot, shelf_lazy_first + r);
+            _ -> { }
+        }
+    }
+}
+
+// How many entries the dictionary in slot has (-1: it isn't open).
+shelf_entry_count(slot: int): int {
+    if (!shelf_open_is(SHELF_USE_ENTRIES, slot)) return -1;
+    count: int = -1;
+    borrow shelf_open[SHELF_USE_ENTRIES] as open {
+        match open.reader {
+            Keys k -> count = key_module_count(k.module);
+            _ -> { }
+        }
+    }
+    count
+}
+
+shelf_entry_row(module: *KeyModule, slot: int, index: int) {
+    ui_row(UI_ITEM, ACT_SHELF_ENTRY, slot * SHELF_PLACE + index);
+    region {
+        try {
+            key: str = key_module_key(module, index);
+            fbuf_n = 0;
+            fput_entry_key(key_module_info(module), key);
+            ui_set_title_fbuf()
+        } with SwordError _error -> {
+            ui_set_title("(damaged)")
+        }
+    }
+    ui_set_acc(ACC_MORE)
+}
+
+sk_build_shelf_entry(id: int, arg: int) {
+    slot: int = arg / SHELF_PLACE;
+    index: int = arg % SHELF_PLACE;
+    i: int = shelf_find_slot(slot);
+    ui_begin(id, SCR_SHELF_ENTRY, arg, "");
+    ui_page = true;
+    if (i < 0) return;
+    count: int = shelf_entry_count(slot);
+    ui_tool("", "chevron.left", ACT_SHELF_STEP, -1, if (index > 0) UI_TOOL_PLAIN else UI_TOOL_OFF,
+        0);
+    fbuf_n = 0;
+    fput_str("Previous Entry");
+    ui_set_tool_label_fbuf();
+    ui_tool("", "chevron.right", ACT_SHELF_STEP, 1, if (count < 0 || index + 1 < count) UI_TOOL_PLAIN else UI_TOOL_OFF,
+        2);
+    fbuf_n = 0;
+    fput_str("Next Entry");
+    ui_set_tool_label_fbuf();
+    if (!shelf_ensure_open(slot)) {
+        shelf_opening_rows(slot, i);
+        return
+    }
+    borrow shelf_open[SHELF_USE_ENTRIES] as open {
+        match open.reader {
+            Keys r -> shelf_entry_rows(r.module, index);
+            _ -> { }
+        }
+    }
+    ui_section("", "");
+    shelf_credit_row(i)
+}
+
+shelf_entry_rows(module: *KeyModule, index: int) {
+    region {
+        try {
+            key: str = key_module_key(module, index);
+            fbuf_n = 0;
+            fput_entry_key(key_module_info(module), key);
+            ui_set_screen_title_fbuf();
+            text: []i8 = key_module_text(module, index);
+            rich: *RichText = rich_new();
+            state: MarkupState = markup_state_new();
+            markup_convert(rich, &state, key_module_info(module).markup, text, 0,
+                len(text));
+            ui_section("", "");
+            shelf_rich_rows(rich, ACT_SHELF_LINK, false)
+        } with SwordError _error -> {
+            ui_set_empty("exclamationmark.triangle", "This Entry Is Damaged", "")
+        }
+    }
+}
+
+// A key as a reader would name it: a devotional's date (01.15: January
+// 15), a Strong's number without its zeros and with its language's letter
+// (00025: G25), none an introduction; else as it is.
+fput_entry_key(info: *ModuleInfo, key: str) {
+    if (len(key) == 0) {
+        fput_str("Introduction");
+        return
+    }
+    devotional: bool = match info.kind {
+        Devotional -> true;
+        _ -> false
+    };
+    if (devotional && len(key) == 5 && key[2] as int == 46 && is_digit(key[0] as int) && is_digit(key[1] as int) && is_digit(key[3] as int) && is_digit(key[4] as int)) {
+        month: int = (key[0] as int - 48) * 10 + key[1] as int - 48;
+        day: int = (key[3] as int - 48) * 10 + key[4] as int - 48;
+        if (month >= 1 && month <= 12) {
+            fput_str(month_names[month - 1]);
+            fput(32);
+            fput_int(day);
+            return
+        }
+    }
+    if (info.greek_definitions || info.hebrew_definitions) {
+        digits: bool = true;
+        for c in key
+            if (!is_digit(c as int)) digits = false;
+        if (digits) {
+            fput(if (info.greek_definitions) 71 else 72);
+            n: int = 0;
+            for c in key n = n * 10 + c as int - 48;
+            fput_int(n);
+            return
+        }
+    }
+    fput_str(key)
+}
+
+// A devotional's entry for today: its key MM.DD (as SWORD's daily
+// devotionals name them), -1 if it has none.
+shelf_today_entry(module: *KeyModule): int {
+    civil_date(sk_local_day(time(0)));
+    key: []i8 = new i8[5](48i8);
+    month: int = date_m;
+    date: int = date_d;
+    key[0] = (48 + month / 10) trunc i8;
+    key[1] = (48 + month % 10) trunc i8;
+    key[2] = 46i8;
+    key[3] = (48 + date / 10) trunc i8;
+    key[4] = (48 + date % 10) trunc i8;
+    key_module_find(module, shelf_bytes_text(key, 0, 5))
+}
+
+// ---- a book's parts ----
+// Its arg: slot * SHELF_PLACE + the part (its node; 0 the whole book).
+sk_build_shelf_book(id: int, arg: int) {
+    slot: int = arg / SHELF_PLACE;
+    node: int = arg % SHELF_PLACE;
+    i: int = shelf_find_slot(slot);
+    ui_begin(id, SCR_SHELF_BOOK, arg, "");
+    if (node == 0) {
+        fbuf_n = 0;
+        fput_shelf_abbreviation(i);
+        ui_set_screen_title_fbuf()
+    }
+    ui_page = true;
+    if (i < 0) return;
+    if (!shelf_ensure_open(slot)) {
+        shelf_opening_rows(slot, i);
+        return
+    }
+    borrow shelf_open[SHELF_USE_BOOK] as open {
+        match open.reader {
+            Tree t -> shelf_book_rows(t.module, slot, node, i);
+            _ -> { }
+        }
+    }
+}
+
+shelf_book_rows(
+    module: *TreeModule,
+    slot: int,
+    node: int,
+    i: int
+) {
+    region {
+        try {
+            if (node > 0) {
+                fbuf_n = 0;
+                fput_str(tree_module_name(module, node));
+                ui_set_screen_title_fbuf();
+                previous: int = shelf_book_step(module, node, -1);
+                following: int = shelf_book_step(module, node, 1);
+                ui_tool("", "chevron.left", ACT_SHELF_STEP, -1, if (previous > 0) UI_TOOL_PLAIN else UI_TOOL_OFF,
+                    0);
+                fbuf_n = 0;
+                fput_str("Previous Part");
+                ui_set_tool_label_fbuf();
+                ui_tool("", "chevron.right", ACT_SHELF_STEP, 1, if (following > 0) UI_TOOL_PLAIN else UI_TOOL_OFF,
+                    2);
+                fbuf_n = 0;
+                fput_str("Next Part");
+                ui_set_tool_label_fbuf()
+            } else {
+                ui_section("", "");
+                ui_row(UI_TEXT, 0, 0);
+                ui_rich_begin();
+                fput_shelf_title(i);
+                ui_rich(RUN_STRONG);
+                ui_rich_title()
+            }
+            text: []i8 = tree_module_text(module, node);
+            if (len(text) > 0) {
+                rich: *RichText = rich_new();
+                state: MarkupState = markup_state_new();
+                markup_convert(rich, &state, tree_module_info(module).markup, text,
+                    0, len(text));
+                ui_section("", "");
+                shelf_rich_rows(rich, ACT_SHELF_LINK, false)
+            }
+            child: int = tree_module_first_child(module, node);
+            if (child >= 0) ui_section(if (node == 0) "Contents" else "", "");
+            while (child >= 0) {
+                ui_row(UI_ITEM, ACT_SHELF_ENTRY, slot * SHELF_PLACE + child);
+                fbuf_n = 0;
+                fput_str(tree_module_name(module, child));
+                ui_set_title_fbuf();
+                ui_set_acc(ACC_MORE);
+                child = tree_module_next(module, child)
+            }
+        } with SwordError _error -> {
+            ui_set_empty("exclamationmark.triangle", "This Part Is Damaged", "")
+        }
+    }
+    ui_section("", "");
+    shelf_credit_row(i)
+}
+
+// The part before node or after it, in reading order (its first child,
+// else its next sibling, else an ancestor's next), -1 none.
+shelf_book_step(module: *TreeModule, node: int, direction: int) raises SwordError: int {
+    if (direction > 0) {
+        child: int = tree_module_first_child(module, node);
+        if (child >= 0) return child;
+        at: int = node;
+        while (at > 0) {
+            next: int = tree_module_next(module, at);
+            if (next >= 0) return next;
+            at = tree_module_parent(module, at)
+        }
+        return -1
+    }
+    parent: int = tree_module_parent(module, node);
+    if (parent < 0) return -1;
+    // (Its previous sibling's last descendant, else its parent.)
+    sibling: int = tree_module_first_child(module, parent);
+    if (sibling == node) return if (parent == 0) -1 else parent;
+    before: int = sibling;
+    while (sibling >= 0 && sibling != node) {
+        before = sibling;
+        sibling = tree_module_next(module, sibling)
+    }
+    last: int = before;
+    child: int = tree_module_first_child(module, last);
+    while (child >= 0) {
+        last = child;
+        next: int = tree_module_next(module, child);
+        while (next >= 0) {
+            last = next;
+            next = tree_module_next(module, next)
+        }
+        child = tree_module_first_child(module, last)
+    }
+    last
+}
+
+// ---- what they do ----
+sk_shelf_act(
+    at: int,
+    action: int,
+    arg: int,
+    value: int
+) {
+    id: int = sk_ids[at];
+    a: int = sk_args[at];
+    if (action == ACT_SHELF_BROWSE) {
+        sk_open(SCR_SHELF_BROWSE, arg, true);
+        return
+    }
+    if (action == ACT_SHELF_KIND) {
+        shelf_browse_kind = clamp_index(value, SHELF_SEGMENTS);
+        shelf_browse_language_at = -1;
+        sk_build(at);
+        ui_effect("update", id, -1);
+        return
+    }
+    if (action == ACT_SHELF_LANGUAGE) {
+        shelf_browse_language_set(arg);
+        sk_build(at);
+        ui_effect("update", id, -1);
+        return
+    }
+    if (action == ACT_SHELF_ITEM) {
+        sk_open(SCR_SHELF_ITEM, arg, true);
+        return
+    }
+    if (action == ACT_SHELF_INFO) {
+        i: int = shelf_find_slot(arg);
+        if (i >= 0) sk_open(SCR_SHELF_ITEM, shelf_item_arg(i), true);
+        return
+    }
+    if (action == ACT_SHELF_REFRESH) {
+        shelf_refresh_catalog();
+        shelf_screens_changed();
+        return
+    }
+    if (action == ACT_SHELF_RETRY) {
+        if (arg == shelf_failed_slot) shelf_failed_slot = -1;
+        shelf_pump();
+        shelf_screens_changed();
+        return
+    }
+    if (action == ACT_SHELF_DOWNLOAD) {
+        if (shelf_catalog == null || arg < 0 || arg >= shelf_catalog_count()) return;
+        borrow shelf_catalog as catalog {
+            shelf_add(&catalog.entries[arg])
+        }
+        return
+    }
+    if (action == ACT_SHELF_STOP || action == ACT_SHELF_REMOVE) {
+        shelf_remove(shelf_find_slot(arg));
+        return
+    }
+    if (action == ACT_SHELF_DELETE) {
+        shelf_remove(shelf_find_slot(arg));
+        return
+    }
+    if (action == ACT_SHELF_OPEN) {
+        i: int = shelf_find_slot(arg);
+        if (i >= 0) shelf_read(i);
+        return
+    }
+    if (action == ACT_SHELF_READ) {
+        i: int = shelf_find_slot(arg);
+        if (i >= 0) shelf_read(i);
+        return
+    }
+    if (action == ACT_SHELF_ENTRY) {
+        kind: int = sk_kinds[at];
+        if (kind == SCR_SHELF_BOOK) sk_open(SCR_SHELF_BOOK, arg, true) else sk_open(SCR_SHELF_ENTRY,
+            arg, true);
+        return
+    }
+    if (action == ACT_SHELF_LINK) {
+        sk_preview(arg);
+        return
+    }
+    if (action == ACT_SHELF_STEP) {
+        shelf_step(at, a, if (arg < 0) -1 else 1);
+        return
+    }
+    _v: int = value
+}
+
+// A module read: a Bible as the version (Bookshelf closed, the reader
+// in it); a commentary at the reader's chapter; a dictionary's entries
+// (a devotional at today's); a book's contents.
+shelf_read(i: int) {
+    if (!shelf_ready_at(i)) return;
+    k: int = shelf_kind_at(i);
+    slot: int = shelf_slot_at(i);
+    if (k == SHELF_KIND_BIBLE) {
+        sk_use_version(shelf_text_of(i));
+        sk_dismiss();
+        return
+    }
+    if (k == SHELF_KIND_COMMENTARY) {
+        sk_open(SCR_SHELF_COMMENTARY, slot * SHELF_PLACE + (if (sk_c >= 0 && sk_c < chapters) sk_c else 0),
+            true);
+        return
+    }
+    if (k == SHELF_KIND_BOOK) {
+        sk_open(SCR_SHELF_BOOK, slot * SHELF_PLACE, true);
+        return
+    }
+    shelf_query_n = 0;
+    if (k == SHELF_KIND_DEVOTIONAL && shelf_open_is(SHELF_USE_ENTRIES, slot)) {
+        today: int = -1;
+        borrow shelf_open[SHELF_USE_ENTRIES] as open {
+            match open.reader {
+                Keys r -> today = shelf_today_entry(r.module);
+                _ -> { }
+            }
+        }
+        if (today >= 0) {
+            sk_open(SCR_SHELF_ENTRY, slot * SHELF_PLACE + today, true);
+            return
+        }
+    }
+    sk_open(SCR_SHELF_ENTRIES, slot, true)
+}
+
+// The commentary's chapter, the entry or the book's part before or after
+// the one shown.
+shelf_step(at: int, a: int, direction: int) {
+    kind: int = sk_kinds[at];
+    slot: int = a / SHELF_PLACE;
+    place: int = a % SHELF_PLACE;
+    if (kind == SCR_SHELF_COMMENTARY) {
+        c: int = place + direction;
+        if (c < 0 || c >= chapters) return;
+        sk_args[at] = slot * SHELF_PLACE + c
+    } else if (kind == SCR_SHELF_ENTRY) {
+        index: int = place + direction;
+        if (index < 0 || index >= shelf_entry_count(slot)) return;
+        sk_args[at] = slot * SHELF_PLACE + index
+    } else if (kind == SCR_SHELF_BOOK) {
+        if (!shelf_open_is(SHELF_USE_BOOK, slot)) return;
+        next: int = -1;
+        borrow shelf_open[SHELF_USE_BOOK] as open {
+            match open.reader {
+                Tree t -> {
+                    try {
+                        next = shelf_book_step(t.module, place, direction)
+                    } with SwordError _error -> {
+                        // (A damaged tree: the part shown stays, and its
+                        // screen says it is damaged where it is.)
+                        next = -1
+                    }
+                }
+                _ -> { }
+            }
+        }
+        if (next <= 0) return;
+        sk_args[at] = slot * SHELF_PLACE + next
+    } else return;
+    sk_build(at);
+    ui_effect("update", sk_ids[at], -1)
+}
+
+// What a Bookshelf screen's field holds (lower case), its screen made again.
+sk_shelf_typed(
+    at: int,
+    buf: []i8,
+    b: int,
+    e: int
+) {
+    // (Longer than the field keeps: up to its last whole character, which
+    // the field then shows.)
+    end: int = e;
+    if (end - b > len(shelf_query)) {
+        end = b + len(shelf_query);
+        while (end > b && (buf[end] as int & 192) == 128) end = end - 1
+    }
+    shelf_query_n = 0;
+    for x in b..end {
+        k: int = buf[x] as int;
+        shelf_query[shelf_query_n] = (if (k >= 'A' as int && k <= 'Z' as int) k + 32 else k) trunc i8;
+        shelf_query_n = shelf_query_n + 1
+    }
+    sk_build(at);
+    ui_effect("refill", sk_ids[at], 0)
+}

@@ -43,11 +43,39 @@ store_mem(ty: *Type) noregion raises Error {
 }
 
 store_mem_at(ty: *Type, base: int, offset: int) noregion raises Error {
+    // (A record smaller than 8 bytes travels in a register: stored at its
+    // own width, so the bytes after it in memory are left alone.)
+    if (is_struct_ty(ty) || is_exn_ty(ty)) {
+        size: int = type_size(ty);
+        if (size < 8) {
+            store_small_aggregate(size, base, offset);
+            return
+        }
+    }
     esz: int = enum_mem_size(ty);
     if (esz == 1 || is_byte_ty(ty)) cg_movb_rm(0, base, offset) else {
         if (esz == 4 || is_i32_ty(ty) || is_u32_ty(ty) || is_f32_ty(ty)) cg_movl_rm(0,
             base, offset) else cg_mov_rm(0, base, offset)
     }
+}
+
+// The low size bytes of %rax into (base + offset), %rax kept (r11 holds
+// it while its bytes are shifted down).
+store_small_aggregate(size: int, base: int, offset: int) noregion raises Error {
+    if (size == 4) {
+        cg_movl_rm(0, base, offset);
+        return
+    }
+    if (base == 0 || base == 11) error("internal: a small record's store needs a base other than rax and r11");
+    cg_mov_rr(0, 11);
+    for i in 0..size {
+        if (i > 0) {
+            cg_mov_rr(11, 0);
+            cg_shift_imm(5, 8 * i, 0)
+        }
+        cg_movb_rm(0, base, offset + i)
+    }
+    cg_mov_rr(11, 0)
 }
 
 /* Write tag into (%rax). Width follows the enum's tag type. */
@@ -151,6 +179,19 @@ emit_check_new_count(nreg: int, esz: int) noregion raises Error {
     if (max_n <= 0) max_n = 0;
     cg_alu_imm(7, max_n, nreg);
     cg_jump_id(7, oob_lab)
+}
+
+emit_user_call(name: []i8@immortal, fn: ?*Function) noregion raises Error {
+    external: bool = false;
+    if (fn != null && fn.is_extern) external = true;
+    if (fn != null && (streq(fn.link_name, "l8_region_depth") || streq(fn.link_name,
+        "l8_region_unwind") || streq(fn.link_name, "l8_reserve_bytes") || streq(fn.link_name,
+        "l8_heap_mark") || streq(fn.link_name, "l8_heap_used") || streq(fn.link_name,
+        "l8_heap_reset") || streq(fn.link_name, "l8_arena_live") || streq(fn.link_name,
+        "wasm_callback_abandon") || streq(fn.link_name, "wasm_native_abandon"))) external = false;
+    if (external) cg_call("l8_arena_suspend");
+    cg_call(name);
+    if (external) cg_call("l8_arena_resume")
 }
 
 emit_malloc() noregion raises Error {
@@ -598,6 +639,29 @@ gen_simple_addr(n: *Expr, reg: int) noregion raises Error: bool {
     }
 }
 
+// Leave the handle in an owner element in rax and empty the element. The
+// slice and index are evaluated once.
+gen_take_owner_element(element: *Expr) noregion raises Error {
+    gen_addr(element);
+    cg_mov_rr(0, 7);
+    cg_mov_mr(7, 0, 0);
+    cg_mov_imm(0, 6);
+    cg_mov_rm(6, 7, 0)
+}
+
+// Store the handle in rax into an owner element, which must be empty: the
+// right side, evaluated first, may have refilled it.
+gen_fill_owner_element(element: *Expr) noregion raises Error {
+    cg_push(0);
+    gen_addr(element);
+    cg_mov_rr(0, 7);
+    cg_mov_mr(7, 0, 0);
+    cg_alu_imm(7, 0, 0);
+    cg_jump_id(5, oob_lab);
+    cg_pop(0);
+    cg_mov_rm(0, 7, 0)
+}
+
 gen_load(n: *Expr) noregion raises Error {
     ty: *Type = n.ty or error("missing type");
     if (passes_by_ref(ty)) {
@@ -782,6 +846,39 @@ cg_load_call_arg(a: *Expr, reg: int) noregion raises Error {
         _ -> { }
     }
     if (!gen_simple_operand(a, reg)) error("internal: simple call argument")
+}
+
+// Capture the destination and old value in frame slots before evaluating rhs.
+// Both backends then use ordinary assignment and numeric operator lowering.
+type CompoundLowering = {
+    capture_address: *Expr;
+    capture_value: *Expr;
+    store: *Expr
+}
+
+lower_compound_assignment(
+    lhs: *Expr@new,
+    rhs: *Expr@new,
+    update: *CompoundAssignment@new,
+    offset: int
+): CompoundLowering@new {
+    update.address.offset = offset;
+    update.value.offset = offset + 8;
+    address: *Expr = new_addr(lhs);
+    address.ty = update.address.ty;
+    save_address: *Expr = new_assign(new_var_node(update.address), address);
+    save_address.ty = update.address.ty;
+    old: *Expr = new_deref(new_var_node(update.address));
+    old.ty = lhs.ty;
+    save_value: *Expr = new_assign(new_var_node(update.value), old);
+    save_value.ty = lhs.ty;
+    result: *Expr = new_binary(update.op, new_var_node(update.value), rhs);
+    result.ty = lhs.ty;
+    target: *Expr = new_deref(new_var_node(update.address));
+    target.ty = lhs.ty;
+    store: *Expr = new_assign(target, result);
+    store.ty = lhs.ty;
+    CompoundLowering { capture_address: save_address, capture_value: save_value, store: store }
 }
 
 gen_binop_setup(lhs: *Expr, rhs: *Expr) noregion raises Error {
@@ -1520,6 +1617,15 @@ gen_expr(n: *Expr) noregion raises Error {
             return
         }
         Assign q -> {
+            update: ?*CompoundAssignment = q.compound;
+            if (update != null) {
+                lowered: CompoundLowering = lower_compound_assignment(q.lhs, q.rhs,
+                    update, cg_temp_offset(n));
+                gen_expr(lowered.capture_address);
+                gen_expr(lowered.capture_value);
+                gen_expr(lowered.store);
+                return
+            }
             match q.rhs.kind {
                 StructLit k -> {
                     lty: ?*Type = q.lhs.ty;
@@ -1581,12 +1687,26 @@ gen_expr(n: *Expr) noregion raises Error {
                     Var k -> {
                         vo: ?*Obj = k.var;
                         if (vo != null) {
+                            // A call in the RHS can refill a global owner. Check
+                            // after evaluation so reentrancy cannot lose it.
+                            if (!vo.is_local && is_owned_ty(decay(lhs_ty))) {
+                                cg_push(0);
+                                emit_load_var(vo, lhs_ty);
+                                cg_alu_imm(7, 0, 0);
+                                cg_jump_id(5, oob_lab);
+                                cg_pop(0)
+                            }
                             emit_store_var(vo, lhs_ty);
                             return
                         }
                     }
                     _ -> { }
                 }
+            }
+            // Owner variables were stored above; this is an element.
+            if (is_owned_ty(decay(lhs_ty))) {
+                gen_fill_owner_element(q.lhs);
+                return
             }
             if (!passes_by_ref(lhs_ty) && gen_simple_store(q.lhs, lhs_ty)) return;
             // Simple address formation preserves the evaluated source in rax.
@@ -1729,7 +1849,7 @@ gen_expr(n: *Expr) noregion raises Error {
                     emit_io_call(k.funcname, k.args);
                     return
                 }
-                cg_call(call_name);
+                emit_user_call(call_name, fno);
                 emit_ret_to_rax(n.ty);
                 return
             }
@@ -1744,7 +1864,7 @@ gen_expr(n: *Expr) noregion raises Error {
                         cg_mov_rr(0, cg_arg_reg(0))
                     }
                 }
-                cg_call(call_name);
+                emit_user_call(call_name, fno);
                 emit_ret_to_rax(n.ty);
                 return
             }
@@ -1798,7 +1918,7 @@ gen_expr(n: *Expr) noregion raises Error {
                     return
                 }
                 cg_arm_nstack = nstack;
-                cg_call(call_name);
+                emit_user_call(call_name, fno);
                 if (nstack > 0) cg_alu_imm(0, 8 * nstack, 4);
                 if (call_pad != 0) cg_alu_imm(0, call_pad, 4);
                 emit_ret_to_rax(n.ty);
@@ -1872,7 +1992,7 @@ gen_expr(n: *Expr) noregion raises Error {
                 a = a.next
             }
             cg_arm_nstack = nst_pred;
-            cg_call(call_name);
+            emit_user_call(call_name, fno);
             if (nst_pred > 0) cg_alu_imm(0, 8 * nst_pred, 4);
             if (call_pad_f != 0) cg_alu_imm(0, call_pad_f, 4);
             emit_ret_to_rax(n.ty);
@@ -1907,6 +2027,43 @@ gen_expr(n: *Expr) noregion raises Error {
                 s = s.next
             }
             return
+        }
+        Own k -> {
+            cg_call("l8_arena_new");
+            cg_alu_imm(7, 0, 0);
+            cg_jump_id(4, oob_lab);
+            emit_store_var(k.slot, k.slot.ty or ty_int);
+            emit_load_var(k.slot, k.slot.ty or ty_int);
+            cg_mov_rr(0, cg_arg_reg(0));
+            cg_call("l8_own_enter");
+            cg_region_depth = cg_region_depth + 1;
+            gen_stmt(k.body);
+            cg_push(0);
+            emit_load_var(k.slot, k.slot.ty or ty_int);
+            cg_mov_rr(0, cg_arg_reg(0));
+            cg_pop(cg_arg_reg(1));
+            cg_call("l8_own_commit");
+            cg_region_depth = cg_region_depth - 1;
+            emit_load_var(k.slot, k.slot.ty or ty_int);
+            return
+        }
+        Move k -> {
+            match k.lhs.kind {
+                Var v -> {
+                    src: *Obj = v.var or error("move");
+                    emit_load_var(src, src.ty or ty_int);
+                    cg_push(0);
+                    cg_mov_imm(0, 0);
+                    emit_store_var(src, src.ty or ty_int);
+                    cg_pop(0);
+                    return
+                }
+                Index _ -> {
+                    gen_take_owner_element(k.lhs);
+                    return
+                }
+                _ -> error("move")
+            }
         }
         Sizeof k -> {
             sty: ?*Type = k.ty;
@@ -2109,6 +2266,57 @@ emit_loop_compare(item: *Obj, bound: *Obj) noregion raises Error {
     cg_alu_rr(57, right, left)
 }
 
+type CodegenLoop = {
+    break_label: int;
+    continue_label: int;
+    region_depth: int;
+    try_depth: int;
+    push_count: int
+}
+
+cg_loop: ?*CodegenLoop = null;
+
+cg_try_depth: int = 0;
+
+gen_loop_body(body: *Stmt, break_label: int, continue_label: int) noregion raises Error {
+    outer: ?*CodegenLoop = cg_loop;
+    cg_loop = new CodegenLoop {
+        break_label: break_label,
+        continue_label: continue_label,
+        region_depth: cg_region_depth,
+        try_depth: cg_try_depth,
+        push_count: cg_push_count
+    };
+    gen_stmt(body);
+    cg_loop = outer
+}
+
+gen_loop_jump(stmt: *Stmt) noregion raises Error {
+    loop: *CodegenLoop = cg_loop or error("internal: loop jump outside a loop");
+    for _handler in loop.try_depth..cg_try_depth cg_call("l8_try_end");
+    for _region in loop.region_depth..cg_region_depth cg_call("l8_region_pop");
+    // An expression may have saved registers or reserved arguments before the
+    // jump. Restore them at run time, retaining the model for other code paths.
+    saved_count: int = cg_push_count;
+    saved_offset: int = cg_rsp_off;
+    if (saved_count > len(cg_push_regs)) error("too many temporaries across a loop jump");
+    while (cg_push_count > loop.push_count) {
+        entry: int = cg_push_regs[cg_push_count - 1];
+        if (entry >= 0) cg_pop(entry) else cg_alu_imm(0, 0 - entry, 4)
+    }
+    match stmt.kind {
+        Break -> cg_jump_id(0 - 1, loop.break_label);
+        Continue -> cg_jump_id(0 - 1, loop.continue_label);
+        _ -> error("internal: expected loop jump")
+    }
+    for index in loop.push_count..saved_count {
+        entry: int = cg_push_regs[index];
+        if (entry >= 0) cg_saved_adjust(entry, 1)
+    }
+    cg_push_count = saved_count;
+    cg_rsp_off = saved_offset
+}
+
 emit_loop_increment(item: *Obj) noregion raises Error {
     if (item.cg_register as int > 1) cg_alu_imm(0, 1, item.cg_register as int) else {
         emit_load_var(item, ty_int);
@@ -2117,8 +2325,16 @@ emit_loop_increment(item: *Obj) noregion raises Error {
     }
 }
 
+gen_loop_index(index: ?*Obj, counter: *Obj) noregion raises Error {
+    if (index == null) return;
+    emit_load_var(counter, ty_int);
+    emit_store_var(index, ty_int)
+}
+
 gen_stmt(n: *Stmt) noregion raises Error {
     match n.kind {
+        Break -> gen_loop_jump(n);
+        Continue -> gen_loop_jump(n);
         Return k -> {
             lhs: ?*Expr = k.lhs;
             if (lhs != null) {
@@ -2131,6 +2347,9 @@ gen_stmt(n: *Stmt) noregion raises Error {
                     cg_mov_rr(7, 0)
                 }
             } else cg_mov_imm(0, 0);
+            // (The handlers of the trys it leaves are let go; l8_try_end
+            // keeps the value.)
+            for _handler in 0..cg_try_depth cg_call("l8_try_end");
             rd: int = cg_region_depth;
             if (rd > 0) cg_push(0);
             while (rd > 0) {
@@ -2176,17 +2395,21 @@ gen_stmt(n: *Stmt) noregion raises Error {
             // Test at the bottom: each iteration takes one branch, not two.
             lb: int = new_label();
             ltest: int = new_label();
+            lend: int = new_label();
             cg_jump_id(0 - 1, ltest);
             cg_label_id(lb);
-            gen_stmt(k.body);
+            gen_loop_body(k.body, lend, ltest);
             cg_label_id(ltest);
             gen_cond(k.cond, lb, true);
+            cg_label_id(lend);
             return
         }
         For k -> {
             // Loops test at the bottom; entry jumps to the first test.
             lb3: int = new_label();
             lt3: int = new_label();
+            lend3: int = new_label();
+            lstep3: int = new_label();
             hu3: ?*Expr = k.hi;
             if (hu3 != null) {
                 gen_expr(k.iter);
@@ -2195,11 +2418,13 @@ gen_stmt(n: *Stmt) noregion raises Error {
                 emit_store_var(k.n, ty_int);
                 cg_jump_id(0 - 1, lt3);
                 cg_label_id(lb3);
-                gen_stmt(k.body);
+                gen_loop_body(k.body, lend3, lstep3);
+                cg_label_id(lstep3);
                 emit_loop_increment(k.item);
                 cg_label_id(lt3);
                 emit_loop_compare(k.item, k.n);
                 cg_jump_id(12, lb3);
+                cg_label_id(lend3);
                 return
             }
             co2: ?*Obj = k.coll;
@@ -2231,11 +2456,14 @@ gen_stmt(n: *Stmt) noregion raises Error {
                     load_mem(ity);
                     emit_store_var(k.item, ity)
                 }
-                gen_stmt(k.body);
+                gen_loop_index(k.index, iu2);
+                gen_loop_body(k.body, lend3, lstep3);
+                cg_label_id(lstep3);
                 emit_loop_increment(iu2);
                 cg_label_id(lt3);
                 emit_loop_compare(iu2, k.n);
                 cg_jump_id(2, lb3);
+                cg_label_id(lend3);
                 return
             }
             gen_expr(k.iter);
@@ -2259,11 +2487,14 @@ gen_stmt(n: *Stmt) noregion raises Error {
                 load_mem(ity);
                 emit_store_var(k.item, ity)
             }
-            gen_stmt(k.body);
+            gen_loop_index(k.index, iu2);
+            gen_loop_body(k.body, lend3, lstep3);
+            cg_label_id(lstep3);
             emit_loop_increment(iu2);
             cg_label_id(lt3);
             emit_loop_compare(iu2, k.n);
             cg_jump_id(2, lb3);
+            cg_label_id(lend3);
             return
         }
         Match k -> {
@@ -2294,7 +2525,9 @@ gen_stmt(n: *Stmt) noregion raises Error {
             cg_call("l8_try_begin");
             cg_alu_imm(7, 0, 0);
             cg_jump_id(5, lcatch);
+            cg_try_depth = cg_try_depth + 1;
             gen_stmt(k.body);
+            cg_try_depth = cg_try_depth - 1;
             cg_call("l8_try_end");
             cg_jump_id(0 - 1, ltryend);
             cg_label_id(lcatch);
@@ -2339,6 +2572,57 @@ gen_stmt(n: *Stmt) noregion raises Error {
             cg_call("l8_region_pop");
             cg_pop(0);
             return
+        }
+        Borrow k -> {
+            gen_expr(k.place);
+            emit_store_var(k.header, ty_int);
+            cg_mov_rr(0, cg_arg_reg(0));
+            cg_call("l8_borrow_enter");
+            cg_region_depth = cg_region_depth + 1;
+            emit_load_var(k.header, ty_int);
+            cg_mov_mr(0, 32, 0);
+            emit_store_var(k.shadow, k.shadow.ty or ty_int);
+            gen_stmt(k.body);
+            cg_region_depth = cg_region_depth - 1;
+            cg_push(0);
+            cg_call("l8_region_pop");
+            cg_pop(0);
+            return
+        }
+        Allocate k -> {
+            header: *Obj = k.header or error("missing allocation owner");
+            emit_load_var(header, header.ty or ty_int);
+            cg_mov_rr(0, cg_arg_reg(0));
+            cg_call("l8_alloc_enter");
+            cg_region_depth = cg_region_depth + 1;
+            gen_stmt(k.body);
+            cg_region_depth = cg_region_depth - 1;
+            cg_push(0);
+            cg_call("l8_region_pop");
+            cg_pop(0);
+            return
+        }
+        Drop k -> {
+            match k.target.kind {
+                Var v -> {
+                    dropped: *Obj = v.var or error("drop");
+                    emit_load_var(dropped, dropped.ty or ty_int);
+                    cg_mov_rr(0, cg_arg_reg(0));
+                    cg_call("l8_arena_drop");
+                    cg_mov_imm(0, 0);
+                    emit_store_var(dropped, dropped.ty or ty_int);
+                    return
+                }
+                // Empty the element before freeing, so it never names a
+                // dropped arena.
+                Index _ -> {
+                    gen_take_owner_element(k.target);
+                    cg_mov_rr(0, cg_arg_reg(0));
+                    cg_call("l8_arena_drop");
+                    return
+                }
+                _ -> error("drop")
+            }
         }
         Expect k -> {
             // The test entry records which expectation the output so far
@@ -2498,7 +2782,10 @@ cg_temps_expr(e: ?*Expr, off: int) raises Error: int {
             cg_temp_slot(n, type_size(rt), o)
         }
         Binary k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
-        Assign k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
+        Assign k -> {
+            total: int = cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
+            if (k.compound != null) cg_temp_slot(n, 16, total) else total
+        }
         LogAnd k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
         LogOr k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
         OrElse k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
@@ -2516,6 +2803,8 @@ cg_temps_expr(e: ?*Expr, off: int) raises Error: int {
         If k -> cg_temps_expr(k.els, cg_temps_expr(k.then, cg_temps_expr(k.cond, off)));
         Match k -> cg_temps_arms(k.arms, cg_temps_expr(k.cond, off));
         Block k -> cg_temps_stmts(k.body, off);
+        Own k -> cg_temps_stmts(k.body, off);
+        Move k -> cg_temps_expr(k.lhs, off);
         Sizeof k -> cg_temps_expr(k.e, off);
         Num _ -> off;
         Null -> off;
@@ -2549,7 +2838,15 @@ cg_temps_stmts(stmts: ?*Stmt, off: int) raises Error: int {
                 }
             }
             Region k -> o = cg_temps_stmts(k.body, o);
+            Borrow k -> {
+                o = cg_temps_expr(k.place, o);
+                o = cg_temps_stmts(k.body, o)
+            }
+            Allocate k -> o = cg_temps_stmts(k.body, o);
+            Drop k -> o = cg_temps_expr(k.target, o);
             Expect _ -> { }
+            Break -> { }
+            Continue -> { }
         }
         q = q.next
     }
@@ -2704,7 +3001,7 @@ cg_scalar_expr(n: ?*Expr): bool {
         Binary k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
         // Assigning a literal builds it in place, through rbx unless the
         // destination is a local, which is addressed through rbp.
-        Assign k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs) && (!cg_literal(k.rhs) || cg_local_literal_target(k.lhs,
+        Assign k -> k.compound == null && cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs) && (!cg_literal(k.rhs) || cg_local_literal_target(k.lhs,
             k.rhs));
         // Other literals are built in their rbp-addressed frame slots.
         StructLit k -> cg_scalar_inits(k.inits);
@@ -2950,6 +3247,8 @@ emit_text() noregion raises Error {
             current_fn = fn;
             current_return_lab = new_label();
             cg_region_depth = 0;
+            cg_try_depth = 0;
+            cg_loop = null;
             cg_global(fn.link_name);
             cg_label(fn.link_name);
             cg_func_entry();

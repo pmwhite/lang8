@@ -1,0 +1,240 @@
+tag sword_internal;
+
+// Bibles and commentaries: an entry a verse slot (versification.l8), in
+// each testament's files. Compressed (zText, zCom; 4: wide sizes):
+// ot.bzv gives each slot's block, start in it and size (4+4+2 bytes, or
+// 4+4+4); ot.bzs each block's offset in ot.bzz, compressed size and size
+// (4+4+4). Uncompressed (RawText, RawCom): ot.vss gives each slot's start
+// in ot and size (4+2, or 4+4). nt likewise. A testament a module does not
+// hold has no files. Verses that share an entry (a commentary's note on a
+// passage) point at the same text.
+//
+// To read many verses, take each block once (verse_module_block) and its verses'
+// texts from it; a block is a book, a chapter or a few verses as the
+// module was made (BlockType). verse_module_text_at reads one verse alone.
+tag sword
+type VerseModule = tag sword_internal {
+    info: ModuleInfo;
+    system: *Versification;
+    compressed: bool;
+    wide: bool;
+    // Each testament's files (index 0 the Old, 1 the New; empty if absent).
+    verse_index: [][]i8;
+    block_index: [][]i8;
+    text: [][]i8
+}
+
+// Where a verse's text is: its testament, block (-1: an uncompressed
+// module's testament text) and bytes there. A size of 0: no text.
+tag sword
+type VerseEntry = {
+    testament: int;
+    block: int;
+    start: int;
+    size: int
+}
+
+// An entry with no text (what verse_module_entry gives for a verse the
+// module has no text for).
+tag sword
+verse_no_entry: VerseEntry = VerseEntry {
+    testament: 1,
+    block: -1,
+    start: 0,
+    size: 0
+};
+
+// The Bible or commentary in package (its storage by verse).
+tag sword
+verse_module_open(package: *ModulePackage@new) raises SwordError: *VerseModule@new {
+    compressed: bool = false;
+    wide: bool = false;
+    match package.info.storage {
+        ByVerse s -> {
+            compressed = s.compressed;
+            wide = s.wide
+        }
+        _ -> raise SwordError { failure: SwordFailure.NotSupported }
+    }
+    match module_support(&package.info) {
+        Readable -> { }
+        Unreadable _ -> raise SwordError { failure: SwordFailure.NotSupported }
+    }
+    system: *Versification = versification_named(package.info.versification);
+    verse_index: [][]i8 = new []i8[2](sword_empty);
+    block_index: [][]i8 = new []i8[2](sword_empty);
+    text: [][]i8 = new []i8[2](sword_empty);
+    if (compressed) {
+        verse_index[0] = package_data_optional(package, "ot.bzv");
+        block_index[0] = package_data_optional(package, "ot.bzs");
+        text[0] = package_data_optional(package, "ot.bzz");
+        verse_index[1] = package_data_optional(package, "nt.bzv");
+        block_index[1] = package_data_optional(package, "nt.bzs");
+        text[1] = package_data_optional(package, "nt.bzz")
+    } else {
+        verse_index[0] = package_data_optional(package, "ot.vss");
+        text[0] = package_data_optional(package, "ot");
+        verse_index[1] = package_data_optional(package, "nt.vss");
+        text[1] = package_data_optional(package, "nt")
+    }
+    if (len(verse_index[0]) == 0 && len(verse_index[1]) == 0) raise SwordError { failure: SwordFailure.MissingFile { ending: if (compressed) "ot.bzv" else "ot.vss" } };
+    new VerseModule {
+        info: package.info,
+        system: system,
+        compressed: compressed,
+        wide: wide,
+        verse_index: verse_index,
+        block_index: block_index,
+        text: text
+    }
+}
+
+tag sword
+verse_module_info(module: *VerseModule): *ModuleInfo@module {
+    &module.info
+}
+
+tag sword
+verse_module_system(module: *VerseModule): *Versification@module {
+    module.system
+}
+
+// Whether the module holds a testament (1, 2) at all.
+tag sword
+verse_module_has(module: *VerseModule, testament: int): bool {
+    testament >= 1 && testament <= 2 && len(module.verse_index[testament - 1]) > 0
+}
+
+tag sword
+verse_module_entry(module: *VerseModule, slot: VerseSlot) raises SwordError: VerseEntry {
+    if (slot.slot < 0 || slot.testament < 1 || slot.testament > 2) return verse_no_entry;
+    index: []i8 = module.verse_index[slot.testament - 1];
+    if (module.compressed) {
+        width: int = if (module.wide) 12 else 10;
+        at: int = slot.slot * width;
+        if (at + width > len(index)) return VerseEntry {
+            testament: slot.testament,
+            block: -1,
+            start: 0,
+            size: 0
+        };
+        size: int = if (module.wide) sword_u32(index, at + 8) else sword_u16(index,
+            at + 8);
+        block: int = sword_u32(index, at);
+        if (size > 0 && (block + 1) * 12 > len(module.block_index[slot.testament - 1])) raise SwordError { failure: SwordFailure.BadIndex { ending: "bzv", at: at } };
+        return VerseEntry {
+            testament: slot.testament,
+            block: block,
+            start: sword_u32(index, at + 4),
+            size: size
+        }
+    }
+    width: int = if (module.wide) 8 else 6;
+    at: int = slot.slot * width;
+    if (at + width > len(index)) return VerseEntry {
+        testament: slot.testament,
+        block: -1,
+        start: 0,
+        size: 0
+    };
+    start: int = sword_u32(index, at);
+    size: int = if (module.wide) sword_u32(index, at + 4) else sword_u16(index, at + 4);
+    if (start + size > len(module.text[slot.testament - 1])) raise SwordError { failure: SwordFailure.BadIndex { ending: "vss", at: at } };
+    VerseEntry {
+        testament: slot.testament,
+        block: -1,
+        start: start,
+        size: size
+    }
+}
+
+// Whether two entries are the same text (verses a note covers together).
+tag sword
+verse_entries_same(a: VerseEntry, b: VerseEntry): bool {
+    a.size > 0 && a.testament == b.testament && a.block == b.block && a.start == b.start && a.size == b.size
+}
+
+// A block, decoded.
+tag sword
+verse_module_block(module: *VerseModule, testament: int, block: int) raises SwordError: []i8@new {
+    index: []i8 = module.block_index[testament - 1];
+    at: int = block * 12;
+    if (block < 0 || at + 12 > len(index)) raise SwordError { failure: SwordFailure.BadIndex { ending: "bzs", at: at } };
+    offset: int = sword_u32(index, at);
+    count: int = sword_u32(index, at + 4);
+    size: int = sword_u32(index, at + 8);
+    data: []i8 = module.text[testament - 1];
+    if (offset + count > len(data)) raise SwordError { failure: SwordFailure.BadIndex { ending: "bzs", at: at } };
+    try {
+        sword_block_decode(module.info.compression, data, offset, count, size)
+    } with SwordError error -> {
+        // (A block that doesn't decode is the module's damage; other
+        // failures are as they are.)
+        match error.failure {
+            BadBlock _ -> raise SwordError { failure: SwordFailure.BadBlock { ending: "bzz", block: block } };
+            _ -> raise SwordError { failure: error.failure }
+        }
+    }
+}
+
+// The text of an uncompressed module's testament (its entries' source).
+tag sword
+verse_module_testament_text(module: *VerseModule, testament: int): []i8@module {
+    module.text[testament - 1]
+}
+
+// An entry's text as UTF-8, from source: the decoded block it is in, or
+// its testament's text (uncompressed).
+tag sword
+verse_module_text(module: *VerseModule, source: []i8, entry: VerseEntry) raises SwordError: []i8@new {
+    if (entry.size == 0) return new i8[0](0i8);
+    if (entry.start + entry.size > len(source)) raise SwordError { failure: SwordFailure.BadIndex { ending: "bzv", at: entry.start } };
+    entry_utf8(module.info.utf8, source, entry.start, entry.start + entry.size)
+}
+
+// One verse's text (its block decoded for it alone, then let go; empty:
+// none).
+tag sword
+verse_module_text_at(
+    module: *VerseModule,
+    book: int,
+    chapter: int,
+    verse: int
+) raises SwordError: []i8@new {
+    entry: VerseEntry = verse_module_entry(module, verse_slot(module.system, book,
+        chapter, verse));
+    if (entry.size == 0) return new i8[0](0i8);
+    if (entry.block < 0) return verse_module_text(module, module.text[entry.testament - 1],
+        entry);
+    // (Room for its text, Latin-1 doubled at most as UTF-8.)
+    room: []i8 = new i8[entry.size * 2](0i8);
+    n: int = 0;
+    region {
+        block: []i8 = verse_module_block(module, entry.testament, entry.block);
+        if (entry.start + entry.size > len(block)) raise SwordError { failure: SwordFailure.BadIndex { ending: "bzv", at: entry.start } };
+        n = entry_utf8_into(module.info.utf8, block, entry.start, entry.start + entry.size,
+            room)
+    }
+    text: []i8 = new i8[n](0i8);
+    memcpy(text, 0, room, 0, n);
+    text
+}
+
+// Whether chapter (0: any) of book has a verse with text: a module may
+// hold a testament's files and leave some of its books or chapters empty.
+tag sword
+verse_module_has_text(module: *VerseModule, book: int, chapter: int) raises SwordError: bool {
+    if (book < 0 || book >= len(module.system.books)) return false;
+    entry: VersificationBook = module.system.books[book];
+    if (!verse_module_has(module, entry.testament)) return false;
+    first: int = if (chapter > 0) chapter else 1;
+    last: int = if (chapter > 0) chapter else len(entry.verses);
+    for c in first..last + 1 {
+        if (c <= len(entry.verses)) {
+            for v in 1..entry.verses[c - 1] + 1
+                if (verse_module_entry(module, verse_slot(module.system, book, c,
+                    v)).size > 0) return true
+        }
+    }
+    false
+}

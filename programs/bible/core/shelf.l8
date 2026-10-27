@@ -1,0 +1,1468 @@
+tag bible;
+
+use_tag std, sword, builder;
+
+// The bookshelf: Bibles, commentaries, dictionaries, devotionals and books
+// downloaded from CrossWire's SWORD library (https://crosswire.org/sword/)
+// and kept on the device to read offline. Core keeps what is installed,
+// fetches each module's package with the platform's HostIO.fetch and reads
+// it back with HostIO.read_kept, as it needs it:
+//
+//   shelf.tsv             what is installed or asked for, a line each
+//   shelf-catalog.tar.gz  the library's catalog (its mods.d.tar.gz)
+//   shelf-NAME.zip        a module's package, as the library serves it
+//
+// What is installed is a dataset (its own arena, made again whole from
+// shelf.tsv's lines when it changes); so are the catalog and each module
+// open. Nothing the bookshelf does allocates beyond them, so it can run
+// wherever core's lines are handled. A Bible becomes a version (core/
+// shelf_bible.l8: its slot is TEXT_SHELF_FIRST plus its slot number, at
+// most TEXT_SHELF_MOST of them); a commentary, dictionary or book is opened
+// while one of its screens or Study shows it. Downloads go one at a time,
+// in the order they were asked for, and go on when the app opens again.
+import "../../sword/sword.l8";
+
+import "shelf_bible.l8";
+
+import "shelf_screens.l8";
+
+// Where modules come from: CrossWire's main repository.
+SHELF_SOURCE: str = "https://www.crosswire.org/ftpmirror/pub/sword/";
+
+SHELF_CATALOG_PATH: str = "raw/mods.d.tar.gz";
+
+SHELF_PACKAGES_PATH: str = "packages/rawzip/";
+
+SHELF_LIST_FILE: str = "shelf.tsv";
+
+SHELF_CATALOG_FILE: str = "shelf-catalog.tar.gz";
+
+// The library's name, as the screens credit it.
+SHELF_SOURCE_NAME: str = "CrossWire Bible Society";
+
+SHELF_SOURCE_SHORT_NAME: str = "CrossWire";
+
+// The ids of its fetches and reads (apart from the host's own and held.l8's).
+SHELF_FETCH_ID_FIRST: int = 1000000;
+
+SHELF_READ_CATALOG_ID: int = 1999999;
+
+SHELF_READ_ID_FIRST: int = 2000000;
+
+// ---- what is installed ----
+// A module installed or asked for. Its slot number is its own while it is
+// installed (a Bible's is below TEXT_SHELF_MOST: its text slot follows).
+type ShelfItem = {
+    name: str;
+    slot: int;
+    kind: ModuleKind;
+    // Its package is here (else it is wanted: downloading, or waiting to).
+    ready: bool;
+    // Its package's size in bytes (the catalog's while wanted).
+    size: int;
+    version: str;
+    language: str;
+    abbreviation: str;
+    title: str;
+    // When it was asked for (seconds).
+    added: int;
+    // Its package is being read; it could not be opened (until it is
+    // downloaded again).
+    reading: bool;
+    broken: bool;
+    // A Bible's, once opened: whether it marks the words of Jesus, and
+    // what of it could not be shown (its verses -1 until then).
+    red: bool;
+    report: BibleReport
+}
+
+type ShelfList = {
+    items: []ShelfItem;
+    count: int
+}
+
+no_report: BibleReport = BibleReport {
+    missing_books: -1,
+    outside_chapters: -1,
+    extra_books: -1,
+    verses: -1
+};
+
+shelf_list: ?owned *ShelfList = null;
+
+shelf_loaded: bool = false;
+
+// A module's kind as the shelf keeps it (shelf_kind_code: ModuleKind's
+// order), and its name in shelf.tsv.
+SHELF_KIND_BIBLE: int = 0;
+
+SHELF_KIND_COMMENTARY: int = 1;
+
+SHELF_KIND_DICTIONARY: int = 2;
+
+SHELF_KIND_GLOSSARY: int = 3;
+
+SHELF_KIND_DEVOTIONAL: int = 4;
+
+SHELF_KIND_BOOK: int = 5;
+
+SHELF_KIND_IMAGES: int = 6;
+
+SHELF_KIND_OTHER: int = 7;
+
+shelf_kind_names: []str = ["bible", "commentary", "dictionary", "glossary", "devotional",
+    "book", "images", "other"];
+
+shelf_kind_code(kind: ModuleKind): int {
+    match kind {
+        Bible -> SHELF_KIND_BIBLE;
+        Commentary -> SHELF_KIND_COMMENTARY;
+        Dictionary -> SHELF_KIND_DICTIONARY;
+        Glossary -> SHELF_KIND_GLOSSARY;
+        Devotional -> SHELF_KIND_DEVOTIONAL;
+        Book -> SHELF_KIND_BOOK;
+        Images -> SHELF_KIND_IMAGES;
+        Other -> SHELF_KIND_OTHER
+    }
+}
+
+shelf_kind_of(code: int): ModuleKind {
+    if (code == SHELF_KIND_BIBLE) ModuleKind.Bible else if (code == SHELF_KIND_COMMENTARY) ModuleKind.Commentary else if (code == SHELF_KIND_DICTIONARY) ModuleKind.Dictionary else if (code == SHELF_KIND_GLOSSARY) ModuleKind.Glossary else if (code == SHELF_KIND_DEVOTIONAL) ModuleKind.Devotional else if (code == SHELF_KIND_BOOK) ModuleKind.Book else if (code == SHELF_KIND_IMAGES) ModuleKind.Images else ModuleKind.Other
+}
+
+// Bytes from up to to as a string (a NUL among them, which a string
+// can't hold, left out).
+shelf_bytes_text(source: []i8, from: int, to: int): str@new {
+    count: int = 0;
+    for i in from..to
+        if (source[i] as int != 0) count = count + 1;
+    out: []i8 = new i8[count](0i8);
+    n: int = 0;
+    for i in from..to {
+        if (source[i] as int != 0) {
+            out[n] = source[i];
+            n = n + 1
+        }
+    }
+    cstr(out)
+}
+
+shelf_ends_with(text: str, end: str): bool {
+    if (len(text) < len(end)) return false;
+    from: int = len(text) - len(end);
+    for i in 0..len(end)
+        if (text[from + i] != end[i]) return false;
+    true
+}
+
+// ---- reading the list: what callers see (each borrows it) ----
+shelf_count(): int {
+    if (shelf_list == null) return 0;
+    n: int = 0;
+    borrow shelf_list as list {
+        n = list.count
+    }
+    n
+}
+
+// Item i's slot, kind (its code), whether it is here, its size, whether it
+// is being read, could not be opened; -1 or false for no such item.
+shelf_slot_at(i: int): int {
+    if (i < 0 || shelf_list == null) return -1;
+    slot: int = -1;
+    borrow shelf_list as list {
+        if (i < list.count) slot = list.items[i].slot
+    }
+    slot
+}
+
+shelf_kind_at(i: int): int {
+    if (i < 0 || shelf_list == null) return -1;
+    kind: int = -1;
+    borrow shelf_list as list {
+        if (i < list.count) kind = shelf_kind_code(list.items[i].kind)
+    }
+    kind
+}
+
+shelf_ready_at(i: int): bool {
+    if (i < 0 || shelf_list == null) return false;
+    ready: bool = false;
+    borrow shelf_list as list {
+        if (i < list.count) ready = list.items[i].ready
+    }
+    ready
+}
+
+shelf_size_at(i: int): int {
+    if (i < 0 || shelf_list == null) return 0;
+    size: int = 0;
+    borrow shelf_list as list {
+        if (i < list.count) size = list.items[i].size
+    }
+    size
+}
+
+shelf_reading_at(i: int): bool {
+    if (i < 0 || shelf_list == null) return false;
+    reading: bool = false;
+    borrow shelf_list as list {
+        if (i < list.count) reading = list.items[i].reading
+    }
+    reading
+}
+
+shelf_broken_at(i: int): bool {
+    if (i < 0 || shelf_list == null) return false;
+    broken: bool = false;
+    borrow shelf_list as list {
+        if (i < list.count) broken = list.items[i].broken
+    }
+    broken
+}
+
+shelf_report_at(i: int): BibleReport {
+    if (i < 0 || shelf_list == null) return no_report;
+    report: BibleReport = no_report;
+    borrow shelf_list as list {
+        if (i < list.count) report = list.items[i].report
+    }
+    report
+}
+
+// Item i's short name, title (its description), name, onto fbuf.
+fput_shelf_abbreviation(i: int) {
+    if (i < 0 || shelf_list == null) return;
+    borrow shelf_list as list {
+        if (i < list.count) fput_str(list.items[i].abbreviation)
+    }
+}
+
+fput_shelf_title(i: int) {
+    if (i < 0 || shelf_list == null) return;
+    borrow shelf_list as list {
+        if (i < list.count) fput_str(list.items[i].title)
+    }
+}
+
+// The item named (-1: none).
+shelf_find(name: str): int {
+    if (shelf_list == null) return -1;
+    found: int = -1;
+    borrow shelf_list as list {
+        for i in 0..list.count
+            if (list.items[i].name == name) found = i
+    }
+    found
+}
+
+// The item in slot (-1: none).
+shelf_find_slot(slot: int): int {
+    if (shelf_list == null || slot < 0) return -1;
+    found: int = -1;
+    borrow shelf_list as list {
+        for i in 0..list.count
+            if (list.items[i].slot == slot) found = i
+    }
+    found
+}
+
+// The Bible whose text slot is t (-1: none).
+shelf_find_text(t: int): int {
+    if (t < TEXT_SHELF_FIRST) return -1;
+    i: int = shelf_find_slot(t - TEXT_SHELF_FIRST);
+    if (shelf_kind_at(i) == SHELF_KIND_BIBLE) i else -1
+}
+
+shelf_text_of(i: int): int {
+    TEXT_SHELF_FIRST + shelf_slot_at(i)
+}
+
+// Item i's own state set (not what shelf.tsv keeps).
+shelf_set_reading(i: int, reading: bool) {
+    if (i < 0 || shelf_list == null) return;
+    borrow shelf_list as list {
+        if (i < list.count) list.items[i].reading = reading
+    }
+}
+
+shelf_set_broken(i: int, broken: bool) {
+    if (i < 0 || shelf_list == null) return;
+    borrow shelf_list as list {
+        if (i < list.count) list.items[i].broken = broken
+    }
+}
+
+shelf_set_opened(i: int, red: bool, report: BibleReport) {
+    if (i < 0 || shelf_list == null) return;
+    borrow shelf_list as list {
+        if (i < list.count) {
+            list.items[i].red = red;
+            list.items[i].report = report;
+            list.items[i].broken = false
+        }
+    }
+}
+
+// ---- shelf.tsv ----
+// NAME SLOT STATE KIND SIZE VERSION LANG ADDED ABBREVIATION TITLE,
+// tab-separated; STATE ready or wanted, KIND a shelf_kind_names.
+shelf_load() {
+    if (shelf_loaded) return;
+    shelf_loaded = true;
+    shelf_kjv_prepare();
+    kp_set(SHELF_LIST_FILE);
+    kp_read();
+    shelf_list_from_fbuf();
+    shelf_name_versions()
+}
+
+// The list made again of fbuf's lines (shelf.tsv's), each item's own state
+// kept from the list before (by slot), in place of it.
+shelf_list_from_fbuf() {
+    next: owned *ShelfList = own {
+        shelf_list_made()
+    };
+    if (shelf_list != null) {
+        borrow shelf_list as old {
+            borrow next as fresh {
+                for i in 0..fresh.count {
+                    for k in 0..old.count {
+                        if (old.items[k].slot == fresh.items[i].slot) {
+                            fresh.items[i].reading = old.items[k].reading;
+                            fresh.items[i].broken = old.items[k].broken;
+                            fresh.items[i].red = old.items[k].red;
+                            fresh.items[i].report = old.items[k].report
+                        }
+                    }
+                }
+            }
+        }
+    }
+    drop shelf_list;
+    shelf_list = move next
+}
+
+shelf_list_made(): *ShelfList@new {
+    lines: int = 0;
+    for i in 0..fbuf_n
+        if (fbuf[i] as int == 10) lines = lines + 1;
+    items: []ShelfItem = new ShelfItem[lines](ShelfItem {
+        name: "",
+        slot: 0,
+        kind: ModuleKind.Other,
+        ready: false,
+        size: 0,
+        version: "",
+        language: "",
+        abbreviation: "",
+        title: "",
+        added: 0,
+        reading: false,
+        broken: false,
+        red: false,
+        report: no_report
+    });
+    count: int = 0;
+    fields: []int = new int[10](0);
+    ends: []int = new int[10](0);
+    begin_lines();
+    while (next_line()) {
+        at: int = fpos;
+        for f in 0..10 {
+            fields[f] = at;
+            end: int = at;
+            while (end < line_e && fbuf[end] as int != 9) end = end + 1;
+            ends[f] = end;
+            at = (if (end < line_e) end + 1 else line_e)
+        }
+        if (ends[9] > fields[9] && ends[0] > fields[0] && count < lines) {
+            kind: int = 7;
+            for k in 0..len(shelf_kind_names)
+                if (sk_word_is(fbuf, fields[3], ends[3], shelf_kind_names[k])) kind = k;
+            items[count] = ShelfItem {
+                name: shelf_bytes_text(fbuf, fields[0], ends[0]),
+                slot: sk_num(fbuf, fields[1], ends[1]),
+                kind: shelf_kind_of(kind),
+                ready: sk_word_is(fbuf, fields[2], ends[2], "ready"),
+                size: sk_num(fbuf, fields[4], ends[4]),
+                version: shelf_bytes_text(fbuf, fields[5], ends[5]),
+                language: shelf_bytes_text(fbuf, fields[6], ends[6]),
+                added: sk_num(fbuf, fields[7], ends[7]),
+                abbreviation: shelf_bytes_text(fbuf, fields[8], ends[8]),
+                title: shelf_bytes_text(fbuf, fields[9], ends[9]),
+                reading: false,
+                broken: false,
+                red: false,
+                report: no_report
+            };
+            count = count + 1
+        }
+    }
+    new ShelfList { items: items, count: count }
+}
+
+// The list as shelf.tsv's lines, into fbuf (all but item skip: -1 none).
+shelf_format(skip: int) {
+    fbuf_n = 0;
+    if (shelf_list == null) return;
+    borrow shelf_list as list {
+        for i in 0..list.count {
+            if (i != skip) shelf_format_item(&list.items[i])
+        }
+    }
+}
+
+shelf_format_item(item: *ShelfItem) {
+    fput_tsv(item.name);
+    fput(9);
+    fput_int(item.slot);
+    fput(9);
+    fput_str(if (item.ready) "ready" else "wanted");
+    fput(9);
+    fput_str(shelf_kind_names[shelf_kind_code(item.kind)]);
+    fput(9);
+    fput_int(item.size);
+    fput(9);
+    fput_tsv(item.version);
+    fput(9);
+    fput_tsv(item.language);
+    fput(9);
+    fput_int(item.added);
+    fput(9);
+    fput_tsv(item.abbreviation);
+    fput(9);
+    fput_tsv(item.title);
+    fput(10)
+}
+
+// Words for a field of shelf.tsv: its tabs and line breaks as spaces.
+fput_tsv(text: str) {
+    for c in text {
+        k: int = c as int;
+        fput(if (k == 9 || k == 10 || k == 13) 32 else k)
+    }
+}
+
+// fbuf's lines kept as shelf.tsv, and the list made of them again.
+shelf_keep_fbuf() {
+    kp_set(SHELF_LIST_FILE);
+    kp_write();
+    shelf_list_from_fbuf();
+    shelf_name_versions()
+}
+
+// The list kept as it is, item i made ready or wanted (and its size).
+shelf_save_with(i: int, ready: bool, size: int) {
+    if (shelf_list != null) {
+        borrow shelf_list as list {
+            if (i >= 0 && i < list.count) {
+                list.items[i].ready = ready;
+                list.items[i].size = size
+            }
+        }
+    }
+    shelf_format(-1);
+    shelf_keep_fbuf()
+}
+
+// A package's kept name: shelf-NAME.zip, into kp_name (false: it is too
+// long to keep).
+shelf_kept_name(name: str): bool {
+    if (6 + len(name) + 4 > len(kp_name)) return false;
+    kp_set("shelf-");
+    for c in name {
+        kp_name[kp_name_n] = c;
+        kp_name_n = kp_name_n + 1
+    }
+    for c in ".zip" {
+        kp_name[kp_name_n] = c;
+        kp_name_n = kp_name_n + 1
+    }
+    true
+}
+
+shelf_kept_name_at(i: int): bool {
+    if (i < 0 || shelf_list == null) return false;
+    ok: bool = false;
+    borrow shelf_list as list {
+        if (i < list.count) ok = shelf_kept_name(list.items[i].name)
+    }
+    ok
+}
+
+// ---- the bookshelf's Bibles, as versions ----
+// Every installed Bible named for core/text.l8 (in its pool), the others'
+// slots let go: whenever the list changes or a Bible is opened (whether it
+// marks the words of Jesus is known then).
+shelf_name_versions() {
+    for k in 0..TEXT_SHELF_MOST text_unname_version(TEXT_SHELF_FIRST + k);
+    if (shelf_list == null) return;
+    borrow shelf_list as list {
+        for i in 0..list.count {
+            item: *ShelfItem = &list.items[i];
+            if (item.ready && shelf_kind_code(item.kind) == SHELF_KIND_BIBLE && item.slot < TEXT_SHELF_MOST) {
+                region {
+                    line: *ByteBuilder = builder_new(64);
+                    builder_str(line, language_name(item.language));
+                    builder_str(line, " \¬\∑ From ");
+                    builder_str(line, SHELF_SOURCE_SHORT_NAME);
+                    _named: bool = text_name_version(TEXT_SHELF_FIRST + item.slot,
+                        item.abbreviation, shelf_short_title(item.title), builder_text(line,
+                        0, line.size), item.red)
+                }
+            }
+        }
+    }
+}
+
+// A title at most 400 bytes (cut at a space, with an ellipsis): text.l8's
+// pool holds a version's names in 768 bytes.
+shelf_short_title(title: str): str@new {
+    cut: int = len(title);
+    if (cut > 400) {
+        cut = 397;
+        while (cut > 0 && title[cut] as int != 32) cut = cut - 1;
+        if (cut == 0) cut = 397
+    }
+    ellipsis: str = "\‚\Ä\¶";
+    extra: int = if (cut < len(title)) len(ellipsis) else 0;
+    raw: []i8 = new i8[cut + extra](0i8);
+    for i in 0..cut raw[i] = title[i];
+    for i in 0..extra raw[cut + i] = ellipsis[i];
+    cstr(raw)
+}
+
+// ---- the catalog ----
+type CatalogEntry = {
+    info: ModuleInfo;
+    support: ModuleSupport
+}
+
+type ShelfCatalog = {
+    entries: []CatalogEntry;
+    count: int
+}
+
+shelf_catalog: ?owned *ShelfCatalog = null;
+
+// Its state: none read yet, being fetched or read, here, or it could not
+// come (why, for the screens).
+type CatalogState =
+    | Unread
+    | Coming
+    | Here
+    | Failed { offline: bool }
+
+shelf_catalog_state: CatalogState = CatalogState.Unread;
+
+// The catalog's day (days since 1970, as the settings keep it:
+// shelfCatalogDay), 0 never fetched.
+shelf_catalog_day(): int {
+    pref_get("shelfCatalogDay")
+}
+
+// The catalog wanted (a screen that lists it is open): read from where it
+// is kept, or fetched if it is not, or a week old and online.
+shelf_want_catalog() {
+    match shelf_catalog_state {
+        Coming -> return;
+        _ -> { }
+    }
+    day: int = sk_local_day(time(0));
+    old: bool = shelf_catalog_day() <= 0 || day - shelf_catalog_day() >= 7;
+    if (shelf_catalog != null && !(old && hd_network != NET_NONE && shelf_fetch_id < 0)) return;
+    if (shelf_catalog == null && shelf_catalog_day() > 0 && !old) {
+        shelf_read_catalog();
+        return
+    }
+    if (old && hd_network != NET_NONE) {
+        shelf_fetch_catalog();
+        return
+    }
+    if (shelf_catalog_day() > 0) shelf_read_catalog() else shelf_catalog_state = CatalogState.Failed { offline: true }
+}
+
+shelf_read_catalog() {
+    shelf_catalog_state = CatalogState.Coming;
+    shelf_read_kept(SHELF_READ_CATALOG_ID, SHELF_CATALOG_FILE)
+}
+
+// "Check for Updates": the catalog fetched again now.
+shelf_refresh_catalog() {
+    match shelf_catalog_state {
+        Coming -> return;
+        _ -> { }
+    }
+    shelf_fetch_catalog()
+}
+
+// The catalog's bytes (a tar.gz of confs) made into a catalog of its own:
+// its modules sorted by kind, then language (English first), then name.
+// Whether it could be read.
+shelf_catalog_came(data: []i8, size: int): bool {
+    try {
+        next: owned *ShelfCatalog = own {
+            catalog_made(data, size)
+        };
+        borrow next as fresh {
+            shelf_catalog_renumber(fresh)
+        }
+        drop shelf_catalog;
+        shelf_catalog = move next;
+        shelf_catalog_state = CatalogState.Here;
+        // (Its entries are numbered anew.)
+        shelf_browse_language_at = -1;
+        true
+    } with archive::ArchiveError _error -> {
+        false
+    } with deflate::DeflateError _error -> {
+        false
+    }
+}
+
+// A Details screen's argument for a module neither listed nor installed:
+// past any catalog's entries, so it shows that it is gone.
+SHELF_ITEM_GONE: int = 1000000000;
+
+// The Details screens open, named by their place in the catalog before,
+// renamed by their place in the one that follows it (or by their slot if
+// it no longer lists them; a screen of a module neither lists nor has
+// installed shows that it is gone).
+shelf_catalog_renumber(fresh: *ShelfCatalog) {
+    if (shelf_catalog == null) return;
+    for k in 0..sk_n {
+        if (sk_kinds[k] == SCR_SHELF_ITEM && sk_args[k] >= 0) {
+            at: int = -1;
+            slot: int = -1;
+            borrow shelf_catalog as old {
+                if (sk_args[k] < old.count) {
+                    name: str = old.entries[sk_args[k]].info.name;
+                    slot = shelf_slot_at(shelf_find(name));
+                    for j in 0..fresh.count
+                        if (fresh.entries[j].info.name == name) at = j
+                }
+            }
+            sk_args[k] = (if (at >= 0) at else if (slot >= 0) -1 - slot else SHELF_ITEM_GONE)
+        }
+    }
+}
+
+catalog_made(data: []i8, size: int) raises archive::ArchiveError, deflate::DeflateError: *ShelfCatalog@new {
+    tar: []i8 = deflate::gzip_decompress(data, 0, size);
+    members: []archive::TarEntry = archive::tar_entries(tar, len(tar));
+    entries: []CatalogEntry = new CatalogEntry[len(members)](CatalogEntry { info: catalog_empty_info(), support: ModuleSupport.Readable });
+    count: int = 0;
+    for m in 0..len(members) {
+        member: archive::TarEntry = members[m];
+        if (shelf_ends_with(member.name, ".conf")) {
+            // (A conf that cannot be read is left out, not the catalog.)
+            try {
+                conf_bytes: []i8 = new i8[member.size](0i8);
+                memcpy(conf_bytes, 0, tar, member.offset, member.size);
+                conf: *ModuleConf = conf_parse(conf_bytes, member.size);
+                entries[count].info = module_info(conf);
+                entries[count].support = module_support(&entries[count].info);
+                count = count + 1
+            } with SwordError _error -> { }
+        }
+    }
+    // (In order: insertion, as the catalog is a few hundred.)
+    for i in 1..count {
+        j: int = i;
+        while (j > 0 && catalog_before(&entries[j], &entries[j - 1])) {
+            swapped: CatalogEntry = entries[j];
+            entries[j] = entries[j - 1];
+            entries[j - 1] = swapped;
+            j = j - 1
+        }
+    }
+    new ShelfCatalog { entries: entries, count: count }
+}
+
+catalog_empty_info(): ModuleInfo {
+    ModuleInfo {
+        name: "",
+        description: "",
+        abbreviation: "",
+        kind: ModuleKind.Other,
+        storage: ModuleStorage.ByTree,
+        compression: Compression.Uncompressed,
+        markup: Markup.Plain,
+        utf8: true,
+        versification: "",
+        language: "",
+        right_to_left: false,
+        data_path: "",
+        install_size: 0,
+        version: "",
+        date: "",
+        about: "",
+        license: "",
+        copyright: "",
+        locked: false,
+        words_of_christ: false,
+        strongs: false,
+        footnotes: false,
+        greek_definitions: false,
+        hebrew_definitions: false,
+        questionable: false
+    }
+}
+
+catalog_group(kind: ModuleKind): int {
+    segment: int = shelf_segment_of(kind);
+    if (segment >= 0) segment else SHELF_SEGMENTS + shelf_kind_code(kind)
+}
+
+// Whether a comes before b: by Browse's segment (the kinds it doesn't
+// show after, by kind), then English before other languages, then
+// language name, then description. (Each segment's languages are then
+// together, though it shows two kinds.)
+catalog_before(a: *CatalogEntry, b: *CatalogEntry): bool {
+    ka: int = catalog_group(a.info.kind);
+    kb: int = catalog_group(b.info.kind);
+    if (ka != kb) return ka < kb;
+    ea: bool = language_is_english(a.info.language);
+    eb: bool = language_is_english(b.info.language);
+    if (ea != eb) return ea;
+    c: int = text_compare_folded(language_name(a.info.language), language_name(b.info.language));
+    if (c != 0) return c < 0;
+    text_compare_folded(a.info.description, b.info.description) < 0
+}
+
+// Two texts compared as a reader would sort them: letters without regard
+// to case (bytes past ASCII as they are).
+text_compare_folded(a: str, b: str): int {
+    n: int = if (len(a) < len(b)) len(a) else len(b);
+    for i in 0..n {
+        x: int = a[i] as int & 255;
+        y: int = b[i] as int & 255;
+        if (x >= 65 && x <= 90) x = x + 32;
+        if (y >= 65 && y <= 90) y = y + 32;
+        if (x != y) return x - y
+    }
+    len(a) - len(b)
+}
+
+// The catalog's entry named (-1: none; no catalog).
+shelf_catalog_find(name: str): int {
+    if (shelf_catalog == null) return -1;
+    found: int = -1;
+    borrow shelf_catalog as catalog {
+        for i in 0..catalog.count
+            if (catalog.entries[i].info.name == name) found = i
+    }
+    found
+}
+
+// Item i's catalog entry (-1: none).
+shelf_catalog_find_item(i: int): int {
+    if (i < 0 || shelf_list == null) return -1;
+    found: int = -1;
+    borrow shelf_list as list {
+        if (i < list.count) found = shelf_catalog_find(list.items[i].name)
+    }
+    found
+}
+
+// ---- fetching: the catalog and packages, one at a time ----
+type ShelfFetch =
+    | Idle
+    | FetchingCatalog { id: int }
+    | FetchingPackage { id: int, slot: int }
+
+shelf_fetch: ShelfFetch = ShelfFetch.Idle;
+
+shelf_fetch_id: int = -1;
+
+shelf_fetch_next_id: int = SHELF_FETCH_ID_FIRST;
+
+// How much of the package fetching has come, and its whole (bytes).
+shelf_fetch_got: int = 0;
+
+shelf_fetch_total: int = 0;
+
+// The share last shown (hundredths), so the screens follow it a twentieth
+// at a time.
+shelf_fetch_shown: int = 0;
+
+// The last fetch that failed (its slot, -1 none), so it is not tried
+// again until asked, and why.
+shelf_failed_slot: int = -1;
+
+shelf_failed_offline: bool = false;
+
+shelf_catalog_wanted: bool = false;
+
+// A fetch's address: the repository's, a path and a module's name (a kept
+// file's name holds at most 64 bytes, so a module's name does too).
+shelf_url: []i8 = new i8[512](0i8);
+
+shelf_url_n: int = 0;
+
+// Text added to the address; whether it fit.
+shelf_url_add(text: str): bool {
+    if (shelf_url_n + len(text) > len(shelf_url)) return false;
+    for c in text {
+        shelf_url[shelf_url_n] = c;
+        shelf_url_n = shelf_url_n + 1
+    }
+    true
+}
+
+shelf_can_fetch(): bool {
+    host_io.fetch != null && host_io.read_kept != null
+}
+
+// A fetch begun (its id shelf_fetch_id) of the repository's path then
+// name (and .zip), into the kept file kp_name names; whether it could be
+// (its address fit).
+shelf_fetch_start(path: str, name: str, zip: bool): bool {
+    shelf_url_n = 0;
+    if (!shelf_url_add(SHELF_SOURCE) || !shelf_url_add(path) || !shelf_url_add(name) || zip && !shelf_url_add(".zip")) return false;
+    shelf_fetch_id = shelf_fetch_next_id;
+    shelf_fetch_next_id = shelf_fetch_next_id + 1;
+    shelf_fetch_got = 0;
+    shelf_fetch_shown = 0;
+    f: ?fn(id: int, url: []i8, url_n: int, name: []i8, name_n: int) = host_io.fetch;
+    if (f != null) f(shelf_fetch_id, shelf_url, shelf_url_n, kp_name, kp_name_n);
+    true
+}
+
+shelf_fetch_catalog() {
+    if (!shelf_can_fetch()) {
+        shelf_catalog_state = CatalogState.Failed { offline: false };
+        return
+    }
+    match shelf_fetch {
+        Idle -> { }
+        _ -> {
+            // (After the package coming: shelf_pump fetches it next.)
+            shelf_catalog_wanted = true;
+            return
+        }
+    }
+    shelf_catalog_wanted = false;
+    shelf_catalog_state = CatalogState.Coming;
+    kp_set(SHELF_CATALOG_FILE);
+    _started: bool = shelf_fetch_start(SHELF_CATALOG_PATH, "", false);
+    shelf_fetch = ShelfFetch.FetchingCatalog { id: shelf_fetch_id };
+    shelf_fetch_total = 0
+}
+
+// The next wanted package fetched, if nothing is coming.
+shelf_pump() {
+    match shelf_fetch {
+        Idle -> { }
+        _ -> return
+    }
+    if (!shelf_can_fetch() || hd_network == NET_NONE) return;
+    if (shelf_catalog_wanted) {
+        shelf_fetch_catalog();
+        return
+    }
+    for i in 0..shelf_count() {
+        slot: int = shelf_slot_at(i);
+        if (!shelf_ready_at(i) && slot != shelf_failed_slot) {
+            started: bool = false;
+            if (shelf_kept_name_at(i) && shelf_list != null) {
+                borrow shelf_list as list {
+                    started = shelf_fetch_start(SHELF_PACKAGES_PATH, list.items[i].name,
+                        true)
+                }
+            }
+            if (!started) {
+                // (A name too long to keep: it can't be downloaded.)
+                shelf_failed_slot = slot;
+                shelf_failed_offline = false;
+                shelf_screens_changed();
+                return
+            }
+            shelf_fetch = ShelfFetch.FetchingPackage { id: shelf_fetch_id, slot: slot };
+            shelf_fetch_total = shelf_size_at(i);
+            shelf_screens_changed();
+            return
+        }
+    }
+}
+
+// The platform's lines about a fetch (core/held.l8's, for ids of ours).
+shelf_fetching(id: int, got: int, total: int) {
+    if (id != shelf_fetch_id) return;
+    shelf_fetch_got = got;
+    if (total > 0) shelf_fetch_total = total;
+    if (shelf_fetch_total <= 0) return;
+    shown: int = got * 100 / shelf_fetch_total;
+    if (shown < shelf_fetch_shown + 5) return;
+    shelf_fetch_shown = shown;
+    shelf_screens_changed()
+}
+
+shelf_fetched(id: int, status: int, bytes: int) {
+    if (id != shelf_fetch_id) return;
+    shelf_fetch_id = -1;
+    fetch: ShelfFetch = shelf_fetch;
+    shelf_fetch = ShelfFetch.Idle;
+    ok: bool = status == 200 && bytes > 0;
+    match fetch {
+        FetchingCatalog _f -> {
+            if (ok) {
+                set_pref("shelfCatalogDay", sk_local_day(time(0)));
+                sk_save();
+                shelf_read_catalog()
+            } else {
+                // (The one kept, if there is one, still serves.)
+                if (shelf_catalog == null && shelf_catalog_day() > 0) shelf_read_catalog() else if (shelf_catalog == null) shelf_catalog_state = CatalogState.Failed { offline: status == 0 } else shelf_catalog_state = CatalogState.Here
+            }
+        }
+        FetchingPackage p -> {
+            i: int = shelf_find_slot(p.slot);
+            if (i >= 0) {
+                if (ok) {
+                    shelf_save_with(i, true, bytes);
+                    shelf_toast_ready(i)
+                } else {
+                    shelf_failed_slot = p.slot;
+                    shelf_failed_offline = status == 0
+                }
+            }
+        }
+        Idle -> { }
+    }
+    shelf_screens_changed();
+    shelf_pump()
+}
+
+// A module ready: said in a toast.
+shelf_toast_ready(i: int) {
+    fbuf_n = 0;
+    fput_shelf_abbreviation(i);
+    fput_str(" is ready to read");
+    ui_toast(TOAST_CHECK)
+}
+
+// The network came back (or changed): a failed fetch tried again.
+shelf_network_changed() {
+    if (hd_network != NET_NONE) shelf_failed_slot = -1;
+    shelf_pump()
+}
+
+// ---- asking and removing ----
+// The lowest slot number free (for a Bible: below TEXT_SHELF_MOST; -1 if
+// none is).
+shelf_free_slot(bible: bool): int {
+    if (bible) {
+        for s in 0..TEXT_SHELF_MOST
+            if (shelf_find_slot(s) < 0) return s;
+        return -1
+    }
+    slot: int = 0;
+    while (shelf_find_slot(slot) >= 0) slot = slot + 1;
+    slot
+}
+
+// Whether an entry of kind can't be added now: a Bible when every
+// Bible's slot is taken.
+shelf_full_for(kind: ModuleKind): bool {
+    shelf_kind_code(kind) == SHELF_KIND_BIBLE && shelf_free_slot(true) < 0
+}
+
+// The catalog's entry asked for (not if the shelf has no room for it:
+// shelf_full_for, which Details shows): on the shelf, wanted, its download begun
+// (or waiting its turn).
+shelf_add(entry: *CatalogEntry) {
+    info: *ModuleInfo = &entry.info;
+    if (shelf_find(info.name) >= 0) return;
+    slot: int = shelf_free_slot(shelf_kind_code(info.kind) == SHELF_KIND_BIBLE);
+    if (slot < 0) return;
+    shelf_format(-1);
+    fput_tsv(info.name);
+    fput(9);
+    fput_int(slot);
+    fput(9);
+    fput_str("wanted");
+    fput(9);
+    fput_str(shelf_kind_names[shelf_kind_code(info.kind)]);
+    fput(9);
+    fput_int(info.install_size);
+    fput(9);
+    fput_tsv(info.version);
+    fput(9);
+    fput_tsv(info.language);
+    fput(9);
+    fput_int(time(0));
+    fput(9);
+    fput_tsv(shelf_short_name(info));
+    fput(9);
+    fput_tsv(info.description);
+    fput(10);
+    shelf_keep_fbuf();
+    shelf_failed_slot = -1;
+    shelf_pump();
+    shelf_screens_changed()
+}
+
+// A module's short name: its Abbreviation, else its name.
+shelf_short_name(info: *ModuleInfo): str@info {
+    if (len(info.abbreviation) > 0) info.abbreviation else info.name
+}
+
+// Item i removed: its download stopped, its package deleted, and anything
+// open of it let go (the reader leaves a Bible removed for the BSB).
+shelf_remove(i: int) {
+    if (i < 0 || i >= shelf_count()) return;
+    slot: int = shelf_slot_at(i);
+    kind: int = shelf_kind_at(i);
+    match shelf_fetch {
+        FetchingPackage p -> {
+            if (p.slot == slot) {
+                // (Its fetch's end is ignored; the file the platform may
+                // keep of it is deleted below.)
+                shelf_fetch = ShelfFetch.Idle;
+                shelf_fetch_id = -1
+            }
+        }
+        _ -> { }
+    }
+    named: bool = shelf_kept_name_at(i);
+    // (kp_name is the package's: removed once the list is kept.)
+    package_name: []i8 = new i8[64](0i8);
+    package_name_n: int = kp_name_n;
+    for k in 0..kp_name_n package_name[k] = kp_name[k];
+    shelf_format(i);
+    shelf_keep_fbuf();
+    if (named) {
+        kp_name_n = package_name_n;
+        for k in 0..package_name_n kp_name[k] = package_name[k];
+        f: fn() = kept_store.remove;
+        f()
+    }
+    shelf_close_slot(slot);
+    if (kind == SHELF_KIND_BIBLE) {
+        t: int = TEXT_SHELF_FIRST + slot;
+        if (text_cur == t) sk_use_version(TEXT_BSB);
+        if (t < len(texts)) {
+            drop texts[t];
+            texts[t] = text_empty(t)
+        }
+        if (pref_get("version") == t) set_pref("version", TEXT_BSB)
+    }
+    if (pref_get("studyCommentary") == slot + 1) set_pref("studyCommentary", 0);
+    sk_save();
+    shelf_pump();
+    shelf_screens_changed();
+    sk_update_all()
+}
+
+// ---- reading what is kept ----
+// (Without read_kept the bookshelf is not offered: nothing is read.)
+shelf_read_kept(id: int, kept: str) {
+    f: ?fn(id: int, name: []i8, name_n: int) = host_io.read_kept;
+    kp_set(kept);
+    if (f != null) f(id, kp_name, kp_name_n)
+}
+
+// Item i's package asked for (it comes as `got`, to shelf_got), once.
+shelf_read_item(i: int) {
+    if (!shelf_ready_at(i) || shelf_reading_at(i) || !shelf_kept_name_at(i)) return;
+    shelf_set_reading(i, true);
+    f: ?fn(id: int, name: []i8, name_n: int) = host_io.read_kept;
+    if (f != null) f(SHELF_READ_ID_FIRST + shelf_slot_at(i), kp_name, kp_name_n)
+}
+
+// A bookshelf Bible wanted as text t (host.l8's hs_ask_version).
+shelf_ask_text(t: int) {
+    i: int = shelf_find_text(t);
+    if (i < 0 || !shelf_ready_at(i)) {
+        hs_missing(t);
+        return
+    }
+    shelf_read_item(i)
+}
+
+// The platform's `got` for one of ours: the catalog, or a package, read
+// into scratch and made what it is used as.
+shelf_got(id: int, size: int) {
+    if (id == SHELF_READ_CATALOG_ID) {
+        came: bool = false;
+        if (size > 0) {
+            region {
+                data: []i8 = new i8[size](0i8);
+                hs_file(id, data);
+                came = shelf_catalog_came(data, size)
+            }
+        }
+        if (!came) {
+            // (What is kept is damaged or gone: fetched again, online.)
+            set_pref("shelfCatalogDay", 0);
+            if (shelf_catalog == null) shelf_catalog_state = (if (hd_network != NET_NONE) CatalogState.Unread else CatalogState.Failed { offline: true }) else shelf_catalog_state = CatalogState.Here;
+            if (hd_network != NET_NONE) shelf_fetch_catalog()
+        }
+        shelf_screens_changed();
+        return
+    }
+    i: int = shelf_find_slot(id - SHELF_READ_ID_FIRST);
+    if (i < 0) return;
+    shelf_set_reading(i, false);
+    if (size <= 0) {
+        // (Its file is gone: wanted again, downloaded when online.)
+        shelf_save_with(i, false, shelf_size_at(i));
+        shelf_pump();
+        shelf_open_settled();
+        return
+    }
+    if (shelf_kind_at(i) == SHELF_KIND_BIBLE) {
+        shelf_bible_came(i, id, size);
+        return
+    }
+    shelf_module_came(i, id, size)
+}
+
+// A Bible's package came: its version made (core/shelf_bible.l8), then
+// read as any version that comes.
+shelf_bible_came(i: int, id: int, size: int) {
+    t: int = shelf_text_of(i);
+    // (A slot past the versions' (a damaged shelf.tsv): damaged too.)
+    if (t >= len(texts)) {
+        shelf_set_broken(i, true);
+        shelf_open_settled();
+        return
+    }
+    opened: BibleOpened = BibleOpened { red: false, report: BibleReport {
+        missing_books: 0,
+        outside_chapters: 0,
+        extra_books: 0,
+        verses: 0
+    } };
+    try {
+        made: owned *TextData = shelf_bible_text(t, id, size, &opened);
+        shelf_set_opened(i, opened.red, opened.report);
+        shelf_name_versions();
+        // (In place of the slot's text before, let go.)
+        drop texts[t];
+        texts[t] = move made;
+        hs_version_arrived(t)
+    } with SwordError _error -> {
+        shelf_set_broken(i, true);
+        hs_missing(t);
+        shelf_open_settled()
+    }
+}
+
+// What a Bible's module said as it was made a version: whether it marks
+// the words of Jesus, and what of it could not be shown.
+type BibleOpened = {
+    red: bool;
+    report: BibleReport
+}
+
+// Text t made of the package (file id, size bytes) read into scratch.
+shelf_bible_text(
+    t: int,
+    id: int,
+    size: int,
+    opened: *BibleOpened
+) raises SwordError: owned *TextData {
+    region {
+        data: []i8 = new i8[size](0i8);
+        hs_file(id, data);
+        package: *ModulePackage = package_open(data, size);
+        module: *VerseModule = verse_module_open(package);
+        opened.red = verse_module_info(module).words_of_christ;
+        made: owned *TextData = bible_text_made(t, module, &opened.report);
+        return move made
+    }
+}
+
+// ---- modules open for reading (commentaries, dictionaries, books) ----
+// Each open module's package read whole into an arena of its own: one
+// for each use at a time (Study's commentary, a dictionary, a book), let
+// go when another is opened for that use or it is removed.
+type OpenReader =
+    | Verses { module: *VerseModule }
+    | Keys { module: *KeyModule }
+    | Tree { module: *TreeModule }
+
+type OpenModule = {
+    slot: int;
+    package: *ModulePackage;
+    reader: OpenReader
+}
+
+SHELF_USES: int = 3;
+
+// The uses: Study's commentary (and a Bible's), a dictionary's entries
+// (a glossary's, a devotional's), a book.
+SHELF_USE_STUDY: int = 0;
+
+SHELF_USE_ENTRIES: int = 1;
+
+SHELF_USE_BOOK: int = 2;
+
+shelf_open: []?owned *OpenModule = new ?owned *OpenModule[SHELF_USES](null);
+
+// Each use's slot open (-1 none).
+shelf_open_slots: []int = new int[SHELF_USES](-1);
+
+// The use a module's kind (its code) is opened for.
+shelf_use_of(kind: int): int {
+    if (kind <= SHELF_KIND_COMMENTARY) SHELF_USE_STUDY else if (kind <= SHELF_KIND_DEVOTIONAL) SHELF_USE_ENTRIES else SHELF_USE_BOOK
+}
+
+// Whether slot is open (its module readable now); if not, asked for.
+shelf_ensure_open(slot: int): bool {
+    i: int = shelf_find_slot(slot);
+    if (i < 0 || !shelf_ready_at(i)) return false;
+    use: int = shelf_use_of(shelf_kind_at(i));
+    if (shelf_open_slots[use] == slot && shelf_open[use] != null) return true;
+    if (shelf_broken_at(i)) return false;
+    shelf_read_item(i);
+    false
+}
+
+shelf_module_came(i: int, id: int, size: int) {
+    slot: int = shelf_slot_at(i);
+    use: int = shelf_use_of(shelf_kind_at(i));
+    try {
+        next: owned *OpenModule = own {
+            shelf_open_made(slot, id, size)
+        };
+        drop shelf_open[use];
+        shelf_open[use] = move next;
+        shelf_open_slots[use] = slot;
+        shelf_set_broken(i, false)
+    } with SwordError _error -> {
+        shelf_set_broken(i, true)
+    }
+    shelf_open_settled()
+}
+
+shelf_open_made(slot: int, id: int, size: int) raises SwordError: *OpenModule@new {
+    data: []i8 = new i8[size](0i8);
+    hs_file(id, data);
+    package: *ModulePackage = package_open(data, size);
+    reader: OpenReader = match package.info.storage {
+        ByVerse _ -> OpenReader.Verses { module: verse_module_open(package) };
+        ByKey _ -> OpenReader.Keys { module: key_module_open(package) };
+        ByTree -> OpenReader.Tree { module: tree_module_open(package) };
+        _ -> raise SwordError { failure: SwordFailure.NotSupported }
+    };
+    new OpenModule { slot: slot, package: package, reader: reader }
+}
+
+// A module opened, or found it could not be: the screens that wait for
+// it told.
+shelf_open_settled() {
+    shelf_screens_changed();
+    sk_update_all()
+}
+
+shelf_close_slot(slot: int) {
+    for use in 0..SHELF_USES {
+        if (shelf_open_slots[use] == slot) {
+            drop shelf_open[use];
+            shelf_open_slots[use] = -1
+        }
+    }
+}
+
+// The use's open module is slot's.
+shelf_open_is(use: int, slot: int): bool {
+    shelf_open_slots[use] == slot && shelf_open[use] != null
+}
+
+// ---- references in a module's text ----
+// The KJV's books (the app's 66, in order), from the library's tables: a
+// dataset read when the shelf is (shelf_load; its table is part of the
+// library, so it reads).
+shelf_kjv: ?owned *Versification = null;
+
+shelf_kjv_prepare() {
+    if (shelf_kjv != null) return;
+    try {
+        next: owned *Versification = own {
+            versification_named("KJV")
+        };
+        drop shelf_kjv;
+        shelf_kjv = move next
+    } with SwordError _error -> {
+        // (Only a broken library table fails here. Then nothing has the
+        // KJV's books: modules' references aren't linked, and a
+        // commentary has no verses, as for a numbering not known.)
+        drop shelf_kjv;
+        shelf_kjv = null
+    }
+}
+
+// The app's book whose OSIS name is bytes from up to to of osis (-1:
+// none).
+shelf_osis_book(osis: []i8, from: int, to: int): int {
+    if (shelf_kjv == null) return -1;
+    found: int = -1;
+    borrow shelf_kjv as kjv {
+        for k in 0..books {
+            if (k < len(kjv.books)) {
+                name: str = kjv.books[k].osis;
+                if (len(name) == to - from) {
+                    same: bool = true;
+                    for x in 0..len(name)
+                        if (name[x] != osis[from + x]) same = false;
+                    if (same) found = k
+                }
+            }
+        }
+    }
+    found
+}
+
+// The module's book that is the app's book b (-1: none).
+shelf_module_book(system: *Versification, b: int): int {
+    if (shelf_kjv == null) return -1;
+    found: int = -1;
+    borrow shelf_kjv as kjv {
+        if (b < len(kjv.books)) found = versification_book(system, kjv.books[b].osis)
+    }
+    found
+}
+
+// An OSIS reference (Gen.1.1, Gen.1.1-Gen.1.3, Ps.23, John.3.16-18) as a
+// packed reference (core/text.l8's xref_unpack), -1 if it names nothing
+// in the 66 books.
+shelf_osis_ref(text: []i8, from: int, to: int): int {
+    // (Its first reference, if it has several.)
+    end: int = from;
+    while (end < to && text[end] as int != 32 && text[end] as int != 59) end = end + 1;
+    dash: int = from;
+    while (dash < end && text[dash] as int != 45) dash = dash + 1;
+    book_end: int = from;
+    while (book_end < dash && text[book_end] as int != 46) book_end = book_end + 1;
+    b: int = shelf_osis_book(text, from, book_end);
+    if (b < 0) return -1;
+    c: int = osis_number(text, book_end + 1, dash, 0);
+    v: int = osis_number(text, book_end + 1, dash, 1);
+    if (c <= 0 || c > book_count[b]) return -1;
+    ce: int = c;
+    ve: int = v;
+    if (dash < end) {
+        // (Its end: Book.C.V, C.V, or V.)
+        tail: int = dash + 1;
+        parts: int = 0;
+        for x in tail..end
+            if (text[x] == '.') parts = parts + 1;
+        if (parts == 2) {
+            // (Past its book's name, to its chapter.)
+            book_dot: int = tail;
+            while (book_dot < end && text[book_dot] != '.') book_dot = book_dot + 1;
+            ce = osis_number(text, book_dot + 1, end, 0);
+            ve = osis_number(text, book_dot + 1, end, 1)
+        } else if (parts == 1) {
+            ce = osis_number(text, tail, end, 0);
+            ve = osis_number(text, tail, end, 1)
+        } else ve = osis_number(text, tail, end, 0);
+        if (ce < c || ce > book_count[b]) ce = c
+    }
+    start: int = xref_place(b, c, if (v > 0) v else 0);
+    finish: int = if (ce == c && ve == v) 0 else xref_place(0, ce, if (ve > 0) ve else 0);
+    xref_pair(start, finish)
+}
+
+// Number part (0 the first) of the dot-separated numbers from up to to.
+osis_number(
+    text: []i8,
+    from: int,
+    to: int,
+    part: int
+): int {
+    at: int = from;
+    for _skip in 0..part {
+        while (at < to && text[at] != '.') at = at + 1;
+        at = at + 1
+    }
+    n: int = 0;
+    while (at < to && is_digit(text[at] as int)) {
+        n = n * 10 + text[at] as int - 48;
+        at = at + 1
+    }
+    n
+}
+
+// A reference as a reader writes it (a ThML passage: "Ge 1:1; Ro 5:8"),
+// its first one, as a packed reference (-1: none), by the reference
+// parser Go To uses.
+shelf_passage_ref(text: []i8, from: int, to: int): int {
+    end: int = from;
+    while (end < to && text[end] != ';' && text[end] != ',') end = end + 1;
+    if (end - from <= 0 || end - from > 200) return -1;
+    room: []i8 = new i8[end - from](0i8);
+    for x in from..end room[x - from] = text[x];
+    if (!parse_ref(room, end - from) || ref_book < 0) return -1;
+    c: int = if (ref_chapter > 0) ref_chapter else 1;
+    v: int = if (ref_verse > 0) ref_verse else 0;
+    xref_pair(xref_place(ref_book, c, v), 0)
+}
+
+// ---- languages ----
+// A language's name in English, from its code as a module's conf gives it
+// (ISO 639; perhaps with a script or region after a dash: zh-Hant).
+module_language_codes: []str = ["en", "fr", "de", "grc", "pt", "ru", "la", "hbo",
+    "es", "vi", "nl", "zh", "sv", "sl", "ja", "hu", "fi", "it", "cs", "cop", "ur",
+    "tlh", "he", "fa", "da", "bg", "uk", "tr", "tl", "sr", "pon", "pl", "nb", "my",
+    "lv", "ko", "hy", "gez", "eu", "br", "ar", "vls", "ug", "tsg", "tpi", "th", "syr",
+    "sw", "sq", "so", "sn", "sml", "ro", "rmq", "prs", "ppk", "pot", "nn", "nd", "mn",
+    "mlf", "mi", "mg", "lzh", "lt", "ln", "ktu", "ksw", "kpl", "km", "kk", "kek",
+    "ht", "hr", "hi", "gv", "got", "gd", "ga", "et", "eo", "enm", "el", "cy", "cu",
+    "chr", "ceb", "bea", "be", "azb", "az", "af", "no", "id", "ms", "ta", "te", "bn",
+    "ml", "kn", "mr", "gu", "pa", "ne", "am", "ti", "yo", "ig", "zu", "xh", "ny",
+    "rw", "ka", "is", "fo", "mt", "ca", "gl", "oc", "sk", "mk", "bs", "ky", "uz",
+    "tg", "tk", "ps", "sd", "si", "lo", "bo", "dz", "jv", "su", "haw", "sm", "to",
+    "fj", "qu", "ay", "gn", "nv", "kl", "iu", "ase", "zxx", "und", "ang", "frm", "fro",
+    "dum", "gmh", "goh", "non", "akk", "sux", "egy", "arc", "syc", "chu", "orv", "sa",
+    "pi"];
+
+module_language_names: []str = ["English", "French", "German", "Ancient Greek", "Portuguese",
+    "Russian", "Latin", "Ancient Hebrew", "Spanish", "Vietnamese", "Dutch", "Chinese",
+    "Swedish", "Slovenian", "Japanese", "Hungarian", "Finnish", "Italian", "Czech",
+    "Coptic", "Urdu", "Klingon", "Hebrew", "Persian", "Danish", "Bulgarian", "Ukrainian",
+    "Turkish", "Tagalog", "Serbian", "Pohnpeian", "Polish", "Norwegian Bokm\√\•l",
+    "Burmese", "Latvian", "Korean", "Armenian", "Ge\ \ºez", "Basque", "Breton", "Arabic",
+    "West Flemish", "Uyghur", "Tausug", "Tok Pisin", "Thai", "Syriac", "Swahili",
+    "Albanian", "Somali", "Shona", "Central Sama", "Romanian", "Romani", "Dari", "Mbwela",
+    "Potawatomi", "Norwegian Nynorsk", "North Ndebele", "Mongolian", "Malagasy (Sakalava)",
+    "M\ƒ\Åori", "Malagasy", "Classical Chinese", "Lithuanian", "Lingala", "Ugaritic",
+    "Southern Karen", "Kapingamarangi", "Khmer", "Kazakh", "Q\ \ºeqchi\ \º", "Haitian Creole",
+    "Croatian", "Hindi", "Manx", "Gothic", "Scottish Gaelic", "Irish", "Estonian",
+    "Esperanto", "Middle English", "Greek", "Welsh", "Church Slavonic", "Cherokee",
+    "Cebuano", "Beaver", "Belarusian", "South Azerbaijani", "Azerbaijani", "Afrikaans",
+    "Norwegian", "Indonesian", "Malay", "Tamil", "Telugu", "Bengali", "Malayalam",
+    "Kannada", "Marathi", "Gujarati", "Punjabi", "Nepali", "Amharic", "Tigrinya",
+    "Yoruba", "Igbo", "Zulu", "Xhosa", "Chichewa", "Kinyarwanda", "Georgian", "Icelandic",
+    "Faroese", "Maltese", "Catalan", "Galician", "Occitan", "Slovak", "Macedonian",
+    "Bosnian", "Kyrgyz", "Uzbek", "Tajik", "Turkmen", "Pashto", "Sindhi", "Sinhala",
+    "Lao", "Tibetan", "Dzongkha", "Javanese", "Sundanese", "Hawaiian", "Samoan", "Tongan",
+    "Fijian", "Quechua", "Aymara", "Guarani", "Navajo", "Greenlandic", "Inuktitut",
+    "American Sign Language", "No Language", "Undetermined", "Old English", "Middle French",
+    "Old French", "Middle Dutch", "Middle High German", "Old High German", "Old Norse",
+    "Akkadian", "Sumerian", "Egyptian", "Aramaic", "Classical Syriac", "Church Slavonic",
+    "Old Russian", "Sanskrit", "Pali"];
+
+// A code's language (none known: the code itself).
+language_name(code: str): str@code {
+    // (Its first part: zh of zh-Hant.)
+    first: int = 0;
+    while (first < len(code) && code[first] as int != 45) first = first + 1;
+    for i in 0..len(module_language_codes) {
+        known: str = module_language_codes[i];
+        if (len(known) == first) {
+            same: bool = true;
+            for k in 0..first
+                if (known[k] != code[k]) same = false;
+            if (same) return module_language_names[i]
+        }
+    }
+    code
+}
+
+language_is_english(code: str): bool {
+    len(code) >= 2 && code[0] == 'e' && code[1] == 'n' && (len(code) == 2 || code[2] == '-')
+}

@@ -1,0 +1,460 @@
+tag archive_internal;
+
+use_tag std, deflate;
+
+// Reading zip archives and tar files held whole in memory. See README.md
+// for the contract.
+import "../deflate/deflate.l8";
+
+tag archive
+type ArchiveFailure =
+    // The span given lies outside the archive's bytes.
+    | InvalidSpan
+    // No zip end-of-central-directory record is there.
+    | NotZip
+    // A record or an entry's data runs past the end.
+    | Truncated
+    // A header's signature, field or checksum is wrong.
+    | BadRecord
+    // Zip64 (entries or archives of 4 GiB, or more than 65535 entries).
+    | Zip64
+    // An archive split across several disks.
+    | MultiDisk
+    // An encrypted entry.
+    | Encrypted
+    // A compression method other than stored (0) and deflate (8).
+    | UnsupportedMethod { method: int }
+    // An entry's compressed data does not decode.
+    | Corrupt { failure: DeflateFailure }
+    // An entry's data does not match its CRC-32.
+    | BadChecksum
+
+// Reading failed: why, and the byte offset into the archive near which
+// it was found.
+tag archive
+exception ArchiveError {
+    failure: ArchiveFailure;
+    at: int
+}
+
+tag archive
+archive_failure_name(failure: ArchiveFailure): str {
+    match failure {
+        InvalidSpan -> "span outside the archive";
+        NotZip -> "not a zip archive";
+        Truncated -> "archive ends early";
+        BadRecord -> "malformed archive record";
+        Zip64 -> "zip64 archives are not supported";
+        MultiDisk -> "multi-disk zip archives are not supported";
+        Encrypted -> "encrypted entries are not supported";
+        UnsupportedMethod _m -> "unsupported compression method";
+        Corrupt _c -> "compressed data is corrupt";
+        BadChecksum -> "entry checksum mismatch"
+    }
+}
+
+archive_fail(failure: ArchiveFailure, at: int) raises ArchiveError {
+    raise ArchiveError { failure: failure, at: at }
+}
+
+check_archive_size(archive: []i8, size: int) raises ArchiveError {
+    if (size < 0 || size > len(archive)) archive_fail(ArchiveFailure.InvalidSpan,
+        0)
+}
+
+little_16(data: []i8, at: int): int {
+    data[at] as int & 255 | (data[at + 1] as int & 255) << 8
+}
+
+little_32(data: []i8, at: int): int {
+    little_16(data, at) | little_16(data, at + 2) << 16
+}
+
+// ---- zip ----
+tag archive
+type ZipMethod =
+    | Stored
+    | Deflated
+    | OtherMethod { code: int }
+
+// An entry as the central directory lists it. Names are as stored (zip
+// uses / between folders; a folder's name ends with /).
+tag archive
+type ZipEntry = {
+    name: str;
+    method: ZipMethod;
+    encrypted: bool;
+    crc32: int;
+    compressed_size: int;
+    size: int;
+    // Where its local header is.
+    header_offset: int
+}
+
+ZIP_END_SIGNATURE: int = 101010256;
+
+ZIP_END_SIZE: int = 22;
+
+ZIP_LOCATOR_64_SIGNATURE: int = 117853008;
+
+ZIP_CENTRAL_SIGNATURE: int = 33639248;
+
+ZIP_CENTRAL_SIZE: int = 46;
+
+ZIP_LOCAL_SIGNATURE: int = 67324752;
+
+ZIP_LOCAL_SIZE: int = 30;
+
+ZIP_MOST_COMMENT: int = 65535;
+
+ZIP_NONE_16: int = 65535;
+
+ZIP_NONE_32: int = 4294967295;
+
+ZIP_ENCRYPTED_FLAG: int = 1;
+
+// The end-of-central-directory record: the last one whose comment ends
+// the archive exactly.
+zip_find_end(archive: []i8, size: int) raises ArchiveError: int {
+    at: int = size - ZIP_END_SIZE;
+    lowest: int = if (size - ZIP_END_SIZE - ZIP_MOST_COMMENT > 0) size - ZIP_END_SIZE - ZIP_MOST_COMMENT else 0;
+    while (at >= lowest) {
+        if (little_32(archive, at) == ZIP_END_SIGNATURE && at + ZIP_END_SIZE + little_16(archive,
+            at + 20) == size) return at;
+        at = at - 1
+    }
+    archive_fail(ArchiveFailure.NotZip, size);
+    0
+}
+
+// A name's bytes as a str (names cannot hold a NUL byte).
+archive_name(data: []i8, at: int, count: int) raises ArchiveError: str@new {
+    name: []i8 = new i8[count](0i8);
+    for i in 0..count {
+        if (data[at + i] as int == 0) archive_fail(ArchiveFailure.BadRecord, at + i);
+        name[i] = data[at + i]
+    }
+    cstr(name)
+}
+
+zip_method(code: int): ZipMethod {
+    if (code == 0) ZipMethod.Stored else if (code == 8) ZipMethod.Deflated else ZipMethod.OtherMethod { code: code }
+}
+
+// Every entry of the zip archive in archive's first size bytes, in the
+// central directory's order.
+tag archive
+zip_entries(archive: []i8, size: int) raises ArchiveError: []ZipEntry@new {
+    check_archive_size(archive, size);
+    end: int = zip_find_end(archive, size);
+    if (end >= 20 && little_32(archive, end - 20) == ZIP_LOCATOR_64_SIGNATURE) archive_fail(ArchiveFailure.Zip64,
+        end - 20);
+    disk: int = little_16(archive, end + 4);
+    directory_disk: int = little_16(archive, end + 6);
+    on_disk: int = little_16(archive, end + 8);
+    count: int = little_16(archive, end + 10);
+    directory_size: int = little_32(archive, end + 12);
+    directory_offset: int = little_32(archive, end + 16);
+    if (count == ZIP_NONE_16 || directory_size == ZIP_NONE_32 || directory_offset == ZIP_NONE_32) archive_fail(ArchiveFailure.Zip64,
+        end);
+    if (disk != 0 || directory_disk != 0 || on_disk != count) archive_fail(ArchiveFailure.MultiDisk,
+        end);
+    if (directory_offset + directory_size > end) archive_fail(ArchiveFailure.Truncated,
+        end);
+    entries: []ZipEntry = new ZipEntry[count](ZipEntry {
+        name: "",
+        method: ZipMethod.Stored,
+        encrypted: false,
+        crc32: 0,
+        compressed_size: 0,
+        size: 0,
+        header_offset: 0
+    });
+    at: int = directory_offset;
+    directory_end: int = directory_offset + directory_size;
+    for i in 0..count {
+        if (at + ZIP_CENTRAL_SIZE > directory_end) archive_fail(ArchiveFailure.Truncated,
+            at);
+        if (little_32(archive, at) != ZIP_CENTRAL_SIGNATURE) archive_fail(ArchiveFailure.BadRecord,
+            at);
+        name_size: int = little_16(archive, at + 28);
+        extra_size: int = little_16(archive, at + 30);
+        comment_size: int = little_16(archive, at + 32);
+        next: int = at + ZIP_CENTRAL_SIZE + name_size + extra_size + comment_size;
+        if (next > directory_end) archive_fail(ArchiveFailure.Truncated, at);
+        compressed_size: int = little_32(archive, at + 20);
+        entry_size: int = little_32(archive, at + 24);
+        header_offset: int = little_32(archive, at + 42);
+        if (compressed_size == ZIP_NONE_32 || entry_size == ZIP_NONE_32 || header_offset == ZIP_NONE_32) archive_fail(ArchiveFailure.Zip64,
+            at);
+        entries[i] = ZipEntry {
+            name: archive_name(archive, at + ZIP_CENTRAL_SIZE, name_size),
+            method: zip_method(little_16(archive, at + 10)),
+            encrypted: (little_16(archive, at + 8) & ZIP_ENCRYPTED_FLAG) != 0,
+            crc32: little_32(archive, at + 16),
+            compressed_size: compressed_size,
+            size: entry_size,
+            header_offset: header_offset
+        };
+        at = next
+    }
+    entries
+}
+
+// The index of the entry named name (-1: none).
+tag archive
+zip_entry_index(entries: []ZipEntry, name: str): int {
+    for i in 0..len(entries)
+        if (entries[i].name == name) return i;
+    -1
+}
+
+// Whether the entry is a folder rather than a file.
+tag archive
+zip_entry_is_folder(entry: *ZipEntry): bool {
+    len(entry.name) > 0 && entry.name[len(entry.name) - 1] as int == 47
+}
+
+// The entry's data, decompressed and checked against its CRC-32.
+tag archive
+zip_entry_bytes(archive: []i8, size: int, entry: *ZipEntry) raises ArchiveError: []i8@new {
+    check_archive_size(archive, size);
+    at: int = entry.header_offset;
+    if (at < 0 || at + ZIP_LOCAL_SIZE > size) archive_fail(ArchiveFailure.Truncated,
+        at);
+    if (little_32(archive, at) != ZIP_LOCAL_SIGNATURE) archive_fail(ArchiveFailure.BadRecord,
+        at);
+    if (entry.encrypted) archive_fail(ArchiveFailure.Encrypted, at);
+    start: int = at + ZIP_LOCAL_SIZE + little_16(archive, at + 26) + little_16(archive,
+        at + 28);
+    if (start + entry.compressed_size > size) archive_fail(ArchiveFailure.Truncated,
+        start);
+    data: []i8 = new i8[0](0i8);
+    match entry.method {
+        Stored -> {
+            if (entry.compressed_size != entry.size) archive_fail(ArchiveFailure.BadRecord,
+                at);
+            data = new i8[entry.size](0i8);
+            memcpy(data, 0, archive, start, entry.size)
+        }
+        Deflated -> {
+            try {
+                data = inflate(archive, start, entry.compressed_size, entry.size)
+            } with DeflateError error -> {
+                archive_fail(ArchiveFailure.Corrupt { failure: error.failure }, error.at)
+            }
+        }
+        OtherMethod other -> archive_fail(ArchiveFailure.UnsupportedMethod { method: other.code },
+            at)
+    }
+    if (crc32(data, 0, len(data)) != entry.crc32) archive_fail(ArchiveFailure.BadChecksum,
+        start);
+    data
+}
+
+// ---- tar ----
+tag archive
+type TarKind =
+    | File
+    | Folder
+    // Anything else (links, devices, FIFOs): its type flag byte.
+    | OtherKind { type_flag: int }
+
+// A tar member: its name (a ustar prefix joined on, or a long name from
+// a GNU or pax header), and where its data is in the archive.
+tag archive
+type TarEntry = {
+    name: str;
+    kind: TarKind;
+    offset: int;
+    size: int
+}
+
+TAR_BLOCK: int = 512;
+
+// Where a header's "ustar" is.
+TAR_MAGIC: int = 257;
+
+// The number in a header field: octal digits (spaces and NULs around
+// them), or base 256 when its first byte's high bit is set (one too large
+// for an int is a bad record).
+tar_number(archive: []i8, at: int, count: int) raises ArchiveError: int {
+    if ((archive[at] as int & 128) != 0) {
+        value: int = archive[at] as int & 127;
+        for i in 1..count {
+            if (value >> 55 != 0) archive_fail(ArchiveFailure.BadRecord, at);
+            value = value << 8 | archive[at + i] as int & 255
+        }
+        return value
+    }
+    value: int = 0;
+    i: int = 0;
+    while (i < count && (archive[at + i] as int == 32 || archive[at + i] as int == 0)) i = i + 1;
+    while (i < count && archive[at + i] as int >= 48 && archive[at + i] as int <= 55) {
+        value = value * 8 + archive[at + i] as int - 48;
+        i = i + 1
+    }
+    while (i < count) {
+        c: int = archive[at + i] as int;
+        if (c != 32 && c != 0) archive_fail(ArchiveFailure.BadRecord, at + i);
+        i = i + 1
+    }
+    value
+}
+
+// The length of a NUL-padded field's text.
+tar_field_length(archive: []i8, at: int, count: int): int {
+    n: int = 0;
+    while (n < count && archive[at + n] as int != 0) n = n + 1;
+    n
+}
+
+tar_block_is_zero(archive: []i8, at: int): bool {
+    for i in at..at + TAR_BLOCK
+        if (archive[i] as int != 0) return false;
+    true
+}
+
+// A header's checksum: its bytes summed, the checksum field as spaces.
+tar_checksum_matches(archive: []i8, at: int) raises ArchiveError: bool {
+    sum: int = 0;
+    for i in 0..TAR_BLOCK sum = sum + (if (i >= 148 && i < 156) 32 else archive[at + i] as int & 255);
+    sum == tar_number(archive, at + 148, 8)
+}
+
+// The value of the pax record key (e.g. "path") in a pax header's data,
+// as [start, end) offsets into archive (start -1: not there). Records
+// are "LENGTH KEY=VALUE\n".
+type PaxValue = {
+    start: int;
+    end: int
+}
+
+pax_find(
+    archive: []i8,
+    at: int,
+    size: int,
+    key: str
+) raises ArchiveError: PaxValue {
+    p: int = at;
+    end: int = at + size;
+    found: PaxValue = PaxValue { start: -1, end: -1 };
+    while (p < end) {
+        length: int = 0;
+        q: int = p;
+        while (q < end && archive[q] as int >= 48 && archive[q] as int <= 57) {
+            length = length * 10 + archive[q] as int - 48;
+            q = q + 1
+        }
+        if (q >= end || archive[q] as int != 32 || length <= 0 || p + length > end) archive_fail(ArchiveFailure.BadRecord,
+            p);
+        record_end: int = p + length;
+        k: int = q + 1;
+        matches: bool = k + len(key) < record_end && archive[k + len(key)] as int == 61;
+        for i in 0..len(key)
+            if (matches && archive[k + i] != key[i]) matches = false;
+        if (matches) found = PaxValue { start: k + len(key) + 1, end: record_end - 1 };
+        p = record_end
+    }
+    found
+}
+
+// Walk the members: each file, folder or other member into entries (at
+// most len(entries) of them; none, to count them); the number of
+// members. GNU long names ('L') and pax headers' path and size
+// ('x') apply to the member after them; global pax headers ('g') and
+// GNU long link names ('K') are skipped.
+tar_walk(archive: []i8, size: int, entries: []TarEntry@new) raises ArchiveError: int {
+    count: int = 0;
+    at: int = 0;
+    long_name: PaxValue = PaxValue { start: -1, end: -1 };
+    long_size: int = -1;
+    while (at < size) {
+        if (at + TAR_BLOCK > size) archive_fail(ArchiveFailure.Truncated, at);
+        if (tar_block_is_zero(archive, at)) return count;
+        if (!tar_checksum_matches(archive, at)) archive_fail(ArchiveFailure.BadRecord,
+            at);
+        type_flag: int = archive[at + 156] as int;
+        // (A pax header's size is its member's, not a long name's.)
+        describes: bool = type_flag == 'L' as int || type_flag == 'x' as int || type_flag == 'g' as int || type_flag == 'K' as int;
+        member_size: int = if (long_size >= 0 && !describes) long_size else tar_number(archive,
+            at + 124, 12);
+        data: int = at + TAR_BLOCK;
+        if (member_size > size - data) archive_fail(ArchiveFailure.Truncated, data);
+        if (type_flag == 'L' as int) {
+            // ('L': the next member's name, NUL-terminated.)
+            long_name = PaxValue { start: data, end: data + tar_field_length(archive,
+                data, member_size) }
+        } else if (type_flag == 'x' as int) {
+            path: PaxValue = pax_find(archive, data, member_size, "path");
+            if (path.start >= 0) long_name = path;
+            size_value: PaxValue = pax_find(archive, data, member_size, "size");
+            if (size_value.start >= 0) {
+                long_size = 0;
+                for i in size_value.start..size_value.end {
+                    digit: int = archive[i] as int - '0' as int;
+                    if (digit < 0 || digit > 9) archive_fail(ArchiveFailure.BadRecord,
+                        i);
+                    // (Past the archive's size it can't be whole: stop before it overflows.)
+                    if (long_size > size) archive_fail(ArchiveFailure.Truncated, data);
+                    long_size = long_size * 10 + digit
+                }
+                if (size_value.end == size_value.start) archive_fail(ArchiveFailure.BadRecord,
+                    size_value.start)
+            }
+        } else if (!describes) {
+            if (count < len(entries)) {
+                kind: TarKind = if (type_flag == '0' as int || type_flag == 0 || type_flag == '7' as int) TarKind.File else if (type_flag == '5' as int) TarKind.Folder else TarKind.OtherKind { type_flag: type_flag };
+                entries[count] = TarEntry {
+                    name: tar_name(archive, at, long_name),
+                    kind: kind,
+                    offset: data,
+                    size: member_size
+                }
+            }
+            count = count + 1;
+            long_name = PaxValue { start: -1, end: -1 };
+            long_size = -1
+        }
+        at = data + (member_size + TAR_BLOCK - 1) / TAR_BLOCK * TAR_BLOCK
+    }
+    count
+}
+
+// A member's name: the long name before it, else its header's (a POSIX
+// ustar prefix and /, then the name field).
+tar_name(archive: []i8, at: int, long_name: PaxValue) raises ArchiveError: str@new {
+    if (long_name.start >= 0) return archive_name(archive, long_name.start, long_name.end - long_name.start);
+    name_length: int = tar_field_length(archive, at, 100);
+    // ("ustar\0": POSIX, whose prefix field is used; GNU's "ustar  "
+    // keeps other fields there.)
+    posix: bool = archive[at + TAR_MAGIC] == 'u' && archive[at + TAR_MAGIC + 5] as int == 0;
+    prefix_length: int = if (posix) tar_field_length(archive, at + 345, 155) else 0;
+    if (prefix_length == 0) return archive_name(archive, at, name_length);
+    joined: []i8 = new i8[prefix_length + 1 + name_length](0i8);
+    memcpy(joined, 0, archive, at + 345, prefix_length);
+    joined[prefix_length] = 47i8;
+    memcpy(joined, prefix_length + 1, archive, at, name_length);
+    archive_name(joined, 0, len(joined))
+}
+
+// Every member of the tar file in archive's first size bytes, in order,
+// to its end (a zero block, or the data's end at a block boundary).
+tag archive
+tar_entries(archive: []i8, size: int) raises ArchiveError: []TarEntry@new {
+    check_archive_size(archive, size);
+    count: int = tar_walk(archive, size, new TarEntry[0](TarEntry {
+        name: "",
+        kind: TarKind.File,
+        offset: 0,
+        size: 0
+    }));
+    entries: []TarEntry = new TarEntry[count](TarEntry {
+        name: "",
+        kind: TarKind.File,
+        offset: 0,
+        size: 0
+    });
+    _filled: int = tar_walk(archive, size, entries);
+    entries
+}

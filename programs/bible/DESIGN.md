@@ -19,6 +19,11 @@ together even where their combined size exceeds the module-size heuristic.
 `core/host.l8` runs the line-based host used by every platform.
 `core/kept.l8` loads and saves named user files. Data modules handle text,
 study records, original languages, audio timings and the ESV cache.
+`core/shelf.l8` keeps the Bookshelf: SWORD modules downloaded on request
+rather than bundled. A Bible among them becomes a version in a text slot of
+its own, its records made from the module when it is opened; commentaries,
+dictionaries and books are read from their packages while a screen shows
+them.
 
 The reader and a plan's day use the same references and shared reading
 rules. Marks are keyed by reference, so switching versions preserves their

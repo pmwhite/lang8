@@ -29,6 +29,7 @@ What `core/skin.l8` imports, besides the screens' own files
 | `esv_client.l8` | Asking for the ESV's chapters (one at a time, the client's limit, resting, the reader's window) and taking them |
 | `words.l8` | Words no one screen owns: counts, labels, toasts, the controls' titles |
 | `kept.l8` | What is kept: the files (as the iPhone names them), what goes in each, saving and loading them; a host only reads, writes, adds to and deletes one by name (`kept_store`) |
+| `shelf.l8`, `shelf_screens.l8`, `shelf_bible.l8` | The Bookshelf: modules from CrossWire's SWORD library (`programs/sword`), what is installed, the catalog, downloads, their screens, and a Bible made a version |
 
 A skin decides **how** things look and move (a sheet or a pushed screen, a
 switch or a checkbox, the platform's fonts and icons). Core decides **what**
@@ -47,14 +48,17 @@ a concrete implementation: `web/main.l8` (the platform) and
 - `kept_store = KeptStore { read, write, append, remove }`: one named file
   (`kp_name`) read into `fbuf`, written from it, added to, deleted
   (`core/kept.l8` names them and says what goes in each).
-- `host_io = HostIO { ask, http, file, fetch, say }`: a data file asked
+- `host_io = HostIO { ask, http, file, fetch, read_kept, say }`: a data file asked
   for by name (the site's `data/` names: `bsb` ... `ylt`, `orig.txt`,
   `lang/*`, `help.txt`, `xrefs.bin`, `mhcc.txt`, `audio/*.tim`,
   `audio/henson.paths`), a GET, a file or answer's bytes, a recording
   fetched into a kept file, lines to the skin. `fetch` (a GET into the
   kept file named, written whole only when the answer is 200, and kept out
   of backups) may be `null` where a platform cannot keep recordings; core
-  then offers no Downloads.
+  then offers no Downloads. `read_kept` reads a kept file back as an id
+  (answered `got ID SIZE`, -1 when there is no such file, its bytes by
+  `file`): the Bookshelf's catalog and modules, which `fetch` kept. Without
+  both, core offers no Bookshelf.
 - `hs_start()`, then what the platform is: `sk_device` (its name: "Device",
   "Phone"), `sk_follows_text_size`, `sk_fonts` (its reader's faces, in the
   settings' order), `hs_notify_off` (where notifications are turned back
@@ -63,7 +67,9 @@ a concrete implementation: `web/main.l8` (the platform) and
   `hs_after()`: from a loop that waits for them, or from its callbacks (the
   iPhone's, where every line comes in one). A data file asked for is
   answered `got ID SIZE`; core's host then reads it through `file`
-  straight into the dataset it is part of.
+  straight into the dataset it is part of. Ids from 1000000 are the
+  Bookshelf's (`core/shelf.l8`): its fetches, and its kept files read back
+  (from 1999999); a host passes them on as it does the others.
 - Its own lines in: `got ID SIZE` (a data file came; -1 none), `http ID
   STATUS SIZE` (an answer came), `api BASE` (the site's `/api/v1/`),
   `fetching ID GOT TOTAL` (a fetch's bytes so far, TOTAL 0 unknown; as

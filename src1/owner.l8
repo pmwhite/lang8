@@ -1,0 +1,759 @@
+tag compiler_internal;
+
+// Flow of owned handles. A local starts empty. A global, and a ?owned
+// parameter, starts nullish: it may already be null, so borrow and move
+// check at run time, but assigning it would drop a live arena. A plain
+// owned parameter starts full. Drop and move leave the variable empty.
+// Only an empty variable can be assigned; assignment does not drop.
+// Elements of a []?owned *T are not followed: each may be empty, and
+// assigning one checks at run time that it is.
+// A branch that returns does not change the path that continues. A loop is
+// rechecked from the join of its entry and its back edge, so the next pass
+// cannot overwrite an owner the previous pass left full.
+OWNER_NONE: int = 0 - 1;
+
+OWNER_WILD: int = 0;
+
+OWNER_FULL: int = 1;
+
+OWNER_VACANT: int = 2;
+
+OWNER_NULLISH: int = 3;
+
+type OwnerHold = {
+    obj: *Obj;
+    state: int;
+    next: ?*OwnerHold
+}
+
+owner_holds: ?*OwnerHold = null;
+
+owner_touched: ?*OwnerHold = null;
+
+owner_breaks: ?*OwnerHold = null;
+
+owner_break_seen: bool = false;
+
+owner_conts: ?*OwnerHold = null;
+
+owner_cont_seen: bool = false;
+
+owner_file: int = 0;
+
+owner_stmt_yield: int = 0 - 1;
+
+owner_list_yield: int = 0 - 1;
+
+owner_child_yield: int = 0 - 1;
+
+owner_walk_div: bool = false;
+
+owner_default(obj: *Obj): int {
+    if (!obj.is_local) return OWNER_NULLISH;
+    OWNER_VACANT
+}
+
+owner_find(list: ?*OwnerHold, obj: *Obj): ?*OwnerHold@list {
+    held: ?*OwnerHold = list;
+    while (held != null) {
+        if (held.obj == obj) return held;
+        held = held.next
+    }
+    null
+}
+
+owner_state_in(list: ?*OwnerHold, obj: *Obj): int {
+    held: ?*OwnerHold = owner_find(list, obj);
+    if (held != null) return held.state;
+    owner_default(obj)
+}
+
+owner_get(obj: *Obj): int {
+    owner_state_in(owner_holds, obj)
+}
+
+owner_set(obj: *Obj@immortal, state: int) noregion {
+    held: ?*OwnerHold = owner_find(owner_holds, obj);
+    if (held != null) held.state = state else owner_holds = new OwnerHold { obj: obj, state: state, next: owner_holds };
+    if (owner_find(owner_touched, obj) == null) owner_touched = new OwnerHold { obj: obj, state: state, next: owner_touched }
+}
+
+owner_copy(list: ?*OwnerHold@new): ?*OwnerHold@new {
+    acc: ?*OwnerHold = null;
+    held: ?*OwnerHold = list;
+    while (held != null) {
+        acc = new OwnerHold { obj: held.obj, state: held.state, next: acc };
+        held = held.next
+    }
+    out: ?*OwnerHold = null;
+    while (acc != null) {
+        nxt: ?*OwnerHold = acc.next;
+        acc.next = out;
+        out = acc;
+        acc = nxt
+    }
+    out
+}
+
+owner_meet_state(left: int, right: int): int {
+    if (left == right) return left;
+    if (left == OWNER_FULL && right == OWNER_NULLISH) return OWNER_NULLISH;
+    if (left == OWNER_NULLISH && right == OWNER_FULL) return OWNER_NULLISH;
+    OWNER_WILD
+}
+
+owner_meet_lists(left: ?*OwnerHold@new, right: ?*OwnerHold@new): ?*OwnerHold@new {
+    out: ?*OwnerHold = null;
+    held: ?*OwnerHold = left;
+    while (held != null) {
+        out = new OwnerHold { obj: held.obj, state: owner_meet_state(held.state, owner_state_in(right,
+            held.obj)), next: out };
+        held = held.next
+    }
+    right_held: ?*OwnerHold = right;
+    while (right_held != null) {
+        if (owner_find(left, right_held.obj) == null) out = new OwnerHold { obj: right_held.obj, state: owner_meet_state(owner_state_in(left,
+            right_held.obj), right_held.state), next: out };
+        right_held = right_held.next
+    }
+    out
+}
+
+owner_same(left: ?*OwnerHold, right: ?*OwnerHold): bool {
+    held: ?*OwnerHold = left;
+    while (held != null) {
+        if (owner_state_in(right, held.obj) != held.state) return false;
+        held = held.next
+    }
+    right_held: ?*OwnerHold = right;
+    while (right_held != null) {
+        if (owner_state_in(left, right_held.obj) != right_held.state) return false;
+        right_held = right_held.next
+    }
+    true
+}
+
+owner_is_owned(obj: *Obj): bool {
+    is_owned_ty(decay(obj.ty))
+}
+
+owner_fail_use(obj: *Obj, state: int) noregion raises Error {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, obj.name);
+    if (state == OWNER_VACANT) sb_puts(sb, " is empty") else sb_puts(sb, " may be empty");
+    error(sb_finish(sb))
+}
+
+owner_fail_assign(obj: *Obj) noregion raises Error {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "drop ");
+    sb_puts(sb, obj.name);
+    sb_puts(sb, " before assigning it");
+    error(sb_finish(sb))
+}
+
+owner_require_usable(obj: *Obj) noregion raises Error {
+    state: int = owner_get(obj);
+    if (state != OWNER_FULL && state != OWNER_NULLISH) owner_fail_use(obj, state)
+}
+
+owner_require_vacant(obj: *Obj) noregion raises Error {
+    if (owner_get(obj) != OWNER_VACANT) owner_fail_assign(obj)
+}
+
+owner_yield_ty(ty: ?*Type): int {
+    t: ?*Type = decay(ty);
+    if (t == null || !is_owned_ty(t)) return OWNER_NONE;
+    if (is_opt_owned(t)) return OWNER_NULLISH;
+    OWNER_FULL
+}
+
+owner_bind(obj: ?*Obj@immortal) noregion {
+    if (obj == null) return;
+    slot: *Obj = obj;
+    if (!owner_is_owned(slot)) return;
+    if (is_opt_owned(decay(slot.ty))) owner_set(slot, OWNER_NULLISH) else owner_set(slot,
+        OWNER_FULL)
+}
+
+owner_poison(from: ?*OwnerHold@immortal, mark: ?*OwnerHold) noregion {
+    held: ?*OwnerHold = from;
+    while (held != null && held != mark) {
+        owner_set(held.obj, OWNER_WILD);
+        held = held.next
+    }
+}
+
+owner_expr(n: ?*Expr) noregion raises Error: int {
+    saved: bool = owner_walk_div;
+    owner_walk_div = false;
+    y: int = OWNER_NONE;
+    if (n != null) {
+        outer_pos: int = diag_expr_pos;
+        outer_file: int = diag_expr_file;
+        diag_expr_pos = n.pos;
+        diag_expr_file = n.file;
+        y = owner_expr_node(n);
+        diag_expr_pos = outer_pos;
+        diag_expr_file = outer_file
+    }
+    node_div: bool = owner_walk_div;
+    owner_walk_div = saved || node_div;
+    y
+}
+
+owner_expr_list(n: ?*Expr) noregion raises Error {
+    a: ?*Expr = n;
+    while (a != null) {
+        _y: int = owner_expr(a);
+        if (owner_walk_div) return;
+        a = a.next
+    }
+}
+
+owner_inits(inits: ?*FieldInit) noregion raises Error {
+    f: ?*FieldInit = inits;
+    while (f != null) {
+        _y: int = owner_expr(f.lhs);
+        if (owner_walk_div) return;
+        f = f.next
+    }
+}
+
+// lhs always runs. rhs runs only on the other path, so the states join.
+owner_either(lhs: *Expr, rhs: *Expr) noregion raises Error: int {
+    save: ?*OwnerHold = owner_copy(owner_holds);
+    y1: int = owner_expr(lhs);
+    d1: bool = owner_walk_div;
+    st1: ?*OwnerHold = owner_copy(owner_holds);
+    owner_holds = owner_copy(save);
+    owner_walk_div = false;
+    y2: int = owner_expr(rhs);
+    d2: bool = owner_walk_div;
+    st2: ?*OwnerHold = owner_copy(owner_holds);
+    if (d1 && d2) {
+        owner_walk_div = true;
+        return OWNER_NONE
+    }
+    if (d1) {
+        owner_walk_div = false;
+        owner_holds = st2;
+        return y2
+    }
+    if (d2) {
+        owner_walk_div = false;
+        owner_holds = st1;
+        return y1
+    }
+    owner_holds = owner_meet_lists(st1, st2);
+    owner_walk_div = false;
+    if (y1 < 0) return y2;
+    if (y2 < 0) return y1;
+    owner_meet_state(y1, y2)
+}
+
+owner_short_circuit(lhs: *Expr, rhs: *Expr) noregion raises Error: int {
+    _left: int = owner_expr(lhs);
+    if (owner_walk_div) return OWNER_NONE;
+    skipped: ?*OwnerHold = owner_copy(owner_holds);
+    _right: int = owner_expr(rhs);
+    if (owner_walk_div) owner_holds = skipped else owner_holds = owner_meet_lists(skipped,
+        owner_holds);
+    owner_walk_div = false;
+    OWNER_NONE
+}
+
+owner_dest_var(n: *Expr): ?*Obj {
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v != null && owner_is_owned(v)) return v;
+            null
+        }
+        _ -> null
+    }
+}
+
+owner_commit(dest: *Obj@immortal, rhs: *Expr, yielded: int) noregion {
+    state: int = yielded;
+    if (state < 0) {
+        if (is_null_expr(rhs)) state = OWNER_VACANT else state = owner_yield_ty(dest.ty)
+    }
+    if (state < 0) state = OWNER_FULL;
+    owner_set(dest, state)
+}
+
+owner_expr_node(n: *Expr) noregion raises Error: int {
+    match n.kind {
+        Num _k -> OWNER_NONE;
+        Null -> OWNER_VACANT;
+        Var _k -> OWNER_NONE;
+        FuncAddr _k -> OWNER_NONE;
+        Sizeof _k -> OWNER_NONE;
+        Binary k -> {
+            _l: int = owner_expr(k.lhs);
+            if (owner_walk_div) return OWNER_NONE;
+            _r: int = owner_expr(k.rhs);
+            OWNER_NONE
+        }
+        Assign k -> {
+            dest: ?*Obj = owner_dest_var(k.lhs);
+            if (dest != null) owner_require_vacant(dest) else {
+                _lhs: int = owner_expr(k.lhs);
+                if (owner_walk_div) return OWNER_NONE
+            }
+            y: int = owner_expr(k.rhs);
+            if (owner_walk_div) return y;
+            if (dest != null) owner_commit(dest, k.rhs, y);
+            y
+        }
+        Addr k -> {
+            _a: int = owner_expr(k.lhs);
+            OWNER_NONE
+        }
+        Deref k -> {
+            _d: int = owner_expr(k.lhs);
+            OWNER_NONE
+        }
+        Not k -> {
+            _n: int = owner_expr(k.lhs);
+            OWNER_NONE
+        }
+        Neg k -> {
+            _g: int = owner_expr(k.lhs);
+            OWNER_NONE
+        }
+        BitNot k -> {
+            _b: int = owner_expr(k.lhs);
+            OWNER_NONE
+        }
+        As k -> {
+            _s: int = owner_expr(k.lhs);
+            OWNER_NONE
+        }
+        Trunc k -> {
+            _t: int = owner_expr(k.lhs);
+            OWNER_NONE
+        }
+        MemberAccess k -> {
+            _m: int = owner_expr(k.lhs);
+            OWNER_NONE
+        }
+        Index k -> {
+            _i: int = owner_expr(k.lhs);
+            if (owner_walk_div) return OWNER_NONE;
+            _j: int = owner_expr(k.idx);
+            OWNER_NONE
+        }
+        LogAnd k -> owner_short_circuit(k.lhs, k.rhs);
+        LogOr k -> owner_short_circuit(k.lhs, k.rhs);
+        OrElse k -> owner_either(k.lhs, k.rhs);
+        Funcall k -> {
+            target: ?*Expr = k.target;
+            if (target != null) {
+                _tg: int = owner_expr(target);
+                if (owner_walk_div) return OWNER_NONE
+            }
+            owner_expr_list(k.args);
+            if (owner_walk_div) return OWNER_NONE;
+            owner_yield_ty(n.ty)
+        }
+        New k -> {
+            _len: int = owner_expr(k.lhs);
+            if (owner_walk_div) return OWNER_NONE;
+            _fill: int = owner_expr(k.fill);
+            if (owner_walk_div) return OWNER_NONE;
+            owner_inits(k.inits);
+            OWNER_NONE
+        }
+        StructLit k -> {
+            owner_inits(k.inits);
+            OWNER_NONE
+        }
+        VariantLit k -> {
+            owner_inits(k.inits);
+            OWNER_NONE
+        }
+        ArrayLit k -> {
+            owner_expr_list(k.elems);
+            OWNER_NONE
+        }
+        If k -> {
+            _c: int = owner_expr(k.cond);
+            if (owner_walk_div) return OWNER_NONE;
+            owner_either(k.then, k.els)
+        }
+        Match k -> owner_match_expr(k.cond, k.arms);
+        Block k -> {
+            d: bool = owner_stmts(k.body);
+            y: int = owner_list_yield;
+            if (d) owner_walk_div = true;
+            y
+        }
+        Own k -> {
+            d: bool = owner_stmt(k.body);
+            if (d) {
+                owner_walk_div = true;
+                return OWNER_NONE
+            }
+            OWNER_FULL
+        }
+        Move k -> owner_move(k.lhs)
+    }
+}
+
+owner_move(lhs: *Expr) noregion raises Error: int {
+    match lhs.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) error("move requires an owner variable");
+            slot: *Obj = v;
+            state: int = owner_get(slot);
+            if (state != OWNER_FULL && state != OWNER_NULLISH) owner_fail_use(slot,
+                state);
+            produced: int = OWNER_NULLISH;
+            if (state == OWNER_FULL) produced = OWNER_FULL;
+            owner_set(slot, OWNER_VACANT);
+            produced
+        }
+        // Elements are not followed: any may be empty.
+        Index _ -> {
+            _place: int = owner_expr(lhs);
+            OWNER_NULLISH
+        }
+        _ -> error("move requires an owner variable or an element of a []?owned *T")
+    }
+}
+
+owner_match_expr(cond: *Expr, arms: ?*MatchArm@immortal) noregion raises Error: int {
+    _c: int = owner_expr(cond);
+    if (owner_walk_div) return OWNER_NONE;
+    save: ?*OwnerHold = owner_copy(owner_holds);
+    y: int = OWNER_NONE;
+    acc: ?*OwnerHold = null;
+    live: int = 0;
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        owner_holds = owner_copy(save);
+        owner_walk_div = false;
+        owner_bind(arm.binder);
+        d: bool = owner_stmt(arm.body);
+        ay: int = owner_stmt_yield;
+        if (!d) {
+            st: ?*OwnerHold = owner_copy(owner_holds);
+            if (live == 0) {
+                acc = st;
+                y = ay
+            } else {
+                acc = owner_meet_lists(acc, st);
+                if (y < 0) y = ay else if (ay >= 0) y = owner_meet_state(y, ay)
+            }
+            live = live + 1
+        }
+        arm = arm.next
+    }
+    if (live == 0) {
+        owner_walk_div = true;
+        return OWNER_NONE
+    }
+    owner_holds = acc;
+    owner_walk_div = false;
+    y
+}
+
+owner_note_break() noregion {
+    if (!owner_break_seen) {
+        owner_breaks = owner_copy(owner_holds);
+        owner_break_seen = true;
+        return
+    }
+    owner_breaks = owner_meet_lists(owner_breaks, owner_holds)
+}
+
+owner_note_cont() noregion {
+    if (!owner_cont_seen) {
+        owner_conts = owner_copy(owner_holds);
+        owner_cont_seen = true;
+        return
+    }
+    owner_conts = owner_meet_lists(owner_conts, owner_holds)
+}
+
+owner_loop(cond: ?*Expr, body: *Stmt) noregion raises Error {
+    pre: ?*OwnerHold = owner_copy(owner_holds);
+    saved_breaks: ?*OwnerHold = owner_breaks;
+    saved_break_seen: bool = owner_break_seen;
+    saved_conts: ?*OwnerHold = owner_conts;
+    saved_cont_seen: bool = owner_cont_seen;
+    head: ?*OwnerHold = owner_copy(pre);
+    all_breaks: ?*OwnerHold = null;
+    saw_break: bool = false;
+    stable: bool = false;
+    while (!stable) {
+        owner_holds = owner_copy(head);
+        owner_breaks = null;
+        owner_break_seen = false;
+        owner_conts = null;
+        owner_cont_seen = false;
+        cond_div: bool = false;
+        if (cond != null) {
+            owner_walk_div = false;
+            _cy: int = owner_expr(cond);
+            cond_div = owner_walk_div
+        }
+        body_div: bool = true;
+        if (!cond_div) body_div = owner_stmt(body);
+        back: ?*OwnerHold = owner_copy(head);
+        if (!cond_div && !body_div) {
+            back = owner_copy(owner_holds);
+            if (owner_cont_seen) back = owner_meet_lists(back, owner_conts)
+        } else if (owner_cont_seen) back = owner_copy(owner_conts);
+        if (owner_break_seen) {
+            if (!saw_break) {
+                all_breaks = owner_copy(owner_breaks);
+                saw_break = true
+            } else all_breaks = owner_meet_lists(all_breaks, owner_breaks)
+        }
+        next: ?*OwnerHold = owner_meet_lists(pre, back);
+        stable = owner_same(next, head);
+        head = next
+    }
+    owner_holds = owner_copy(head);
+    if (saw_break) owner_holds = owner_meet_lists(owner_holds, all_breaks);
+    owner_breaks = saved_breaks;
+    owner_break_seen = saved_break_seen;
+    owner_conts = saved_conts;
+    owner_cont_seen = saved_cont_seen
+}
+
+owner_stmts(s: ?*Stmt) noregion raises Error: bool {
+    y: int = OWNER_NONE;
+    a: ?*Stmt = s;
+    while (a != null) {
+        d: bool = owner_stmt(a);
+        if (d) {
+            owner_list_yield = y;
+            return true
+        }
+        y = owner_stmt_yield;
+        a = a.next
+    }
+    owner_list_yield = y;
+    false
+}
+
+owner_child(s: *Stmt) noregion raises Error: bool {
+    saved: int = owner_stmt_yield;
+    d: bool = owner_stmt(s);
+    owner_child_yield = owner_stmt_yield;
+    owner_stmt_yield = saved;
+    d
+}
+
+owner_stmt(s: ?*Stmt) noregion raises Error: bool {
+    if (s == null) return false;
+    outer_file: int = diag_stmt_file;
+    outer: int = diag_enter_stmt(s, owner_file);
+    diag_expr_pos = 0;
+    owner_walk_div = false;
+    owner_stmt_yield = OWNER_NONE;
+    d: bool = owner_stmt_node(s);
+    diag_leave(outer, outer_file);
+    d || owner_walk_div
+}
+
+owner_stmt_node(s: *Stmt) noregion raises Error: bool {
+    match s.kind {
+        Break -> {
+            owner_note_break();
+            true
+        }
+        Continue -> {
+            owner_note_cont();
+            true
+        }
+        Return k -> {
+            _r: int = owner_expr(k.lhs);
+            true
+        }
+        Raise k -> {
+            owner_inits(k.inits);
+            true
+        }
+        ExprStmt k -> {
+            owner_stmt_yield = owner_expr(k.lhs);
+            owner_walk_div
+        }
+        Block k -> {
+            d: bool = owner_stmts(k.body);
+            owner_stmt_yield = owner_list_yield;
+            d
+        }
+        If k -> owner_if(k.cond, k.then, k.els);
+        While k -> {
+            owner_loop(k.cond, k.body);
+            false
+        }
+        For k -> {
+            _it: int = owner_expr(k.iter);
+            if (owner_walk_div) return true;
+            _hi: int = owner_expr(k.hi);
+            if (owner_walk_div) return true;
+            owner_loop(null, k.body);
+            false
+        }
+        Decl k -> owner_decl(k.var, k.init);
+        Match k -> owner_match_stmt(k.cond, k.arms);
+        Try k -> owner_try(k.body, k.arms);
+        Region k -> {
+            d: bool = owner_child(k.body);
+            owner_stmt_yield = owner_child_yield;
+            d
+        }
+        Borrow k -> {
+            match k.place.kind {
+                Var v -> owner_require_usable(v.var or error("borrow requires an owner variable"));
+                _ -> {
+                    _place: int = owner_expr(k.place);
+                    if (owner_walk_div) return true
+                }
+            }
+            owner_child(k.body)
+        }
+        Allocate k -> owner_child(k.body);
+        Drop k -> {
+            match k.target.kind {
+                Var v -> {
+                    dropped: ?*Obj = v.var;
+                    if (dropped != null) owner_set(dropped, OWNER_VACANT)
+                }
+                _ -> {
+                    _y: int = owner_expr(k.target)
+                }
+            }
+            false
+        }
+        Expect _k -> false
+    }
+}
+
+owner_if(cond: *Expr, then: *Stmt, els: ?*Stmt) noregion raises Error: bool {
+    _c: int = owner_expr(cond);
+    if (owner_walk_div) return true;
+    save: ?*OwnerHold = owner_copy(owner_holds);
+    then_div: bool = owner_stmt(then);
+    then_st: ?*OwnerHold = owner_copy(owner_holds);
+    if (els == null) {
+        owner_holds = owner_copy(save);
+        if (!then_div) owner_holds = owner_meet_lists(save, then_st);
+        return false
+    }
+    other: *Stmt = els;
+    owner_holds = owner_copy(save);
+    else_div: bool = owner_stmt(other);
+    else_st: ?*OwnerHold = owner_copy(owner_holds);
+    if (then_div && else_div) return true;
+    if (then_div) {
+        owner_holds = else_st;
+        return false
+    }
+    if (else_div) {
+        owner_holds = then_st;
+        return false
+    }
+    owner_holds = owner_meet_lists(then_st, else_st);
+    false
+}
+
+owner_match_stmt(cond: *Expr, arms: ?*MatchArm@immortal) noregion raises Error: bool {
+    _c: int = owner_expr(cond);
+    if (owner_walk_div) return true;
+    save: ?*OwnerHold = owner_copy(owner_holds);
+    acc: ?*OwnerHold = null;
+    live: int = 0;
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        owner_holds = owner_copy(save);
+        owner_bind(arm.binder);
+        d: bool = owner_stmt(arm.body);
+        if (!d) {
+            st: ?*OwnerHold = owner_copy(owner_holds);
+            if (live == 0) acc = st else acc = owner_meet_lists(acc, st);
+            live = live + 1
+        }
+        arm = arm.next
+    }
+    if (live == 0) return true;
+    owner_holds = acc;
+    false
+}
+
+owner_try(body: *Stmt, arms: ?*CatchArm@immortal) noregion raises Error: bool {
+    save: ?*OwnerHold = owner_copy(owner_holds);
+    mark: ?*OwnerHold = owner_touched;
+    body_div: bool = owner_stmt(body);
+    after_body: ?*OwnerHold = owner_touched;
+    end_st: ?*OwnerHold = owner_copy(owner_holds);
+    acc: ?*OwnerHold = null;
+    live: int = 0;
+    if (!body_div) {
+        acc = end_st;
+        live = 1
+    }
+    arm: ?*CatchArm = arms;
+    while (arm != null) {
+        owner_holds = owner_copy(save);
+        owner_poison(after_body, mark);
+        owner_bind(arm.binder);
+        d: bool = owner_stmt(arm.body);
+        if (!d) {
+            st: ?*OwnerHold = owner_copy(owner_holds);
+            if (live == 0) acc = st else acc = owner_meet_lists(acc, st);
+            live = live + 1
+        }
+        arm = arm.next
+    }
+    if (live == 0) return true;
+    owner_holds = acc;
+    false
+}
+
+owner_decl(slot: ?*Obj@immortal, init: ?*Expr) noregion raises Error: bool {
+    y: int = OWNER_NONE;
+    if (init != null) y = owner_expr(init);
+    if (owner_walk_div) return true;
+    if (slot == null || !owner_is_owned(slot)) return false;
+    state: int = y;
+    if (state < 0) {
+        if (init == null || is_null_expr(init)) state = OWNER_VACANT else state = owner_yield_ty(slot.ty)
+    }
+    if (state < 0) state = OWNER_FULL;
+    owner_set(slot, state);
+    false
+}
+
+owner_seed(fn: *Function@immortal) noregion {
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (owner_is_owned(p)) {
+            if (is_opt_owned(decay(p.ty))) owner_set(p, OWNER_NULLISH) else owner_set(p,
+                OWNER_FULL)
+        }
+        p = p.param_next
+    }
+}
+
+check_fn_owners(fn: *Function@immortal) noregion raises Error {
+    owner_holds = null;
+    owner_touched = null;
+    owner_breaks = null;
+    owner_break_seen = false;
+    owner_conts = null;
+    owner_cont_seen = false;
+    owner_walk_div = false;
+    owner_file = fn.browse_file;
+    owner_seed(fn);
+    _d: bool = owner_stmt(fn.body);
+    owner_holds = null;
+    owner_touched = null
+}

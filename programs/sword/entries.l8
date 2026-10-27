@@ -1,0 +1,254 @@
+tag sword_internal;
+
+// Lexicons, dictionaries, glossaries and devotionals: entries by key, in
+// the order of their keys. NAME.idx gives each entry's place in NAME.dat
+// (start and size: 4+2 bytes, or 4+4 for RawLD4 and zLD). There the
+// entry's key comes first, up to a newline (or a backslash or CR, which
+// end it too), then its text; a text of "@LINK KEY" means KEY's entry.
+// zLD's text is instead a block and an entry in it (4+4 bytes): NAME.zdx
+// gives each block's start and size in NAME.zdt (4+4); a block decoded
+// is a count, then each entry's start and size in the block (4+4), then
+// the entries' texts.
+//
+// Keys are kept in capitals (unless the conf says CaseSensitiveKeys) and,
+// where a key is a Strong's number, padded with zeros to five digits (or
+// four after a G or H) unless StrongsPadding is false; key_module_find looks a
+// key up the same way.
+tag sword
+type KeyModule = tag sword_internal {
+    info: ModuleInfo;
+    compressed: bool;
+    wide: bool;
+    case_sensitive: bool;
+    strongs_padding: bool;
+    index: []i8;
+    data: []i8;
+    block_index: []i8;
+    blocks: []i8;
+    count: int
+}
+
+tag sword
+key_module_open(package: *ModulePackage@new) raises SwordError: *KeyModule@new {
+    compressed: bool = false;
+    wide: bool = false;
+    match package.info.storage {
+        ByKey s -> {
+            compressed = s.compressed;
+            wide = s.wide
+        }
+        _ -> raise SwordError { failure: SwordFailure.NotSupported }
+    }
+    match module_support(&package.info) {
+        Readable -> { }
+        Unreadable _ -> raise SwordError { failure: SwordFailure.NotSupported }
+    }
+    index: []i8 = package_data(package, ".idx");
+    width: int = if (wide) 8 else 6;
+    new KeyModule {
+        info: package.info,
+        compressed: compressed,
+        wide: wide,
+        case_sensitive: conf_value_or(package.conf, "CaseSensitiveKeys", "false") == "true",
+        strongs_padding: conf_value_or(package.conf, "StrongsPadding", "true") != "false",
+        index: index,
+        data: package_data(package, ".dat"),
+        block_index: if (compressed) package_data(package, ".zdx") else sword_empty,
+        blocks: if (compressed) package_data(package, ".zdt") else sword_empty,
+        count: len(index) / width
+    }
+}
+
+tag sword
+key_module_info(module: *KeyModule): *ModuleInfo@module {
+    &module.info
+}
+
+tag sword
+key_module_count(module: *KeyModule): int {
+    module.count
+}
+
+// Entry i's place in NAME.dat: where its key begins and its whole size.
+key_module_record_start(module: *KeyModule, i: int): int {
+    width: int = if (module.wide) 8 else 6;
+    sword_u32(module.index, i * width)
+}
+
+key_module_record_size(module: *KeyModule, i: int): int {
+    width: int = if (module.wide) 8 else 6;
+    if (module.wide) sword_u32(module.index, i * width + 4) else sword_u16(module.index,
+        i * width + 4)
+}
+
+// Where the key of the record at start (size bytes) in NAME.dat ends.
+key_module_key_end(module: *KeyModule, start: int, size: int): int {
+    end: int = start;
+    limit: int = if (start + size <= len(module.data)) start + size else len(module.data);
+    while (end < limit && module.data[end] as int != 92 && module.data[end] as int != 10 && module.data[end] as int != 13) end = end + 1;
+    end
+}
+
+// Entry i's key, as the module keeps it (in capitals, Strong's padded).
+tag sword
+key_module_key(module: *KeyModule, i: int) raises SwordError: str@new {
+    if (i < 0 || i >= module.count) raise SwordError { failure: SwordFailure.BadKey };
+    start: int = key_module_record_start(module, i);
+    size: int = key_module_record_size(module, i);
+    if (start + size > len(module.data)) raise SwordError { failure: SwordFailure.BadIndex { ending: ".idx", at: i } };
+    text: []i8 = entry_utf8(module.info.utf8, module.data, start, key_module_key_end(module,
+        start, size));
+    sword_text(text, 0, len(text))
+}
+
+// The key as the module would keep it: in capitals (Latin letters) and,
+// where it is a Strong's number, padded.
+tag sword
+key_module_normal(module: *KeyModule, key: str): str@new {
+    raw: []i8 = bytes(key);
+    n: int = len(raw);
+    if (!module.case_sensitive) {
+        for i in 0..n {
+            k: int = raw[i] as int & 255;
+            if (k >= 97 && k <= 122) raw[i] = (k - 32) trunc i8
+        }
+    }
+    if (!module.strongs_padding || n == 0 || n >= 9) return sword_text(raw, 0, n);
+    prefixed: bool = raw[0] as int == 71 || raw[0] as int == 72;
+    first: int = if (prefixed) 1 else 0;
+    digits: int = 0;
+    while (first + digits < n && raw[first + digits] as int >= 48 && raw[first + digits] as int <= 57) digits = digits + 1;
+    rest: int = n - first - digits;
+    if (digits == 0 || rest > 2) return sword_text(raw, 0, n);
+    width: int = if (prefixed) 4 else 5;
+    // (Its number, without leading zeros, then padded to width.)
+    lead: int = first;
+    while (lead < first + digits - 1 && raw[lead] as int == 48) lead = lead + 1;
+    significant: int = first + digits - lead;
+    pad: int = if (significant < width) width - significant else 0;
+    out: []i8 = new i8[first + pad + significant + rest](48i8);
+    if (prefixed) out[0] = raw[0];
+    for k in 0..significant out[first + pad + k] = raw[lead + k];
+    for k in 0..rest {
+        tail: int = raw[first + digits + k] as int & 255;
+        out[first + pad + significant + k] = (if (tail >= 97 && tail <= 122) tail - 32 else tail) trunc i8
+    }
+    sword_text(out, 0, len(out))
+}
+
+// How entry i's key compares with key (bytes): below 0, 0 or above.
+key_module_compare(module: *KeyModule, i: int, key: str): int {
+    start: int = key_module_record_start(module, i);
+    end: int = key_module_key_end(module, start, key_module_record_size(module, i));
+    at: int = 0;
+    p: int = start;
+    while (p < end && at < len(key)) {
+        a: int = module.data[p] as int & 255;
+        b: int = key[at] as int & 255;
+        if (a != b) return a - b;
+        p = p + 1;
+        at = at + 1
+    }
+    if (p < end) 1 else if (at < len(key)) -1 else 0
+}
+
+// The first entry whose key is not before key (normalized as the module
+// keeps keys): where a search for it would begin; key_module_count if none.
+tag sword
+key_module_seek(module: *KeyModule, key: str): int {
+    normal: str = key_module_normal(module, key);
+    low: int = 0;
+    high: int = module.count;
+    while (low < high) {
+        middle: int = (low + high) / 2;
+        if (key_module_compare(module, middle, normal) < 0) low = middle + 1 else high = middle
+    }
+    low
+}
+
+// The entry whose key is key (-1: none).
+tag sword
+key_module_find(module: *KeyModule, key: str): int {
+    at: int = key_module_seek(module, key);
+    if (at < module.count && key_module_compare(module, at, key_module_normal(module,
+        key)) == 0) at else -1
+}
+
+// Entry i's text as UTF-8, its links followed (at most 8).
+tag sword
+key_module_text(module: *KeyModule, i: int) raises SwordError: []i8@new {
+    entry: int = i;
+    for _link in 0..8 {
+        if (entry < 0 || entry >= module.count) raise SwordError { failure: SwordFailure.BadKey };
+        start: int = key_module_record_start(module, entry);
+        size: int = key_module_record_size(module, entry);
+        if (start + size > len(module.data)) raise SwordError { failure: SwordFailure.BadIndex { ending: ".idx", at: entry } };
+        // (Its text: after the key's line.)
+        text_at: int = start;
+        while (text_at < start + size && module.data[text_at] as int != 10) text_at = text_at + 1;
+        text_at = text_at + 1;
+        end: int = start + size;
+        if (text_at > end) text_at = end;
+        target: int = key_module_link(module, text_at, end);
+        if (target == -2) {
+            if (!module.compressed) return entry_utf8(module.info.utf8, module.data,
+                text_at, end);
+            if (end - text_at < 8) raise SwordError { failure: SwordFailure.BadIndex { ending: ".dat", at: entry } };
+            return key_module_block_text(module, sword_u32(module.data, text_at),
+                sword_u32(module.data, text_at + 4))
+        }
+        entry = target
+    }
+    raise SwordError { failure: SwordFailure.BadKey }
+}
+
+// If the text from up to end is "@LINK KEY", KEY's entry (-1 none such);
+// -2 if it is not a link.
+key_module_link(module: *KeyModule, from: int, end: int): int {
+    link: str = "@LINK ";
+    if (end - from < len(link)) return -2;
+    for k in 0..len(link)
+        if (module.data[from + k] != link[k]) return -2;
+    target_end: int = from + len(link);
+    while (target_end < end && module.data[target_end] as int != 10 && module.data[target_end] as int != 13) target_end = target_end + 1;
+    target: str = sword_text(module.data, from + len(link), target_end);
+    key_module_find(module, target)
+}
+
+// Entry entry of zLD block block, decoded.
+key_module_block_text(module: *KeyModule, block: int, entry: int) raises SwordError: []i8@new {
+    at: int = block * 8;
+    if (block < 0 || at + 8 > len(module.block_index)) raise SwordError { failure: SwordFailure.BadIndex { ending: ".zdx", at: at } };
+    start: int = sword_u32(module.block_index, at);
+    count: int = sword_u32(module.block_index, at + 4);
+    if (start + count > len(module.blocks)) raise SwordError { failure: SwordFailure.BadIndex { ending: ".zdx", at: at } };
+    decoded: []i8 = key_module_block(module, start, count, block);
+    if (len(decoded) < 4 || entry >= sword_u32(decoded, 0)) raise SwordError { failure: SwordFailure.BadBlock { ending: ".zdt", block: block } };
+    meta: int = 4 + entry * 8;
+    if (meta + 8 > len(decoded)) raise SwordError { failure: SwordFailure.BadBlock { ending: ".zdt", block: block } };
+    text_start: int = sword_u32(decoded, meta);
+    text_size: int = sword_u32(decoded, meta + 4);
+    if (text_start + text_size > len(decoded)) raise SwordError { failure: SwordFailure.BadBlock { ending: ".zdt", block: block } };
+    entry_utf8(module.info.utf8, decoded, text_start, text_start + text_size)
+}
+
+// A zLD block, decoded; its size is unrecorded, so a zlib block is
+// measured as it is decoded (an LZSS one cannot be: module_support says
+// such a module can't be read).
+key_module_block(
+    module: *KeyModule,
+    start: int,
+    count: int,
+    block: int
+) raises SwordError: []i8@new {
+    match module.info.compression {
+        Zip -> {
+            try {
+                deflate::zlib_decompress_leading(module.blocks, start, count, -1)
+            } with deflate::DeflateError _error -> {
+                raise SwordError { failure: SwordFailure.BadBlock { ending: ".zdt", block: block } }
+            }
+        }
+        _ -> raise SwordError { failure: SwordFailure.NotSupported }
+    }
+}

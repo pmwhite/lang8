@@ -173,8 +173,85 @@ http_path(id: int) {
     path_end()
 }
 
+// ---- kept files read back for core (HostIO.read_kept) ----
+// Each read asked for: its id and kept name, answered in the loop (got ID
+// SIZE) and forgotten once its file is taken. Core reads a module's file
+// once at a time (the catalog, each module opened): far fewer than
+// KEPT_READS_MOST are ever waiting; past it, a read is answered as a file
+// that is not there (-1), which core reports.
+KEPT_READS_MOST: int = 32;
+
+// The longest kept name a read can be asked for (a module's package:
+// shelf-NAME.zip).
+KEPT_READ_NAME_MOST: int = 64;
+
+kept_read_ids: []int = new int[KEPT_READS_MOST](0);
+
+kept_read_names: []i8 = new i8[KEPT_READS_MOST * KEPT_READ_NAME_MOST](0i8);
+
+kept_read_lens: []int = new int[KEPT_READS_MOST](0);
+
+kept_reads_n: int = 0;
+
+kept_reads_said: int = 0;
+
+android_read_kept(id: int, name: []i8, name_n: int) {
+    if (kept_reads_n >= KEPT_READS_MOST || name_n > KEPT_READ_NAME_MOST) {
+        fbuf_n = 0;
+        fput_str("got ");
+        fput_int(id);
+        fput_str(" -1\n");
+        // (Answered with the asks: core's host reads it next.)
+        for i in 0..fbuf_n {
+            if (late_n < len(late)) {
+                late[late_n] = fbuf[i];
+                late_n = late_n + 1
+            }
+        }
+        return
+    }
+    kept_read_ids[kept_reads_n] = id;
+    for i in 0..name_n kept_read_names[kept_reads_n * KEPT_READ_NAME_MOST + i] = name[i];
+    kept_read_lens[kept_reads_n] = name_n;
+    kept_reads_n = kept_reads_n + 1
+}
+
+// Lines answered at once (a read that couldn't wait), sent with the asks.
+late: []i8 = new i8[4096](0i8);
+
+late_n: int = 0;
+
+kept_read_find(id: int): int {
+    for k in 0..kept_reads_n
+        if (kept_read_ids[k] == id) return k;
+    -1
+}
+
+// Kept read k's path.
+kept_read_path(k: int) {
+    path_begin();
+    for i in 0..kept_read_lens[k] path_put(kept_read_names[k * KEPT_READ_NAME_MOST + i] as int);
+    path_end()
+}
+
+kept_read_forget(k: int) {
+    for j in k..kept_reads_n - 1 {
+        kept_read_ids[j] = kept_read_ids[j + 1];
+        kept_read_lens[j] = kept_read_lens[j + 1];
+        for i in 0..KEPT_READ_NAME_MOST kept_read_names[j * KEPT_READ_NAME_MOST + i] = kept_read_names[(j + 1) * KEPT_READ_NAME_MOST + i]
+    }
+    kept_reads_n = kept_reads_n - 1;
+    if (kept_reads_said > k) kept_reads_said = kept_reads_said - 1
+}
+
 // File or answer id into out: its length.
 android_file(id: int, out: []i8): int {
+    k: int = kept_read_find(id);
+    if (k >= 0) {
+        kept_read_path(k);
+        kept_read_forget(k);
+        return path_read(out)
+    }
     if (id >= ASKED_MOST) http_path(id) else {
         asked_path(id, false);
         if (path_size() < 0) asked_path(id, true)
@@ -182,11 +259,30 @@ android_file(id: int, out: []i8): int {
     path_read(out)
 }
 
-// The asks answered: each `got ID SIZE` (-1: not there), as lines core's
-// host reads next; whether there were any.
+// The asks answered (and the kept reads): each `got ID SIZE` (-1: not
+// there), as lines core's host reads next; whether there were any.
 answer_asks(): bool {
-    if (waiting_n == 0) return false;
+    if (waiting_n == 0 && kept_reads_said >= kept_reads_n && late_n == 0) return false;
     n: int = 0;
+    for i in 0..late_n {
+        hs_inbox[n] = late[i];
+        n = n + 1
+    }
+    late_n = 0;
+    while (kept_reads_said < kept_reads_n) {
+        kept_read_path(kept_reads_said);
+        fbuf_n = 0;
+        fput_str("got ");
+        fput_int(kept_read_ids[kept_reads_said]);
+        fput(32);
+        fput_int(path_size());
+        fput(10);
+        for i in 0..fbuf_n {
+            hs_inbox[n] = fbuf[i];
+            n = n + 1
+        }
+        kept_reads_said = kept_reads_said + 1
+    }
     for w in 0..waiting_n {
         id: int = waiting[w];
         asked_path(id, false);
@@ -312,6 +408,7 @@ main() noregion: int {
         http: &android_http,
         file: &android_file,
         fetch: &android_fetch,
+        read_kept: &android_read_kept,
         say: &android_say
     };
     begun: bool = false;

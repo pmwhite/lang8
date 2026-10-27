@@ -118,9 +118,10 @@ async function httpGet(id, url) {
   send(`http ${id} ${status} ${bytes.length}`);
 }
 
-// ---- recordings held (core/held.l8): each fetched through the site's
-// Worker (the readers' hosts give pages no access to their files) and kept
-// in the browser's cache under /read/held/NAME, never fetched as such ----
+// ---- what core fetches to keep (core/held.l8's recordings, core/shelf.l8's
+// modules): each fetched through the site's Worker (their hosts give pages
+// no access to their files) and kept in the browser's cache under
+// /read/held/NAME, never fetched as such; read back for core by name ----
 const HELD = "sb-held";
 const heldKey = (name) => new Request(`/read/held/${encodeURIComponent(name)}`);
 
@@ -128,7 +129,7 @@ async function fetchHeld(id, url, name) {
   let status = 0;
   let size = 0;
   try {
-    const r = await fetch(`${API}audio/relay?u=${encodeURIComponent(url)}`, { headers: { "X-Smooth-Bible": "web (1)" } });
+    const r = await fetch(`${API}relay?u=${encodeURIComponent(url)}`, { headers: { "X-Smooth-Bible": "web (1)" } });
     status = r.status;
     if (r.ok && r.body) {
       const total = Number(r.headers.get("content-length")) || 0;
@@ -145,14 +146,26 @@ async function fetchHeld(id, url, name) {
           send(`fetching ${id} ${size} ${total}`);
         }
       }
-      const blob = new Blob(parts, { type: "audio/mpeg" });
-      await (await caches.open(HELD)).put(heldKey(name), new Response(blob, { headers: { "content-type": "audio/mpeg" } }));
+      const type = r.headers.get("content-type") || "application/octet-stream";
+      const blob = new Blob(parts, { type });
+      await (await caches.open(HELD)).put(heldKey(name), new Response(blob, { headers: { "content-type": type } }));
       keepStorage("sb.held");
     }
   } catch {
     size = 0;
   }
   send(`fetched ${id} ${status} ${status === 200 ? size : 0}`);
+}
+
+// A kept file read back for core as id (`got ID SIZE`; -1: not kept).
+async function readHeld(id, name) {
+  let bytes = null;
+  try {
+    const hit = await (await caches.open(HELD)).match(heldKey(name));
+    if (hit) bytes = new Uint8Array(await hit.arrayBuffer());
+  } catch {}
+  if (bytes) files.set(id, bytes);
+  send(`got ${id} ${bytes ? bytes.length : -1}`);
 }
 
 // A held recording as an address the player can seek in (none: not held).
@@ -213,6 +226,9 @@ const imports = {
   },
   bw_http(id, b, n) {
     httpGet(Number(id), dec.decode(this.bytes().slice(Number(b), Number(b) + Number(n))));
+    return 0n;
+  },  bw_read_kept(id, name, nameN) {
+    readHeld(Number(id), dec.decode(this.bytes().slice(Number(name), Number(name) + Number(nameN))));
     return 0n;
   },
   bw_fetch(id, b, n, name, nameN) {

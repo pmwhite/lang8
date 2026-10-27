@@ -32,6 +32,10 @@ tag compiler_internal;
 // stored, returned, or passed except to write/read or a self-bound parameter.
 // `region { }` saves the bump pointer and restores it on exit, return, and
 // exception unwind. `new` inside is in that heap generation. Nested regions nest.
+// `owned *T` is a unique handle for an arena whose root is `*T`. `own { }`
+// allocates into a fresh arena and yields the handle; `borrow` names the root
+// inside its block; `allocate` selects that arena for `new`; `move` transfers
+// the handle; `drop` frees it when nothing is borrowing it.
 // Exception payloads are allocated off the rewindable heap. A payload may hold
 // immortal pointers, or heaptop pointers. A function that stashes `new` into
 // immortal storage (a global, exception payload, or immortal parameter) must be
@@ -87,6 +91,7 @@ type Type =
     | Str
     | OptStr
     | Ptr { base: *Type }
+    | Owned { base: *Type, optional: bool }
     | Refined { base: *Type, invariant: *TypeInvariant }
     | Slice { base: *Type }
     | OptSlice { base: *Type }
@@ -178,6 +183,8 @@ type ExnDef = {
 
 type ExnList = {
     exn: *ExnDef;
+    source_file: int;
+    source_pos: int;
     seen: bool;
     next: ?*ExnList
 }
@@ -283,6 +290,8 @@ type TokKind =
     | For
     | In
     | Return
+    | Break
+    | Continue
     | TypeKw
     | Sizeof
     | As
@@ -304,6 +313,16 @@ type TokKind =
     | Lt
     | Gt
     | Assign
+    | AddAssign
+    | SubAssign
+    | MulAssign
+    | DivAssign
+    | ModAssign
+    | AndAssign
+    | OrAssign
+    | XorAssign
+    | ShlAssign
+    | ShrAssign
     | Not
     | Amp
     | LParen
@@ -366,14 +385,25 @@ type MatchArm = {
     is_literal: bool;
     binder: ?*Obj;
     binder_name: []i8;
+    // Where binder_name is written, or 0 without a binder.
+    binder_pos: int;
     body: *Stmt;
     next: ?*MatchArm;
     lead: ?*Com;
     trail: ?*Com;
     pos: int;
     file: int;
-    toklen: int;
-    end: int
+    toklen: int
+}
+
+// Where a match is written, kept to resolve its arms once its subject is
+// typed: a subject naming an inferred local has no type while parsing.
+type MatchSite = {
+    file: int;
+    // The closing brace, where missing arms are reported.
+    close_pos: int;
+    // Null when parsing only for formatting.
+    representation: ?*RepresentationSite
 }
 
 type CatchArm = {
@@ -406,6 +436,12 @@ type BinOp =
     | Gt
     | Ge
 
+type CompoundAssignment = {
+    op: BinOp;
+    address: *Obj;
+    value: *Obj
+}
+
 type ExprKind =
     | Num {
         val: int,
@@ -416,7 +452,7 @@ type ExprKind =
     | Null
     | Var { var: ?*Obj, name: []i8, member: ?*Member }
     | Binary { op: BinOp, lhs: *Expr, rhs: *Expr }
-    | Assign { lhs: *Expr, rhs: *Expr }
+    | Assign { lhs: *Expr, rhs: *Expr, compound: ?*CompoundAssignment }
     | FuncAddr { name: []i8, fn: ?*Function }
     | Addr { lhs: *Expr }
     | Deref { lhs: *Expr }
@@ -458,13 +494,10 @@ type ExprKind =
         inits: ?*FieldInit
     }
     | If { cond: *Expr, then: *Expr, els: *Expr }
-    | Match {
-        cond: *Expr,
-        arms: ?*MatchArm,
-        // Tag context of the match brace; null when parsing only for formatting.
-        representation: ?*RepresentationSite
-    }
+    | Match { cond: *Expr, arms: ?*MatchArm, site: *MatchSite }
     | Block { body: ?*Stmt }
+    | Own { body: *Stmt, slot: *Obj }
+    | Move { lhs: *Expr }
     | Sizeof { ty: ?*Type, e: ?*Expr }
     | ArrayLit { elems: ?*Expr }
 
@@ -475,6 +508,9 @@ type Expr = {
     pos: int;
     file: int;
     toklen: int;
+    // Written expression span, separate from the token span used by browse.
+    source_start: int;
+    source_end: int;
     // Frame offset of this expression's aggregate temporary, or 0.
     cg_temp: int;
     // Call argument label and original source position within the argument list.
@@ -486,10 +522,13 @@ type Expr = {
 
 type StmtKind =
     | Return { lhs: ?*Expr }
+    | Break
+    | Continue
     | If { cond: *Expr, then: *Stmt, els: ?*Stmt }
-    | While { cond: *Expr, body: *Stmt }
+    | While { cond: *Expr, body: *Stmt, has_break: bool }
     | For {
         item: *Obj,
+        index: ?*Obj,
         coll: ?*Obj,
         idx: ?*Obj,
         n: *Obj,
@@ -506,12 +545,7 @@ type StmtKind =
         init: ?*Expr,
         var: ?*Obj
     }
-    | Match {
-        cond: *Expr,
-        arms: ?*MatchArm,
-        // Tag context of the match brace; null when parsing only for formatting.
-        representation: ?*RepresentationSite
-    }
+    | Match { cond: *Expr, arms: ?*MatchArm, site: *MatchSite }
     | Raise {
         name: []i8,
         exn: ?*ExnDef,
@@ -520,6 +554,15 @@ type StmtKind =
     }
     | Try { body: *Stmt, arms: ?*CatchArm, buf: *Obj }
     | Region { body: *Stmt, mark: *Obj }
+    // place is the owner variable, or an element of a []?owned *T.
+    | Borrow {
+        place: *Expr,
+        shadow: *Obj,
+        header: *Obj,
+        body: *Stmt
+    }
+    | Allocate { owner: *Obj, header: ?*Obj, body: *Stmt }
+    | Drop { target: *Expr }
     | Expect { site: *ExpectSite }
 
 type Stmt = {
@@ -555,12 +598,23 @@ type Obj = {
     param_label: []i8;
     hash_next: ?*Obj;
     life: int;
+    // Parameter lifetime carried by a match or for copy. Kept off `life` so a
+    // later heap value in the same local stays comparable.
+    carried_life: int;
     storage_life: int;
     life_bound: []i8;
     // Declaration position fits the padding before the last-use boundary.
     bound_need_imm: bool;
     bound_need_new: bool;
+    // Allocations from the call's destination are stored into what this
+    // parameter points at (a builder grown), so its argument must not
+    // outlive that destination.
+    bound_holds_new: bool;
+    // Set when a copy carries the address of a local without joining the taint list.
+    is_tainted: bool;
     bound_named: ?*Obj;
+    declared_type_pos: int;
+    declared_type_end: int;
     browse_id: int;
     browse_pos: int;
     browse_file: int;
@@ -575,12 +629,49 @@ type Obj = {
 type BoundCall = {
     caller_param: *Obj;
     callee_param: *Obj;
+    allocation_bound: int;
     next: ?*BoundCall
+}
+
+// An argument to a callee's @new parameter that outlives the call's
+// allocation destination: an error once the parameter is known to hold
+// what the callee allocates (bound_holds_new), unless the argument is
+// immortal and the caller allocates from the process heap (it becomes
+// noregion). A function value's @new parameters are taken to hold.
+type HeldArgument =
+    | Outlives
+    | Immortal
+
+type HoldCheck = {
+    callee_name: []i8;
+    callee_param: *Obj;
+    // The callee is a function value (its body unknown).
+    indirect: bool;
+    argument: HeldArgument;
+    file: int;
+    pos: int;
+    span: int;
+    next: ?*HoldCheck
 }
 
 type CallEdge = {
     callee: *Function;
     next: ?*CallEdge
+}
+
+type NoregionReason =
+    | GlobalStore { name: []i8 }
+    | Store
+    | Payload
+    | Argument { callee: []i8, parameter: []i8 }
+    | HeldArgument { callee: []i8, parameter: []i8 }
+    | Call { callee: []i8 }
+
+type NoregionCause = {
+    file: int;
+    pos: int;
+    span: int;
+    reason: NoregionReason
 }
 
 type Function = {
@@ -603,10 +694,12 @@ type Function = {
     ret_bound: []i8;
     ret_life: int;
     need_imm_heap: int;
+    noregion_cause: ?*NoregionCause;
     decl_imm_heap: int;
     bound_ret_need_new: bool;
     bound_ret_param: ?*Obj;
     bound_calls: ?*BoundCall;
+    hold_checks: ?*HoldCheck;
     callees: ?*CallEdge;
     browse_id: int;
     browse_pos: int;
@@ -845,6 +938,8 @@ scope_depth: int = 0;
 
 region_depth: int = 0;
 
+owner_read_ok: int = 0;
+
 functions: ?*Function = null;
 
 unused_functions: ?*UnusedFunction = null;
@@ -862,6 +957,10 @@ LIFE_SELF: int = 2;
 const LIFE_MAX: int = 256;
 
 LIFE_KIND_PARAM: int = 3;
+
+// Not a parameter. Kind 3 is a caller's borrow, which may be stored into the
+// callee's locals; an arena pointer must not escape that way.
+LIFE_KIND_ARENA: int = 4;
 
 type LifeArrays = {
     parent: []int;
@@ -1003,8 +1102,6 @@ do_profile: bool = false;
 
 // Whether a[i] checks its index at run time (`--unchecked-index` clears it).
 check_index_mode: bool = true;
-
-mark_nerr: int = 0;
 
 current_fn_name: []i8 = "";
 
@@ -1169,7 +1266,7 @@ emit_flush() {
     }
 }
 
-emit(s: []i8) raises Error {
+emit(s: []i8) noregion raises Error {
     n: int = len(s);
     if (n <= 0) return;
     if (n > emit_cap) {
@@ -1182,19 +1279,19 @@ emit(s: []i8) raises Error {
     sb_puts(&emit_state, s)
 }
 
-emit_ch(c: i8) raises Error {
+emit_ch(c: i8) noregion raises Error {
     if (emit_state.used >= emit_cap) emit_flush();
     sb_putc(&emit_state, c)
 }
 
-emit_digits(n: int) raises Error {
+emit_digits(n: int) noregion raises Error {
     if (n <= -10 || n >= 10) emit_digits(n / 10);
     digit: int = n % 10;
     if (digit < 0) digit = 0 - digit;
     emit_ch(('0' as int + digit) trunc i8)
 }
 
-emit_num(n: int) raises Error {
+emit_num(n: int) noregion raises Error {
     if (n < 0) emit_ch('-');
     emit_digits(n)
 }
@@ -1231,35 +1328,35 @@ error(msg: []i8@immortal) raises Error: noreturn {
     diag_stmt_pos = 0;
     if (e > 0) error_at_file(diag_expr_file, e, msg);
     if (s > 0) error_at_file(diag_stmt_file, s, msg);
-    raise Error {
+    raise Error { diagnostic: Diagnostic.Located {
         msg: msg,
         pos: tok.pos,
         path: source_path,
         src: source,
         src_len: source_len
-    }
+    } }
 }
 
 error_at(p: int, msg: []i8@immortal) raises Error: noreturn {
-    raise Error {
+    raise Error { diagnostic: Diagnostic.Located {
         msg: msg,
         pos: p,
         path: source_path,
         src: source,
         src_len: source_len
-    }
+    } }
 }
 
 error_at_file(file: int, p: int, msg: []i8@immortal) raises Error: noreturn {
     f: ?*ImportedFile = imported_files;
     while (f != null) {
-        if (f.id == file) raise Error {
+        if (f.id == file) raise Error { diagnostic: Diagnostic.Located {
             msg: msg,
             pos: p,
             path: f.path,
             src: f.src,
             src_len: f.src_len
-        };
+        } };
         f = f.next
     }
     error_at(p, msg)
@@ -1304,6 +1401,14 @@ print_diag_path(path: []i8) {
         raw::raw_write_bytes(2, diag_relative(path))
     } with Error _e -> {
         raw::raw_write_bytes(2, path)
+    }
+}
+
+print_diagnostic(diagnostic: Diagnostic) {
+    match diagnostic {
+        Located location -> print_error_at(location.path, location.src, location.src_len,
+            location.pos, location.msg);
+        Document document -> raw::raw_write_bytes(2, document.text)
     }
 }
 
@@ -1463,7 +1568,10 @@ sb_puts(sb: *StrBuf@new, s: []i8) raises Error {
 sb_uint(sb: *StrBuf@new, n: int) raises Error {
     if (n < 0) {
         sb_putc(sb, '-');
-        n = 0 - n
+        // Negate the quotient and remainder separately so the minimum int fits.
+        if (n <= -10) sb_uint(sb, 0 - n / 10);
+        sb_putc(sb, ('0' as int - n % 10) trunc i8);
+        return
     }
     if (n >= 10) sb_uint(sb, n / 10);
     d: int = n % 10;
@@ -1621,6 +1729,12 @@ append_type(sb: *StrBuf@immortal, t: ?*Type) raises Error {
             append_type(sb, k.base);
             return
         }
+        Owned k -> {
+            if (k.optional) sb_putc(sb, '?');
+            sb_puts(sb, "owned *");
+            append_type(sb, k.base);
+            return
+        }
         Refined k -> {
             if (type_invariant_plain_nonnull(k.invariant)) {
                 match k.base.* {
@@ -1664,6 +1778,125 @@ append_type(sb: *StrBuf@immortal, t: ?*Type) raises Error {
             return
         }
     }
+}
+
+check_call_argument_count(call: *Expr, callee: []i8, expected: int) noregion raises Error {
+    match call.kind {
+        Funcall invocation -> check_argument_count(call, invocation.args, callee,
+            expected);
+        _ -> error("internal: expected a function call")
+    }
+}
+
+// Labeled arguments are bound to parameter order first; count that list.
+check_argument_count(
+    call: *Expr,
+    arguments: ?*Expr,
+    callee: []i8,
+    expected: int
+) noregion raises Error {
+    actual: int = 0;
+    argument: ?*Expr = arguments;
+    while (argument != null) {
+        actual = actual + 1;
+        argument = argument.next
+    }
+    if (actual == expected) return;
+    message: *StrBuf = sb_new();
+    sb_puts(message, callee);
+    sb_puts(message, " expects ");
+    sb_uint(message, expected);
+    if (expected == 1) sb_puts(message, " argument, got ") else sb_puts(message, " arguments, got ");
+    sb_uint(message, actual);
+    error_at_file(call.file, call.pos, sb_finish(message))
+}
+
+error_unknown_variant_at(
+    file: int,
+    pos: int,
+    enum_def: *EnumDef,
+    variant_name: []i8
+) noregion raises Error: noreturn {
+    message: *StrBuf = sb_new();
+    sb_puts(message, "unknown variant ");
+    sb_puts(message, variant_name);
+    sb_puts(message, " in ");
+    sb_puts(message, enum_def.name);
+    sb_puts(message, "; available variants: ");
+    available: ?*Variant = enum_def.variants;
+    while (available != null) {
+        sb_puts(message, available.name);
+        available = available.next;
+        if (available != null) sb_puts(message, ", ")
+    }
+    error_at_file(file, pos, sb_finish(message))
+}
+
+append_member_names(message: *StrBuf@new, members: ?*Member) raises Error {
+    member: ?*Member = members;
+    while (member != null) {
+        sb_puts(message, member.name);
+        member = member.next;
+        if (member != null) sb_puts(message, ", ")
+    }
+}
+
+error_unknown_member_at(
+    file: int,
+    pos: int,
+    type_name: []i8,
+    members: ?*Member,
+    member_name: []i8
+) noregion raises Error: noreturn {
+    message: *StrBuf = sb_new();
+    sb_puts(message, "unknown member ");
+    sb_puts(message, member_name);
+    sb_puts(message, " in ");
+    sb_puts(message, type_name);
+    sb_puts(message, "; available fields: ");
+    append_member_names(message, members);
+    error_at_file(file, pos, sb_finish(message))
+}
+
+error_unknown_exception(exception_name: []i8) noregion raises Error: noreturn {
+    message: *StrBuf = sb_new();
+    sb_puts(message, "unknown exception ");
+    sb_puts(message, exception_name);
+    error(sb_finish(message))
+}
+
+error_variant_requires_fields_at(file: int, pos: int, variant: *Variant) noregion raises Error: noreturn {
+    message: *StrBuf = sb_new();
+    sb_puts(message, "variant ");
+    sb_puts(message, variant.name);
+    sb_puts(message, " requires field initializers: ");
+    append_member_names(message, variant.fields);
+    error_at_file(file, pos, sb_finish(message))
+}
+
+error_unit_variant_at(file: int, pos: int, variant: *Variant) noregion raises Error: noreturn {
+    message: *StrBuf = sb_new();
+    sb_puts(message, "unit variant ");
+    sb_puts(message, variant.name);
+    sb_puts(message, " does not take fields");
+    error_at_file(file, pos, sb_finish(message))
+}
+
+error_exception_requires_fields_at(file: int, pos: int, exception_def: *ExnDef) noregion raises Error: noreturn {
+    message: *StrBuf = sb_new();
+    sb_puts(message, "exception ");
+    sb_puts(message, exception_def.name);
+    sb_puts(message, " requires field initializers: ");
+    append_member_names(message, exception_def.members);
+    error_at_file(file, pos, sb_finish(message))
+}
+
+error_unit_exception_at(file: int, pos: int, exception_def: *ExnDef) noregion raises Error: noreturn {
+    message: *StrBuf = sb_new();
+    sb_puts(message, "unit exception ");
+    sb_puts(message, exception_def.name);
+    sb_puts(message, " does not take fields");
+    error_at_file(file, pos, sb_finish(message))
 }
 
 error_ty(msg: []i8, t: ?*Type) noregion raises Error: noreturn {
@@ -1743,7 +1976,24 @@ append_expr_ty(sb: *StrBuf@immortal, e: ?*Expr) raises Error {
     append_type(sb, null)
 }
 
+argument_type_mismatch_message(callee: []i8, parameter_name: []i8) raises Error: []i8@new {
+    message: *StrBuf = sb_new();
+    sb_puts(message, "argument type mismatch for parameter ");
+    sb_puts(message, parameter_name);
+    sb_puts(message, " of ");
+    sb_puts(message, callee);
+    sb_finish(message)
+}
+
 error_have_expr_want(msg: []i8, have: ?*Expr, want: ?*Type) noregion raises Error: noreturn {
+    if (have != null && have.ty == null) {
+        match have.kind {
+            Assign assignment -> {
+                if (is_owned_ty(decay(assignment.lhs.ty))) error("owner assignment has no value; move the owner variable to transfer it")
+            }
+            _ -> { }
+        }
+    }
     sb: *StrBuf = sb_new();
     sb_puts(sb, msg);
     sb_puts(sb, ": have ");
@@ -2002,6 +2252,7 @@ type_size(t: *Type): int {
         F64 -> 8;
         Bool -> 1;
         Ptr _p -> 8;
+        Owned _p -> 8;
         Refined k -> type_size(k.base);
         Slice _p -> 8;
         OptSlice _p -> 8;
@@ -2349,7 +2600,7 @@ syntax_fields_after_brace(inner: *Token): bool {
     if (inner.kind != TokKind.Ident) return false;
     if (inner.next.kind != TokKind.Colon) return false;
     v: *Token = inner.next.next;
-    if (v.kind == TokKind.Ident && name_eq_span("fn", source, v.pos, v.len) && v.next.kind == TokKind.LParen || v.kind == TokKind.Int || v.kind == TokKind.I8 || v.kind == TokKind.I32 || v.kind == TokKind.U32 || v.kind == TokKind.F32 || v.kind == TokKind.F64 || v.kind == TokKind.Bool || v.kind == TokKind.Noreturn) return false;
+    if (v.kind == TokKind.Ident && name_eq_span("fn", source, v.pos, v.len) && v.next.kind == TokKind.LParen || v.kind == TokKind.Int || v.kind == TokKind.I8 || v.kind == TokKind.I32 || v.kind == TokKind.U32 || v.kind == TokKind.F32 || v.kind == TokKind.F64 || v.kind == TokKind.Bool || v.kind == TokKind.StrTy || v.kind == TokKind.Noreturn) return false;
     if (v.kind == TokKind.Star || v.kind == TokKind.Question || v.kind == TokKind.LBrack) return false;
     if (v.kind == TokKind.Ident) {
         n: TokKind = v.next.kind;
@@ -2374,8 +2625,14 @@ exn_stub(name: []i8@new): *ExnDef@new {
     }
 }
 
+token_is_owned(t: ?*Token): bool {
+    if (t == null) return false;
+    t.kind == TokKind.Ident && t.len == 5 && streq_n(source, t.pos, "owned", 0, 5)
+}
+
 starts_type(): bool {
     if (tok.kind == TokKind.LBrack) return true;
+    if (token_is_owned(tok)) return true;
     if (at_function_type() || tok.kind == TokKind.StrTy || tok.kind == TokKind.Int || tok.kind == TokKind.I8 || tok.kind == TokKind.I32 || tok.kind == TokKind.U32 || tok.kind == TokKind.F32 || tok.kind == TokKind.F64 || tok.kind == TokKind.Bool || is_type_name()) return true;
     t: ?*Token = tok;
     done: bool = false;
@@ -2386,7 +2643,11 @@ starts_type(): bool {
                 if (n1.kind == TokKind.StrTy) {
                     t = n1;
                     done = true
-                } else if (n1.kind == TokKind.Star) t = n1.next else {
+                } else if (n1.kind == TokKind.Star) t = n1.next else if (token_is_owned(n1)) {
+                    nstar: ?*Token = n1.next;
+                    if (nstar == null || nstar.kind != TokKind.Star) return false;
+                    t = nstar.next
+                } else {
                     if (n1.kind == TokKind.LBrack) {
                         n2: ?*Token = n1.next;
                         if (n2 != null) {
@@ -2607,11 +2868,39 @@ is_opt_slice(t: *Type): bool {
     }
 }
 
+is_owned_ty(t: ?*Type): bool {
+    if (t == null) return false;
+    match t.* {
+        Owned _ -> true;
+        _ -> false
+    }
+}
+
+is_opt_owned(t: ?*Type): bool {
+    if (t == null) return false;
+    match t.* {
+        Owned k -> k.optional;
+        _ -> false
+    }
+}
+
+owned_pointee(t: *Type) raises Error: *Type {
+    match t.* {
+        Owned k -> k.base;
+        _ -> error("not an owner")
+    }
+}
+
+owned_type(base: *Type@new, optional: bool): *Type@new {
+    new Type.Owned { base: base, optional: optional }
+}
+
 is_optional(t: *Type): bool {
-    is_opt_pointer(t) || is_opt_slice(t) || is_opt_str(t) || is_opt_fnptr(t)
+    is_opt_pointer(t) || is_opt_slice(t) || is_opt_str(t) || is_opt_fnptr(t) || is_opt_owned(t)
 }
 
 unwrap_optional(t: *Type) noregion raises Error: *Type@new {
+    if (is_owned_ty(t)) return owned_type(owned_pointee(t), false);
     match t.* {
         FnPtr k -> return new Type.FnPtr { fn: k.fn, optional: false };
         _ -> { }
@@ -2765,6 +3054,8 @@ assignable(to: ?*Type@from_n, from_n: ?*Expr) raises Error: bool {
             if (is_fnptr(to2) && is_fnptr(from2) && is_opt_fnptr(to2) && !is_opt_fnptr(from2)) return fnptr_signatures_equal(fnptr_function(to2),
                 fnptr_function(from2));
             if (is_opt_str(to2) && is_str(from2)) return true;
+            if (is_opt_owned(to2) && is_owned_ty(from2) && types_equal(owned_pointee(to2),
+                owned_pointee(from2))) return true;
             if (is_opt_pointer(to2) && (is_pointer(from2) || is_slice(from2)) && types_equal(type_base(from2),
                 type_base(to2))) return true;
             if (is_opt_slice(to2) && is_slice(from2) && types_equal(type_base(from2),
@@ -2936,7 +3227,8 @@ types_equal(a: *Type, b: *Type) raises Error: bool {
         type_base(b)) else if (is_slice(a) && is_slice(b)) types_equal(type_base(a),
         type_base(b)) else if (is_opt_slice(a) && is_opt_slice(b)) types_equal(type_base(a),
         type_base(b)) else if (is_str(a) && is_str(b) || is_opt_str(a) && is_opt_str(b)) true else if (is_array(a) && is_array(b)) array_len(a) == array_len(b) && types_equal(type_base(a),
-        type_base(b)) else if (is_struct_ty(a) && is_struct_ty(b)) type_struct_def(a) == type_struct_def(b) else if (is_enum_ty(a) && is_enum_ty(b)) type_enum_def(a) == type_enum_def(b) else if (is_exn_ty(a) && is_exn_ty(b)) type_exn_def(a) == type_exn_def(b) else false
+        type_base(b)) else if (is_owned_ty(a) && is_owned_ty(b)) is_opt_owned(a) == is_opt_owned(b) && types_equal(owned_pointee(a),
+        owned_pointee(b)) else if (is_struct_ty(a) && is_struct_ty(b)) type_struct_def(a) == type_struct_def(b) else if (is_enum_ty(a) && is_enum_ty(b)) type_enum_def(a) == type_enum_def(b) else if (is_exn_ty(a) && is_exn_ty(b)) type_exn_def(a) == type_exn_def(b) else false
 }
 
 is_numeric_ty(t: *Type): bool {
@@ -3025,35 +3317,40 @@ check_io_args(name: []i8, args: ?*Expr) noregion raises Error {
     error_have_want("I/O buf must be []i8 or *i8", t1, slice_of(ty_i8))
 }
 
-check_memcpy_args(args: ?*Expr) noregion raises Error {
+check_memcpy_args(call: *Expr) noregion raises Error {
+    check_call_argument_count(call, "memcpy", 5);
+    args: ?*Expr = null;
+    match call.kind {
+        Funcall invocation -> args = invocation.args;
+        _ -> error("internal: expected memcpy call")
+    }
     a0: ?*Expr = args;
-    if (a0 == null) error("memcpy takes five arguments");
+    if (a0 == null) error("internal: missing memcpy argument");
     a0u: *Expr = a0;
     a1: ?*Expr = a0u.next;
-    if (a1 == null) error("memcpy takes five arguments");
+    if (a1 == null) error("internal: missing memcpy argument");
     a1u: *Expr = a1;
     a2: ?*Expr = a1u.next;
-    if (a2 == null) error("memcpy takes five arguments");
+    if (a2 == null) error("internal: missing memcpy argument");
     a2u: *Expr = a2;
     a3: ?*Expr = a2u.next;
-    if (a3 == null) error("memcpy takes five arguments");
+    if (a3 == null) error("internal: missing memcpy argument");
     a3u: *Expr = a3;
     a4: ?*Expr = a3u.next;
-    if (a4 == null) error("memcpy takes five arguments");
+    if (a4 == null) error("internal: missing memcpy argument");
     a4u: *Expr = a4;
-    if (a4u.next != null) error("memcpy takes five arguments");
     t0: ?*Type = decay(a0u.ty);
     t1: ?*Type = decay(a1u.ty);
     t2: ?*Type = decay(a2u.ty);
     t3: ?*Type = decay(a3u.ty);
     t4: ?*Type = decay(a4u.ty);
-    if (t0 == null || !is_slice(t0) || !is_i8_ty(type_base(t0))) error_have_want("memcpy dst must be []i8",
-        t0, slice_of(ty_i8));
-    if (t1 == null || !is_int_ty(t1)) error_ty("memcpy di must be int", t1);
-    if (t2 == null || !is_str(t2) && (!is_slice(t2) || !is_i8_ty(type_base(t2)))) error_have_want("memcpy src must be str or []i8",
-        t2, slice_of(ty_i8));
-    if (t3 == null || !is_int_ty(t3)) error_ty("memcpy si must be int", t3);
-    if (t4 == null || !is_int_ty(t4)) error_ty("memcpy n must be int", t4)
+    if (t0 == null || !is_slice(t0) || !is_i8_ty(type_base(t0))) error_expression_requirement(a0u,
+        "memcpy destination must be mutable []i8");
+    if (t1 == null || !is_int_ty(t1)) error_expression_requirement(a1u, "memcpy destination offset must be int");
+    if (t2 == null || !is_str(t2) && (!is_slice(t2) || !is_i8_ty(type_base(t2)))) error_expression_requirement(a2u,
+        "memcpy source must be str or []i8");
+    if (t3 == null || !is_int_ty(t3)) error_expression_requirement(a3u, "memcpy source offset must be int");
+    if (t4 == null || !is_int_ty(t4)) error_expression_requirement(a4u, "memcpy byte count must be int")
 }
 
 check_trunc(from: ?*Type, to: ?*Type) noregion raises Error {
@@ -3190,8 +3487,9 @@ compiler_analyze(src_path: []i8@immortal) noregion raises Error {
         profile_mark("unused_locals");
         check_return_style()
     }
-    check_imm_heap_functions();
-    check_written_bounds();
+    lifetime_diagnostics: *LifetimeDiagnostics = new LifetimeDiagnostics { output: sb_new(), count: 0 };
+    check_imm_heap_functions(lifetime_diagnostics);
+    check_written_bounds(lifetime_diagnostics);
     check_raises_functions();
     profile_mark("raises");
     check_noreturn_functions();
@@ -3244,7 +3542,7 @@ compiler_build_direct(src_path: []i8@immortal) noregion: int {
         profile_mark("runtime");
         0
     } with Error e -> {
-        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        print_diagnostic(e.diagnostic);
         1
     }
 }
@@ -3266,7 +3564,7 @@ compiler_unused_main(argc: int, argv: []str) noregion: int {
         warn_unused_functions();
         0
     } with Error e -> {
-        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        print_diagnostic(e.diagnostic);
         1
     }
 }
@@ -3301,7 +3599,7 @@ compiler_main(argc: int, argv: []str) noregion: int {
         profile_end();
         0
     } with Error e -> {
-        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        print_diagnostic(e.diagnostic);
         1
     }
 }
@@ -3311,7 +3609,11 @@ import "tags.l8";
 
 import "parse.l8";
 
+import "diagnostics.l8";
+
 import "check.l8";
+
+import "owner.l8";
 
 import "callbacks.l8";
 

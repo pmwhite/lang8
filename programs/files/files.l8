@@ -12,6 +12,12 @@ extern files_unlink(path: str): i32 = unlink;
 
 extern files_close(descriptor: int): int = close;
 
+// (The L8 runtime's open and read are system calls: a failure is the
+// negated errno. lseek is libc's: -1, the cause in errno.)
+extern files_open(path: str, flags: int, mode: int): int = open;
+
+extern files_seek(descriptor: int, offset: int, whence: i32): int = lseek;
+
 extern files_errno(): *i32 = __errno_location;
 
 tag files
@@ -20,6 +26,8 @@ type FileOperation =
     | Write
     | Close
     | Replace
+    | Open
+    | Read
 
 tag files
 exception FileError {
@@ -65,7 +73,9 @@ file_operation_name(operation: FileOperation): str {
         CreateTemporary -> "create a temporary file";
         Write -> "write the replacement";
         Close -> "close the replacement";
-        Replace -> "replace the saved file"
+        Replace -> "replace the saved file";
+        Open -> "open the file";
+        Read -> "read the file"
     }
 }
 
@@ -104,5 +114,35 @@ replace_file_bytes(path: str, data: []i8, count: int) raises FileError {
     } with FileError error -> {
         cleanup_code: int = discard_temporary(&file);
         raise FileError { operation: error.operation, code: error.code, cleanup_code: cleanup_code }
+    }
+}
+
+// The whole file at path, read into a new slice exactly its length. Its
+// size is taken as it is opened: a file that grows meanwhile gives that
+// many bytes, and one that shrinks gives what was left.
+tag files
+read_file_bytes(path: str) raises FileError: []i8@new {
+    descriptor: int = files_open(path, 0, 0);
+    if (descriptor < 0) raise FileError { operation: FileOperation.Open, code: 0 - descriptor, cleanup_code: 0 };
+    try {
+        size: int = files_seek(descriptor, 0, 2i32);
+        if (size < 0 || files_seek(descriptor, 0, 0i32) < 0) raise FileError { operation: FileOperation.Read, code: files_errno().* as int, cleanup_code: 0 };
+        data: []i8 = new i8[size](0i8);
+        got: int = 0;
+        more: bool = true;
+        while (more && got < size) {
+            count: int = read(descriptor, data, got, size - got);
+            if (count < 0) raise FileError { operation: FileOperation.Read, code: 0 - count, cleanup_code: 0 };
+            if (count == 0) more = false else got = got + count
+        }
+        _closed: int = files_close(descriptor);
+        if (got == size) return data;
+        // (Shorter than it was: what was read.)
+        shorter: []i8 = new i8[got](0i8);
+        memcpy(shorter, 0, data, 0, got);
+        shorter
+    } with FileError error -> {
+        _closed: int = files_close(descriptor);
+        raise FileError { operation: error.operation, code: error.code, cleanup_code: 0 }
     }
 }

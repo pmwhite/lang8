@@ -243,6 +243,7 @@ parse_fnptr_type(optional: bool) noregion raises Error: *Type@new {
     saved_scope: ?*Obj = scope_locals;
     saved_depth: int = scope_depth;
     saved_region: int = region_depth;
+    saved_loop: ?*ParseLoop = parse_loop;
     saved_narrow: ?*NarrowFrame = narrow_top;
     saved_catch: ?*CatchFrame = catch_top;
     saved_fn: ?*Function = current_fn;
@@ -254,6 +255,7 @@ parse_fnptr_type(optional: bool) noregion raises Error: *Type@new {
     scope_locals = saved_scope;
     scope_depth = saved_depth;
     region_depth = saved_region;
+    parse_loop = saved_loop;
     narrow_top = saved_narrow;
     catch_top = saved_catch;
     current_fn = saved_fn;
@@ -368,7 +370,7 @@ call_source_arg(args: ?*Expr, order: int): ?*Expr@args {
     null
 }
 
-type_call_arguments(args: ?*Expr@new) noregion raises Error {
+type_call_arguments(args: ?*Expr@immortal) noregion raises Error {
     if (args != null && args.arg_index >= 0 && call_args_reordered(args)) {
         order: int = 0;
         argument: ?*Expr = call_source_arg(args, order);
@@ -421,20 +423,29 @@ type_indirect_call(p: *Expr) noregion raises Error {
             target: *Expr = target0 or error("missing function target");
             add_type(target);
             ty: *Type = target.ty or error("calling a value without a type");
-            if (!is_fnptr(ty)) error("indirect call requires a fn value");
-            if (is_opt_fnptr(ty)) error("optional function must be narrowed before calling");
+            if (!is_fnptr(ty)) {
+                message: *StrBuf = sb_new();
+                match target.kind {
+                    Var reference -> sb_puts(message, reference.name);
+                    _ -> sb_puts(message, "this expression")
+                }
+                sb_puts(message, " has type ");
+                append_type(message, ty);
+                sb_puts(message, ", which cannot be called");
+                error_at_file(target.file, target.pos, sb_finish(message))
+            }
+            if (is_opt_fnptr(ty)) error_nullable_use(target, "calling it");
             fn: *Function = fnptr_function(ty);
             type_call_arguments(args);
             args = bind_call_arguments(fn, args, p);
+            check_argument_count(p, args, "function value", fn.nparams);
             a: ?*Expr = args;
             po: ?*Obj = fn.params;
             while (a != null && po != null) {
-                if (!assignable(po.ty, a)) error_have_expr_want("function argument type mismatch",
-                    a, po.ty);
+                if (!assignable(po.ty, a)) error_call_argument_type(p, fn, a, po);
                 a = a.next;
                 po = po.param_next
             }
-            if (a != null || po != null) error("wrong number of function arguments");
             check_call_lifetimes(fn, args);
             er: ?*ExnList = fn.raises_list;
             while (er != null) {

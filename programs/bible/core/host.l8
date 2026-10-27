@@ -19,13 +19,16 @@ use_tag std;
 // Its lines to core, besides the wire: `got ID SIZE` (data file ID came, or
 // -1), `http ID STATUS SIZE` (a request's answer, its body file ID's), `api
 // BASE` (where the site's /api/v1/ is), and core/held.l8's `fetching`,
-// `fetched` and `network`. To the skin, besides core's lines: `ready` once
-// the reader's version and what is kept are read.
+// `fetched` and `network` (also core/shelf.l8's, for its fetches' ids).
+// To the skin, besides core's lines: `ready` once the reader's version
+// and what is kept are read.
 import "skin.l8";
 
 import "json.l8";
 
 import "held.l8";
+
+import "shelf.l8";
 
 type HostIO = {
     // Data file name asked for as id (it comes as `got ID SIZE`).
@@ -43,6 +46,12 @@ type HostIO = {
     // or copy url and name before returning. None: the platform cannot
     // keep recordings (Downloads is not offered).
     fetch: ?fn(id: int, url: []i8, url_n: int, name: []i8, name_n: int);
+    // The kept file named (name's first name_n bytes: one fetch kept) read
+    // as id: it comes as `got ID SIZE` (-1: there is no such file), its
+    // bytes by file(id). Consume or copy name before returning. None: the
+    // platform cannot read back what it fetches (the bookshelf is not
+    // offered).
+    read_kept: ?fn(id: int, name: []i8, name_n: int);
     // Lines to the skin: n bytes of b from start.
     say: fn(b: []i8, start: int, n: int)
 }
@@ -62,6 +71,7 @@ host_io: HostIO = HostIO {
     http: &hs_no_http,
     file: &hs_no_file,
     fetch: null,
+    read_kept: null,
     say: &hs_no_say
 };
 
@@ -131,6 +141,10 @@ hs_begun: bool = false;
 hs_asked_t: int = -1;
 
 hs_ask_version(t: int) {
+    if (t >= TEXT_SHELF_FIRST) {
+        shelf_ask_text(t);
+        return
+    }
     if (t < 0 || t >= len(hs_version_files) || len(hs_version_files[t]) == 0) return;
     if (t == TEXT_ORIG) {
         // (Its words, Ketiv and accents, then its text: those come before
@@ -147,6 +161,11 @@ hs_ask_version(t: int) {
 // File id came, size bytes (-1: it could not): read into the dataset it
 // is part of (its arena), or into scratch that dataset is made from.
 hs_got(id: int, size: int) {
+    // (The bookshelf's: its catalog and packages, read back.)
+    if (id >= SHELF_READ_CATALOG_ID) {
+        shelf_got(id, size);
+        return
+    }
     if (size < 0) {
         hs_missing(id);
         return
@@ -230,12 +249,12 @@ hs_version_arrived(t: int) {
         hs_begin()
     } else if (t == hs_asked_t) {
         hs_asked_t = -1;
-        hs_loading[t] = false;
+        if (t < len(hs_loading)) hs_loading[t] = false;
         sk_use_version(t)
-    } else if (hs_loading[t]) {
+    } else if (t < len(hs_loading) && hs_loading[t]) {
         hs_loading[t] = false;
         sk_update_all()
-    }
+    } else if (t >= TEXT_SHELF_FIRST) sk_update_all()
 }
 
 // Versions read for core's own use (Compare's, a passage's in Practice),
@@ -244,6 +263,11 @@ hs_version_arrived(t: int) {
 hs_loading: []bool = new bool[8](false);
 
 hs_text_ready(t: int): int {
+    if (t >= TEXT_SHELF_FIRST && text_is_version(t)) {
+        if (text_ready(t)) return 1;
+        shelf_ask_text(t);
+        return 0
+    }
     if (t < 0 || t >= TEXT_PIN || t == TEXT_ESV) return 0;
     if (text_ready(t)) return 1;
     if (!hs_loading[t] && t != hs_asked_t) {
@@ -872,13 +896,19 @@ hs_line(p: int, e: int) {
     } else if (sk_word_is(hs_inbox, p, e, "fetching")) {
         id: int = sk_num(hs_inbox, p + 9, e);
         got: int = sk_num(hs_inbox, sk_num_end, e);
-        held_fetching(id, got, sk_num(hs_inbox, sk_num_end, e))
+        total: int = sk_num(hs_inbox, sk_num_end, e);
+        if (id >= SHELF_FETCH_ID_FIRST) shelf_fetching(id, got, total) else held_fetching(id,
+            got, total)
     } else if (sk_word_is(hs_inbox, p, e, "fetched")) {
         id: int = sk_num(hs_inbox, p + 8, e);
         st: int = sk_num(hs_inbox, sk_num_end, e);
-        held_fetched(id, st, sk_num(hs_inbox, sk_num_end, e))
-    } else if (sk_word_is(hs_inbox, p, e, "network")) held_network(sk_num(hs_inbox,
-        p + 8, e)) else if (e - p > 4 && sk_word_is(hs_inbox, p, e, "api")) {
+        bytes_came: int = sk_num(hs_inbox, sk_num_end, e);
+        if (id >= SHELF_FETCH_ID_FIRST) shelf_fetched(id, st, bytes_came) else held_fetched(id,
+            st, bytes_came)
+    } else if (sk_word_is(hs_inbox, p, e, "network")) {
+        held_network(sk_num(hs_inbox, p + 8, e));
+        shelf_network_changed()
+    } else if (e - p > 4 && sk_word_is(hs_inbox, p, e, "api")) {
         hs_api_n = 0;
         for x in p + 4..e {
             if (hs_api_n < len(hs_api)) {
@@ -930,10 +960,13 @@ hs_start() {
     sk_has_manual = true;
     sk_has_acknowledgements = true;
     sk_has_downloads = host_io.fetch != null;
+    sk_has_shelf = host_io.fetch != null && host_io.read_kept != null;
     kept_load_prefs();
+    // (The bookshelf read now: the version kept may be one of its Bibles.)
+    if (sk_has_shelf) shelf_load();
     hs_voice_load();
     hs_start_t = launch_version(pref_get("version"), false);
-    if (hs_start_t < 0 || hs_start_t >= len(hs_version_files) || len(hs_version_files[hs_start_t]) == 0) hs_start_t = 0;
+    if (hs_start_t >= TEXT_SHELF_FIRST && !text_is_version(hs_start_t) || hs_start_t < TEXT_SHELF_FIRST && (hs_start_t < 0 || hs_start_t >= len(hs_version_files) || len(hs_version_files[hs_start_t]) == 0)) hs_start_t = 0;
     hs_ask_version(hs_start_t);
     hs_ask(HS_PLAN_M_ID, "plans/mcheyne.txt");
     hs_ask(HS_PLAN_C_ID, "plans/chrono.txt")

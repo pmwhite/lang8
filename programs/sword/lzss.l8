@@ -1,0 +1,83 @@
+tag sword_internal;
+
+// SWORD's LZSS (src/modules/common/lzsscomprs.cpp): a 4096-byte ring
+// buffer begun as spaces up to its last 18, writing from there; each flag
+// byte says, low bit first, whether the next item is one byte as it is (1)
+// or two bytes naming a copy (0): 12 bits where in the ring, 4 bits its
+// length less 3. The block's size is known (its index says), so the result
+// is exactly that long or the block is damaged.
+sword_lzss_decode(
+    source: []i8,
+    start: int,
+    count: int,
+    expected_size: int
+) raises SwordError: []i8@new {
+    ring: []i8 = new i8[4096](32i8);
+    out: []i8 = new i8[expected_size](0i8);
+    n: int = 0;
+    r: int = 4096 - 18;
+    at: int = start;
+    end: int = start + count;
+    flags: int = 0;
+    flag_bits: int = 0;
+    while (at < end) {
+        if (flag_bits == 0) {
+            flags = source[at] as int & 255;
+            at = at + 1;
+            flag_bits = 8
+        }
+        if (at < end) {
+            if ((flags & 1) == 1) {
+                if (n >= expected_size) raise SwordError { failure: SwordFailure.BadBlock { ending: "", block: -1 } };
+                byte: i8 = source[at];
+                at = at + 1;
+                out[n] = byte;
+                n = n + 1;
+                ring[r] = byte;
+                r = r + 1 & 4095
+            } else {
+                if (at + 1 >= end) raise SwordError { failure: SwordFailure.BadBlock { ending: "", block: -1 } };
+                low: int = source[at] as int & 255;
+                high: int = source[at + 1] as int & 255;
+                at = at + 2;
+                position: int = low | (high & 240) << 4;
+                length: int = (high & 15) + 3;
+                if (n + length > expected_size) raise SwordError { failure: SwordFailure.BadBlock { ending: "", block: -1 } };
+                for k in 0..length {
+                    byte: i8 = ring[position + k & 4095];
+                    out[n] = byte;
+                    n = n + 1;
+                    ring[r] = byte;
+                    r = r + 1 & 4095
+                }
+            }
+            flags = flags >> 1;
+            flag_bits = flag_bits - 1
+        }
+    }
+    if (n != expected_size) raise SwordError { failure: SwordFailure.BadBlock { ending: "", block: -1 } };
+    out
+}
+
+// A compressed block (count bytes of source from start), decoded to its
+// size as its module compresses it. (A zlib block's count may take in
+// padding after its stream, as SWORD's own reader allows.)
+sword_block_decode(
+    compression: Compression,
+    source: []i8,
+    start: int,
+    count: int,
+    size: int
+) raises SwordError: []i8@new {
+    match compression {
+        Lzss -> sword_lzss_decode(source, start, count, size);
+        Zip -> {
+            try {
+                deflate::zlib_decompress_leading(source, start, count, size)
+            } with deflate::DeflateError _error -> {
+                raise SwordError { failure: SwordFailure.BadBlock { ending: "", block: -1 } }
+            }
+        }
+        _ -> raise SwordError { failure: SwordFailure.NotSupported }
+    }
+}

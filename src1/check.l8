@@ -175,6 +175,99 @@ life_leave_region(old_cur: int, old_heap: int) {
     life_region_tc = life_region_tc - 1
 }
 
+life_enter_arena() raises Error: int {
+    f: int = life_alloc_frame(0 - 1, LIFE_KIND_ARENA);
+    life_cur = f;
+    life_heap = f;
+    life_region_tc = life_region_tc + 1;
+    if (life_region_tc >= 0 && life_region_tc < LIFE_MAX) life_arrays.depth_frames[life_region_tc] = f;
+    f
+}
+
+life_enter_borrow(parent: int) raises Error: int {
+    f: int = life_alloc_frame(life_cur, 2);
+    life_add_edge(parent, f);
+    life_cur = f;
+    life_region_tc = life_region_tc + 1;
+    if (life_region_tc >= 0 && life_region_tc < LIFE_MAX) life_arrays.depth_frames[life_region_tc] = f;
+    f
+}
+
+life_is_arena(id: int): bool {
+    id >= 3 && id < life_arrays.n && life_arrays.kind[id] == LIFE_KIND_ARENA
+}
+
+type ObjArena = {
+    obj: *Obj;
+    life: int;
+    header: *Obj;
+    next: ?*ObjArena
+}
+
+type ExprArena = {
+    expr: *Expr;
+    life: int;
+    header: *Obj;
+    next: ?*ExprArena
+}
+
+obj_arenas: ?*ObjArena = null;
+
+expr_arenas: ?*ExprArena = null;
+
+note_obj_arena(obj: *Obj@immortal, life: int, header: *Obj@immortal) noregion {
+    a: ?*ObjArena = obj_arenas;
+    while (a != null) {
+        if (a.obj == obj) {
+            a.life = life;
+            a.header = header;
+            return
+        }
+        a = a.next
+    }
+    obj_arenas = new ObjArena {
+        obj: obj,
+        life: life,
+        header: header,
+        next: obj_arenas
+    }
+}
+
+note_expr_arena(expr: *Expr@immortal, life: int, header: *Obj@immortal) noregion {
+    expr_arenas = new ExprArena {
+        expr: expr,
+        life: life,
+        header: header,
+        next: expr_arenas
+    }
+}
+
+obj_arena(obj: ?*Obj): ?*ObjArena {
+    a: ?*ObjArena = obj_arenas;
+    while (a != null) {
+        if (a.obj == obj) return a;
+        a = a.next
+    }
+    null
+}
+
+expr_arena(expr: ?*Expr): ?*ExprArena {
+    a: ?*ExprArena = expr_arenas;
+    while (a != null) {
+        if (a.expr == expr) return a;
+        a = a.next
+    }
+    null
+}
+
+ensure_owner_arena(obj: *Obj@immortal) noregion raises Error: *ObjArena {
+    found: ?*ObjArena = obj_arena(obj);
+    if (found != null) return found;
+    life: int = life_alloc_frame(0 - 1, LIFE_KIND_ARENA);
+    note_obj_arena(obj, life, obj);
+    obj_arena(obj) or error("internal: owner arena")
+}
+
 var_view_ty(var: ?*Obj): ?*Type@var {
     f: ?*NarrowFrame = narrow_top;
     while (f != null) {
@@ -438,7 +531,15 @@ kill_assigned_stmt(s: *Stmt) noregion {
             }
         }
         Region k -> kill_assigned_stmt(k.body);
+        Borrow k -> {
+            kill_assigned_expr(k.place);
+            kill_assigned_stmt(k.body)
+        }
+        Allocate k -> kill_assigned_stmt(k.body);
+        Drop k -> kill_assigned_expr(k.target);
         Expect _ -> { }
+        Break -> { }
+        Continue -> { }
     }
 }
 
@@ -628,6 +729,7 @@ is_stack_addr(n: ?*Expr): bool {
 
 is_tainted_obj(o: ?*Obj): bool {
     if (o == null) return false;
+    if (o.is_tainted) return true;
     f: ?*InitFrame = taint_top;
     while (f != null) {
         if (f.var == o) return true;
@@ -715,6 +817,96 @@ io_allows_stack(name: []i8): bool {
     streq(name, "write") || streq(name, "read")
 }
 
+// A parameter named by a copied value. Region and arena lives stay on `life`;
+// a parameter id stays here so it is not joined with an unrelated heap pointer.
+carried_life_of(n: ?*Expr) raises Error: int {
+    if (n == null || !type_has_pointers(n.ty)) return 0;
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return 0;
+            if (is_current_param(v) && life_is_param(v.life)) return v.life;
+            v.carried_life
+        }
+        Deref k -> carried_life_of(k.lhs);
+        MemberAccess k -> carried_life_of(k.lhs);
+        Index k -> carried_life_of(k.lhs);
+        As k -> carried_life_of(k.lhs);
+        Trunc k -> carried_life_of(k.lhs);
+        _ -> 0
+    }
+}
+
+// A match payload or for element is a shallow copy. The copy keeps a region,
+// arena, parameter, or local-address lifetime; otherwise a pointer in it
+// escapes as immortal.
+note_copied_life(src: *Expr, slot: ?*Obj) raises Error {
+    if (slot == null) return;
+    local: *Obj = slot;
+    if (!type_has_pointers(local.ty)) return;
+    life: int = expr_life(src);
+    tainted: bool = is_tainted_expr(src) || is_stack_addr(src);
+    if (life_is_region(life) || life_is_arena(life)) local.life = life_meet(local.life,
+        life);
+    if (tainted || life == LIFE_SELF) {
+        use: int = life;
+        if (use == LIFE_IMM || life_is_param(use)) use = LIFE_SELF;
+        local.life = life_meet(local.life, use);
+        local.is_tainted = true
+    }
+    carried: int = life;
+    if (!life_is_param(carried)) carried = carried_life_of(src);
+    if (life_is_param(carried)) local.carried_life = life_meet(local.carried_life,
+        carried)
+}
+
+// A field or element store does not replace the aggregate, so the value keeps
+// the shorter pointer written into it.
+aggregate_value(n: *Expr) raises Error: ?*Obj {
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null || !v.is_local || is_current_param(v)) return null;
+            if (!type_has_pointers(v.ty)) return null;
+            t: ?*Type = decay(v.ty);
+            if (t != null && (is_pointer(t) || is_opt_pointer(t) || is_slice(t) || is_opt_slice(t) || is_str(t))) return null;
+            v
+        }
+        MemberAccess k -> {
+            lt: ?*Type = decay(k.lhs.ty);
+            if (lt != null && (is_pointer(lt) || is_opt_pointer(lt) || is_slice(lt) || is_opt_slice(lt))) return null;
+            aggregate_value(k.lhs)
+        }
+        Index k -> {
+            lt2: ?*Type = k.lhs.ty;
+            if (lt2 != null && (is_slice(lt2) || is_str(lt2) || is_pointer(lt2))) return null;
+            aggregate_value(k.lhs)
+        }
+        _ -> null
+    }
+}
+
+note_aggregate_store(lhs: *Expr, rhs: *Expr) raises Error {
+    if (!type_has_pointers(rhs.ty) && !is_tainted_expr(rhs) && !is_stack_addr(rhs)) return;
+    root: ?*Obj = aggregate_value(lhs);
+    if (root == null) return;
+    local: *Obj = root;
+    life: int = expr_life(rhs);
+    tainted: bool = is_tainted_expr(rhs) || is_stack_addr(rhs);
+    if (life_is_region(life) || life_is_arena(life)) local.life = life_meet(local.life,
+        life);
+    if (tainted || life == LIFE_SELF) {
+        use: int = life;
+        if (use == LIFE_IMM || life_is_param(use)) use = LIFE_SELF;
+        local.life = life_meet(local.life, use);
+        local.is_tainted = true
+    }
+    carried: int = life;
+    if (!life_is_param(carried)) carried = carried_life_of(rhs);
+    if (life_is_param(carried)) local.carried_life = life_meet(local.carried_life,
+        carried)
+}
+
 life_meet(a: int, b: int) raises Error: int {
     if (life_outlives(a, b)) return b;
     if (life_outlives(b, a)) return a;
@@ -797,6 +989,8 @@ stmt_result_life(s: ?*Stmt) raises Error: int {
             l2
         }
         Region k -> stmt_result_life(k.body);
+        Borrow k -> stmt_result_life(k.body);
+        Allocate k -> stmt_result_life(k.body);
         _ -> LIFE_IMM
     }
 }
@@ -823,6 +1017,8 @@ expr_life(n: ?*Expr) raises Error: int {
         Var k -> {
             v: ?*Obj = k.var;
             if (v == null) return LIFE_IMM;
+            noted: ?*ObjArena = obj_arena(v);
+            if (noted != null) return noted.life;
             if (!v.is_local) return LIFE_IMM;
             v.life
         }
@@ -905,9 +1101,38 @@ escape_error(n: ?*Expr) noregion raises Error {
     error("region pointer cannot escape")
 }
 
-note_imm_heap() {
+arena_escape() noregion raises Error {
     fn: ?*Function = current_fn;
-    if (fn != null) fn.need_imm_heap = 1
+    if (fn != null) {
+        sb: *StrBuf = sb_new();
+        sb_puts(sb, "arena pointer cannot escape in ");
+        sb_puts(sb, fn.name);
+        error(sb_finish(sb))
+    }
+    error("arena pointer cannot escape")
+}
+
+note_imm_heap(value: *Expr, reason: NoregionReason@immortal) noregion {
+    fn: ?*Function = current_fn;
+    if (fn == null) return;
+    fn.need_imm_heap = 1;
+    if (fn.noregion_cause != null) return;
+    pos: int = value.pos;
+    file: int = value.file;
+    if (pos == 0) {
+        pos = diag_expr_pos;
+        file = diag_expr_file
+    }
+    if (pos == 0) {
+        pos = diag_stmt_pos;
+        file = diag_stmt_file
+    }
+    fn.noregion_cause = new NoregionCause {
+        file: file,
+        pos: pos,
+        span: value.toklen,
+        reason: reason
+    }
 }
 
 is_current_param(o: ?*Obj): bool {
@@ -934,7 +1159,7 @@ find_param_by_life(id: int): ?*Obj {
 }
 
 constrain_param_to_dest(p: *Obj, dest: int) {
-    if (dest == LIFE_IMM) {
+    if (dest == LIFE_IMM || life_is_arena(dest)) {
         p.bound_need_imm = true;
         return
     }
@@ -1013,7 +1238,19 @@ note_params_in_expr(n: ?*Expr, dest: int) raises Error {
                 return
             }
             q: ?*Obj = find_param_by_life(v.life);
-            if (q != null) constrain_param_to_dest(q, dest)
+            if (q != null) {
+                constrain_param_to_dest(q, dest);
+                return
+            }
+            // A match or for copy names the parameter without taking its life
+            // id, which does not compare with heap pointers stored later.
+            // Storing it somewhere immortal needs @immortal on the parameter,
+            // written or not (else the written bound would look needless). A
+            // @new parameter already names a heap lifetime: the bootstrap
+            // compiler stores such copies into its own immortal AST.
+            carried: ?*Obj = find_param_by_life(v.carried_life);
+            if (carried != null && (dest == LIFE_IMM || life_is_arena(dest)) && !streq(carried.life_bound,
+                "new")) constrain_param_to_dest(carried, dest)
         }
         Addr k -> note_params_in_address(k.lhs, dest);
         Deref k -> note_params_in_expr(k.lhs, dest);
@@ -1041,6 +1278,11 @@ note_params_in_expr(n: ?*Expr, dest: int) raises Error {
         StructLit k -> note_params_in_inits(k.inits, dest);
         VariantLit k -> note_params_in_inits(k.inits, dest);
         New k -> note_params_in_inits(k.inits, dest);
+        // A call result carries the parameter named by its return bound.
+        Funcall _k -> {
+            carried: ?*Obj = find_param_by_life(expr_life(n));
+            if (carried != null) constrain_param_to_dest(carried, dest)
+        }
         ArrayLit k -> {
             a: ?*Expr = k.elems;
             while (a != null) {
@@ -1055,7 +1297,18 @@ note_params_in_expr(n: ?*Expr, dest: int) raises Error {
 note_bound_call_param(callee_po: *Obj@immortal, p: *Obj@immortal) noregion {
     fn: ?*Function = current_fn;
     if (fn == null) return;
-    fn.bound_calls = new BoundCall { caller_param: p, callee_param: callee_po, next: fn.bound_calls }
+    // A callee's @new refers to this call's allocation destination. Scratch
+    // regions do not constrain the caller's allocation lifetime; an independent
+    // owned arena can only retain immortal caller data.
+    allocation_bound: int = BOUND_OMIT;
+    if (life_heap == LIFE_HEAPTOP) allocation_bound = BOUND_NEW;
+    if (life_heap == LIFE_IMM || life_is_arena(life_heap)) allocation_bound = BOUND_IMM;
+    fn.bound_calls = new BoundCall {
+        caller_param: p,
+        callee_param: callee_po,
+        allocation_bound: allocation_bound,
+        next: fn.bound_calls
+    }
 }
 
 note_bound_calls_in_inits(inits: ?*FieldInit, callee_po: *Obj@immortal) noregion raises Error {
@@ -1150,6 +1403,10 @@ note_bound_calls_in_expr(n: ?*Expr, callee_po: *Obj@immortal) noregion raises Er
         StructLit k -> note_bound_calls_in_inits(k.inits, callee_po);
         VariantLit k -> note_bound_calls_in_inits(k.inits, callee_po);
         New k -> note_bound_calls_in_inits(k.inits, callee_po);
+        Funcall _k -> {
+            carried: ?*Obj = find_param_by_life(expr_life(n));
+            if (carried != null) note_bound_call_param(callee_po, carried)
+        }
         ArrayLit k -> {
             a: ?*Expr = k.elems;
             while (a != null) {
@@ -1167,7 +1424,10 @@ note_sig_store(src: ?*Expr, dest: int) raises Error {
     sl: int = expr_life(src);
     if (sl == LIFE_HEAPTOP) {
         dp: ?*Obj = find_param_by_life(dest);
-        if (dp != null) dp.bound_need_new = true
+        if (dp != null) {
+            dp.bound_need_new = true;
+            dp.bound_holds_new = true
+        }
     }
     note_params_in_expr(src, dest)
 }
@@ -1180,24 +1440,47 @@ note_sig_return(src: ?*Expr) raises Error {
     rp: ?*Obj = find_param_by_life(sl);
     if (rp != null) {
         if (fn.bound_ret_param == null) fn.bound_ret_param = rp;
+        // (Returned from another parameter as well: the result is bound to
+        // the shorter-lived of the two, or else that one must outlive the
+        // one it is bound to.)
+        bound: ?*Obj = fn.bound_ret_param;
+        if (bound != null && bound != rp) {
+            if (!life_outlives(rp.life, bound.life) && life_outlives(bound.life, rp.life)) {
+                constrain_param_to_dest(bound, rp.life);
+                fn.bound_ret_param = rp
+            } else constrain_param_to_dest(rp, bound.life)
+        }
         note_params_in_expr(src, rp.life);
         return
     }
     if (sl == LIFE_HEAPTOP) note_params_in_expr(src, LIFE_HEAPTOP)
 }
 
-check_store(src: ?*Expr, dest: int) noregion raises Error {
+// target supplies source context for an assignment; synthetic storage has no target expression.
+check_store(src: ?*Expr, dest: int, target: ?*Expr) noregion raises Error {
     if (src == null) return;
     if (!type_has_pointers(src.ty) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
     sl: int = expr_life(src);
     note_sig_store(src, dest);
     if (life_outlives(sl, dest)) return;
-    if (dest == LIFE_IMM && sl == LIFE_HEAPTOP) {
-        note_imm_heap();
+    if ((dest == LIFE_IMM || life_is_arena(dest)) && sl == LIFE_HEAPTOP) {
+        reason: NoregionReason = NoregionReason.Store;
+        if (target != null) {
+            match target.kind {
+                Var reference -> {
+                    variable: ?*Obj = reference.var;
+                    if (variable != null && !variable.is_local) reason = NoregionReason.GlobalStore { name: strdup_n(variable.name,
+                        0, len(variable.name)) }
+                }
+                _ -> { }
+            }
+        }
+        note_imm_heap(src, reason);
         return
     }
     if (sl == LIFE_HEAPTOP && find_param_by_life(dest) != null) return;
     if (life_is_param(sl) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
+    if (life_is_arena(sl)) arena_escape();
     escape_error(src)
 }
 
@@ -1236,21 +1519,23 @@ check_return_value(src: *Expr) noregion raises Error {
     if (dest == LIFE_IMM && sl == LIFE_HEAPTOP) return_needs_new();
     if (life_outlives(sl, dest)) return;
     if (life_is_param(sl) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
+    if (life_is_arena(sl)) arena_escape();
     escape_error(src)
 }
 
-check_exc_payload(src: ?*Expr) raises Error {
+check_exc_payload(src: ?*Expr) noregion raises Error {
     if (src == null) return;
     if (!type_has_pointers(src.ty) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
     sl: int = expr_life(src);
     note_sig_store(src, LIFE_IMM);
     if (life_outlives(sl, LIFE_IMM)) return;
     if (sl == LIFE_HEAPTOP) {
-        note_imm_heap();
+        note_imm_heap(src, NoregionReason.Payload);
         return
     }
     if (life_is_param(sl) && !is_tainted_expr(src) && !is_stack_addr(src)) return;
     if (is_tainted_expr(src) || is_stack_addr(src)) error("exception payload cannot hold the address of a local");
+    if (life_is_arena(sl)) error("exception payload cannot hold an arena pointer");
     error("exception payload cannot hold a region pointer")
 }
 
@@ -1268,11 +1553,18 @@ check_call_lifetimes(fno: *Function@immortal, args: ?*Expr) noregion raises Erro
             if (!life_is_self_bound(po)) {
                 need: int = instantiate_bound(fno, po.life_bound, args);
                 if (!life_outlives(sl, need)) {
-                    if (sl == LIFE_HEAPTOP && need == LIFE_IMM) note_imm_heap() else {
+                    if (sl == LIFE_HEAPTOP && need == LIFE_IMM) {
+                        callee_name: []i8 = fno.name;
+                        if (len(callee_name) == 0) callee_name = "a function value";
+                        note_imm_heap(a, NoregionReason.Argument { callee: strdup_n(callee_name,
+                            0, len(callee_name)), parameter: strdup_n(po.name, 0,
+                            len(po.name)) })
+                    } else {
                         qp2: ?*Obj = find_param_by_life(sl);
                         if (qp2 != null && !is_tainted_expr(a) && !is_stack_addr(a)) constrain_param_to_dest(qp2,
                             need) else if (!is_tainted_expr(a) && !is_stack_addr(a) && type_has_pointers(a.ty)) {
                             note_params_in_expr(a, need);
+                            if (qp2 == null && life_is_arena(sl)) arena_escape();
                             if (qp2 == null && life_is_region(sl)) escape_error(a)
                         } else escape_error(a)
                     }
@@ -1281,11 +1573,91 @@ check_call_lifetimes(fno: *Function@immortal, args: ?*Expr) noregion raises Erro
                     if (qp3 != null && sl != LIFE_IMM && need != LIFE_SELF && need != LIFE_IMM && need != LIFE_HEAPTOP) constrain_param_to_dest(qp3,
                         need)
                 }
+                if (streq(po.life_bound, "new") && !fno.is_extern) note_hold_check(fno,
+                    po, a, sl)
             }
             po = po.param_next
         }
         a = a.next
     }
+}
+
+// Argument a (its lifetime sl) to callee's @new parameter po: whether it
+// can outlive this call's allocation destination, to be checked once
+// po is known to hold what the callee allocates (check_held_arguments).
+// A caller's parameter at the caller's own destination carries the
+// obligation to the caller's callers instead (propagate_param_bounds).
+note_hold_check(
+    callee: *Function@immortal,
+    po: *Obj@immortal,
+    a: *Expr,
+    sl: int
+) noregion {
+    fn: ?*Function = current_fn;
+    if (fn == null || life_heap == LIFE_IMM) return;
+    if (is_tainted_expr(a) || is_stack_addr(a) || !type_has_pointers(a.ty)) return;
+    if (life_outlives(life_heap, sl)) return;
+    if (life_heap == LIFE_HEAPTOP && find_param_by_life(sl) != null) return;
+    argument: HeldArgument = if (sl == LIFE_IMM && life_heap == LIFE_HEAPTOP) HeldArgument.Immortal else HeldArgument.Outlives;
+    pos: int = a.pos;
+    file: int = a.file;
+    if (pos == 0) {
+        pos = diag_expr_pos;
+        file = diag_expr_file
+    }
+    fn.hold_checks = new HoldCheck {
+        callee_name: callee.name,
+        callee_param: po,
+        indirect: len(callee.name) == 0,
+        argument: argument,
+        file: file,
+        pos: pos,
+        span: a.toklen,
+        next: fn.hold_checks
+    }
+}
+
+// The arguments note_hold_check kept, now that every parameter that holds
+// what its function allocates is known: one that would outlive what is
+// stored in it is an error; an immortal one makes its caller noregion.
+check_held_arguments() noregion raises Error {
+    fn: ?*Function = functions;
+    marked: bool = false;
+    while (fn != null) {
+        h: ?*HoldCheck = fn.hold_checks;
+        while (h != null) {
+            if (h.indirect || h.callee_param.bound_holds_new) {
+                match h.argument {
+                    Outlives -> {
+                        message: *StrBuf = sb_new();
+                        if (h.indirect) sb_puts(message, "a function value") else sb_puts(message,
+                            h.callee_name);
+                        sb_puts(message, " stores what it allocates into parameter ");
+                        sb_puts(message, h.callee_param.name);
+                        sb_puts(message, ", but this argument outlives those allocations (they end with the region or arena the call allocates in); make the call where the argument was allocated");
+                        error_at_file(h.file, h.pos, sb_finish(message))
+                    }
+                    Immortal -> {
+                        if (fn.need_imm_heap == 0) {
+                            fn.need_imm_heap = 1;
+                            marked = true
+                        }
+                        callee: []i8 = h.callee_name;
+                        if (h.indirect) callee = "a function value";
+                        if (fn.noregion_cause == null) fn.noregion_cause = new NoregionCause {
+                            file: h.file,
+                            pos: h.pos,
+                            span: h.span,
+                            reason: NoregionReason.HeldArgument { callee: callee, parameter: h.callee_param.name }
+                        }
+                    }
+                }
+            }
+            h = h.next
+        }
+        fn = fn.next
+    }
+    if (marked) propagate_need_imm_heap()
 }
 
 index_lhs_var(n: *Expr): ?*Obj {
@@ -1406,6 +1778,8 @@ narrow_push_eq_nulls(cond: ?*Expr) noregion raises Error {
 /* Syntactic divergence for parse-time early-exit narrowing (no full typing). */
 stmt_parse_diverges(n: *Stmt): bool {
     match n.kind {
+        Break -> true;
+        Continue -> true;
         Return _p -> true;
         Raise _p -> true;
         ExprStmt q -> {
@@ -1435,6 +1809,7 @@ stmt_parse_diverges(n: *Stmt): bool {
             if (els != null) stmt_parse_diverges(k.then) && stmt_parse_diverges(els) else false
         }
         While k -> {
+            if (k.has_break) return false;
             match k.cond.kind {
                 Num q -> q.form == LIT_TRUE;
                 _ -> false
@@ -1464,6 +1839,8 @@ stmt_parse_diverges(n: *Stmt): bool {
 
 stmt_always_diverges(n: *Stmt): bool {
     match n.kind {
+        Break -> true;
+        Continue -> true;
         Return _p -> true;
         Raise _p -> true;
         ExprStmt k -> {
@@ -1483,6 +1860,7 @@ stmt_always_diverges(n: *Stmt): bool {
             if (els != null) stmt_always_diverges(k.then) && stmt_always_diverges(els) else false
         }
         While k -> {
+            if (k.has_break) return false;
             match k.cond.kind {
                 Num q -> q.form == LIT_TRUE;
                 _ -> false
@@ -1507,6 +1885,8 @@ stmt_always_diverges(n: *Stmt): bool {
             true
         }
         Region k -> stmt_always_diverges(k.body);
+        Borrow k -> stmt_always_diverges(k.body);
+        Allocate k -> stmt_always_diverges(k.body);
         _ -> false
     }
 }
@@ -1552,6 +1932,8 @@ stmt_assigns_to(n: *Stmt, v: *Obj): bool {
             if (els != null) stmt_assigns_to(els, v) else false
         }
         Region k -> stmt_assigns_to(k.body, v);
+        Borrow k -> stmt_assigns_to(k.body, v);
+        Allocate k -> stmt_assigns_to(k.body, v);
         _ -> false
     }
 }
@@ -1591,6 +1973,8 @@ stmt_ensures_nonnull(n: *Stmt, v: *Obj): bool {
                 v) else false
         }
         Region k -> stmt_ensures_nonnull(k.body, v);
+        Borrow k -> stmt_ensures_nonnull(k.body, v);
+        Allocate k -> stmt_ensures_nonnull(k.body, v);
         _ -> false
     }
 }
@@ -1640,6 +2024,9 @@ mark_used_functions() {
     }
     main_fn: ?*Function = find_function("main");
     if (main_fn != null) mark_reachable(main_fn);
+    // A program's hot reload entry (RELOAD.md), which the host calls.
+    reload_fn: ?*Function = find_function("reload");
+    if (reload_fn != null && !reload_fn.is_extern && reload_fn.nparams == 0) mark_reachable(reload_fn);
     fn = functions;
     while (fn != null) {
         if (fn.address_taken || fn.test_id >= 0) mark_reachable(fn);
@@ -2040,7 +2427,7 @@ typecheck_global_inits() noregion raises Error {
             add_type(init);
             if (!assignable(g.ty, init)) error_have_expr_want("global initializer type mismatch",
                 init, g.ty);
-            check_store(init, LIFE_IMM)
+            check_store(init, LIFE_IMM, null)
         }
         g = g.next
     }
@@ -2166,6 +2553,7 @@ da_expr(n: ?*Expr) noregion raises Error: bool {
             false
         }
         Assign k -> {
+            if (k.compound != null) _al: bool = da_expr(k.lhs);
             _ar: bool = da_expr(k.rhs);
             da_write(k.lhs);
             false
@@ -2293,7 +2681,9 @@ da_expr(n: ?*Expr) noregion raises Error: bool {
             false
         }
         Block k -> da_stmt_list(k.body);
-        Sizeof k -> da_expr(k.e)
+        Sizeof k -> da_expr(k.e);
+        Own k -> da_stmt(k.body);
+        Move k -> da_expr(k.lhs)
     }
 }
 
@@ -2319,6 +2709,8 @@ da_stmt(s: ?*Stmt) noregion raises Error: bool {
 
 da_stmt_node(s: *Stmt) noregion raises Error: bool {
     match s.kind {
+        Break -> true;
+        Continue -> true;
         Return k -> {
             _re: bool = da_expr(k.lhs);
             true
@@ -2366,6 +2758,8 @@ da_stmt_node(s: *Stmt) noregion raises Error: bool {
             _fi: bool = da_expr(k.iter);
             _fh: bool = da_expr(k.hi);
             init_mark(k.item);
+            index: ?*Obj = k.index;
+            if (index != null) init_mark(index);
             savef: ?*InitFrame = init_top;
             _fb: bool = da_stmt(k.body);
             init_top = savef;
@@ -2430,6 +2824,13 @@ da_stmt_node(s: *Stmt) noregion raises Error: bool {
             false
         }
         Region k -> da_stmt(k.body);
+        Borrow k -> {
+            if (da_expr(k.place)) return true;
+            init_mark(k.shadow);
+            da_stmt(k.body)
+        }
+        Allocate k -> da_stmt(k.body);
+        Drop k -> da_expr(k.target);
         Decl k -> {
             _di: bool = da_expr(k.init);
             vo: ?*Obj = k.var;
@@ -2450,124 +2851,152 @@ check_fn_inited(fn: *Function@immortal) noregion raises Error {
 // The file of the function whose locals' initialization is followed.
 da_file: int = 0;
 
-expr_calls_need_imm(n: ?*Expr): bool {
+record_noregion_call_expr(owner: *Function@immortal, n: ?*Expr) raises Error: bool {
     if (n == null) return false;
     match n.kind {
         Funcall k -> {
-            if (expr_calls_need_imm(k.target)) return true;
+            if (record_noregion_call_expr(owner, k.target)) return true;
             fno: ?*Function = k.fn;
             if (fno == null) fno = find_function(k.funcname);
             if (fno != null) {
                 fu: *Function = fno;
-                if (fu.need_imm_heap != 0) return true
+                if (fu.need_imm_heap != 0) {
+                    callee_name: []i8 = fu.name;
+                    if (len(callee_name) == 0) callee_name = "a function value";
+                    owner.noregion_cause = new NoregionCause {
+                        file: n.file,
+                        pos: n.pos,
+                        span: n.toklen,
+                        reason: NoregionReason.Call { callee: strdup_n(callee_name,
+                            0, len(callee_name)) }
+                    };
+                    return true
+                }
             }
             a: ?*Expr = k.args;
             while (a != null) {
-                if (expr_calls_need_imm(a)) return true;
+                if (record_noregion_call_expr(owner, a)) return true;
                 a = a.next
             }
             false
         }
-        Binary k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs);
-        Assign k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs);
-        Addr k -> expr_calls_need_imm(k.lhs);
-        Deref k -> expr_calls_need_imm(k.lhs);
-        Index k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.idx);
-        Not k -> expr_calls_need_imm(k.lhs);
-        Neg k -> expr_calls_need_imm(k.lhs);
-        BitNot k -> expr_calls_need_imm(k.lhs);
-        LogAnd k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs);
-        LogOr k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs);
-        OrElse k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs);
-        MemberAccess k -> expr_calls_need_imm(k.lhs);
-        As k -> expr_calls_need_imm(k.lhs);
-        Trunc k -> expr_calls_need_imm(k.lhs);
-        New k -> expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.fill) || field_inits_calls_need_imm(k.inits);
+        Binary k -> record_noregion_call_expr(owner, k.lhs) || record_noregion_call_expr(owner,
+            k.rhs);
+        Assign k -> record_noregion_call_expr(owner, k.lhs) || record_noregion_call_expr(owner,
+            k.rhs);
+        Addr k -> record_noregion_call_expr(owner, k.lhs);
+        Deref k -> record_noregion_call_expr(owner, k.lhs);
+        Index k -> record_noregion_call_expr(owner, k.lhs) || record_noregion_call_expr(owner,
+            k.idx);
+        Not k -> record_noregion_call_expr(owner, k.lhs);
+        Neg k -> record_noregion_call_expr(owner, k.lhs);
+        BitNot k -> record_noregion_call_expr(owner, k.lhs);
+        LogAnd k -> record_noregion_call_expr(owner, k.lhs) || record_noregion_call_expr(owner,
+            k.rhs);
+        LogOr k -> record_noregion_call_expr(owner, k.lhs) || record_noregion_call_expr(owner,
+            k.rhs);
+        OrElse k -> record_noregion_call_expr(owner, k.lhs) || record_noregion_call_expr(owner,
+            k.rhs);
+        MemberAccess k -> record_noregion_call_expr(owner, k.lhs);
+        As k -> record_noregion_call_expr(owner, k.lhs);
+        Trunc k -> record_noregion_call_expr(owner, k.lhs);
+        New k -> record_noregion_call_expr(owner, k.lhs) || record_noregion_call_expr(owner,
+            k.fill) || record_noregion_call_inits(owner, k.inits);
         ArrayLit k -> {
             a: ?*Expr = k.elems;
             while (a != null) {
-                if (expr_calls_need_imm(a)) return true;
+                if (record_noregion_call_expr(owner, a)) return true;
                 a = a.next
             }
             false
         }
-        StructLit k -> field_inits_calls_need_imm(k.inits);
-        VariantLit k -> field_inits_calls_need_imm(k.inits);
-        If k -> expr_calls_need_imm(k.cond) || expr_calls_need_imm(k.then) || expr_calls_need_imm(k.els);
+        StructLit k -> record_noregion_call_inits(owner, k.inits);
+        VariantLit k -> record_noregion_call_inits(owner, k.inits);
+        If k -> record_noregion_call_expr(owner, k.cond) || record_noregion_call_expr(owner,
+            k.then) || record_noregion_call_expr(owner, k.els);
         Match k -> {
-            if (expr_calls_need_imm(k.cond)) return true;
+            if (record_noregion_call_expr(owner, k.cond)) return true;
             arm: ?*MatchArm = k.arms;
             while (arm != null) {
-                if (stmt_calls_need_imm(arm.body)) return true;
+                if (record_noregion_call_stmt(owner, arm.body)) return true;
                 arm = arm.next
             }
             false
         }
-        Block k -> stmt_list_calls_need_imm(k.body);
-        Sizeof k -> expr_calls_need_imm(k.e);
+        Block k -> record_noregion_call_stmts(owner, k.body);
+        Sizeof k -> record_noregion_call_expr(owner, k.e);
+        Own k -> record_noregion_call_stmt(owner, k.body);
+        Move k -> record_noregion_call_expr(owner, k.lhs);
         _ -> false
     }
 }
 
-field_inits_calls_need_imm(inits: ?*FieldInit): bool {
+record_noregion_call_inits(owner: *Function@immortal, inits: ?*FieldInit) raises Error: bool {
     a: ?*FieldInit = inits;
     while (a != null) {
-        if (expr_calls_need_imm(a.lhs)) return true;
+        if (record_noregion_call_expr(owner, a.lhs)) return true;
         a = a.next
     }
     false
 }
 
-stmt_calls_need_imm(s: ?*Stmt): bool {
+record_noregion_call_stmt(owner: *Function@immortal, s: ?*Stmt) raises Error: bool {
     if (s == null) return false;
     match s.kind {
-        Return k -> expr_calls_need_imm(k.lhs);
-        ExprStmt k -> expr_calls_need_imm(k.lhs);
-        Block k -> stmt_list_calls_need_imm(k.body);
-        If k -> expr_calls_need_imm(k.cond) || stmt_calls_need_imm(k.then) || stmt_calls_need_imm(k.els);
-        While k -> expr_calls_need_imm(k.cond) || stmt_calls_need_imm(k.body);
-        For k -> expr_calls_need_imm(k.iter) || expr_calls_need_imm(k.hi) || stmt_calls_need_imm(k.body);
+        Return k -> record_noregion_call_expr(owner, k.lhs);
+        ExprStmt k -> record_noregion_call_expr(owner, k.lhs);
+        Block k -> record_noregion_call_stmts(owner, k.body);
+        If k -> record_noregion_call_expr(owner, k.cond) || record_noregion_call_stmt(owner,
+            k.then) || record_noregion_call_stmt(owner, k.els);
+        While k -> record_noregion_call_expr(owner, k.cond) || record_noregion_call_stmt(owner,
+            k.body);
+        For k -> record_noregion_call_expr(owner, k.iter) || record_noregion_call_expr(owner,
+            k.hi) || record_noregion_call_stmt(owner, k.body);
         Match k -> {
-            if (expr_calls_need_imm(k.cond)) return true;
+            if (record_noregion_call_expr(owner, k.cond)) return true;
             arm: ?*MatchArm = k.arms;
             while (arm != null) {
-                if (stmt_calls_need_imm(arm.body)) return true;
+                if (record_noregion_call_stmt(owner, arm.body)) return true;
                 arm = arm.next
             }
             false
         }
-        Raise k -> field_inits_calls_need_imm(k.inits);
+        Raise k -> record_noregion_call_inits(owner, k.inits);
         Try k -> {
-            if (stmt_calls_need_imm(k.body)) return true;
+            if (record_noregion_call_stmt(owner, k.body)) return true;
             a: ?*CatchArm = k.arms;
             while (a != null) {
-                if (stmt_calls_need_imm(a.body)) return true;
+                if (record_noregion_call_stmt(owner, a.body)) return true;
                 a = a.next
             }
             false
         }
-        Region k -> stmt_calls_need_imm(k.body);
-        Decl k -> expr_calls_need_imm(k.init);
+        Region k -> record_noregion_call_stmt(owner, k.body);
+        Borrow k -> record_noregion_call_expr(owner, k.place) || record_noregion_call_stmt(owner,
+            k.body);
+        Allocate k -> record_noregion_call_stmt(owner, k.body);
+        Drop k -> record_noregion_call_expr(owner, k.target);
+        Decl k -> record_noregion_call_expr(owner, k.init);
         _ -> false
     }
 }
 
-stmt_list_calls_need_imm(s: ?*Stmt): bool {
+record_noregion_call_stmts(owner: *Function@immortal, s: ?*Stmt) raises Error: bool {
     while (s != null) {
-        if (stmt_calls_need_imm(s)) return true;
+        if (record_noregion_call_stmt(owner, s)) return true;
         s = s.next
     }
     false
 }
 
-propagate_need_imm_heap() {
+propagate_need_imm_heap() raises Error {
     changed: bool = true;
     while (changed) {
         changed = false;
         fn: ?*Function = functions;
         while (fn != null) {
             if (!fn.is_extern && fn.need_imm_heap == 0) {
-                if (stmt_calls_need_imm(fn.body)) {
+                if (record_noregion_call_stmt(fn, fn.body)) {
                     fn.need_imm_heap = 1;
                     changed = true
                 }
@@ -2577,9 +3006,20 @@ propagate_need_imm_heap() {
     }
 }
 
-check_region_calls_expr(n: ?*Expr) raises Error {
+check_region_calls_expr(n: ?*Expr) noregion raises Error {
     if (n == null) return;
     match n.kind {
+        Own k -> {
+            old_heap: int = life_heap;
+            life_heap = 99;
+            check_region_calls_stmt(k.body);
+            life_heap = old_heap;
+            return
+        }
+        Move k -> {
+            check_region_calls_expr(k.lhs);
+            return
+        }
         Funcall k -> {
             check_region_calls_expr(k.target);
             fno: ?*Function = k.fn;
@@ -2587,7 +3027,13 @@ check_region_calls_expr(n: ?*Expr) raises Error {
             if (fno != null) {
                 fu: *Function = fno;
                 if (fu.need_imm_heap != 0) {
-                    if (life_heap != LIFE_HEAPTOP && life_heap != LIFE_IMM) error("cannot call from a region")
+                    if (life_heap != LIFE_HEAPTOP && life_heap != LIFE_IMM) {
+                        message: *StrBuf = sb_new();
+                        if (len(fu.name) == 0) sb_puts(message, "this function value") else sb_puts(message,
+                            fu.name);
+                        sb_puts(message, " requires noregion; move the call outside this region or use a function without that requirement");
+                        error_at_file(n.file, n.pos, sb_finish(message))
+                    }
                 }
             }
             a: ?*Expr = k.args;
@@ -2704,7 +3150,7 @@ check_region_calls_expr(n: ?*Expr) raises Error {
     }
 }
 
-check_region_calls_inits(inits: ?*FieldInit) raises Error {
+check_region_calls_inits(inits: ?*FieldInit) noregion raises Error {
     a: ?*FieldInit = inits;
     while (a != null) {
         check_region_calls_expr(a.lhs);
@@ -2713,7 +3159,7 @@ check_region_calls_inits(inits: ?*FieldInit) raises Error {
 }
 
 // (An error in s reported at it, in the function checked.)
-check_region_calls_stmt(s: ?*Stmt) raises Error {
+check_region_calls_stmt(s: ?*Stmt) noregion raises Error {
     if (s == null) return;
     fn: ?*Function = current_fn;
     // (Not an if expression: src1, which builds this, narrows only its
@@ -2726,7 +3172,7 @@ check_region_calls_stmt(s: ?*Stmt) raises Error {
     diag_leave(outer, outer_file)
 }
 
-check_region_calls_node(s: *Stmt) raises Error {
+check_region_calls_node(s: *Stmt) noregion raises Error {
     match s.kind {
         Return k -> {
             check_region_calls_expr(k.lhs);
@@ -2786,6 +3232,22 @@ check_region_calls_node(s: *Stmt) raises Error {
             life_heap = old_heap;
             return
         }
+        Borrow k -> {
+            check_region_calls_expr(k.place);
+            check_region_calls_stmt(k.body);
+            return
+        }
+        Allocate k -> {
+            old_heap: int = life_heap;
+            life_heap = 99;
+            check_region_calls_stmt(k.body);
+            life_heap = old_heap;
+            return
+        }
+        Drop k -> {
+            check_region_calls_expr(k.target);
+            return
+        }
         Decl k -> {
             check_region_calls_expr(k.init);
             return
@@ -2794,14 +3256,14 @@ check_region_calls_node(s: *Stmt) raises Error {
     }
 }
 
-check_region_calls_stmt_list(s: ?*Stmt) raises Error {
+check_region_calls_stmt_list(s: ?*Stmt) noregion raises Error {
     while (s != null) {
         check_region_calls_stmt(s);
         s = s.next
     }
 }
 
-check_region_calls_all() raises Error {
+check_region_calls_all() noregion raises Error {
     fn: ?*Function = functions;
     while (fn != null) {
         if (!fn.is_extern) {
@@ -2809,6 +3271,163 @@ check_region_calls_all() raises Error {
             check_region_calls_stmt(fn.body)
         }
         fn = fn.next
+    }
+}
+
+stmt_value_expr(s: ?*Stmt): ?*Expr {
+    if (s == null) return null;
+    match s.kind {
+        ExprStmt k -> k.lhs;
+        Block k -> stmt_value_expr(last_stmt(k.body));
+        If k -> stmt_value_expr(k.then);
+        Region k -> stmt_value_expr(k.body);
+        _ -> null
+    }
+}
+
+type_own_expr(p: *Expr@immortal, body: *Stmt, slot: *Obj@immortal) noregion raises Error {
+    old_cur: int = life_cur;
+    old_heap: int = life_heap;
+    frame: int = life_enter_arena();
+    slot.ty = ty_int;
+    add_type_stmt(body);
+    value: ?*Expr = stmt_value_expr(body);
+    if (value == null) error("own needs a pointer result allocated in its arena");
+    result: *Expr = value or error("own needs a pointer result");
+    rt: ?*Type = decay(result.ty);
+    if (rt == null || !is_pointer(rt)) error("own's result must be a pointer into its arena");
+    if (stmt_result_life(body) != frame) error("own's result must be allocated in its arena");
+    life_leave_region(old_cur, old_heap);
+    p.ty = owned_type(type_base(rt), false);
+    slot.ty = p.ty;
+    note_expr_arena(p, frame, slot)
+}
+
+type_move_expr(p: *Expr@immortal, lhs: *Expr@immortal) noregion raises Error {
+    saved: int = owner_read_ok;
+    owner_read_ok = owner_read_ok + 1;
+    add_type(lhs);
+    owner_read_ok = saved;
+    lt: ?*Type = decay(lhs.ty);
+    if (lt == null || !is_owned_ty(lt)) error("move requires an owner");
+    match lhs.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) error("move requires an owner variable");
+            owner: *Obj = v;
+            noted: *ObjArena = ensure_owner_arena(owner);
+            p.ty = lt;
+            note_expr_arena(p, noted.life, owner);
+            return
+        }
+        // An element's arena is not known statically; a later borrow of the
+        // handle's new owner gets a fresh arena life.
+        Index _ -> {
+            p.ty = lt;
+            return
+        }
+        _ -> error("move requires an owner variable or an element of a []?owned *T")
+    }
+}
+
+// The owner type of a borrowed place: an owner variable, or an element of a
+// []?owned *T.
+borrowed_owner_type(place: *Expr) noregion raises Error: *Type@place {
+    pt: ?*Type = decay(place.ty);
+    if (pt != null && is_owned_ty(pt)) {
+        match place.kind {
+            Var _ -> return pt;
+            Index _ -> return pt;
+            _ -> { }
+        }
+    }
+    error_expression_requirement(place, "borrow requires an owner variable or an element of a []?owned *T")
+}
+
+// An owner variable keeps one arena life across its borrows. Each element
+// borrow gets a fresh one: indexes are dynamic, so two element borrows may
+// name different arenas.
+borrowed_arena_life(place: *Expr) noregion raises Error: int {
+    match place.kind {
+        Var k -> {
+            owner: *Obj = k.var or error("borrow requires an owner variable");
+            mark_var_use(owner);
+            noted: *ObjArena = ensure_owner_arena(owner);
+            noted.life
+        }
+        _ -> life_alloc_frame(0 - 1, LIFE_KIND_ARENA)
+    }
+}
+
+type_borrow_stmt(
+    place: *Expr@immortal,
+    shadow: *Obj@immortal,
+    header: *Obj@immortal,
+    body: *Stmt
+) noregion raises Error {
+    saved: int = owner_read_ok;
+    owner_read_ok = owner_read_ok + 1;
+    add_type(place);
+    owner_read_ok = saved;
+    shadow.ty = ptr_to(owned_pointee(borrowed_owner_type(place)));
+    arena_life: int = borrowed_arena_life(place);
+    note_obj_arena(shadow, arena_life, header);
+    old_cur: int = life_cur;
+    old_heap: int = life_heap;
+    _f: int = life_enter_borrow(arena_life);
+    add_type_stmt(body);
+    life_leave_region(old_cur, old_heap)
+}
+
+type_allocate_stmt(slot: *Obj, body: *Stmt) noregion raises Error {
+    mark_var_use(slot);
+    noted: ?*ObjArena = obj_arena(slot);
+    if (noted == null || noted.header == slot && is_owned_ty(decay(slot.ty))) error("allocate needs a pointer from a borrow");
+    if (noted == null) error("allocate needs a pointer from a borrow");
+    arena: *ObjArena = noted;
+    old_heap: int = life_heap;
+    life_heap = arena.life;
+    add_type_stmt(body);
+    life_heap = old_heap
+}
+
+type_drop_stmt(target: *Expr@immortal) noregion raises Error {
+    saved: int = owner_read_ok;
+    owner_read_ok = owner_read_ok + 1;
+    add_type(target);
+    owner_read_ok = saved;
+    lt: ?*Type = decay(target.ty);
+    if (lt == null || !is_owned_ty(lt)) error("drop requires an owner");
+    match target.kind {
+        Var _ -> return;
+        Index _ -> return;
+        _ -> error("drop requires an owner variable or an element of a []?owned *T")
+    }
+}
+
+note_assigned_arena(lhs: *Expr, rhs: *Expr) noregion {
+    match lhs.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return;
+            noted: ?*ExprArena = expr_arena(rhs);
+            if (noted == null) {
+                match rhs.kind {
+                    Var rv -> {
+                        src: ?*Obj = rv.var;
+                        onote: ?*ObjArena = obj_arena(src);
+                        if (onote != null && !is_owned_ty(decay(rhs.ty))) note_obj_arena(v,
+                            onote.life, onote.header)
+                    }
+                    _ -> { }
+                }
+                return
+            }
+            header: *Obj = noted.header;
+            if (is_owned_ty(decay(lhs.ty))) header = v;
+            note_obj_arena(v, noted.life, header)
+        }
+        _ -> { }
     }
 }
 
@@ -2829,14 +3448,18 @@ typecheck_program() noregion raises Error {
             taint_top = null;
             addr_top = null;
             life_init_fn(fn);
+            obj_arenas = null;
+            expr_arenas = null;
             add_type_stmt(fn.body);
             check_fn_result(fn);
-            check_fn_inited(fn)
+            check_fn_inited(fn);
+            check_fn_owners(fn)
         }
         fn = fn.next
     }
     propagate_need_imm_heap();
     propagate_param_bounds();
+    check_held_arguments();
     check_region_calls_all();
     check_foreign_function_types();
     current_fn = null;
@@ -2853,18 +3476,29 @@ check_fn_result(fn: *Function@immortal) noregion raises Error {
     want: *Type = rt;
     if (check_stmt_result(fn.body, want)) return;
     sb: *StrBuf = sb_new();
-    sb_puts(sb, "missing return value in ");
     sb_puts(sb, fn.name);
-    error(sb_finish(sb))
+    sb_puts(sb, " can finish without returning ");
+    append_type(sb, want);
+    sb_puts(sb, "; add a final value or return from each branch");
+    error_at_file(fn.browse_file, fn.browse_pos, sb_finish(sb))
 }
 
-check_raises_functions() raises Error {
+check_raises_functions() noregion raises Error {
     fn: ?*Function = functions;
     while (fn != null) {
         if (fn.raises_list != null) {
             e: ?*ExnList = fn.raises_list;
             while (e != null) {
-                if (!e.seen) error_at_file(fn.browse_file, fn.browse_pos, "raises lists an exception that is never raised");
+                if (!e.seen) {
+                    message: *StrBuf = sb_new();
+                    sb_puts(message, e.exn.name);
+                    sb_puts(message, " cannot escape ");
+                    sb_puts(message, fn.name);
+                    sb_puts(message, "; remove it from ");
+                    sb_puts(message, fn.name);
+                    sb_puts(message, "'s raises list.");
+                    error_at_file(e.source_file, e.source_pos, sb_finish(message))
+                }
                 e = e.next
             }
         }
@@ -2872,39 +3506,28 @@ check_raises_functions() raises Error {
     }
 }
 
-// The first mark found wrong: where the summary of them is reported.
-mark_first_file: int = 0;
-
-mark_first_pos: int = 0;
-
-mark_print_at(file: int, pos: int, msg: []i8) {
-    if (mark_nerr == 0) {
-        mark_first_file = file;
-        mark_first_pos = pos
-    }
-    f: ?*ImportedFile = imported_files;
-    while (f != null) {
-        if (f.id == file) {
-            print_error_at(f.path, f.src, f.src_len, pos, msg);
-            mark_nerr = mark_nerr + 1;
-            return
-        }
-        f = f.next
-    }
-    print_error_at(source_path, source, source_len, pos, msg);
-    mark_nerr = mark_nerr + 1
+append_lifetime_diagnostic(
+    report: *LifetimeDiagnostics@new,
+    file: int,
+    pos: int,
+    msg: []i8
+) raises Error {
+    sb_puts(report.output, "error: ");
+    append_diagnostic_location(report.output, file, pos);
+    sb_puts(report.output, ": ");
+    sb_puts(report.output, msg);
+    sb_putc(report.output, '\n');
+    report.count = report.count + 1
 }
 
-check_imm_heap_functions() raises Error {
+check_imm_heap_functions(report: *LifetimeDiagnostics@new) raises Error {
     fn: ?*Function = functions;
     while (fn != null) {
         // Test bodies cannot declare noregion; only the test entry calls them.
         if (!fn.is_extern && fn.test_id < 0) {
-            if (fn.need_imm_heap != 0 && fn.decl_imm_heap == 0) {
-                sb: *StrBuf = sb_new();
-                sb_puts(sb, "missing noregion on ");
-                sb_puts(sb, fn.name);
-                mark_print_at(fn.browse_file, fn.browse_pos, sb_finish(sb))
+            if (missing_noregion(fn) && primary_noregion_diagnostic(fn)) {
+                append_noregion_diagnostic(report.output, fn);
+                report.count = report.count + 1
             }
             // (A function taken as a value may be noregion for its type: a
             // noregion fn the value is stored as, as another may need.)
@@ -2912,7 +3535,8 @@ check_imm_heap_functions() raises Error {
                 sb2: *StrBuf = sb_new();
                 sb_puts(sb2, "unnecessary noregion on ");
                 sb_puts(sb2, fn.name);
-                mark_print_at(fn.browse_file, fn.browse_pos, sb_finish(sb2))
+                append_lifetime_diagnostic(report, fn.browse_file, fn.browse_pos,
+                    sb_finish(sb2))
             }
         }
         fn = fn.next
@@ -2955,25 +3579,30 @@ inferred_ret_kind(fn: *Function): int {
     BOUND_OMIT
 }
 
-bound_err(msg: []i8, fn: *Function) raises Error {
+bound_err(report: *LifetimeDiagnostics@new, msg: []i8, fn: *Function) raises Error {
     sb: *StrBuf = sb_new();
     sb_puts(sb, msg);
     sb_puts(sb, fn.name);
-    mark_print_at(fn.browse_file, fn.browse_pos, sb_finish(sb))
+    append_lifetime_diagnostic(report, fn.browse_file, fn.browse_pos, sb_finish(sb))
 }
 
-bound_err_param(msg: []i8, fn: *Function, p: *Obj) raises Error {
+bound_err_param(
+    report: *LifetimeDiagnostics@new,
+    msg: []i8,
+    fn: *Function,
+    p: *Obj
+) raises Error {
     sb: *StrBuf = sb_new();
     sb_puts(sb, msg);
     sb_puts(sb, p.name);
     sb_puts(sb, " in ");
     sb_puts(sb, fn.name);
-    mark_print_at(p.browse_file, p.browse_pos, sb_finish(sb))
+    append_lifetime_diagnostic(report, p.browse_file, p.browse_pos, sb_finish(sb))
 }
 
-bound_use_named(fn: *Function, p: ?*Obj) raises Error {
+bound_use_named(report: *LifetimeDiagnostics@new, fn: *Function, p: ?*Obj) raises Error {
     if (p == null) {
-        bound_err("omit bound on ", fn);
+        bound_err(report, "omit bound on ", fn);
         return
     }
     pu: *Obj = p;
@@ -2982,12 +3611,17 @@ bound_use_named(fn: *Function, p: ?*Obj) raises Error {
     sb_puts(sb, pu.name);
     sb_puts(sb, " on ");
     sb_puts(sb, fn.name);
-    mark_print_at(fn.browse_file, fn.browse_pos, sb_finish(sb))
+    append_lifetime_diagnostic(report, fn.browse_file, fn.browse_pos, sb_finish(sb))
 }
 
-bound_use_named_param(fn: *Function, p: *Obj, inf: ?*Obj) raises Error {
+bound_use_named_param(
+    report: *LifetimeDiagnostics@new,
+    fn: *Function,
+    p: *Obj,
+    inf: ?*Obj
+) raises Error {
     if (inf == null) {
-        bound_err_param("omit bound on ", fn, p);
+        bound_err_param(report, "omit bound on ", fn, p);
         return
     }
     iu: *Obj = inf;
@@ -2998,14 +3632,14 @@ bound_use_named_param(fn: *Function, p: *Obj, inf: ?*Obj) raises Error {
     sb_puts(sb, p.name);
     sb_puts(sb, " in ");
     sb_puts(sb, fn.name);
-    mark_print_at(p.browse_file, p.browse_pos, sb_finish(sb))
+    append_lifetime_diagnostic(report, p.browse_file, p.browse_pos, sb_finish(sb))
 }
 
 param_needs_bound(p: *Obj): bool {
     type_is_ref(p.ty) || type_has_pointers(p.ty)
 }
 
-check_written_param(fn: *Function, p: *Obj) raises Error {
+check_written_param(report: *LifetimeDiagnostics@new, fn: *Function, p: *Obj) raises Error {
     if (!param_needs_bound(p)) return;
     have: int = written_param_kind(p);
     want: int = inferred_param_kind(p);
@@ -3013,26 +3647,27 @@ check_written_param(fn: *Function, p: *Obj) raises Error {
         if (have == BOUND_NAMED) {
             inf: ?*Obj = p.bound_named;
             if (inf == null) return;
-            if (!streq(p.life_bound, inf.name)) bound_use_named_param(fn, p, inf)
+            if (!streq(p.life_bound, inf.name)) bound_use_named_param(report, fn,
+                p, inf)
         }
         return
     }
     if (want == BOUND_IMM) {
-        bound_err_param("use @immortal on ", fn, p);
+        bound_err_param(report, "use @immortal on ", fn, p);
         return
     }
     if (want == BOUND_NEW) {
-        bound_err_param("use @new on ", fn, p);
+        bound_err_param(report, "use @new on ", fn, p);
         return
     }
     if (want == BOUND_NAMED) {
-        bound_use_named_param(fn, p, p.bound_named);
+        bound_use_named_param(report, fn, p, p.bound_named);
         return
     }
-    bound_err_param("omit bound on ", fn, p)
+    bound_err_param(report, "omit bound on ", fn, p)
 }
 
-check_written_ret(fn: *Function) raises Error {
+check_written_ret(report: *LifetimeDiagnostics@new, fn: *Function) raises Error {
     if (!type_is_ref(fn.return_ty)) return;
     have: int = written_ret_kind(fn);
     want: int = inferred_ret_kind(fn);
@@ -3040,23 +3675,23 @@ check_written_ret(fn: *Function) raises Error {
         if (have == BOUND_NAMED) {
             rp: ?*Obj = fn.bound_ret_param;
             if (rp == null) return;
-            if (!streq(fn.ret_bound, rp.name)) bound_use_named(fn, rp)
+            if (!streq(fn.ret_bound, rp.name)) bound_use_named(report, fn, rp)
         }
         return
     }
     if (want == BOUND_NEW) {
-        bound_err("return of new requires @new on ", fn);
+        bound_err(report, "return of new requires @new on ", fn);
         return
     }
     if (have == BOUND_NEW) {
-        bound_err("return bound is @new on ", fn);
+        bound_err(report, "return bound is @new on ", fn);
         return
     }
     if (want == BOUND_NAMED) {
-        bound_use_named(fn, fn.bound_ret_param);
+        bound_use_named(report, fn, fn.bound_ret_param);
         return
     }
-    bound_err("omit bound on ", fn)
+    bound_err(report, "omit bound on ", fn)
 }
 
 propagate_param_bounds() {
@@ -3071,8 +3706,16 @@ propagate_param_bounds() {
                     c.caller_param.bound_need_imm = true;
                     changed = true
                 }
-                if (c.callee_param.bound_need_new && !c.caller_param.bound_need_new) {
+                if (c.callee_param.bound_need_new && c.allocation_bound == BOUND_IMM && !c.caller_param.bound_need_imm) {
+                    c.caller_param.bound_need_imm = true;
+                    changed = true
+                }
+                if (c.callee_param.bound_need_new && c.allocation_bound == BOUND_NEW && !c.caller_param.bound_need_new) {
                     c.caller_param.bound_need_new = true;
+                    changed = true
+                }
+                if (c.callee_param.bound_holds_new && c.allocation_bound == BOUND_NEW && !c.caller_param.bound_holds_new) {
+                    c.caller_param.bound_holds_new = true;
                     changed = true
                 }
                 c = c.next
@@ -3082,18 +3725,18 @@ propagate_param_bounds() {
     }
 }
 
-check_written_bounds() raises Error {
+check_written_bounds(report: *LifetimeDiagnostics@new) noregion raises Error {
     fn: ?*Function = functions;
     while (fn != null) {
         if (!fn.is_extern) {
             p: ?*Obj = fn.params;
             while (p != null) {
-                check_written_param(fn, p);
+                check_written_param(report, fn, p);
                 p = p.param_next
             }
-            check_written_ret(fn)
+            check_written_ret(report, fn)
         }
         fn = fn.next
     }
-    if (mark_nerr != 0) error_at_file(mark_first_file, mark_first_pos, "lifetime marks do not match")
+    if (report.count != 0) raise Error { diagnostic: Diagnostic.Document { text: sb_finish(report.output) } }
 }

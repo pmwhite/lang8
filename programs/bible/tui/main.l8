@@ -217,13 +217,102 @@ http_status_path(id: int): str@new {
 }
 
 tui_file(id: int, out: []i8): int {
+    k: int = kept_read_find(id);
+    if (k >= 0) {
+        path: str = kept_read_path(k);
+        kept_read_forget(k);
+        return file_into(path, out)
+    }
     if (id >= 128) return file_into(http_body(id), out);
     p: str = asked_path(id, false);
     if (file_size(p) < 0) p = asked_path(id, true);
     file_into(p, out)
 }
 
+// ---- kept files read back for core (HostIO.read_kept) ----
+// Each read asked for: its id and kept name, answered in the loop (got ID
+// SIZE) and forgotten once its file is taken. Core reads a module's file
+// once at a time (the catalog, each module opened): far fewer than
+// KEPT_READS_MOST are ever waiting; past it, a read is answered as a file
+// that can't be read (-1), which core reports.
+KEPT_READS_MOST: int = 32;
+
+// The longest kept name a read can be asked for (a module's package:
+// shelf-NAME.zip).
+KEPT_READ_NAME_MOST: int = 64;
+
+kept_read_ids: []int = new int[KEPT_READS_MOST](0);
+
+kept_read_names: []i8 = new i8[KEPT_READS_MOST * KEPT_READ_NAME_MOST](0i8);
+
+kept_read_lens: []int = new int[KEPT_READS_MOST](0);
+
+kept_reads_n: int = 0;
+
+kept_reads_said: int = 0;
+
+tui_read_kept(id: int, name: []i8, name_n: int) {
+    if (kept_reads_n >= KEPT_READS_MOST || name_n > KEPT_READ_NAME_MOST) {
+        tc_str("got ");
+        tc_int(id);
+        tc_str(" -1");
+        tc_end();
+        return
+    }
+    kept_read_ids[kept_reads_n] = id;
+    for i in 0..name_n kept_read_names[kept_reads_n * KEPT_READ_NAME_MOST + i] = name[i];
+    kept_read_lens[kept_reads_n] = name_n;
+    kept_reads_n = kept_reads_n + 1
+}
+
+kept_read_find(id: int): int {
+    for k in 0..kept_reads_n
+        if (kept_read_ids[k] == id) return k;
+    -1
+}
+
+kept_read_path(k: int): str@new {
+    tk_cat_n = 0;
+    tk_cat_buf(tk_kept_dir, tk_kept_dir_n);
+    tk_cat_str("/");
+    for i in 0..kept_read_lens[k] tk_cat[tk_cat_n + i] = kept_read_names[k * KEPT_READ_NAME_MOST + i];
+    tk_cat_n = tk_cat_n + kept_read_lens[k];
+    cstr(tk_cat_bytes())
+}
+
+kept_read_forget(k: int) {
+    for j in k..kept_reads_n - 1 {
+        kept_read_ids[j] = kept_read_ids[j + 1];
+        kept_read_lens[j] = kept_read_lens[j + 1];
+        for i in 0..KEPT_READ_NAME_MOST kept_read_names[j * KEPT_READ_NAME_MOST + i] = kept_read_names[(j + 1) * KEPT_READ_NAME_MOST + i]
+    }
+    kept_reads_n = kept_reads_n - 1;
+    if (kept_reads_said > k) kept_reads_said = kept_reads_said - 1
+}
+
+// The reads not yet answered, answered: their sizes (-1: no such file).
+answer_kept_reads(): bool {
+    if (kept_reads_said >= kept_reads_n) return false;
+    n: int = 0;
+    while (kept_reads_said < kept_reads_n) {
+        fbuf_n = 0;
+        fput_str("got ");
+        fput_int(kept_read_ids[kept_reads_said]);
+        fput(32);
+        fput_int(file_size(kept_read_path(kept_reads_said)));
+        fput(10);
+        for i in 0..fbuf_n {
+            hs_inbox[n] = fbuf[i];
+            n = n + 1
+        }
+        kept_reads_said = kept_reads_said + 1
+    }
+    hs_lines(n);
+    true
+}
+
 answer_asks(): bool {
+    if (answer_kept_reads()) return true;
     if (waiting_n == 0) return false;
     n: int = 0;
     for w in 0..waiting_n {
@@ -539,6 +628,7 @@ main(argc: int, args: []str) noregion: int {
         http: &tui_http,
         file: &tui_file,
         fetch: &tui_fetch,
+        read_kept: &tui_read_kept,
         say: &tui_say
     };
     hs_start();

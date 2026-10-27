@@ -1,0 +1,375 @@
+tag bible;
+
+use_tag std, sword, builder;
+
+// A Bible from the bookshelf (core/shelf.l8) as a version: its SWORD
+// module's verses made into records as core/text.l8 reads them (B, C, R,
+// S, s, D, A, Pm, P1, P2, V, T, W, I, J, F lines), in the TextData of its
+// slot. The app's 66 books and their chapters are numbered as the KJV
+// numbers them; a module's chapter goes where its book and number are the
+// same. What has no such place is counted, not shown (BibleReport), and
+// said so in its details.
+import "../../sword/sword.l8";
+
+// What a module held that its version cannot show, and what it lacks.
+type BibleReport = {
+    // Books of the 66 it does not have.
+    missing_books: int;
+    // Chapters past the app's last in a book (as the Hebrew's numbering
+    // has Joel 4).
+    outside_chapters: int;
+    // Books it has beyond the 66 (Tobit, Judith, ...).
+    extra_books: int;
+    // Verses it has with words, shown.
+    verses: int
+}
+
+// How records are being written for the chapter in hand.
+type BibleWriting = {
+    // Words have been written since the last verse or paragraph began, so
+    // a run after a space takes one at its start.
+    words: bool;
+    space: bool;
+    // The verse's V line is written (it is written at its first words).
+    verse_written: bool;
+    // A paragraph is open in this chapter (one begins before its first
+    // verse if the module's markup gives none).
+    paragraph: bool;
+    // A heading, a note: their words gathered into their own lines.
+    heading: HeadingRole;
+    heading_level: int;
+    in_heading: bool;
+    in_note: bool;
+    note_kind: NoteKind
+}
+
+bible_writing_new(): BibleWriting {
+    BibleWriting {
+        words: false,
+        space: false,
+        verse_written: false,
+        paragraph: false,
+        heading: HeadingRole.Section,
+        heading_level: 2,
+        in_heading: false,
+        in_note: false,
+        note_kind: NoteKind.Footnote
+    }
+}
+
+// A line of the records: its letter and nothing yet.
+bible_line(out: *ByteBuilder@new, letter: str) {
+    if (out.size > 0 && out.data[out.size - 1] as int != 10) builder_byte(out, 10i8);
+    builder_str(out, letter)
+}
+
+bible_end_line(out: *ByteBuilder@new) {
+    if (out.size > 0 && out.data[out.size - 1] as int != 10) builder_byte(out, 10i8)
+}
+
+// Words from up to to of text into out as one record's words: newlines
+// as spaces; the divine name in capitals (LORD, as the bundled versions
+// write it).
+bible_words(
+    out: *ByteBuilder@new,
+    text: []i8,
+    from: int,
+    to: int,
+    capitals: bool
+) {
+    for i in from..to {
+        k: int = text[i] as int & 255;
+        if (k == 10 || k == 13 || k == 9) builder_byte(out, 32i8) else if (capitals && k >= 97 && k <= 122) builder_byte(out,
+            (k - 32) trunc i8) else builder_byte(out, text[i])
+    }
+}
+
+bible_verse_line(out: *ByteBuilder@new, writing: *BibleWriting, verse: int) {
+    if (writing.verse_written) return;
+    if (!writing.paragraph) {
+        bible_line(out, "Pm");
+        writing.paragraph = true
+    }
+    bible_line(out, "V");
+    builder_int(out, verse);
+    bible_end_line(out);
+    writing.verse_written = true;
+    writing.words = false;
+    writing.space = false
+}
+
+// One entry's rich text as records: verse's (0: a chapter's heading entry,
+// whose headings come before its first verse).
+bible_records(
+    out: *ByteBuilder@new,
+    writing: *BibleWriting,
+    rich: *RichText,
+    verse: int
+) {
+    for i in 0..rich.count {
+        match rich.pieces[i] {
+            HeadingStart h -> {
+                writing.in_heading = true;
+                writing.heading = h.role;
+                writing.heading_level = h.level;
+                match h.role {
+                    Section -> bible_line(out, if (h.level >= 3) "s" else "S");
+                    PsalmTitle -> bible_line(out, "D");
+                    Acrostic -> bible_line(out, "A");
+                    _ -> { }
+                }
+            }
+            HeadingEnd -> {
+                if (writing.in_heading) {
+                    match writing.heading {
+                        BookTitle -> { }
+                        ChapterTitle -> { }
+                        _ -> bible_end_line(out)
+                    }
+                }
+                writing.in_heading = false
+            }
+            NoteStart n -> {
+                writing.in_note = true;
+                writing.note_kind = n.kind;
+                match n.kind {
+                    CrossReference -> { }
+                    _ -> {
+                        if (verse > 0) bible_verse_line(out, writing, verse);
+                        bible_line(out, "F")
+                    }
+                }
+            }
+            NoteEnd -> {
+                if (writing.in_note) {
+                    match writing.note_kind {
+                        CrossReference -> { }
+                        _ -> bible_end_line(out)
+                    }
+                }
+                writing.in_note = false
+            }
+            Paragraph -> {
+                if (!writing.in_heading && !writing.in_note) {
+                    // (Consecutive breaks are one paragraph.)
+                    if (writing.words || !writing.paragraph) {
+                        bible_line(out, "Pm");
+                        bible_end_line(out);
+                        writing.paragraph = true;
+                        writing.words = false;
+                        writing.space = false
+                    }
+                }
+            }
+            Line l -> {
+                if (!writing.in_heading && !writing.in_note) {
+                    bible_line(out, if (l.indent >= 2) "P2" else "P1");
+                    bible_end_line(out);
+                    writing.paragraph = true;
+                    writing.words = false;
+                    writing.space = false
+                }
+            }
+            Words w -> bible_records_words(out, writing, rich, w.from, w.to, w.style,
+                verse);
+            _ -> { }
+        }
+    }
+}
+
+bible_records_words(
+    out: *ByteBuilder@new,
+    writing: *BibleWriting,
+    rich: *RichText,
+    from: int,
+    to: int,
+    style: RichStyle,
+    verse: int
+) {
+    text: []i8 = rich.text.data;
+    if (writing.in_heading) {
+        match writing.heading {
+            BookTitle -> { }
+            ChapterTitle -> { }
+            _ -> bible_words(out, text, from, to, style.divine)
+        }
+        return
+    }
+    if (writing.in_note) {
+        match writing.note_kind {
+            CrossReference -> { }
+            _ -> bible_words(out, text, from, to, style.divine)
+        }
+        return
+    }
+    if (verse == 0) return;
+    // (Its spaces: one at its start if words came before; one at its end
+    // is the next run's.)
+    start: int = from;
+    end: int = to;
+    leading: bool = false;
+    while (start < end && text[start] as int == 32) {
+        leading = true;
+        start = start + 1
+    }
+    trailing: bool = false;
+    while (end > start && text[end - 1] as int == 32) {
+        trailing = true;
+        end = end - 1
+    }
+    if (end == start) {
+        if (writing.words && (leading || trailing)) writing.space = true;
+        return
+    }
+    bible_verse_line(out, writing, verse);
+    letter: str = if (style.jesus) if (style.added) "J" else "W" else if (style.added) "I" else "T";
+    // (Words in the same record's style go on in its line: the divine
+    // name's capitals are not a record of their own.)
+    if (!bible_line_is(out, letter)) bible_line(out, letter);
+    if (writing.words && (writing.space || leading)) builder_byte(out, 32i8);
+    bible_words(out, text, start, end, style.divine);
+    writing.words = true;
+    writing.space = trailing
+}
+
+// Whether out's last line is open (not ended) and a record of letter's.
+bible_line_is(out: *ByteBuilder, letter: str): bool {
+    if (out.size == 0 || out.data[out.size - 1] as int == 10) return false;
+    start: int = out.size - 1;
+    while (start > 0 && out.data[start - 1] as int != 10) start = start - 1;
+    out.data[start] == letter[0] && out.size - start > 1
+}
+
+// Bytes from up to to of source added to text's records (data, size of it
+// used), growing it in the caller's destination: the text's arena (in an
+// allocate of it), so that what is added outlives the scratch regions it
+// is made in.
+bible_text_append(
+    text: *TextData@new,
+    source: []i8,
+    from: int,
+    to: int
+) {
+    need: int = text.size + to - from;
+    if (need > len(text.data)) {
+        capacity: int = if (len(text.data) < 1024) 1024 else len(text.data);
+        while (capacity < need) capacity = capacity * 2;
+        grown: []i8 = new i8[capacity](0i8);
+        memcpy(grown, 0, text.data, 0, text.size);
+        text.data = grown
+    }
+    memcpy(text.data, text.size, source, from, to - from);
+    text.size = need
+}
+
+// Text t made from the module's Bible (as the app numbers it): its
+// records in its own arena, indexed; what could not be shown, in report.
+// Each book's blocks are decoded in a scratch region of their own, each
+// verse's markup in one of its own, on the process heap; only what is
+// added to the records is allocated in the text's arena. A failure leaves
+// no text behind (its arena is let go).
+bible_text_made(t: int, module: *VerseModule, report: *BibleReport) raises SwordError: owned *TextData {
+    kjv: *Versification = versification_named("KJV");
+    system: *Versification = verse_module_system(module);
+    info: *ModuleInfo = verse_module_info(module);
+    // (Its books beyond the 66.)
+    for mb in 0..len(system.books)
+        if (versification_book(kjv, system.books[mb].osis) < 0) report.extra_books = report.extra_books + 1;
+    next: owned *TextData = own {
+        text_made(t, 0)
+    };
+    try {
+        borrow next as text {
+            text.size = 0;
+            for b in 0..books {
+                osis: str = kjv.books[b].osis;
+                mb: int = versification_book(system, osis);
+                present: bool = mb >= 0 && verse_module_has_text(module, mb, 0);
+                if (!present) report.missing_books = report.missing_books + 1;
+                module_chapters: int = if (present) len(system.books[mb].verses) else 0;
+                if (module_chapters > book_count[b]) report.outside_chapters = report.outside_chapters + module_chapters - book_count[b];
+                region {
+                    line: *ByteBuilder = builder_new(64);
+                    builder_str(line, "B");
+                    builder_str(line, book_code(b));
+                    builder_byte(line, 32i8);
+                    builder_str(line, book_name(b));
+                    builder_byte(line, 10i8);
+                    allocate text {
+                        bible_text_append(text, line.data, 0, line.size)
+                    }
+                    // (The block last decoded, for the verses in it.)
+                    block_testament: int = 0;
+                    block_number: int = -1;
+                    block: []i8 = new i8[0](0i8);
+                    state: MarkupState = markup_state_new();
+                    for n in 1..book_count[b] + 1 {
+                        builder_clear(line);
+                        builder_str(line, "C");
+                        builder_int(line, n);
+                        builder_byte(line, 10i8);
+                        // (A chapter it lacks says so, as its references' small
+                        // line would: not an empty page.)
+                        if (n > module_chapters || !verse_module_has_text(module,
+                            mb, n)) {
+                            builder_str(line, "R");
+                            builder_str(line, if (len(info.abbreviation) > 0) info.abbreviation else info.name);
+                            builder_str(line, if (present) " doesn\â\€\™t include this chapter." else " doesn\â\€\™t include this book.");
+                            builder_byte(line, 10i8)
+                        }
+                        allocate text {
+                            bible_text_append(text, line.data, 0, line.size)
+                        }
+                        writing: BibleWriting = bible_writing_new();
+                        last_verse: int = if (n <= module_chapters) system.books[mb].verses[n - 1] else 0;
+                        // (Verse 0: the chapter's heading entry.)
+                        for v in 0..last_verse + 1 {
+                            entry: VerseEntry = verse_module_entry(module, verse_slot(system,
+                                mb, n, v));
+                            if (entry.size > 0) {
+                                if (entry.block >= 0 && (entry.block != block_number || entry.testament != block_testament)) {
+                                    block = verse_module_block(module, entry.testament,
+                                        entry.block);
+                                    block_number = entry.block;
+                                    block_testament = entry.testament
+                                }
+                                region {
+                                    source: []i8 = if (entry.block >= 0) block else verse_module_testament_text(module,
+                                        entry.testament);
+                                    markup: []i8 = verse_module_text(module, source,
+                                        entry);
+                                    rich: *RichText = rich_new();
+                                    markup_convert(rich, &state, info.markup, markup,
+                                        0, len(markup));
+                                    verse_records: *ByteBuilder = builder_new(len(markup) + 64);
+                                    writing.verse_written = false;
+                                    bible_records(verse_records, &writing, rich, v);
+                                    bible_end_line(verse_records);
+                                    if (writing.verse_written) report.verses = report.verses + 1;
+                                    allocate text {
+                                        bible_text_append(text, verse_records.data,
+                                            0, verse_records.size)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // (A zero after the records, as text_made leaves one.)
+            size: int = text.size;
+            region {
+                zero: []i8 = new i8[1](0i8);
+                allocate text {
+                    bible_text_append(text, zero, 0, 1)
+                }
+            }
+            text.size = size;
+            text_index(text)
+        }
+    } with SwordError error -> {
+        drop next;
+        raise SwordError { failure: error.failure }
+    }
+    move next
+}

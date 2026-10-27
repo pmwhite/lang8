@@ -1,0 +1,381 @@
+tag sword_versifications;
+
+use_tag std, files, builder;
+
+// The versification systems SWORD registers, from a SWORD source tree's
+// include/canon*.h and src/mgr/versificationmgr.cpp, as the L8 data file
+// ../versification_data.l8 (its format is described in that file):
+//
+//   versifications SWORD_SOURCE_DIR > programs/sword/versification_data.l8
+//
+// The headers are C: arrays of books ({"Name", "OSIS", "Abbrev", chapters}
+// up to an all-empty entry), of verses per chapter (int vm_X[]), and of
+// verse mappings (unsigned char mappings_X[]: extra book names, each ended
+// by 0, a 0, then rules of 7 numbers, or 8 when the first names an extra
+// book, up to a 0). versificationmgr.cpp registers each system:
+// registerVersificationSystem("NAME", OT_BOOKS, NT_BOOKS, VERSES[, MAPPINGS]).
+import "../../files/files.l8";
+
+import "../../builder/builder.l8";
+
+import "../../../stdlib/print.l8";
+
+import "../../../stdlib/write.l8";
+
+// ---- C tokens ----
+type TokenKind =
+    | Word
+    | Number
+    | Text
+    | Character
+    | Mark
+
+type Token = {
+    kind: TokenKind;
+    // Its bytes in the source (a text's or character's without quotes).
+    from: int;
+    to: int
+}
+
+type Source = {
+    data: []i8;
+    tokens: []Token;
+    count: int
+}
+
+// What could not be read (reason), at a byte or token of the source.
+exception SourceError {
+    at: int;
+    reason: str
+}
+
+is_word_byte(byte: int): bool {
+    byte >= 97 && byte <= 122 || byte >= 65 && byte <= 90 || byte >= 48 && byte <= 57 || byte == 95
+}
+
+// The file at path, read and split into tokens (comments and preprocessor
+// lines left out).
+read_source(path: str) raises FileError, SourceError: *Source@new {
+    data: []i8 = read_file_bytes(path);
+    tokens: []Token = new Token[len(data) + 1](Token { kind: TokenKind.Mark, from: 0, to: 0 });
+    count: int = 0;
+    at: int = 0;
+    size: int = len(data);
+    line_start: bool = true;
+    while (at < size) {
+        byte: int = data[at] as int & 255;
+        next: int = if (at + 1 < size) data[at + 1] as int & 255 else 0;
+        if (byte == 10) {
+            line_start = true;
+            at = at + 1
+        } else if (byte == 32 || byte == 9 || byte == 13) at = at + 1 else if (byte == 35 && line_start) {
+            while (at < size && data[at] as int != 10) at = at + 1
+        } else if (byte == 47 && next == 47) {
+            while (at < size && data[at] as int != 10) at = at + 1
+        } else if (byte == 47 && next == 42) {
+            at = at + 2;
+            while (at + 1 < size && !(data[at] as int == 42 && data[at + 1] as int == 47)) at = at + 1;
+            at = at + 2
+        } else {
+            line_start = false;
+            from: int = at;
+            kind: TokenKind = TokenKind.Mark;
+            if (byte == 34 || byte == 39) {
+                at = at + 1;
+                while (at < size && (data[at] as int & 255) != byte) {
+                    if (data[at] as int == 92) at = at + 1;
+                    at = at + 1
+                }
+                if (at >= size) raise SourceError { at: from, reason: "a quoted text or character without its end" };
+                kind = (if (byte == 34) TokenKind.Text else TokenKind.Character);
+                tokens[count] = Token { kind: kind, from: from + 1, to: at };
+                at = at + 1
+            } else if (is_word_byte(byte)) {
+                while (at < size && is_word_byte(data[at] as int & 255)) at = at + 1;
+                kind = (if (byte >= 48 && byte <= 57) TokenKind.Number else TokenKind.Word);
+                tokens[count] = Token { kind: kind, from: from, to: at }
+            } else {
+                at = at + 1;
+                tokens[count] = Token { kind: TokenKind.Mark, from: from, to: at }
+            }
+            count = count + 1
+        }
+    }
+    new Source { data: data, tokens: tokens, count: count }
+}
+
+token_is(source: *Source, index: int, text: str): bool {
+    if (index >= source.count) return false;
+    token: Token = source.tokens[index];
+    if (token.to - token.from != len(text)) return false;
+    for i in 0..len(text)
+        if (source.data[token.from + i] != text[i]) return false;
+    true
+}
+
+token_number(source: *Source, index: int) raises SourceError: int {
+    token: Token = source.tokens[index];
+    match token.kind {
+        Number -> { }
+        _ -> raise SourceError { at: token.from, reason: "a number expected" }
+    }
+    value: int = 0;
+    for i in token.from..token.to value = value * 10 + (source.data[i] as int - 48);
+    value
+}
+
+// Where the initializer of the array named name begins: the token after
+// its `{` (-1: there is none).
+array_start(source: *Source, name: str): int {
+    for i in 0..source.count {
+        if (token_is(source, i, name) && token_is(source, i + 1, "[") && token_is(source,
+            i + 2, "]") && token_is(source, i + 3, "=") && token_is(source, i + 4,
+            "{")) return i + 5
+    }
+    -1
+}
+
+// ---- what the headers hold ----
+type Book = {
+    name: str;
+    osis: str;
+    chapters: int
+}
+
+type Tables = {
+    sources: []*Source;
+    count: int
+}
+
+find_array(tables: *Tables, name: str) raises SourceError: int {
+    for s in 0..tables.count {
+        at: int = array_start(tables.sources[s], name);
+        if (at >= 0) return s * 1000000000 + at
+    }
+    raise SourceError { at: 0, reason: "no array of that name in the headers" }
+}
+
+token_str(source: *Source, index: int): str@new {
+    token: Token = source.tokens[index];
+    piece: []i8 = new i8[token.to - token.from](0i8);
+    memcpy(piece, 0, source.data, token.from, token.to - token.from);
+    cstr(piece)
+}
+
+// The books of the array named name, up to its all-empty entry.
+read_books(tables: *Tables, name: str) raises SourceError: []Book@new {
+    found: int = find_array(tables, name);
+    source: *Source = tables.sources[found / 1000000000];
+    at: int = found % 1000000000;
+    books: []Book = new Book[128](Book { name: "", osis: "", chapters: 0 });
+    count: int = 0;
+    more: bool = true;
+    while (more) {
+        // {"Name", "OSIS", "Abbrev", chapters}
+        if (!token_is(source, at, "{")) raise SourceError { at: at, reason: "a book's { expected" };
+        chapters: int = token_number(source, at + 7);
+        if (chapters == 0) more = false else {
+            books[count] = Book { name: token_str(source, at + 1), osis: token_str(source,
+                at + 3), chapters: chapters };
+            count = count + 1
+        }
+        at = at + 10
+    }
+    out: []Book = new Book[count](Book { name: "", osis: "", chapters: 0 });
+    for i in 0..count out[i] = books[i];
+    out
+}
+
+// The numbers of the int array named name, in order.
+read_numbers(tables: *Tables, name: str) raises SourceError: []int@new {
+    found: int = find_array(tables, name);
+    source: *Source = tables.sources[found / 1000000000];
+    at: int = found % 1000000000;
+    count: int = 0;
+    numbers: []int = new int[8192](0);
+    while (!token_is(source, at, "}")) {
+        if (!token_is(source, at, ",")) {
+            numbers[count] = token_number(source, at);
+            count = count + 1
+        }
+        at = at + 1
+    }
+    out: []int = new int[count](0);
+    for i in 0..count out[i] = numbers[i];
+    out
+}
+
+// The mapping array named name, as the data file's text: its extra books'
+// names, a space between, then | and its rules' numbers (without the
+// zeros that end the names and the rules).
+read_mappings(tables: *Tables, name: str, out: *ByteBuilder@new) raises SourceError {
+    found: int = find_array(tables, name);
+    source: *Source = tables.sources[found / 1000000000];
+    at: int = found % 1000000000;
+    // (Extra books: characters up to a 0, until a lone 0.)
+    names: int = 0;
+    in_name: bool = false;
+    in_rules: bool = false;
+    rule_numbers: int = 0;
+    held: int = 0;
+    while (!token_is(source, at, "}")) {
+        token: Token = source.tokens[at];
+        match token.kind {
+            Character -> {
+                if (in_rules) raise SourceError { at: at, reason: "a character among the mapping rules" };
+                if (!in_name && names > 0) builder_byte(out, ' ' as i8);
+                in_name = true;
+                builder_bytes(out, source.data, token.from, token.to)
+            }
+            Number -> {
+                value: int = token_number(source, at);
+                if (in_name) {
+                    if (value != 0) raise SourceError { at: at, reason: "an extra book's name ends with 0" };
+                    in_name = false;
+                    names = names + 1
+                } else if (!in_rules) {
+                    if (value != 0) raise SourceError { at: at, reason: "the extra books' names end with 0" };
+                    in_rules = true;
+                    builder_byte(out, '|' as i8)
+                } else {
+                    // (Each held back until the next comes: the last, a 0,
+                    // ends the rules.)
+                    if (rule_numbers > 0) {
+                        if (rule_numbers > 1) builder_byte(out, ' ' as i8);
+                        builder_int(out, held)
+                    }
+                    held = value;
+                    rule_numbers = rule_numbers + 1
+                }
+            }
+            _ -> { }
+        }
+        at = at + 1
+    }
+    if (rule_numbers > 0 && held != 0) raise SourceError { at: at, reason: "the mapping rules end with 0" }
+}
+
+// ---- the output ----
+add_books(
+    out: *ByteBuilder@new,
+    books: []Book,
+    verses: []int,
+    first_chapter: int
+): int {
+    chapter: int = first_chapter;
+    for b in 0..len(books) {
+        if (b > 0) builder_byte(out, ';' as i8);
+        builder_str(out, books[b].osis);
+        builder_byte(out, '=' as i8);
+        builder_str(out, books[b].name);
+        builder_byte(out, '=' as i8);
+        for c in 0..books[b].chapters {
+            if (c > 0) builder_byte(out, ' ' as i8);
+            builder_int(out, verses[chapter]);
+            chapter = chapter + 1
+        }
+    }
+    chapter
+}
+
+main(argc: int, args: []str): int {
+    try {
+        generate(argc, args)
+    } with IoError _error -> {
+        1
+    }
+}
+
+generate(argc: int, args: []str) raises IoError: int {
+    if (argc != 2) {
+        eprint("usage: versifications SWORD_SOURCE_DIR");
+        return 2
+    }
+    root: str = args[1];
+    try {
+        out: *ByteBuilder = builder_new(1 << 16);
+        manager: *Source = read_source(join(root, "/src/mgr/versificationmgr.cpp"));
+        // (Every header the registrations may name.)
+        headers: []str = ["canon.h", "canon_null.h", "canon_leningrad.h", "canon_mt.h",
+            "canon_kjva.h", "canon_nrsv.h", "canon_nrsva.h", "canon_synodal.h", "canon_synodalprot.h",
+            "canon_vulg.h", "canon_german.h", "canon_luther.h", "canon_catholic.h",
+            "canon_catholic2.h", "canon_lxx.h", "canon_orthodox.h", "canon_segond.h",
+            "canon_calvin.h", "canon_darbyfr.h"];
+        tables: *Tables = new Tables { sources: new *Source[len(headers)](manager), count: len(headers) };
+        for h in 0..len(headers) tables.sources[h] = read_source(join(join(root, "/include/"),
+            headers[h]));
+        builder_str(out, """
+tag sword_internal;
+
+// Generated by tools/versifications.l8 from SWORD's include/canon*.h and
+// src/mgr/versificationmgr.cpp (CrossWire Bible Society, GPL-2.0): the
+// versification systems SWORD registers, in its order. Do not edit;
+// generate it again.
+//
+// Each is one string: NAME|OLD|NEW|EXTRA|RULES. OLD and NEW are a
+// testament's books in order, split by ;, each OSIS=Name=VERSES with a
+// chapter's verses each (space-separated). EXTRA and RULES are its verse
+// mappings to the KJVA's numbering, as SWORD's mappings_X arrays hold
+// them (empty if it has none): the extra books' OSIS names, and the rules'
+// numbers.
+versification_tables: []str = [
+""");
+        at: int = 0;
+        first: bool = true;
+        while (at < manager.count) {
+            if (token_is(manager, at, "registerVersificationSystem") && token_is(manager,
+                at + 1, "(")) {
+                // ("NAME", ot, nt, vm[, mappings])
+                name: str = token_str(manager, at + 2);
+                if (len(name) > 0 && manager.data[manager.tokens[at + 2].from - 1] as int == 34) {
+                    try {
+                        old: []Book = read_books(tables, token_str(manager, at + 4));
+                        new_books: []Book = read_books(tables, token_str(manager,
+                            at + 6));
+                        verses: []int = read_numbers(tables, token_str(manager, at + 8));
+                        if (!first) builder_str(out, ",\n");
+                        first = false;
+                        builder_str(out, "    \"");
+                        builder_str(out, name);
+                        builder_byte(out, '|' as i8);
+                        chapter: int = add_books(out, old, verses, 0);
+                        builder_byte(out, '|' as i8);
+                        chapter = add_books(out, new_books, verses, chapter);
+                        if (chapter != len(verses)) raise SourceError { at: at, reason: "its verse counts do not match its books' chapters" };
+                        builder_byte(out, '|' as i8);
+                        if (token_is(manager, at + 9, ",")) {
+                            mapping: *ByteBuilder = builder_new(4096);
+                            read_mappings(tables, token_str(manager, at + 10), mapping);
+                            builder_bytes(out, mapping.data, 0, mapping.size)
+                        } else builder_byte(out, '|' as i8);
+                        builder_byte(out, '"' as i8)
+                    } with SourceError error -> {
+                        // (Which system could not be read.)
+                        eprint(name);
+                        raise SourceError { at: error.at, reason: error.reason }
+                    }
+                }
+            }
+            at = at + 1
+        }
+        builder_str(out, """
+
+];
+""");
+        write_bytes_n(1, out.data, out.size);
+        0
+    } with FileError error -> {
+        eprint(file_operation_name(error.operation));
+        1
+    } with SourceError error -> {
+        eprint(error.reason);
+        1
+    }
+}
+
+join(a: str, b: str): str@new {
+    out: []i8 = new i8[len(a) + len(b)](0i8);
+    for i in 0..len(a) out[i] = a[i];
+    for i in 0..len(b) out[len(a) + i] = b[i];
+    cstr(out)
+}

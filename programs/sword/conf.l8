@@ -1,0 +1,545 @@
+tag sword_internal;
+
+// A module's .conf (mods.d/NAME.conf): its [NAME], then Key=Value lines.
+// A value ending in a backslash goes on in the next line (joined by a
+// newline); # begins a comment; a key may repeat (GlobalOptionFilter,
+// Feature). See https://wiki.crosswire.org/DevTools:conf_Files.
+//
+// ModuleInfo is what the conf says about the module, checked: its kind,
+// how it is stored, compressed and marked up, and whether this library
+// can read it (module_support).
+tag sword
+type ModuleConf = tag sword_internal {
+    name: str;
+    keys: []str;
+    values: []str;
+    count: int
+}
+
+// (Files are named by their ending, as the module's index or data file:
+// "ot.bzv", ".idx". Which module, and why one is unsupported, the caller
+// knows: module_support.)
+tag sword
+type SwordFailure =
+    | BadConf { line: int }
+    | MissingFile { ending: str }
+    | BadIndex { ending: str, at: int }
+    | BadBlock { ending: str, block: int }
+    | UnknownVersification
+    | NotSupported
+    | BadPackage
+    | BadKey
+
+// What went wrong reading a module or its conf.
+tag sword
+exception SwordError {
+    failure: SwordFailure
+}
+
+tag sword
+sword_failure_name(failure: SwordFailure): str {
+    match failure {
+        BadConf _ -> "its configuration file is not well formed";
+        MissingFile _ -> "one of its files is missing";
+        BadIndex _ -> "an index points outside its data";
+        BadBlock _ -> "a compressed block is damaged";
+        UnknownVersification -> "its verse numbering is not one SWORD defines";
+        NotSupported -> "it is stored in a way this app can't read yet";
+        BadPackage -> "its package is not a readable zip file";
+        BadKey -> "no entry has that name"
+    }
+}
+
+sword_conf_byte(text: []i8, at: int): int {
+    text[at] as int & 255
+}
+
+// A copy of text, in the caller's destination.
+tag sword
+sword_copy(text: str): str@new {
+    raw: []i8 = bytes(text);
+    sword_text(raw, 0, len(raw))
+}
+
+// The bytes from up to to, as a string (NUL bytes left out: a C string
+// cannot hold them, and SWORD's text never means them).
+sword_text(source: []i8, from: int, to: int): str@new {
+    count: int = 0;
+    for i in from..to
+        if (source[i] as int != 0) count = count + 1;
+    out: []i8 = new i8[count](0i8);
+    at: int = 0;
+    for i in from..to {
+        if (source[i] as int != 0) {
+            out[at] = source[i];
+            at = at + 1
+        }
+    }
+    cstr(out)
+}
+
+sword_trimmed_end(text: []i8, from: int, to: int): int {
+    end: int = to;
+    while (end > from && (sword_conf_byte(text, end - 1) == 32 || sword_conf_byte(text,
+        end - 1) == 9 || sword_conf_byte(text, end - 1) == 13)) end = end - 1;
+    end
+}
+
+sword_trimmed_start(text: []i8, from: int, to: int): int {
+    start: int = from;
+    while (start < to && (sword_conf_byte(text, start) == 32 || sword_conf_byte(text,
+        start) == 9)) start = start + 1;
+    start
+}
+
+// The conf in size bytes of text: one module's.
+tag sword
+conf_parse(text: []i8, size: int) raises SwordError: *ModuleConf@new {
+    // (At most a key a line.)
+    lines: int = 1;
+    for i in 0..size
+        if (sword_conf_byte(text, i) == 10) lines = lines + 1;
+    keys: []str = new str[lines]("");
+    values: []str = new str[lines]("");
+    count: int = 0;
+    name: str = "";
+    at: int = 0;
+    line: int = 0;
+    while (at < size) {
+        end: int = at;
+        while (end < size && sword_conf_byte(text, end) != 10) end = end + 1;
+        line = line + 1;
+        from: int = sword_trimmed_start(text, at, end);
+        to: int = sword_trimmed_end(text, from, end);
+        next: int = end + 1;
+        if (from < to && sword_conf_byte(text, from) == 91) {
+            close: int = from + 1;
+            while (close < to && sword_conf_byte(text, close) != 93) close = close + 1;
+            if (close >= to || len(name) > 0) raise SwordError { failure: SwordFailure.BadConf { line: line } };
+            name = sword_text(text, from + 1, close)
+        } else if (from < to && sword_conf_byte(text, from) != 35) {
+            equals: int = from;
+            while (equals < to && sword_conf_byte(text, equals) != 61) equals = equals + 1;
+            if (equals >= to) raise SwordError { failure: SwordFailure.BadConf { line: line } };
+            key_end: int = sword_trimmed_end(text, from, equals);
+            value_from: int = sword_trimmed_start(text, equals + 1, to);
+            // (A value going on: its lines joined by newlines.)
+            if (to > value_from && sword_conf_byte(text, to - 1) == 92) {
+                joined: []i8 = new i8[size](0i8);
+                joined_n: int = 0;
+                piece_from: int = value_from;
+                piece_to: int = to;
+                going_on: bool = true;
+                while (going_on) {
+                    going_on = piece_to > piece_from && sword_conf_byte(text, piece_to - 1) == 92;
+                    if (going_on) piece_to = sword_trimmed_end(text, piece_from, piece_to - 1);
+                    for i in piece_from..piece_to {
+                        joined[joined_n] = text[i];
+                        joined_n = joined_n + 1
+                    }
+                    if (going_on) {
+                        joined[joined_n] = 10i8;
+                        joined_n = joined_n + 1;
+                        if (next >= size) going_on = false else {
+                            line_end: int = next;
+                            while (line_end < size && sword_conf_byte(text, line_end) != 10) line_end = line_end + 1;
+                            line = line + 1;
+                            piece_from = sword_trimmed_start(text, next, line_end);
+                            piece_to = sword_trimmed_end(text, piece_from, line_end);
+                            next = line_end + 1
+                        }
+                    }
+                }
+                values[count] = sword_text(joined, 0, joined_n)
+            } else values[count] = sword_text(text, value_from, to);
+            keys[count] = sword_text(text, from, key_end);
+            count = count + 1
+        }
+        at = next
+    }
+    if (len(name) == 0) raise SwordError { failure: SwordFailure.BadConf { line: 1 } };
+    new ModuleConf {
+        name: name,
+        keys: keys,
+        values: values,
+        count: count
+    }
+}
+
+tag sword
+conf_name(conf: *ModuleConf): str@conf {
+    conf.name
+}
+
+// The first value of key (none: null).
+tag sword
+conf_value(conf: *ModuleConf, key: str): ?str@conf {
+    for i in 0..conf.count
+        if (conf.keys[i] == key) return conf.values[i];
+    null
+}
+
+tag sword
+conf_value_or(conf: *ModuleConf, key: str, fallback: str@conf): str@conf {
+    value: ?str = conf_value(conf, key);
+    if (value == null) fallback else value
+}
+
+// Whether key has value among its values (Feature=StrongsNumbers).
+tag sword
+conf_has(conf: *ModuleConf, key: str, value: str): bool {
+    for i in 0..conf.count
+        if (conf.keys[i] == key && conf.values[i] == value) return true;
+    false
+}
+
+sword_conf_number(conf: *ModuleConf, key: str): int {
+    value: ?str = conf_value(conf, key);
+    if (value == null) return -1;
+    n: int = 0;
+    any: bool = false;
+    for byte in value {
+        k: int = byte as int;
+        if (k >= 48 && k <= 57) {
+            n = n * 10 + k - 48;
+            any = true
+        }
+    }
+    if (any) n else -1
+}
+
+// ---- what the conf says, checked ----
+tag sword
+type ModuleKind =
+    | Bible
+    | Commentary
+    | Dictionary
+    | Glossary
+    | Devotional
+    | Book
+    | Images
+    | Other
+
+// How its entries are found: by verse (texts and commentaries), by key
+// (lexicons and dictionaries), or in a tree of headings (general books).
+// wide: an entry's size takes 4 bytes in the index (zText4, RawLD4).
+tag sword
+type ModuleStorage =
+    | ByVerse { compressed: bool, wide: bool }
+    | ByKey { compressed: bool, wide: bool }
+    | ByTree
+    | UnknownStorage { driver: str }
+
+tag sword
+type Compression =
+    | Uncompressed
+    | Zip
+    | Lzss
+    | UnknownCompression { name: str }
+
+tag sword
+type Markup =
+    | Osis
+    | Thml
+    | Gbf
+    | Tei
+    | Plain
+
+// Why a module cannot be read here.
+tag sword
+type UnsupportedReason =
+    | Locked
+    | Storage { driver: str }
+    | Compressed { name: str }
+    | Numbering { name: str }
+    | Pictures
+
+tag sword
+type ModuleSupport =
+    | Readable
+    | Unreadable { reason: UnsupportedReason }
+
+tag sword
+type ModuleInfo = {
+    name: str;
+    // A line naming it (Description), and its short name where it gives
+    // one (Abbreviation; else its name).
+    description: str;
+    abbreviation: str;
+    kind: ModuleKind;
+    storage: ModuleStorage;
+    compression: Compression;
+    markup: Markup;
+    // Latin-1 unless it says UTF-8 (older modules say nothing).
+    utf8: bool;
+    // Its verse numbering's name (texts and commentaries; KJV if unsaid).
+    versification: str;
+    // Its language (an ISO 639 code, perhaps with a script or region:
+    // en, grc, zh-Hant) and whether its script runs right to left.
+    language: str;
+    right_to_left: bool;
+    // Where its files are under the module library's root, without the
+    // leading ./ (a folder for texts and commentaries, ending with /; the
+    // files' common start for the others: modules/lexdict/zld/x/dict).
+    data_path: str;
+    install_size: int;
+    version: str;
+    date: str;
+    // Its About (SWORD's RTF-like text: about_paragraphs), license and
+    // copyright lines, as the conf gives them ("" if not).
+    about: str;
+    license: str;
+    copyright: str;
+    // It needs an unlock key its publisher sells (CipherKey given empty).
+    locked: bool;
+    // What it marks: the words of Jesus, Strong's numbers, footnotes.
+    words_of_christ: bool;
+    strongs: bool;
+    footnotes: bool;
+    // A lexicon keyed by Strong's numbers, Greek or Hebrew.
+    greek_definitions: bool;
+    hebrew_definitions: bool;
+    // Its category says its teaching is outside mainstream Christianity.
+    questionable: bool
+}
+
+sword_module_kind(conf: *ModuleConf, driver: str): ModuleKind {
+    category: str = conf_value_or(conf, "Category", "");
+    if (category == "Maps" || category == "Images") return ModuleKind.Images;
+    if (conf_has(conf, "Feature", "DailyDevotion") || category == "Daily Devotional") return ModuleKind.Devotional;
+    if (category == "Glossaries" || conf_has(conf, "Feature", "Glossary")) return ModuleKind.Glossary;
+    if (driver == "zText" || driver == "zText4" || driver == "RawText" || driver == "RawText4") return ModuleKind.Bible;
+    if (driver == "zCom" || driver == "zCom4" || driver == "RawCom" || driver == "RawCom4" || driver == "HREFCom") return ModuleKind.Commentary;
+    if (driver == "zLD" || driver == "RawLD" || driver == "RawLD4") return ModuleKind.Dictionary;
+    if (driver == "RawGenBook") return ModuleKind.Book;
+    ModuleKind.Other
+}
+
+sword_module_storage(driver: str): ModuleStorage@new {
+    if (driver == "zText" || driver == "zCom") return ModuleStorage.ByVerse { compressed: true, wide: false };
+    if (driver == "zText4" || driver == "zCom4") return ModuleStorage.ByVerse { compressed: true, wide: true };
+    if (driver == "RawText" || driver == "RawCom") return ModuleStorage.ByVerse { compressed: false, wide: false };
+    if (driver == "RawText4" || driver == "RawCom4") return ModuleStorage.ByVerse { compressed: false, wide: true };
+    if (driver == "zLD") return ModuleStorage.ByKey { compressed: true, wide: true };
+    if (driver == "RawLD") return ModuleStorage.ByKey { compressed: false, wide: false };
+    if (driver == "RawLD4") return ModuleStorage.ByKey { compressed: false, wide: true };
+    if (driver == "RawGenBook") return ModuleStorage.ByTree;
+    ModuleStorage.UnknownStorage { driver: sword_copy(driver) }
+}
+
+sword_module_markup(conf: *ModuleConf): Markup {
+    source: str = conf_value_or(conf, "SourceType", "Plaintext");
+    if (source == "OSIS") return Markup.Osis;
+    if (source == "ThML") return Markup.Thml;
+    if (source == "GBF") return Markup.Gbf;
+    if (source == "TEI") return Markup.Tei;
+    Markup.Plain
+}
+
+// A compressed module's CompressType, as SWORD reads it: LZSS when it
+// says none; ZIP or LZSS in any case; anything else (BZIP2, XZ, empty) a
+// compression this library can't read.
+sword_module_compression(name: str): Compression@new {
+    if (sword_same_folded(name, "ZIP")) return Compression.Zip;
+    if (sword_same_folded(name, "LZSS")) return Compression.Lzss;
+    Compression.UnknownCompression { name: sword_copy(name) }
+}
+
+sword_same_folded(a: str, b: str): bool {
+    if (len(a) != len(b)) return false;
+    for i in 0..len(a)
+        if (sword_lower(a[i] as int) != sword_lower(b[i] as int)) return false;
+    true
+}
+
+// Its data path as given (./modules/texts/ztext/kjv/), without the ./.
+sword_module_data_path(conf: *ModuleConf): str@new {
+    path: str = conf_value_or(conf, "DataPath", "");
+    start: int = 0;
+    if (len(path) >= 2 && path[0] as int == 46 && path[1] as int == 47) start = 2;
+    raw: []i8 = bytes(path);
+    sword_text(raw, start, len(raw))
+}
+
+tag sword
+module_info(conf: *ModuleConf): ModuleInfo@new {
+    driver: str = conf_value_or(conf, "ModDrv", "");
+    storage: ModuleStorage = sword_module_storage(driver);
+    compressed: bool = match storage {
+        ByVerse s -> s.compressed;
+        ByKey s -> s.compressed;
+        _ -> false
+    };
+    compression: Compression = if (compressed) sword_module_compression(conf_value_or(conf,
+        "CompressType", "LZSS")) else Compression.Uncompressed;
+    cipher: ?str = conf_value(conf, "CipherKey");
+    category: str = conf_value_or(conf, "Category", "");
+    ModuleInfo {
+        name: sword_copy(conf.name),
+        description: sword_copy(conf_value_or(conf, "Description", conf.name)),
+        abbreviation: sword_copy(conf_value_or(conf, "Abbreviation", conf.name)),
+        kind: sword_module_kind(conf, driver),
+        storage: storage,
+        compression: compression,
+        markup: sword_module_markup(conf),
+        utf8: conf_value_or(conf, "Encoding", "") == "UTF-8",
+        versification: sword_copy(conf_value_or(conf, "Versification", "KJV")),
+        language: sword_copy(conf_value_or(conf, "Lang", "en")),
+        right_to_left: conf_value_or(conf, "Direction", "") == "RtoL",
+        data_path: sword_module_data_path(conf),
+        install_size: sword_conf_number(conf, "InstallSize"),
+        version: sword_copy(conf_value_or(conf, "Version", "")),
+        date: sword_copy(conf_value_or(conf, "SwordVersionDate", "")),
+        about: sword_copy(conf_value_or(conf, "About", "")),
+        license: sword_copy(conf_value_or(conf, "DistributionLicense", "")),
+        copyright: sword_copy(conf_value_or(conf, "Copyright", conf_value_or(conf,
+            "ShortCopyright", ""))),
+        locked: cipher != null && len(cipher) == 0,
+        words_of_christ: conf_has(conf, "GlobalOptionFilter", "OSISRedLetterWords") || conf_has(conf,
+            "GlobalOptionFilter", "GBFRedLetterWords") || conf_has(conf, "GlobalOptionFilter",
+            "ThMLRedLetterWords"),
+        strongs: conf_has(conf, "Feature", "StrongsNumbers"),
+        footnotes: conf_has(conf, "GlobalOptionFilter", "OSISFootnotes") || conf_has(conf,
+            "GlobalOptionFilter", "GBFFootnotes") || conf_has(conf, "GlobalOptionFilter",
+            "ThMLFootnotes"),
+        greek_definitions: conf_has(conf, "Feature", "GreekDef"),
+        hebrew_definitions: conf_has(conf, "Feature", "HebrewDef"),
+        questionable: category == "Cults / Unorthodox / Questionable Material"
+    }
+}
+
+// Whether this library can read the module, and if not, why.
+tag sword
+module_support(info: *ModuleInfo): ModuleSupport@info {
+    if (info.locked) return ModuleSupport.Unreadable { reason: UnsupportedReason.Locked };
+    match info.kind {
+        Images -> return ModuleSupport.Unreadable { reason: UnsupportedReason.Pictures };
+        _ -> { }
+    }
+    match info.storage {
+        UnknownStorage s -> return ModuleSupport.Unreadable { reason: UnsupportedReason.Storage { driver: s.driver } };
+        ByVerse _ -> {
+            if (!versification_known(info.versification)) return ModuleSupport.Unreadable { reason: UnsupportedReason.Numbering { name: info.versification } }
+        }
+        _ -> { }
+    }
+    match info.compression {
+        UnknownCompression c -> ModuleSupport.Unreadable { reason: UnsupportedReason.Compressed { name: c.name } };
+        Lzss -> {
+            // (A dictionary's LZSS blocks don't record their size, which
+            // decoding them needs.)
+            match info.storage {
+                ByKey _ -> ModuleSupport.Unreadable { reason: UnsupportedReason.Compressed { name: "LZSS" } };
+                _ -> ModuleSupport.Readable
+            }
+        }
+        _ -> ModuleSupport.Readable
+    }
+}
+
+// ---- About ----
+// About's text (or any of SWORD's RTF-like conf values) as paragraphs:
+// split at \par and \pard, its other control words (\qc) left out, a
+// \uN? as the character N.
+tag sword
+about_paragraphs(about: str): []str@new {
+    raw: []i8 = bytes(about);
+    size: int = len(raw);
+    out: []i8 = new i8[size * 2 + 4](0i8);
+    // (Paragraphs split by newlines in out, then cut apart.)
+    n: int = 0;
+    at: int = 0;
+    while (at < size) {
+        byte: int = sword_conf_byte(raw, at);
+        if (byte == 92 && at + 1 < size && sword_conf_byte(raw, at + 1) >= 97 && sword_conf_byte(raw,
+            at + 1) <= 122) {
+            word_end: int = at + 1;
+            while (word_end < size && sword_conf_byte(raw, word_end) >= 97 && sword_conf_byte(raw,
+                word_end) <= 122) word_end = word_end + 1;
+            word: str = sword_text(raw, at + 1, word_end);
+            if (word == "par" || word == "pard" || word == "line") {
+                out[n] = 10i8;
+                n = n + 1
+            } else if (word == "u") {
+                // (舒? an em dash: its number, then a fallback character.)
+                number: int = 0;
+                digits_end: int = word_end;
+                negative: bool = digits_end < size && sword_conf_byte(raw, digits_end) == 45;
+                if (negative) digits_end = digits_end + 1;
+                while (digits_end < size && sword_conf_byte(raw, digits_end) >= 48 && sword_conf_byte(raw,
+                    digits_end) <= 57) {
+                    number = number * 10 + sword_conf_byte(raw, digits_end) - 48;
+                    digits_end = digits_end + 1
+                }
+                if (negative) number = 65536 - number;
+                n = utf8_put(out, n, number);
+                word_end = digits_end;
+                if (word_end < size && sword_conf_byte(raw, word_end) == 63) word_end = word_end + 1
+            }
+            // (A control word's one space belongs to it.)
+            if (word_end < size && sword_conf_byte(raw, word_end) == 32) word_end = word_end + 1;
+            at = word_end
+        } else if (byte == 10 || byte == 13) {
+            // (The conf's own line breaks are spaces; \par makes paragraphs.)
+            if (n > 0 && out[n - 1] as int != 32 && out[n - 1] as int != 10) {
+                out[n] = 32i8;
+                n = n + 1
+            }
+            at = at + 1
+        } else {
+            out[n] = raw[at];
+            n = n + 1;
+            at = at + 1
+        }
+    }
+    // Paragraphs: out's lines, trimmed, the empty ones left out.
+    count: int = 0;
+    from: int = 0;
+    for i in 0..n + 1 {
+        if (i == n || out[i] as int == 10) {
+            start: int = sword_trimmed_start(out, from, i);
+            if (sword_trimmed_end(out, start, i) > start) count = count + 1;
+            from = i + 1
+        }
+    }
+    paragraphs: []str = new str[count]("");
+    k: int = 0;
+    from = 0;
+    for i in 0..n + 1 {
+        if (i == n || out[i] as int == 10) {
+            start: int = sword_trimmed_start(out, from, i);
+            end: int = sword_trimmed_end(out, start, i);
+            if (end > start) {
+                paragraphs[k] = sword_text(out, start, end);
+                k = k + 1
+            }
+            from = i + 1
+        }
+    }
+    paragraphs
+}
+
+// Code point c as UTF-8 into out at n: where it ends.
+tag sword
+utf8_put(out: []i8, n: int, c: int): int {
+    if (c < 128) {
+        out[n] = c trunc i8;
+        return n + 1
+    }
+    if (c < 2048) {
+        out[n] = (192 | c >> 6) trunc i8;
+        out[n + 1] = (128 | c & 63) trunc i8;
+        return n + 2
+    }
+    if (c < 65536) {
+        out[n] = (224 | c >> 12) trunc i8;
+        out[n + 1] = (128 | c >> 6 & 63) trunc i8;
+        out[n + 2] = (128 | c & 63) trunc i8;
+        return n + 3
+    }
+    out[n] = (240 | c >> 18) trunc i8;
+    out[n + 1] = (128 | c >> 12 & 63) trunc i8;
+    out[n + 2] = (128 | c >> 6 & 63) trunc i8;
+    out[n + 3] = (128 | c & 63) trunc i8;
+    n + 4
+}
