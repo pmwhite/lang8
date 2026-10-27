@@ -122,7 +122,7 @@ a concrete implementation: `web/main.l8` (the platform) and
 | Begin, and its appearance | `start W H DENSITY DARK TZ`, `version ABBR`, `dark`, `away` |
 | Taps | `tap`, `act`, `query`, `scope`, `text`, `submit`, `tapverse`, `tapnone`, `trayact`, `word`, `footnote`, `preview`, `esvact`, `versestudy`, `back` |
 | Keys | `command`, `commands` → `key NAME MODS` |
-| A panel beside the reader | `panelfits`, `panelvisible`, `tap shelf`, `beside`, `panelmake`, `panelanchor` |
+| A panel beside the reader | `panelfits`, `panelvisible`, `tap shelf`, `tap full`, `beside`, `panelmake`, `panelanchor` |
 | Recordings | `audio_play`, `audio_stop` → `audiotime`, `audioended`, `audiofailed`; an address `kept:NAME` is the kept file NAME (a chapter core holds), and one that isn't there fails, so core plays it from online |
 | Its voice | `voices` (once); `say`, `speech_stop` → `spoke`, `spoken` |
 | Listening's controls | `listen_pause`, `listen_resume`, `listen_stop`, `follow`; `listenplay`, `listenpause`, `listenprev`, `listennext`, `listenstop` (its own player's too: a lock screen's) |
@@ -418,9 +418,11 @@ a word missed), `toast SYMBOL ICON` WORDS (a toast's words, and its
 symbol: 0 plus, 1 a check, 2 the brain, 3 the carried ribbon; ICON the
 symbol's name, `-` for the ribbon's glyph in the carried ribbon's color), `study_verse C V`,
 `study_moved C V` (Study in the panel moved to another verse: the reader
-follows), `beside OPEN` (whether the panel beside the reader is wanted
+follows), `beside OPEN FULL` (whether the panel beside the reader is wanted
 open: at `start` as it was left, then as core opens or closes it: `tap
-shelf`, its key, the tray's Study, its close. A skin opening it asks for
+shelf`, its key, the tray's Study, its close; and whether it fills the
+screen, the reader hidden under it: `tap full`, or beside the reader
+again, as a reference tapped in it puts it. A skin opening it asks for
 its screens, `panelmake`, which come as `panel ID` (its first, the
 Bookshelf) and `push ID` (the module read beside the reader, at its
 place; Study at its verse), each of group 1; it lets them go with
@@ -453,6 +455,7 @@ From the skin:
 | `open KIND ARG PUSH`, `panel KIND ARG` | open a core screen from a platform entry point; PUSH 1 pushes it, 0 presents it; `panel` opens it beside the reader |
 | `openplan PLAN DAY SELECT PUSH` | open a plan's days at DAY, with that day selected when SELECT is 1 |
 | `anchor ID` | keep the navigation stack through ID, closing screens above it before pushing from that controller |
+| `tap full` | the panel's button: it fills the screen, or is beside the reader again |
 | `panelmake` | the panel beside the reader opening: core makes its screens (`panel`, then `push`es of group 1) as it was left |
 | `panelanchor ID` | the panel's Back (or a swipe) shows ID on top: core lets the panel's screens above it go, any sheet's kept |
 | `closegroup GROUP` | close the sheet's screens (0) or the side panel's screens (1) |

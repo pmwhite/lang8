@@ -625,7 +625,7 @@ function line(w) {
       panel.besideFirst(w.num(1));
       break;
     case "beside":
-      panel.besideLine(w.num(1) === 1);
+      panel.besideLine(w.num(1) === 1, w.num(2) === 1);
       break;
     case "focus":
       panel.refocus(w.num(1));
@@ -1360,6 +1360,10 @@ const panel = {
   stack: [],
   beside: [],
   besideOpen: false,
+  // Whether the panel fills the window (core's `beside` line).
+  full: false,
+  // Its sweep to fill the window or back, while it runs.
+  sweeping: null,
   fields: new Map(),
   typed: 0,
   pending: null,
@@ -1371,7 +1375,7 @@ const panel = {
     const p = el("aside", "panel");
     p.hidden = true;
     p.setAttribute("aria-label", "Panel");
-    p.innerHTML = `<div class="pbar"><button type="button" class="pback"></button><h2 class="ptitle"></h2><button type="button" class="psort" hidden></button><button type="button" class="pbutton" hidden></button></div><div class="pfield" hidden><input type="search" enterkeyhint="search" autocomplete="off" spellcheck="false"></div><div class="pscopes" hidden></div><div class="psegments" hidden></div><div class="pfilter" hidden></div><div class="plist"></div><div class="ptools" hidden></div>`;
+    p.innerHTML = `<div class="pbar"><button type="button" class="pback"></button><h2 class="ptitle"></h2><button type="button" class="psort" hidden></button><button type="button" class="pbutton" hidden></button><button type="button" class="pfull" hidden aria-label="Full Screen"></button></div><div class="pfield" hidden><input type="search" enterkeyhint="search" autocomplete="off" spellcheck="false"></div><div class="pscopes" hidden></div><div class="psegments" hidden></div><div class="pfilter" hidden></div><div class="plist"></div><div class="ptools" hidden></div>`;
     document.body.appendChild(p);
     this.box = p;
     $(".pback", p).addEventListener("click", () => {
@@ -1380,6 +1384,7 @@ const panel = {
       else this.userBack();
     });
     $(".pbutton", p).addEventListener("click", (e) => this.barButton(e.currentTarget));
+    $(".pfull", p).addEventListener("click", () => send("tap full"));
     $(".psort", p).addEventListener("click", (e) => {
       const s = this.top();
       popup(e.currentTarget, s.sorts.map((t, i) => ({ title: (i === s.sort ? "✓ " : "") + t, run: () => send(`act ${s.id} ${s.sortAction} 0 ${i}`) })));
@@ -1442,10 +1447,13 @@ const panel = {
     if (!this.stack.length) this.show(true);
   },
 
-  // `beside OPEN`: the panel beside the page wanted, its screens asked
-  // for; or let go.
-  besideLine(open) {
+  // `beside OPEN FULL`: the panel beside the page wanted, its screens
+  // asked for, filling the window or not; or let go.
+  besideLine(open, full) {
+    const changed = (open && full) !== this.full;
     this.besideOpen = open;
+    this.full = open && full;
+    if (open && changed && this.beside.length && !this.stack.length) this.show(false);
     $(".bar .shelf").setAttribute("aria-pressed", open ? "true" : "false");
     if (open) {
       if (!this.beside.length) send("panelmake");
@@ -1582,9 +1590,32 @@ const panel = {
     this.depth = to;
   },
 
+  // The panel sweeping to fill the window from beside the page (from
+  // where it was, laid out filling it, the page shown under it until it
+  // has), or back (kept filling the window, sliding to where it is beside
+  // the page, then laid out there).
+  sweep(from, full) {
+    const p = this.box;
+    const body = document.body.classList;
+    body.remove("sweeping-in", "sweeping-out");
+    const to = p.getBoundingClientRect();
+    body.add(full ? "sweeping-in" : "sweeping-out");
+    const by = (a, b) => `translate(${a.left - b.left}px, ${a.top - b.top}px)`;
+    const a = full
+      ? p.animate([{ transform: by(from, to) }, { transform: "none" }], { duration: 380, easing: "cubic-bezier(0.2, 0.9, 0.3, 1)" })
+      : p.animate([{ transform: "none" }, { transform: by(to, from) }], { duration: 300, easing: "cubic-bezier(0.4, 0, 0.2, 1)" });
+    this.sweeping?.cancel();
+    this.sweeping = a;
+    a.onfinish = a.oncancel = () => {
+      if (this.sweeping !== a) return;
+      this.sweeping = null;
+      body.remove("sweeping-in", "sweeping-out");
+    };
+  },
+
   hide() {
     this.box.hidden = true;
-    document.body.classList.remove("panel-open", "beside-under");
+    document.body.classList.remove("panel-open", "beside-under", "full");
     this.box.classList.remove("under");
     this.shown = -1;
   },
@@ -1631,10 +1662,20 @@ const panel = {
     const depth = this.current().length;
     back.replaceChildren(s.left ? document.createTextNode(s.left) : icon(depth > 1 ? "chevron-left" : "x"));
     back.setAttribute("aria-label", s.left || (depth > 1 ? "Back" : "Close"));
-    // (Beside the page: under it on a narrow window, the page above.)
-    const under = !this.stack.length;
-    p.classList.toggle("under", under);
-    document.body.classList.toggle("beside-under", under);
+    // (Beside the page: under it on a narrow window, the page above; or
+    // filling the window.)
+    const beside = !this.stack.length;
+    const full = beside && this.full;
+    const sweeps = full !== document.body.classList.contains("full") && !p.hidden && !matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const from = sweeps ? p.getBoundingClientRect() : null;
+    p.classList.toggle("under", beside && !full);
+    document.body.classList.toggle("beside-under", beside && !full);
+    document.body.classList.toggle("full", full);
+    const fb = $(".pfull", p);
+    fb.hidden = !beside;
+    fb.replaceChildren(icon(full ? "minimize-2" : "maximize-2"));
+    fb.setAttribute("aria-label", full ? "Beside the Bible" : "Full Screen");
+    if (from) this.sweep(from, full);
     const bt = s.confirm || s.button;
     const button = $(".pbutton", p);
     button.hidden = !bt;
@@ -2022,6 +2063,13 @@ const panel = {
       p.style.textIndent = `${-r.lo / 10}em`;
     }
     if (r.label) p.setAttribute("aria-label", r.label);
+    // (A paragraph with an action of its own, such as a comment's verses.)
+    if (r.action) {
+      p.classList.add("tap");
+      p.addEventListener("click", (e) => {
+        if (!e.target.closest("a")) this.act(s, r);
+      });
+    }
     return p;
   },
 
@@ -2351,6 +2399,7 @@ const SYMBOLS = {
   "circle.slash": "circle-slash", "hand.tap": "pointer", "info.circle": "info", "textformat.abc": "case-sensitive",
   "textformat.size": "a-large-small", "text.book.closed": "book-text", trash: "trash-2",
   magnifyingglass: "search", highlighter: "highlighter", xmark: "x", headphones: "headphones",
+  "arrow.up.left.and.arrow.down.right": "maximize-2", "arrow.down.right.and.arrow.up.left": "minimize-2",
 };
 
 // An icon core names, drawn (else a character that reads as it; else

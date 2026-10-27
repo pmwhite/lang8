@@ -2,8 +2,10 @@ tag bible_tui;
 
 use_tag std, bible;
 
-// Core's screens (SKINS.md: screens as data), drawn in a panel: beside
-// the reader on a wide terminal, over it on a narrow one. Each screen's
+// Core's screens (SKINS.md: screens as data), drawn in a panel: a sheet's
+// beside the reader on a wide terminal, over it on a narrow one; the
+// panel's beside the page (group 1: core/beside.l8) at its right, or under
+// it on a narrow one, or, as the page, with the Bible beside them. Each screen's
 // lines are kept as they came (screen ... end); the one on top is read
 // into its parts, laid out as lines of cells, and drawn. What can be done
 // on it is a ring of focus items (its rows, a grid's cells, a page's
@@ -20,6 +22,9 @@ sc_id: []int = new int[24](-1);
 sc_raw: [][]i8 = new []i8[24](new i8[0](0i8));
 
 sc_raw_n: []int = new int[24](0);
+
+// Each one's group (0 a sheet's, 1 the panel's beside the page).
+sc_group: []int = new int[24](0);
 
 sc_alloc() noregion {
     for s in 0..SC_SLOTS sc_raw[s] = new i8[1048576](0i8)
@@ -49,6 +54,7 @@ sc_begin(buf: []i8, b: int, e: int) {
         }
     }
     sc_id[s] = id;
+    sc_group[s] = wl_num(buf, b, e, 4);
     sc_raw_n[s] = 0;
     sc_taking = s;
     sc_add(buf, b, e)
@@ -80,6 +86,8 @@ sc_take(buf: []i8, b: int, e: int): bool {
 }
 
 // ---- the stack shown ----
+// The panel's screens first (beside the page), then any sheet's over them,
+// as core keeps them; the top one shown.
 pn_stack: []int = new int[32](0);
 
 pn_depth: int = 0;
@@ -94,9 +102,47 @@ pn_top(): int {
     if (pn_depth > 0) pn_stack[pn_depth - 1] else -1
 }
 
+// Screen id's group (0: a sheet's, or not kept).
+pn_group(id: int): int {
+    s: int = sc_slot(id);
+    if (s < 0) 0 else sc_group[s]
+}
+
+// How many of the stack are the panel's (first).
+pn_beside_n(): int {
+    n: int = 0;
+    while (n < pn_depth && pn_group(pn_stack[n]) == 1) n = n + 1;
+    n
+}
+
+// Whether a sheet's screen is on top (else the panel's, or none).
+pn_sheet_up(): bool {
+    pn_depth > pn_beside_n()
+}
+
+// A sheet presented: over the panel's, a sheet before it let go.
 pn_present(id: int) {
+    pn_depth = pn_beside_n();
+    pn_push(id)
+}
+
+// The panel's first screen (core's `panel`), its stack made again.
+pn_panel(id: int) {
     pn_depth = 0;
     pn_push(id)
+}
+
+// The panel's screens let go (core's `beside 0`), any sheet's kept.
+pn_beside_gone() {
+    n: int = pn_beside_n();
+    if (n == 0) return;
+    for i in n..pn_depth {
+        pn_stack[i - n] = pn_stack[i];
+        pn_kept_focus[i - n] = pn_kept_focus[i];
+        pn_kept_scroll[i - n] = pn_kept_scroll[i]
+    }
+    pn_depth = pn_depth - n;
+    pn_open(false)
 }
 
 // Each screen's focus and scroll, kept while those over it show.
@@ -105,6 +151,23 @@ pn_kept_focus: []int = new int[32](0);
 pn_kept_scroll: []int = new int[32](0);
 
 pn_push(id: int) {
+    // (One of the panel's under a sheet's: on the panel's, the sheet still
+    // on top.)
+    n: int = pn_beside_n();
+    if (pn_group(id) == 1 && n < pn_depth && pn_depth < len(pn_stack)) {
+        i: int = pn_depth;
+        while (i > n) {
+            pn_stack[i] = pn_stack[i - 1];
+            pn_kept_focus[i] = pn_kept_focus[i - 1];
+            pn_kept_scroll[i] = pn_kept_scroll[i - 1];
+            i = i - 1
+        }
+        pn_stack[n] = id;
+        pn_kept_focus[n] = 0;
+        pn_kept_scroll[n] = 0;
+        pn_depth = pn_depth + 1;
+        return
+    }
     if (pn_depth > 0) {
         pn_kept_focus[pn_depth - 1] = pn_focus;
         pn_kept_scroll[pn_depth - 1] = pn_scroll
@@ -135,14 +198,29 @@ pn_close(id: int) {
 }
 
 pn_dismiss() {
-    pn_depth = 0;
+    pn_depth = pn_beside_n();
     pn_open(false)
 }
 
-// The skin's Back: the top screen let go, and core told.
+// The skin's Back: the top screen let go, and core told; of the panel's,
+// the one under it shown (core told which), or, its first, the panel put
+// away.
 pn_back() {
     if (pn_depth == 0) return;
     pn_commit_field();
+    if (!pn_sheet_up()) {
+        if (pn_depth == 1) {
+            tc_str("tap shelf");
+            tc_end();
+            return
+        }
+        pn_depth = pn_depth - 1;
+        tc_str("panelanchor ");
+        tc_int(pn_stack[pn_depth - 1]);
+        tc_end();
+        pn_open(false);
+        return
+    }
     id: int = pn_stack[pn_depth - 1];
     pn_depth = pn_depth - 1;
     tc_str("closed ");
@@ -510,6 +588,9 @@ pn_w: int = 40;
 pn_r0: int = 1;
 
 pn_r1: int = 20;
+
+// Whether it fills the screen (its column at pn_x, its color across it).
+pn_full: bool = false;
 
 pn_built_w: int = -1;
 
@@ -2317,11 +2398,14 @@ pn_draw() {
     }
     r: []i8 = pm_raw();
     bg: int = tm_mix(lk_ink, lk_bg, if (lk_dark) 50 else 30);
+    // (Filling the screen, its color across it, its column in the middle;
+    // else a rule at its left, beside the reader.)
+    x0: int = if (pn_full) 0 else pn_x;
+    x1: int = if (pn_full) tm_cols else pn_x + pn_w;
     for row in pn_r0..pn_r1 {
-        for x in pn_x..pn_x + pn_w _p: int = tm_put(row, x, 32, lk_ink, bg, 0)
+        for x in x0..x1 _p: int = tm_put(row, x, 32, lk_ink, bg, 0)
     }
-    // (A rule at its left, beside the reader.)
-    if (pn_x > 0) {
+    if (pn_x > 0 && !pn_full) {
         for row in pn_r0..pn_r1 _q: int = tm_put(row, pn_x - 1, 9474, tm_mix(lk_faint,
             lk_bg, 500), lk_bg, 0)
     }
