@@ -509,7 +509,7 @@ learn_refresh() {
                 kn_word[s] = cd_known(k)
             }
             cd_rank[k] = vk_rank_of(cd_lang[k], cd_key[k])
-        } else if (cd_key[k] >= 0 && cd_key[k] < lt_n) {
+        } else if (cd_kind[k] != CK_FORM && cd_key[k] >= 0 && cd_key[k] < lt_n) {
             cl_of[cd_key[k]] = k;
             cd_rank[k] = 0
         }
@@ -722,7 +722,9 @@ FROM_KNOWN: int = 4;
 
 FROM_RELATED: int = 5;
 
-from_ids: []str = ["freq", "passage", "study", "alphabet", "known", "related"];
+FROM_FORMS: int = 6;
+
+from_ids: []str = ["freq", "passage", "study", "alphabet", "known", "related", "forms"];
 
 // A word's card added (now, due today): its index, or -1 (one already, or
 // not a word that may be learned).
@@ -794,6 +796,7 @@ learn_grade(
     if (k < 0 || k >= cd_n) return false;
     b0: int = cd_box[k];
     changed: bool = cd_grade(k, grade, today);
+    cd_judged(k, grade);
     me_str("learn card ");
     me_card_key(language, k);
     me(32);
@@ -914,11 +917,186 @@ fput_card_key(language: *LanguageData, k: int) {
         return
     }
     fput(58);
+    if (cd_kind[k] == CK_FORM) {
+        // (A form's: its term's first name, "G:aorist", "H:Qal".)
+        g: int = cd_key[k];
+        if (g < 0 || g >= language.gram_count) return;
+        gram_parts(language, g);
+        fput_bytes(language.grammar, gn_b, gn_e);
+        return
+    }
     i: int = cd_key[k];
     if (i < 0 || i >= lt_n) return;
     a: int = lt_fb[i * 9 + LF_ID];
     if (cd_kind[k] == CK_JOINED) a = a + 2;
     for x in a..lt_fe[i * 9 + LF_ID] fput(language.letters[x] as int)
+}
+
+// ---- form cards: a term of the parsings, practised in words of it ----
+// The terms a form card may be of, by language, in the order Practise
+// Forms offers them new (the commonest and most useful first); each a
+// first name of grammar.txt's lines.
+fc_terms: [][]str = [["nominative", "accusative", "genitive", "dative", "present",
+    "aorist", "imperfect", "future", "perfect", "indicative", "participle", "infinitive",
+    "subjunctive", "imperative", "active", "middle", "passive", "middle or passive",
+    "vocative", "pluperfect", "optative"], ["Qal", "perfect", "imperfect", "consecutive imperfect",
+    "participle", "construct", "pronominal suffix", "imperative", "infinitive construct",
+    "Niphal", "Piel", "Hiphil", "consecutive perfect", "Hithpael", "infinitive absolute",
+    "jussive", "cohortative", "Pual", "Hophal"]];
+
+// grammar.txt's line whose first name is bytes a to b of src (any case),
+// or -1.
+fc_term_named(
+    language: *LanguageData,
+    src: []i8,
+    a: int,
+    b: int
+): int {
+    for g in 0..language.gram_count {
+        gram_parts(language, g);
+        if (gn_e - gn_b == b - a) {
+            same: bool = true;
+            for i in 0..b - a
+                if (lower(language.grammar[gn_b + i] as int) != lower(src[a + i] as int)) same = false;
+            if (same) return g
+        }
+    }
+    -1
+}
+
+// Term i of language lang's list: its grammar.txt line (-1: none).
+fc_term_line(language: *LanguageData, lang: int, i: int): int {
+    s: str = fc_terms[lang][i];
+    for x in 0..len(s) fc_name[x] = s[x] as i8;
+    fc_term_named(language, fc_name, 0, len(s))
+}
+
+fc_name: []i8 = new i8[64](0i8);
+
+// Language lang's form card of term line g (-1: none).
+fc_card_of(lang: int, g: int): int {
+    for k in 0..cd_n
+        if (cd_kind[k] == CK_FORM && cd_lang[k] == lang && cd_key[k] == g) return k;
+    -1
+}
+
+// A form card added (new), for term line g: its index, or -1.
+fc_add(
+    language: *LanguageData,
+    lang: int,
+    g: int,
+    today: int,
+    now: int
+): int {
+    if (g < 0 || fc_card_of(lang, g) >= 0) return -1;
+    k: int = cd_put(lang, CK_FORM, g, now, today);
+    if (k < 0) return -1;
+    learn_logged(language, k, now, "added", 0, 0, FROM_FORMS);
+    k
+}
+
+// Which of the lists' terms parsing m has: a bit a term (Greek's from 0,
+// Hebrew's after them), worked out once a parsing (fc_mask, -1 not yet).
+fc_mask: []int = new int[8192](-1);
+
+fc_mask_of: int = -1;
+
+fc_has(
+    language: *LanguageData,
+    m: int,
+    lang: int,
+    i: int
+): bool {
+    if (m < 0 || m >= len(fc_mask)) return false;
+    // (Made again for other data: its parsings' count is its mark.)
+    if (fc_mask_of != language.morph_count) {
+        for x in 0..len(fc_mask) fc_mask[x] = -1;
+        fc_mask_of = language.morph_count
+    }
+    if (fc_mask[m] < 0) {
+        bits: int = 0;
+        parse_terms(language, m);
+        for t in 0..pt_n {
+            if (pt_gram[t] >= 0) {
+                for l in 0..2 {
+                    for j in 0..len(fc_terms[l])
+                        if (fc_line_cache(language, l, j) == pt_gram[t]) bits = bits | 1 << l * 32 + j
+                }
+            }
+        }
+        fc_mask[m] = bits
+    }
+    (fc_mask[m] & 1 << lang * 32 + i) != 0
+}
+
+// The lists' terms' lines, found once.
+fc_lines: []int = new int[64](-2);
+
+fc_lines_of: int = -1;
+
+fc_line_cache(language: *LanguageData, lang: int, i: int): int {
+    if (fc_lines_of != language.gram_count) {
+        for x in 0..len(fc_lines) fc_lines[x] = -2;
+        fc_lines_of = language.gram_count
+    }
+    at: int = lang * 32 + i;
+    if (fc_lines[at] == -2) fc_lines[at] = fc_term_line(language, lang, i);
+    fc_lines[at]
+}
+
+// The term's place in its language's list (-1: not in it).
+fc_index(language: *LanguageData, lang: int, g: int): int {
+    for i in 0..len(fc_terms[lang])
+        if (fc_line_cache(language, lang, i) == g) return i;
+    -1
+}
+
+// A form card's verse and word: a word of its term, of a word you know
+// where there is one (the form the thing to see), else any; a different
+// one each showing (cd_seen). ctx_vi, ctx_w.
+fc_context(language: *LanguageData, k: int): bool {
+    lang: int = cd_lang[k];
+    i: int = fc_index(language, lang, cd_key[k]);
+    if (i < 0) return false;
+    ctx_n = 0;
+    // (Words you know first: their verses, up to 40 found.)
+    for c in 0..cd_n {
+        if (ctx_n < 40 && cd_kind[c] == CK_WORD && cd_lang[c] == lang && cd_known(c)) {
+            learn_verses_of(language, lang, cd_key[c]);
+            for x in 0..lc_n {
+                vi: int = lc_vi[x];
+                for w in v_first(language, vi)..v_end(language, vi) {
+                    if (ctx_n < 40 && w_strongs(language, w) == cd_key[c] && word_lang(language,
+                        w) == lang && fc_has(language, w_morph(language, w), lang,
+                        i)) {
+                        ctx_cand[ctx_n] = w;
+                        ctx_n = ctx_n + 1
+                    }
+                }
+            }
+        }
+    }
+    // (Else any word of it: from a place the showings move on.)
+    if (ctx_n == 0) {
+        n: int = language.word_count;
+        if (n == 0) return false;
+        from: int = (cd_seen[k] * 7919 + cd_key[k] * 104729) % n;
+        tried: int = 0;
+        w: int = from;
+        while (ctx_n < 1 && tried < n) {
+            if (word_lang(language, w) == lang && fc_has(language, w_morph(language,
+                w), lang, i)) {
+                ctx_cand[ctx_n] = w;
+                ctx_n = ctx_n + 1
+            }
+            w = (w + 1) % n;
+            tried = tried + 1
+        }
+    }
+    if (ctx_n == 0) return false;
+    ctx_w = ctx_cand[cd_seen[k] % ctx_n];
+    ctx_vi = word_verse(language, ctx_w);
+    ctx_vi >= 0
 }
 
 // ---- cards-log.tsv's lines (appended by the platform, never read) ----
@@ -973,8 +1151,9 @@ cdl_add(
 }
 
 // ---- cards.tsv (§14.1.9), in fbuf ----
-// CARD LANG KIND KEY STATE BOX DUE ADDED SEEN, in the order added.
-cd_kind_ids: []str = ["word", "letter", "joined"];
+// CARD LANG KIND KEY STATE BOX DUE ADDED SEEN MISSES, in the order added
+// (MISSES may be missing: a file written before it, 0).
+cd_kind_ids: []str = ["word", "letter", "joined", "form"];
 
 format_cards(language: *LanguageData) {
     fbuf_n = 0;
@@ -995,6 +1174,8 @@ format_cards(language: *LanguageData) {
         fput_int(cd_added[k]);
         fput(9);
         fput_int(cd_seen[k]);
+        fput(9);
+        fput_int(cd_misses[k]);
         fput(10)
     }
 }
@@ -1019,6 +1200,7 @@ parse_cards(language: *LanguageData, today: int) {
             f7: int = field_after(f6);
             f8: int = field_after(f7);
             f9: int = field_after(f8);
+            f10: int = field_after(f9);
             lang: int = if (field_is(f2, "G")) 0 else if (field_is(f2, "H")) 1 else -1;
             kind: int = field_word(f3, cd_kind_ids);
             state: int = if (field_is(f5, "new")) MS_NEW else if (field_is(f5, "review")) MS_REVIEW else -1;
@@ -1026,6 +1208,7 @@ parse_cards(language: *LanguageData, today: int) {
             due: int = if (field_is(f7, "-")) -1 else field_iso_day(f7);
             added: int = field_num(f8, false);
             seen: int = field_num(f9, false);
+            misses: int = if (f10 < line_e) field_num(f10, false) else 0;
             key: int = if (lang >= 0 && kind >= 0) card_key_field(language, f4, lang,
                 kind) else -1;
             good: bool = field_is(fpos, "CARD") && lang >= 0 && kind >= 0 && key >= 0 && state >= 0 && box >= 0 && box <= 8 && added >= 0 && seen >= 0;
@@ -1033,7 +1216,8 @@ parse_cards(language: *LanguageData, today: int) {
             if (good && state == MS_NEW && due < 0) due = today;
             // (A key's first line kept.)
             if (good && kind == CK_WORD && cw_of[vslot(lang, key)] >= 0) good = false;
-            if (good && kind != CK_WORD && cl_of[key] >= 0) good = false;
+            if (good && (kind == CK_LETTER || kind == CK_JOINED) && cl_of[key] >= 0) good = false;
+            if (good && kind == CK_FORM && fc_card_of(lang, key) >= 0) good = false;
             if (good) {
                 k: int = cd_put(lang, kind, key, added, today);
                 if (k >= 0) {
@@ -1041,7 +1225,8 @@ parse_cards(language: *LanguageData, today: int) {
                     cd_box[k] = box;
                     cd_due[k] = due;
                     cd_seen[k] = seen;
-                    if (kind == CK_WORD) cw_of[vslot(lang, key)] = k else cl_of[key] = k
+                    cd_misses[k] = (if (misses < 0) 0 else if (misses > CD_MISSES_MOST) CD_MISSES_MOST else misses);
+                    if (kind == CK_WORD) cw_of[vslot(lang, key)] = k else if (kind != CK_FORM) cl_of[key] = k
                 }
             } else skip_line()
         }
@@ -1070,6 +1255,7 @@ card_key_field(
         return n
     }
     if (fbuf[p + 1] as int != 58) return -1;
+    if (kind == CK_FORM) return fc_term_named(language, fbuf, p + 2, e);
     for i in 0..lt_n {
         if (lt_lang[i] == lang && lt_kind[i] == kind) {
             a: int = lt_fb[i * 9 + LF_ID] + (if (kind == CK_JOINED) 2 else 0);
@@ -1351,6 +1537,7 @@ learn_context(language: *LanguageData, k: int, now: int): bool {
     ctx_w = -1;
     ctx_n = 0;
     if (k < 0 || k >= cd_n) return false;
+    if (cd_kind[k] == CK_FORM) return fc_context(language, k);
     if (cd_kind[k] != CK_WORD) {
         i: int = cd_key[k];
         if (i < 0 || i >= lt_n || lt_vi[i] < 0) return false;
