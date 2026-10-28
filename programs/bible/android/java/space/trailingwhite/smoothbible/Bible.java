@@ -642,6 +642,7 @@ public final class Bible extends Activity {
         building.heroSub = w.field(3);
         building.heroLine = w.field(4);
         building.heroRuns = Screen.runs(w.field(5));
+        building.heroLarge = w.fieldNum(6) == 1;
       } else if (word.equals("tool")) building.tools.add(Screen.tool(w));
       else if (word.equals("confirm")) {
         building.confirmAction = w.fieldNum(1);

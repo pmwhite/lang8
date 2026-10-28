@@ -30,6 +30,8 @@ final class Screen {
   // transliteration, and a line under them (by its runs).
   String hero = "", heroSub = "", heroLine = "";
   int heroScript;
+  // The hero larger: what an exercise asks about.
+  boolean heroLarge;
   int[] heroRuns = new int[0];
   // The buttons at its foot.
   final ArrayList<Tool> tools = new ArrayList<>();

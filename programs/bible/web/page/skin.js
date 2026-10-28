@@ -519,7 +519,7 @@ function screenLine(w) {
       Object.assign(s, { leftAction: w.fnum(1), left: w.field(2) });
       break;
     case "hero":
-      Object.assign(s, { hero: w.field(1), heroScript: w.fnum(2), heroSub: w.field(3), heroLine: w.field(4), heroRuns: parseRuns(w.field(5)) });
+      Object.assign(s, { hero: w.field(1), heroScript: w.fnum(2), heroSub: w.field(3), heroLine: w.field(4), heroRuns: parseRuns(w.field(5)), heroLarge: w.fnum(6) === 1 });
       break;
     case "tool":
       s.tools.push({ action: w.fnum(1), arg: w.field(2), title: w.field(3), icon: w.field(4), label: w.field(5), style: w.fnum(6), place: w.fnum(7), menu: w.field(8) });
@@ -1636,6 +1636,12 @@ const panel = {
     const s = screens.get(id);
     if (!s || this.shown !== id) return;
     $(".pfield input", this.box).value = s.searchText;
+    // (And a field row's words as core has them: emptied for the next
+    // answer.)
+    const f = this.fields.get(id), r = fieldRow(s);
+    if (f && r) f.value = r.detail;
+    // (A field that keeps the keys takes them again: the next answer.)
+    if (f && r && r.flag("e")) f.focus({ preventScroll: true });
   },
 
   barButton(b) {
@@ -1826,7 +1832,7 @@ const panel = {
   rows(s) {
     const frag = document.createDocumentFragment();
     if (s.hero) {
-      const h = el("div", "hero");
+      const h = el("div", s.heroLarge ? "hero large" : "hero");
       h.append(el("div", "hw", s.hero), el("div", "hs", s.heroSub));
       if (s.heroLine) h.appendChild(rich(el("div", "hl"), s.heroLine, s.heroRuns));
       frag.appendChild(h);
@@ -2089,20 +2095,32 @@ const panel = {
       if (r.fieldKind !== 2) f.type = "text";
       if (r.fieldKind === 2) f.rows = 8;
       f.value = r.detail;
-      f.autocapitalize = r.fieldKind === 1 ? "words" : "sentences";
-      if (r.fieldKind === 1) f.spellcheck = false;
+      // (A reference: each word capitalized; letters as typed: none.)
+      f.autocapitalize = r.fieldKind === 1 ? "words" : r.fieldKind === 3 ? "none" : "sentences";
+      if (r.fieldKind === 1 || r.fieldKind === 3) f.spellcheck = false;
+      if (r.fieldKind === 3) {
+        f.setAttribute("autocorrect", "off");
+        f.autocomplete = "off";
+      }
+      // (The screen as core last made it: its row and confirm may have
+      // changed since the field was made, as an exercise's Check becomes
+      // Next.)
+      const current = () => screens.get(s.id) ?? s;
       f.addEventListener("input", () => {
         this.typed = Date.now();
-        const now = fieldRow(s);
+        const now = fieldRow(current());
         if (now && now.flag("l")) send(`text ${s.id} ${now.action} ${now.arg} ${escape(f.value)}`);
       });
       f.addEventListener("keydown", (e) => {
         if (e.key !== "Enter" || r.fieldKind === 2) return;
         e.preventDefault();
-        const now = fieldRow(s);
+        const cur = current();
+        const now = fieldRow(cur);
         if (!now) return;
         if (!now.flag("l")) send(`text ${s.id} ${now.action} ${now.arg} ${escape(f.value)}`);
-        if (now.flag("r") && s.confirm) send(`act ${s.id} ${s.confirmAction} 0 0`);
+        // (A field that keeps the keys: the screen's submit, typing on.)
+        if (now.flag("e")) send(`submit ${s.id}`);
+        else if (now.flag("r") && cur.confirm) send(`act ${s.id} ${cur.confirmAction} 0 0`);
         else f.blur();
       });
       f.addEventListener("blur", () => this.commitField(s.id));

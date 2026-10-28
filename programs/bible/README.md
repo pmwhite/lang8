@@ -2,8 +2,8 @@
 
 A Bible reader written in L8, with iPhone/iPad, Android, web and terminal
 interfaces. It supports reading and search, highlights and notes, bookmarks,
-ribbons, reading plans, version comparison, word study, Greek and Hebrew
-learning, memorization and recorded or synthesized readings.
+ribbons, reading plans, version comparison, word study, Greek lessons
+(the alphabet), memorization and recorded or synthesized readings.
 
 The BSB, KJV, WEB, ASV and YLT are bundled. The original Hebrew and Greek
 and study data are in `data/`. The ESV requires the online proxy and is
@@ -74,7 +74,17 @@ packaging and storage, and [the user manual](data/help.txt) for features.
 ## Data and persistence
 
 `core/text.l8` reads the translation records; `core/lang.l8` and
-`core/orig.l8` read study and original-language records. The converters in
+`core/orig.l8` read study and original-language records. `core/lessons.l8`
+reads the language courses (`data/lang/lessons-greek.txt`, written by hand;
+its format is in its header) and checks them as it reads them: the text
+skin (`.build/skin-text`) prints what is wrong with one, a line each. `core/lessons.l8`
+reads the language courses (`data/lang/lessons-greek.txt`, written by hand;
+its format is in its header) and checks them as it reads them: the text
+skin (`.build/skin-text`) prints what is wrong with one, a line each. `core/lessons.l8`
+reads the language courses (`data/lang/lessons-greek.txt`, written by hand;
+its format is in its header) and checks them as it reads them: the text
+skin (`.build/skin-text`) prints what is wrong with one, a line each. The
+converters in
 `tools/` document their input sources and binary formats. `tools/fetch.sh
 DIR make` downloads the pinned sources, checks their hashes and regenerates
 the data. `tools/align.py` builds verse timings from recordings; recordings
@@ -94,7 +104,7 @@ is unpacked: a Bible is made a version at once (`shelf-NAME.txt`, its
 records), and any other module's files are kept apart (`shelf-NAME.conf`,
 `shelf-NAME.ENDING` for each of its files, listed in `shelf-NAME.files`),
 its text read a span at a time. Reading position, marks, notes,
-plans and learning progress are local to each installation. There is no
+plans and the lessons finished are local to each installation. There is no
 cross-device synchronization.
 
 Terminal replacement saves write a private temporary sibling, check completion

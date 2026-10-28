@@ -350,7 +350,22 @@ final class Panel extends FrameLayout {
     filling = true;
     field.setText(s.searchText);
     field.setSelection(field.getText().length());
+    // (And a field row's words as core has them: emptied for the next
+    // answer.)
+    EditText f = rowFields.get(id);
+    Screen.Row r = fieldRow(s);
+    if (f != null && r != null) f.setText(r.detail);
     filling = false;
+    // (A field that keeps the keys takes them again: the next answer.)
+    if (f != null && r != null && r.flag('e')) {
+      final EditText ff = f;
+      ff.requestFocus();
+      ff.post(() -> {
+        android.view.inputmethod.InputMethodManager m = (android.view.inputmethod.InputMethodManager)
+            getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (m != null) m.showSoftInput(ff, 0);
+      });
+    }
   }
 
   void blur() {
@@ -912,7 +927,7 @@ final class Panel extends FrameLayout {
       box.setPadding(dp(20), dp(24), dp(20), dp(12));
       TextView w = new TextView(c);
       w.setText(s.hero);
-      w.setTextSize(TypedValue.COMPLEX_UNIT_SP, 36);
+      w.setTextSize(TypedValue.COMPLEX_UNIT_SP, s.heroLarge ? 80 : 36);
       w.setTypeface(Typeface.SERIF);
       w.setTextColor(look.ink);
       box.addView(w);
@@ -1329,9 +1344,12 @@ final class Panel extends FrameLayout {
           f.setMinLines(6);
           f.setGravity(Gravity.TOP);
         }
+        // (Letters as typed: no capitals, no suggestions, nothing corrected.)
         f.setInputType(r.fieldKind == 2 ? InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
             | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES : r.fieldKind == 1 ? InputType.TYPE_CLASS_TEXT
             | InputType.TYPE_TEXT_FLAG_CAP_WORDS | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            : r.fieldKind == 3 ? InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         f.setImeOptions(r.flag('r') ? EditorInfo.IME_ACTION_DONE : EditorInfo.IME_ACTION_DONE);
         final EditText ff = f;
@@ -1354,12 +1372,18 @@ final class Panel extends FrameLayout {
           });
         }
         f.setOnEditorActionListener((v, action, ev) -> {
-          Screen.Row now = Panel.fieldRow(s);
+          // (The screen as core last made it: its row and confirm may have
+          // changed since the field was made, as an exercise's Check
+          // becomes Next.)
+          Screen cur = screens.containsKey(s.id) ? screens.get(s.id) : s;
+          Screen.Row now = Panel.fieldRow(cur);
           if (now == null) return false;
           if (!now.flag('l')) Native.send("text " + s.id + " " + now.action + " " + now.arg + " "
               + Wire.escape(ff.getText().toString()));
-          if (now.flag('r') && !s.confirm.isEmpty()) Native.send("act " + s.id + " "
-              + s.confirmAction + " 0 0");
+          // (A field that keeps the keys: the screen's submit, typing on.)
+          if (now.flag('e')) Native.send("submit " + s.id);
+          else if (now.flag('r') && !cur.confirm.isEmpty()) Native.send("act " + s.id + " "
+              + cur.confirmAction + " 0 0");
           else keyboardAway();
           return true;
         });

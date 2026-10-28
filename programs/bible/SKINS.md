@@ -15,11 +15,11 @@ models and protocol used by the current implementations.
 | A skin | `ios/`, `android/`, `web/` | Draws screens and a few views of its own, gives core the platform (files, network, voice, sharing). |
 
 What `core/skin.l8` imports, besides the screens' own files
-(`learn_screens.l8`, `verse_study.l8`, `tray.l8`, `note.l8`):
+(`lessons.l8`, `forms.l8`, `verse_study.l8`, `tray.l8`, `note.l8`):
 
 | File | What it holds |
 |---|---|
-| `practice.l8` | Practice: a session's queue, steps, levels, typing, grades, cards, Practise Reading, each word's look, the buttons, Listen and Echo's verses and clips; its screen (`SCR_PRACTICE`) |
+| `practice.l8` | Practice: a session's queue, steps, levels, typing, grades, each word's look, the buttons, Listen and Echo's verses and clips; its screen (`SCR_PRACTICE`) |
 | `day.l8` | A plan's day: its rows, title, Mark Read, the day's end; following, stopping and marking plans; which days get reminders; its screen (`SCR_DAY`) |
 | `reading.l8` | The reader's rests: chapters read (20 s at rest, end seen), the carried ribbon moving, dwelling into the history |
 | `jump.l8`, `back.l8` | What a jump does (the way back, the history, the ribbon put down), the capsule and its return, opening a ribbon |
@@ -151,7 +151,7 @@ browser's cache (`sb-held`), each played from a blob address.
 ## Screens as data
 
 A screen is built by core when it is shown and again whenever core says it
-changed (`core/ui.l8`'s records; `core/skin.l8` and `core/learn_screens.l8`
+changed (`core/ui.l8`'s records; `core/skin.l8` and the files it imports
 build them). It is a title, sections, and rows, and what is around them:
 
 - **Screen**: an id (its instance, from core), its kind and argument (Go
@@ -280,11 +280,9 @@ page of the verses in the reader's styles and Open in Reader.
 ## Practice
 
 `core/practice.l8` is Practice apart from any platform: a session's queue
-(passages, cards, words to read), each passage's steps and level, the
-words shown, helped and missed, typing's first letters, the grades, a
-card's state, Practise Reading's rounds, and the end. Every opener (the
-Library, a passage's row, the tray's Memorize, a language's cards,
-Practise Reading, Learn 8 Letters) is core's `px_start`.
+of passages, each passage's steps and level, the words shown, helped and
+missed, typing's first letters, the grades, and the end. Every opener (the
+Library, a passage's row, the tray's Memorize) is core's `px_start`.
 
 Every skin draws core's screen (`SCR_PRACTICE`): the
 passage as a page's paragraph whose runs are each word's look
@@ -292,16 +290,15 @@ passage as a page's paragraph whose runs are each word's look
 underline, the rule, the accent, half the accent or the accent dotted,
 times 4; 32 the verse heard; 64 Greek, 128 Hebrew), a hidden word's tap
 showing it and a verse number's its verse; the levels as segments; the
-count at the bar's left; the step's buttons; a card's face as a hero and
-paragraphs; the end as its empty words. A skin that plays a passage and
-speaks a card says so (`SK_NUM_PRACTICE_AUDIO`), and one that takes typed
+count at the bar's left; the step's buttons; the end as its empty words.
+A skin that plays a passage says so (`SK_NUM_PRACTICE_AUDIO`), and one that takes typed
 letters (`SK_NUM_PRACTICE_KEYS`); their buttons are left out otherwise.
 
 ## Settings
 
 `core/prefs.l8` keeps the settings as integers by name, with the names the
 iPhone's defaults already use (`sizeStep`, `theme`, `showVerseNumbers`,
-`librarySegment`, `learnHideKnown`, ...). A skin loads and saves them as
+`librarySegment`, `interlinearOrder`, ...). A skin loads and saves them as
 text (`name value` lines), or maps them to its platform's store.
 
 ## The wire, for skins in another language
@@ -331,7 +328,7 @@ A screen, from core:
 | `subtitle` TEXT | a line under the title, in the bar: what a reading is of (a commentary's, a book's or a dictionary's title) |
 | `intro` TEXT RUNS QUOTE | words above the first section (a plan's description; the language page's); QUOTE 1, a quote (an accent's bar beside it) |
 | `left` ACTION TITLE ICON STYLE | a button at the left of the bar, in place of Back (a note's Cancel; Practice's count, inert) |
-| `hero` WORD SCRIPT SUB LINE RUNS | a word as the heading: large in its script (`RUN_GREEK`, `RUN_HEBREW`), its transliteration, a line under them |
+| `hero` WORD SCRIPT SUB LINE RUNS LARGE | a word as the heading: large in its script (`RUN_GREEK`, `RUN_HEBREW`), its transliteration, a line under them; LARGE 1: larger still, what the screen asks about (an exercise's letter or word) |
 | `index` TITLES | an index down the list's side, a title each section (split by `\|`) |
 | `confirm` ACTION TITLE OFF | the confirming button at the top, in place of Done (OFF 1: not yet) |
 | `tool` ACTION ARG TITLE ICON LABEL STYLE PLACE MENU | a button at the foot: its title, or ICON and the spoken LABEL; STYLE 0 plain, 1 prominent, 2 destructive, 3 off; PLACE 0 left, 1 middle, 2 right; MENU, if any, its items `ARG:TITLE` split by `\|`, each doing ACTION with its ARG |
@@ -361,7 +358,8 @@ FIELD_KIND LEAD LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS LINKS CAPS.
   in small capitals), `f` faint, `b` strong (the row to go to: heavier, its
   words up to two lines), `t` its title in the accent, `g` its icon faint, `m`
   its detail smaller, `k` its circle dimmed and inert, `a` its trailing words
-  in the accent, `r` a field whose Return is the screen's confirm, `q` the
+  in the accent, `r` a field whose Return is the screen's confirm, `e` a field that keeps
+  the keyboard up after its Return and takes it again at `retext`, `q` the
   words its screen's field searches for marked in it, `w` waiting (a
   spinner), `l` a field whose words go to core as they are typed, `u` its
   actions also a menu at its end, `h` a page's heading.
@@ -382,7 +380,8 @@ FIELD_KIND LEAD LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS LINKS CAPS.
   is DELETE destructive), and ACTION_ICONS their icons; RUNS, TRUNS and SRUNS
   its detail's, title's and side words' runs; TITLE_LINES the most lines of
   its title; FIELD_KIND what a field takes (0 a name, 1 a reference, 2 prose:
-  a note's many lines); LEAD a glyph at its start in LEAD_STYLE's script;
+  a note's many lines, 3 letters as typed: no capitals or corrections, a
+  word written in English letters); LEAD a glyph at its start in LEAD_STYLE's script;
   SIDE words at its end over SIDE_NOTE; LINKS a paragraph's links
   (`B:E:ACTION:ARG` split by `|`, B and E UTF-16 places in its title);
   CAPS, in a scripture row's detail, the divine name's letters to set in
@@ -396,7 +395,7 @@ Other lines from core:
 |---|---|
 | `present ID`, `push ID`, `update ID`, `pop`, `pop_to ID`, `dismiss` | what to do with screens |
 | `refill ID FADE` | screen ID made again as its field is typed in (FADE 1: a cross-fade) |
-| `retext ID`, `blur ID` | the field to show the screen's words; the keyboard put away |
+| `retext ID`, `blur ID` | the fields to show the screen's words again (its search field's, and a `field` row's detail, though it is being typed in); the keyboard put away |
 | `reader N` | the reader has N chapters |
 | `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA`, `verse V A B`, `link A B KIND ARG` (a footnote's mark, KIND 0, ARG its place; a reference, 1, ARG the reference; a word of the original's, 2), `gloss A B` (a word of the original glossed under its paragraph) and `mark V HEX BOOKMARK NOTE` lines (a verse's highlight's color, `-` none; bookmarked; noted; verse 0 the chapter's own note, marked after its label), then `end`. A `layout ORIG RTL VERSELINES OPENER LABEL` line after the first says whether the chapter is the original's, set right to left, a verse a line, and where its opener and its label end (UTF-16; 0 none); a `name` TITLE line names it as the bar does. A skin ignores the lines it does not know |
 | `jump C V`, `goto C V`, `relayout` | the reader moved; the screens away, then moved; every chapter to be asked for again |
@@ -470,7 +469,7 @@ From the skin:
 | `esvstatus STATUS ESV`, `esvact WHAT C` | whether the site's Worker gives the ESV (STATUS its answer's, 0 none); a tap on chapter C's ESV line (`link` KIND 3: ARG `ESV_TRY`, `ESV_BSB`, `ESV_SITE`). Core asks for the ESV's chapters near the place as a wire skin reads it (its host's `fetch`), draws one not here as its line, and ends each with "(ESV) · esv.org" |
 | `version ABBR` | the version an address names (`KJV`): before `start`, the one the reader opens in; after, read now |
 | `away` | the app put away: the settings kept now |
-| `word W` | a word of the original tapped (a `link` of KIND 2, its ARG the word): core's word screen (`SCR_WORD`: its form, where, transliteration, gloss, meaning, parsing; Learn This Word or its card's line; Word Study) |
+| `word W` | a word of the original tapped (a `link` of KIND 2, its ARG the word): core's word screen (`SCR_WORD`: its form, where, transliteration, gloss, meaning, parsing; Word Study) |
 | `tapverse C V`, `tapnone` | a verse tapped (core toggles it: another chapter's starts again), or the reader elsewhere (the selection let go); core says `selection` C V... (C -1: none) for the skin to paint, and writes the tray's model as screen 0 (`tray`, `tray_away`). A skin hit-tests in this order: a footnote's mark, a word of the original, a reference, a note's mark, the ESV's line, a chapter's note, then a verse (within a few points), else elsewhere |
 | `select C V...` | the verses selected, whole (none: the tray away), for a skin that keeps its own selection |
 | `trayact ACTION V`, `titlemenu`, `menuact ACTION ARG` | a tray's button; the title's menu's model, as screen 0; one of its items |
@@ -567,8 +566,8 @@ iPhone names them. A tap on a verse selects it (core's tray: highlights,
 Copy, Share, Bookmark, Note, Compare, Memorize), and highlights show as
 core marks them. The language data, cross references, commentary and
 Manual are in the APK (about 37 MB) and read at the start, so Study (the
-tray's: `versestudy`), word studies, the Manual's pages and Learn work,
-and the cards are kept. Reading Plans work there from core: following a plan
+tray's: `versestudy`), word studies, the Manual's pages and the Greek
+lessons work, and the lessons finished are kept. Reading Plans work there from core: following a plan
 (its file plan-N.tsv, their numbers in plans.txt; `SK_KEPT_PLANS`), its
 days, core's day's reader (`SCR_DAY`: its passages, Mark Read, the day's
 end), Day Done.
@@ -637,8 +636,8 @@ waits for its Java side, so what core keeps is made outside any callback.
 The host asks the page for the data files by id (`bw_ask`: the site's
 `data/HASH/NAME.gz`, each the page's fetch, given back as `got ID SIZE`),
 reads the reader's version and the plans first, then what is kept, and
-says `ready`; the language data comes after, and Study and Learn appear
-once it has. What is kept is `core/kept.l8`'s files, a key each in the
+says `ready`; the language data comes after, and Study appears once it
+has. What is kept is `core/kept.l8`'s files, a key each in the
 browser's storage (`sb.NAME`); the Bookshelf's downloads and the files it
 keeps (`bw_fetch`, `bw_keep`) are in Cache Storage (`sb-held`, as
 `/read/held/NAME`), read back whole or a span at a time by slicing their

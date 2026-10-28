@@ -101,7 +101,6 @@ python3 -I "$here/bsb_lang.py" "$dir/bsb_tables.tsv" "$dir/TBESH.txt" "$dir/TBES
   "$data/bsb.txt" "$data/lang"
 python3 -I "$here/senses.py" "$dir" "$data"
 python3 -I "$here/related.py" "$dir/Proximity.tsv" "$data"
-python3 -I "$here/learn.py" "$data"
 # (orig.py adds the parsings it needs to morph.txt, which bsb_lang.py made.)
 python3 -I "$here/orig.py" "$dir" "$data"
 python3 -I "$here/ubs.py" "$dir/ubs" "$data"
