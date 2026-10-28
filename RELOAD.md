@@ -197,6 +197,15 @@ node web/devctl.mjs reload
 node web/devctl.mjs log
 ```
 
+Started with `--data DIR` (`node web/dev.mjs --data programs/bible/data --
+programs/bible/ios/app.l8 -o .build/dev/bible-ios.wasm`), the server also
+gives the data files changed under DIR since it started: `GET /data` lists
+them and `GET /data/PATH` is one. Smooth Bible's hot reload build reads
+those in place of its bundle's copies before it reads any data file, and a
+change to one is a new build, so a course or the Manual reloads without a
+new app. Data the server doesn't list (or a server out of reach after
+three seconds) comes from the bundle.
+
 `wire` lines go to the app rather than the host: a Smooth Bible build for
 hot reload (`programs/bible/ios/devwire.l8`) long-polls the server's
 `/wire` and gives each line to core as its skin would (`select C V`,

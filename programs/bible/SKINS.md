@@ -188,7 +188,9 @@ build them). It is a title, sections, and rows, and what is around them:
     heading.
   - `tiles`: the interlinear's words, its cells tiles (a word, its
     English and transliteration, what is hidden), in lines as wide as the
-    list.
+    list; its value 1 lays them right to left (the Hebrew's order), 2 makes
+    them large and centred (an exercise's word, a sound to a tile, and its
+    choices).
   - `custom`: a view the skin makes itself (below), with an argument.
   Any row may also have: a circle at its start (a plan's day), a glyph in a
   column of its own at its start and words at its end (a letter's example),
@@ -343,7 +345,7 @@ A screen, from core:
 | `button` TITLE, then `command` ACTION ARG TITLE FLAGS | its button at the top and its menu (`x`: destructive) |
 | `section` HEADER FOOTER BUTTON ACTION SUFFIX CREDIT COLUMNS | a section: a button in its header doing ACTION; faint words after its header; CREDIT the credit under it (0 none; each said at `start` by a `credit` line); COLUMNS a grid's columns' names |
 | `row` ... | a row (below) |
-| `cell` ACTION ARG SCRIPT TEXT SUB COUNT LABEL TR FLAGS ACTIONS | after its row, a grid's cell or a tile: its words in a script (0 none: a faint "—"), what it does, its count, what a screen reader says, and its tap (ACTION 0: none); a tile's transliteration and what it hides (`UI_TILE_`), and the actions a screen reader offers |
+| `cell` ACTION ARG SCRIPT TEXT SUB COUNT LABEL TR FLAGS ACTIONS | after its row, a grid's cell or a tile: its words in a script (0 none: a faint "—"), what it does, its count, what a screen reader says, and its tap (ACTION 0: none); a tile's transliteration and its flags (`UI_TILE_`: what it hides; the one being chosen for, ringed; an answer wrong, in red over what was chosen, struck through; a choice offered, its words alone as a button), and the actions a screen reader offers |
 
 A row's fields, in order: `row` KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS
 VALUE OPTIONS LO HI LABEL TRAILING DELETE CUSTOM HINT MARKS LINES CIRCLE

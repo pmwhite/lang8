@@ -123,9 +123,11 @@ final class Screen {
   }
 
   // A tile's flags (core/ui.l8's UI_TILE_): its English hidden, its
-  // transliteration hidden, the helped mark, its English faint, no original.
+  // transliteration hidden, the helped mark, its English faint, no original;
+  // the one being chosen for, an answer checked wrong (the right answer
+  // over it, what was chosen struck through under it), a choice offered.
   static final int TILE_HIDE_SUB = 1, TILE_HIDE_TR = 2, TILE_HELPED = 4, TILE_FAINT_SUB = 8,
-      TILE_ADDED = 16;
+      TILE_ADDED = 16, TILE_SELECTED = 32, TILE_WRONG = 128, TILE_OPTION = 256;
 
   static Cell cell(Wire w) {
     Cell c = new Cell();

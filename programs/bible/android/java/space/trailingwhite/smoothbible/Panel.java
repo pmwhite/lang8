@@ -1208,26 +1208,44 @@ final class Panel extends FrameLayout {
     // press offers its actions.
     private View tilesRow(Screen.Row r) {
       Context c = getContext();
-      Flow flow = new Flow(c, dp(6), dp(14), r.value == 1);
+      // (Large: an exercise's word and its choices.)
+      boolean big = (r.value & 2) != 0;
+      Flow flow = new Flow(c, dp(big ? 10 : 6), dp(14), (r.value & 1) != 0);
       flow.setPadding(dp(14), dp(6), dp(14), dp(6));
+      Screen sc = screen;
       for (Screen.Cell cl : r.cells) {
+        // (A choice offered: its words alone, on a washed button.)
+        if ((cl.flags & Screen.TILE_OPTION) != 0) {
+          TextView o = tileLine(cl.sub, big ? 22 : 19, false, look.ink);
+          o.setPadding(dp(big ? 18 : 14), dp(12), dp(big ? 18 : 14), dp(12));
+          o.setMinWidth(dp(big ? 72 : 64));
+          o.setBackground(tileWash((cl.flags & Screen.TILE_SELECTED) != 0));
+          o.setContentDescription(cl.label);
+          o.setOnClickListener(v -> Native.send("act " + sc.id + " " + cl.action + " " + cl.arg + " 0"));
+          flow.addView(o);
+          continue;
+        }
         LinearLayout t = new LinearLayout(c);
         t.setOrientation(LinearLayout.VERTICAL);
         t.setGravity(Gravity.CENTER_HORIZONTAL);
         t.setPadding(dp(8), dp(6), dp(8), dp(6));
+        if ((cl.flags & Screen.TILE_SELECTED) != 0) t.setBackground(tileWash(true));
         boolean added = (cl.flags & Screen.TILE_ADDED) != 0;
-        TextView sub = tileLine(cl.sub, added || (cl.flags & Screen.TILE_FAINT_SUB) != 0 ? 12 : 15,
-            added || (cl.flags & Screen.TILE_FAINT_SUB) != 0, look.ink);
+        int subColor = (cl.flags & Screen.TILE_WRONG) != 0 ? 0xffc0392b : look.ink;
+        TextView sub = tileLine(cl.sub, big ? 21 : added || (cl.flags & Screen.TILE_FAINT_SUB) != 0 ? 12 : 15,
+            added || (cl.flags & Screen.TILE_FAINT_SUB) != 0, subColor);
         if ((cl.flags & Screen.TILE_HIDE_SUB) != 0) sub.setAlpha(0);
         if ((cl.flags & Screen.TILE_HELPED) != 0) sub.setPaintFlags(sub.getPaintFlags()
             | android.graphics.Paint.UNDERLINE_TEXT_FLAG);
         t.addView(sub);
         if (!added) {
-          TextView o = tileLine(cl.text, 21, false, look.ink);
+          TextView o = tileLine(cl.text, big ? 44 : 21, false, look.ink);
           o.setTypeface(Typeface.SERIF);
           t.addView(o);
           TextView tr = tileLine(cl.tr, 12, true, look.faint);
           if ((cl.flags & Screen.TILE_HIDE_TR) != 0) tr.setAlpha(0);
+          if ((cl.flags & Screen.TILE_WRONG) != 0) tr.setPaintFlags(tr.getPaintFlags()
+              | android.graphics.Paint.STRIKE_THRU_TEXT_FLAG);
           t.addView(tr);
           TextView code = tileLine(cl.count, 11, false, look.faint);
           code.setTypeface(Typeface.MONOSPACE);
@@ -1250,6 +1268,16 @@ final class Panel extends FrameLayout {
         flow.addView(t);
       }
       return flow;
+    }
+
+    // A tile's wash: the ink faintly, rounded; ringed in the accent if it is
+    // the one chosen for.
+    private android.graphics.drawable.GradientDrawable tileWash(boolean ringed) {
+      android.graphics.drawable.GradientDrawable d = new android.graphics.drawable.GradientDrawable();
+      d.setCornerRadius(dp(10));
+      d.setColor((look.ink & 0x00ffffff) | 0x12000000);
+      if (ringed) d.setStroke(dp(2), look.accent);
+      return d;
     }
 
     private TextView tileLine(String words, int sp, boolean italic, int color) {

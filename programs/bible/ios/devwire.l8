@@ -12,7 +12,10 @@ use_tag std, ios, bible, bible_wire;
 // WORDS` taps the row or the toolbar's button of a screen shown whose
 // title (or spoken label) begins with WORDS. While it is connected, the screen stays on (a phone's
 // Auto-Lock, not ten minutes of Keep Screen On) and its diagnostics are
-// written. A build from the App Store has no server set and asks nothing.
+// written. Data files changed on the server since it started (web/dev.mjs
+// --data) are read from it instead of the bundle, so a course or the
+// Manual reloads without a new build. A build from the App Store has no
+// server set and asks nothing.
 import "../../ios/objc.l8";
 
 // The server's address (http://HOST:PORT), the cursor of its lines, the
@@ -50,7 +53,10 @@ dw_server(): int {
 // Begun at launch (and again after a reload), if a server is set.
 devwire_begin() {
     if (dw_url == 0) dw_url = dw_server();
-    if (dw_url == 0) return;
+    if (dw_url == 0) {
+        dw_data_state = DW_DATA_READY;
+        return
+    }
     if (dw_session == 0) {
         config: int = msg(cls("NSURLSessionConfiguration"), sel("ephemeralSessionConfiguration"));
         msg_set_f(config, sel("setTimeoutIntervalForRequest:"), 40.0f64);
@@ -58,7 +64,151 @@ devwire_begin() {
         dw_session = keep(msg3(cls("NSURLSession"), sel("sessionWithConfiguration:delegate:delegateQueue:"),
             config, delegate, msg(cls("NSOperationQueue"), sel("mainQueue"))))
     }
+    devwire_data_list();
     devwire_ask()
+}
+
+// ---- data files from the server ----
+// The files changed there (GET /data: NAME TAB SIZE a line, NAME as core
+// asks for it), each fetched (GET /data/NAME) into a file of the app's
+// temporary directory before any data file is read; until then core's
+// asks wait (devwire_data_ready). The server out of reach, or a file that
+// fails: the bundle's.
+DW_DATA_MOST: int = 32;
+
+DW_DATA_NAME_MOST: int = 64;
+
+dw_data_names: []i8 = new i8[32 * 64](0i8);
+
+dw_data_name_n: []int = new int[32](0);
+
+dw_data_paths: []int = new int[32](0);
+
+dw_data_n: int = 0;
+
+// Asking for the list; fetching file dw_data_at; ready.
+DW_DATA_LISTING: int = 0;
+
+DW_DATA_FETCHING: int = 1;
+
+DW_DATA_READY: int = 2;
+
+dw_data_state: int = 0;
+
+dw_data_at: int = 0;
+
+dw_data_task: int = 0;
+
+dw_data_body: int = 0;
+
+// Whether core's data asks may be answered.
+devwire_data_ready(): bool {
+    dw_data_state == DW_DATA_READY
+}
+
+// A request for path on the server, not waited for long: the app starts
+// at once when the server can't be reached.
+devwire_data_get(path: int) {
+    url: int = msg1(cls("NSURL"), sel("URLWithString:"), msg1(dw_url, sel("stringByAppendingString:"),
+        path));
+    request: int = if (url == 0) 0 else msg1(cls("NSMutableURLRequest"), sel("requestWithURL:"),
+        url);
+    if (request != 0) _t: int = msg_set_f(request, sel("setTimeoutInterval:"), 3.0f64);
+    task: int = if (request == 0) 0 else msg1(dw_session, sel("dataTaskWithRequest:"),
+        request);
+    if (task == 0) {
+        devwire_data_done();
+        return
+    }
+    dw_data_task = keep(task);
+    dw_data_body = keep(make("NSMutableData"));
+    msg(task, sel("resume"))
+}
+
+devwire_data_list() {
+    dw_data_state = DW_DATA_LISTING;
+    dw_data_n = 0;
+    devwire_data_get(nsstring("/data"))
+}
+
+// The list come: its names kept, the first fetched.
+devwire_data_listed(body: int) {
+    n: int = msg(body, sel("length"));
+    region {
+        b: []i8 = new i8[n + 1](0i8);
+        if (n > 0) memcpy_from(b, msg(body, sel("bytes")), n);
+        at: int = 0;
+        while (at < n) {
+            e: int = at;
+            while (e < n && b[e] as int != 10) e = e + 1;
+            tab: int = at;
+            while (tab < e && b[tab] as int != 9) tab = tab + 1;
+            if (tab > at && tab - at <= DW_DATA_NAME_MOST && dw_data_n < DW_DATA_MOST) {
+                for i in at..tab dw_data_names[dw_data_n * DW_DATA_NAME_MOST + i - at] = b[i];
+                dw_data_name_n[dw_data_n] = tab - at;
+                dw_data_paths[dw_data_n] = 0;
+                dw_data_n = dw_data_n + 1
+            }
+            at = e + 1
+        }
+    }
+    dw_data_state = DW_DATA_FETCHING;
+    dw_data_at = 0;
+    devwire_data_next()
+}
+
+// The next file asked for, or (none left) the asks let go.
+devwire_data_next() {
+    if (dw_data_at >= dw_data_n) {
+        devwire_data_done();
+        return
+    }
+    tb_n = 0;
+    tb_str("/data/");
+    k: int = dw_data_at;
+    for i in 0..dw_data_name_n[k] tb_byte(dw_data_names[k * DW_DATA_NAME_MOST + i] as int);
+    devwire_data_get(tb_ns())
+}
+
+// File dw_data_at come: written where it is read from, the next asked
+// for.
+devwire_data_fetched(body: int) {
+    k: int = dw_data_at;
+    fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+    dir: int = msg(msg(fm, sel("temporaryDirectory")), sel("path"));
+    tb_n = 0;
+    tb_str("devdata-");
+    tb_int(k);
+    path: int = msg1(dir, sel("stringByAppendingPathComponent:"), tb_ns());
+    if ((msg2(body, sel("writeToFile:atomically:"), path, 1) & 255) != 0) {
+        dw_data_paths[k] = keep(path);
+        tb_n = 0;
+        tb_str("bible: data from the server: ");
+        for i in 0..dw_data_name_n[k] tb_byte(dw_data_names[k * DW_DATA_NAME_MOST + i] as int);
+        note_ns(tb_ns())
+    }
+    dw_data_at = k + 1;
+    devwire_data_next()
+}
+
+devwire_data_done() {
+    dw_data_state = DW_DATA_READY;
+    asks_pump_soon()
+}
+
+// The file read for ask id (a name core asked for, as ask_names has it) if
+// the server gave one in its place, else 0.
+devwire_data_path(id: int): int {
+    if (dw_data_state != DW_DATA_READY) return 0;
+    for k in 0..dw_data_n {
+        if (dw_data_paths[k] != 0 && dw_data_name_n[k] == ask_name_n[id]) {
+            same: bool = true;
+            for i in 0..ask_name_n[id]
+                if (dw_data_names[k * DW_DATA_NAME_MOST + i] != ask_names[id * 64 + i]) same = false;
+            if (same) return dw_data_paths[k]
+        }
+    }
+    0
 }
 
 devwire_ask() {
@@ -78,12 +228,33 @@ devwire_ask() {
 
 // The session's callbacks (platform.l8's delegate's): whether task is ours.
 devwire_received(task: int, data: int): bool {
+    if (task != 0 && task == dw_data_task) {
+        msg1(dw_data_body, sel("appendData:"), data);
+        return true
+    }
     if (task == 0 || task != dw_task) return false;
     msg1(dw_body, sel("appendData:"), data);
     true
 }
 
 devwire_completed(task: int, error: int): bool {
+    if (task != 0 && task == dw_data_task) {
+        body: int = dw_data_body;
+        dw_data_task = 0;
+        dw_data_body = 0;
+        // (A failure: the list taken as empty, or the file left the
+        // bundle's.)
+        ok: bool = error == 0 && msg(msg(task, sel("response")), sel("statusCode")) == 200;
+        if (dw_data_state == DW_DATA_LISTING) {
+            if (ok) devwire_data_listed(body) else devwire_data_done()
+        } else if (ok) devwire_data_fetched(body) else {
+            dw_data_at = dw_data_at + 1;
+            devwire_data_next()
+        }
+        release(body);
+        release(task);
+        return true
+    }
     if (task == 0 || task != dw_task) return false;
     body: int = dw_body;
     dw_task = 0;

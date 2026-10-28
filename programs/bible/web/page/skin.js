@@ -2137,11 +2137,21 @@ const panel = {
   // The interlinear's words: a tile each, in lines (right to left for the
   // Hebrew's order).
   tilesRow(s, r) {
-    const flow = el("div", "tiles" + (r.value === 1 ? " rtl" : ""));
+    const flow = el("div", "tiles" + (r.value & 1 ? " rtl" : "") + (r.value & 2 ? " large" : ""));
     for (const c of r.cells) {
       const added = c.flags & 16;
-      const t = el(added ? "div" : "button", "tile");
-      const sub = el("span", "tsub" + (added || c.flags & 8 ? " faint" : "") + (c.flags & 4 ? " helped" : ""), c.sub);
+      // (A choice offered: its words alone, as a button.)
+      if (c.flags & 256) {
+        const o = el("button", "tile option" + (c.flags & 32 ? " selected" : ""), c.sub);
+        o.type = "button";
+        o.setAttribute("aria-label", c.label);
+        o.addEventListener("click", () => send(`act ${s.id} ${c.action} ${c.arg} 0`));
+        flow.appendChild(o);
+        continue;
+      }
+      const t = el(added ? "div" : "button", "tile" + (c.flags & 32 ? " selected" : "") + (c.flags & 128 ? " wrong" : ""));
+      const sub = el("span", "tsub" + (added || c.flags & 8 ? " faint" : "") + (c.flags & 4 ? " helped" : "")
+        + (c.flags & 128 ? " wrong" : ""), c.sub);
       if (c.flags & 1) sub.classList.add("hidden");
       t.appendChild(sub);
       if (!added) {

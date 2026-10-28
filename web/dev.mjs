@@ -3,7 +3,7 @@
 // WebAssembly module whenever a source in its import graph changes, and
 // hand each build to the apps waiting for it.
 //
-//   node web/dev.mjs [--port 8777] [--l8 ./l8c3] [--serve DIR] -- <l8 wasm arguments>
+//   node web/dev.mjs [--port 8777] [--l8 ./l8c3] [--serve DIR] [--data DIR] -- <l8 wasm arguments>
 //   node web/dev.mjs -- --async bw_wait programs/bible/web/main.l8 -o .build/dev/bible.wasm
 //
 // Everything after `--` is given to `l8 wasm` as it is (the source is the
@@ -25,6 +25,12 @@
 //                          lines after N (Smooth Bible's ios/devwire.l8)
 //   POST /shot             a screenshot (PNG) from the device, saved under
 //                          .build/dev/shots/; GET /shots/latest says which
+//   GET /data              the data files under --data DIR changed since the
+//                          server started, a line each: PATH TAB SIZE (PATH
+//                          relative to DIR, as an app asks for it); a change
+//                          to one is a new build, so the apps reload and read
+//                          them again (Smooth Bible's ios/devwire.l8)
+//   GET /data/<path>       one of them
 //   GET /<path>            a file under --serve DIR, if given
 //
 // web/reload.js's watchBuilds() is the client.
@@ -45,11 +51,13 @@ const compilerArgs = argv.slice(dash + 1);
 let port = 8777;
 let l8 = fs.existsSync("./l8c3") ? "./l8c3" : "./l8";
 let serveDir = null;
+let dataDir = null;
 for (let i = 0; i < options.length; i++) {
   const o = options[i];
   if (o === "--port") port = Number(options[++i]);
   else if (o === "--l8") l8 = options[++i];
   else if (o === "--serve") serveDir = path.resolve(options[++i]);
+  else if (o === "--data") dataDir = path.resolve(options[++i]);
   else {
     console.error(`unknown option ${o}`);
     process.exit(2);
@@ -170,6 +178,40 @@ setInterval(() => {
   clearTimeout(debounce);
   debounce = setTimeout(build, 120);
 }, 250);
+
+// ---- data files ----
+// Those under --data DIR, as they were when the server started; the ones
+// changed since are given to the apps in place of their bundles' copies.
+function dataFiles(dir, out = []) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) dataFiles(p, out);
+    else if (e.isFile()) out.push(p);
+  }
+  return out;
+}
+const dataAtStart = new Map();
+if (dataDir) for (const f of dataFiles(dataDir)) dataAtStart.set(f, mtime(f));
+
+function dataChanged() {
+  if (!dataDir) return [];
+  return dataFiles(dataDir).filter((f) => dataAtStart.get(f) !== mtime(f));
+}
+
+// (Polled as the sources are: a changed data file, or one changed again,
+// makes a build, which the apps take as a reload.)
+let dataSeen = "";
+setInterval(() => {
+  if (!dataDir) return;
+  const now = dataChanged().map((f) => `${f}:${mtime(f)}`).join("|");
+  if (now === dataSeen) return;
+  const first = dataSeen === "" && now === "";
+  dataSeen = now;
+  if (!first) {
+    console.log(`${new Date().toLocaleTimeString()}  data changed: ${dataChanged().map((f) => path.relative(dataDir, f)).join(", ")}`);
+    build();
+  }
+}, 1000);
 
 // ---- the server ----
 const types = {
@@ -339,6 +381,18 @@ const server = http.createServer((req, res) => {
     if (!state.wasm) return json({ error: "no successful build yet", log: state.log }, 503);
     res.writeHead(200, { ...headers, "Content-Type": "application/wasm" });
     return res.end(state.wasm);
+  }
+  if (dataDir && url.pathname === "/data") {
+    res.writeHead(200, { ...headers, "Content-Type": "text/plain; charset=utf-8" });
+    return res.end(dataChanged().map((f) => `${path.relative(dataDir, f)}\t${fs.statSync(f).size}\n`).join(""));
+  }
+  if (dataDir && url.pathname.startsWith("/data/")) {
+    const p = path.resolve(dataDir, decodeURIComponent(url.pathname.slice("/data/".length)));
+    if (p.startsWith(dataDir + path.sep) && fs.existsSync(p) && fs.statSync(p).isFile()) {
+      res.writeHead(200, { ...headers, "Content-Type": "application/octet-stream" });
+      return res.end(fs.readFileSync(p));
+    }
+    return json({ error: "not found" }, 404);
   }
   if (serveDir) {
     const rel = decodeURIComponent(url.pathname);
