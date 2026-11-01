@@ -75,17 +75,11 @@ packaging and storage, and [the user manual](data/help.txt) for features.
 
 `core/text.l8` reads the translation records; `core/lang.l8` and
 `core/orig.l8` read study and original-language records. `core/lessons.l8`
-reads the language courses (`data/lang/lessons-greek.txt`, written by hand;
-its format is in its header) and checks them as it reads them: the text
-skin (`.build/skin-text`) prints what is wrong with one, a line each. `core/lessons.l8`
-reads the language courses (`data/lang/lessons-greek.txt`, written by hand;
-its format is in its header) and checks them as it reads them: the text
-skin (`.build/skin-text`) prints what is wrong with one, a line each. `core/lessons.l8`
-reads the language courses (`data/lang/lessons-greek.txt`, written by hand;
-its format is in its header) and checks them as it reads them: the text
-skin (`.build/skin-text`) prints what is wrong with one, a line each. The
-converters in
-`tools/` document their input sources and binary formats. `tools/fetch.sh
+reads the language courses (`data/lang/lessons-greek.txt`, written by hand:
+the alphabet's lessons, then words' read in verses of the New Testament; its
+format is in its header) and checks them as it reads them: the text skin
+(`.build/skin-text`) prints what is wrong with one, a line each. The
+converters in `tools/` document their input sources and binary formats. `tools/fetch.sh
 DIR make` downloads the pinned sources, checks their hashes and regenerates
 the data. `tools/align.py` builds verse timings from recordings; recordings
 are streamed or downloaded by the app rather than committed to this repo.
