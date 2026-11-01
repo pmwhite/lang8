@@ -532,7 +532,7 @@ Search (the ESV's results too: the iPhone asks its server, core keeps and
 shows them), History, the reading settings, Glosses, Voice and the
 voices, Downloads, the Manual's list, Acknowledgements and Changes, Reading
 Plans, a plan's days and its Daily Reminder, A Chapter a Day, Begin At, New
-Ribbon and a ribbon's screen, the Bookshelf and its Library, the Library and Memory (Add Passage, a
+Ribbon and a ribbon's screen, the Bookshelf and Bibles and Books, the Library and Memory (Add Passage, a
 passage, its versions, Memory's reminder), Compare, a word's study, its
 grammar and concordance, the language page and what it pushes (Sounds
 Written As, the Alphabet, Your Words, Add Words and its preview, Verses You

@@ -20,9 +20,11 @@ together even where their combined size exceeds the module-size heuristic.
 `core/kept.l8` loads and saves named user files. Data modules handle text,
 study records, original languages, audio timings and the ESV cache.
 `core/beside.l8` keeps the panel beside the page: what is read with the
-Bible (the Bookshelf, the module read beside the page, Study) as a stack
+Bible (the Bookshelf, the document read beside the page, Study) as a stack
 of screens of its own, kept while sheets come and go and opened again as
-it was left; a commentary there follows the page.
+it was left. Its document is a version (laid out as the reader lays it
+out, a row each paragraph) or a Bookshelf module; a version or a
+commentary there follows the page.
 `core/shelf.l8` keeps the Bookshelf: SWORD modules downloaded on request
 rather than bundled. A Bible among them becomes a version in a text slot of
 its own, its records made from the module when it is opened; commentaries,
@@ -31,11 +33,13 @@ them. Opening a package, making a Bible a version and decoding a large
 commentary block happen a step at a time between the screen's updates
 (core asks the skin for a turn with `next`), so the app keeps answering
 its reader however slowly it runs, as it does interpreted under hot reload.
-Go To and the Library list what can be read in one way
+Go To and Bibles and Books (the catalog) list what can be read in one way
 (`core/shelf_screens.l8`'s documents): the bundled versions, the original
-languages, the ESV and the Bookshelf's modules. A Bible chosen becomes the
-reader's version; any other is read beside the page where the panel fits.
-The Library lists what is on the device before what can be downloaded, and
+languages, the ESV and the Bookshelf's modules. Each pane's lists read into that pane:
+over the reader, a Bible chosen becomes the reader's version (Read Beside
+reads it in the panel) and any other is read beside the page where the
+panel fits; in the panel, anything chosen is read there.
+Bibles and Books lists what is on the device before what can be downloaded, and
 leaves out the catalog's editions of the bundled versions.
 
 The reader and a plan's day use the same references and shared reading
