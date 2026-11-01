@@ -869,8 +869,13 @@ const bar = {
   versionWord: "",
   title(t) {
     $(".t", this.titleButton).textContent = t;
-    this.titleButton.setAttribute("aria-label", `${t}, Go To`);
     document.title = `${t} · Smooth Bible`;
+    this.label();
+  },
+  // The title's label: the chapter, the version, what a tap does.
+  label() {
+    const t = $(".t", this.titleButton).textContent;
+    this.titleButton.setAttribute("aria-label", this.versionWord ? `${t}, ${this.versionWord}, Go To` : `${t}, Go To`);
   },
   // The ribbon carried: a strip of its color before the title.
   carried(hex, words) {
@@ -887,11 +892,11 @@ const bar = {
       m.title = words;
     }
   },
+  // The version, faint after the title, as the iPhone's title has it.
   version(v) {
     this.versionWord = v;
-    const b = $(".bar .version");
-    b.textContent = v;
-    b.setAttribute("aria-label", `Version: ${v}`);
+    $(".v", this.titleButton).textContent = v;
+    this.label();
     if (reader.said.c >= 0) address(reader.said.c);
   },
 };
@@ -905,7 +910,6 @@ bar.titleButton.addEventListener("contextmenu", (e) => {
 $(".bar .library").addEventListener("click", () => send("tap library"));
 $(".bar .shelf").addEventListener("click", () => send("tap shelf"));
 $(".bar .search").addEventListener("click", () => send("tap search"));
-$(".bar .version").addEventListener("click", () => send("tap versions"));
 $(".bar .aa").addEventListener("click", () => send("tap settings"));
 
 // ---- the reader ----

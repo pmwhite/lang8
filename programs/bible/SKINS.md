@@ -402,7 +402,7 @@ Other lines from core:
 | `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA`, `verse V A B`, `link A B KIND ARG` (a footnote's mark, KIND 0, ARG its place; a reference, 1, ARG the reference; a word of the original's, 2), `gloss A B` (a word of the original glossed under its paragraph) and `mark V HEX BOOKMARK NOTE` lines (a verse's highlight's color, `-` none; bookmarked; noted; verse 0 the chapter's own note, marked after its label), then `end`. A `layout ORIG RTL VERSELINES OPENER LABEL` line after the first says whether the chapter is the original's, set right to left, a verse a line, and where its opener and its label end (UTF-16; 0 none); a `name` TITLE line names it as the bar does. A skin ignores the lines it does not know |
 | `jump C V`, `goto C V`, `relayout` | the reader moved; the screens away, then moved; every chapter to be asked for again |
 | `highlights SWATCH WASH STRENGTH...`, `themes DAY NIGHT PAGE INK...`, then `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT THEME CHOSEN HAIRLINE SELECTION SHEET CELL` | all a skin needs of look.l8. `highlights`: each of the five by the color its `mark` lines name it with, and the wash a highlighted verse shows now (STRENGTH, like GLOSS, HAIRLINE and SELECTION, in thousandths). `themes`: the themes Auto follows by day and at night, then each theme's page and ink, in the Theme setting's order (for its swatches). `look`: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument); THEME the theme it is and CHOSEN the one chosen (0 Auto), of `themes`; HAIRLINE a rule's strength (RULE's color), SELECTION a selection's (ACCENT's); SHEET and CELL a sheet's color and its rows' (`-`: the platform's grouped colors) |
-| `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation |
+| `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation, shown faint after the title (which opens Go To); the version is chosen in Go To or the Library, not from the bar |
 | `url` ADDRESS | a page outside the app to open |
 | `place C V FRAC`, `back` WORDS | the reader to a place (a ribbon's, the way back's); the capsule's words (none: away) |
 | `next` | core has work going on a step at a time (the Bookshelf opening a module, making a Bible a version, decoding a commentary's block): the skin answers `next` on its next turn, once it has drawn and taken input, so the app answers its reader between steps however slow it runs |
@@ -447,7 +447,7 @@ From the skin:
 | Line | Meaning |
 |---|---|
 | `start W H DENSITY DARK TZ` | the app begun: the window (points), its scale (hundredths), the system's appearance, its time zone (seconds east of UTC: the day turns at its midnight) |
-| `tap goto`, `tap versions`, `tap settings`, `tap history`, `tap search`, `tap library`, `tap shelf` | the bar's buttons (`shelf`: the panel beside the reader opened or closed; without one, the Bookshelf over the reader) |
+| `tap goto`, `tap settings`, `tap history`, `tap search`, `tap library`, `tap shelf` | the bar's buttons (`goto`: its title; `shelf`: the panel beside the reader opened or closed; without one, the Bookshelf over the reader) |
 | `act ID ACTION ARG VALUE` | an action (VALUE: a toggle's 1 or 0, a choice's, segment's, filter's or sort's index, a slider's value, a time's minutes, a swatch's color). An action on a screen means those over it have gone |
 | `query ID TEXT` | screen ID's field typed in (TEXT to the line's end), once typing has rested |
 | `scope ID N` | scope N chosen in screen ID's field |
@@ -529,10 +529,10 @@ explicitly instead of reporting truncated output as a complete screen.
 
 Every list is core's (2026-10-22): Go To (its ribbons and plans too),
 Search (the ESV's results too: the iPhone asks its server, core keeps and
-shows them), Versions, History, the reading settings, Glosses, Voice and the
+shows them), History, the reading settings, Glosses, Voice and the
 voices, Downloads, the Manual's list, Acknowledgements and Changes, Reading
 Plans, a plan's days and its Daily Reminder, A Chapter a Day, Begin At, New
-Ribbon and a ribbon's screen, the Library and Memory (Add Passage, a
+Ribbon and a ribbon's screen, the Bookshelf and its Library, the Library and Memory (Add Passage, a
 passage, its versions, Memory's reminder), Compare, a word's study, its
 grammar and concordance, the language page and what it pushes (Sounds
 Written As, the Alphabet, Your Words, Add Words and its preview, Verses You

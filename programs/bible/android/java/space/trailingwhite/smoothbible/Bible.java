@@ -37,7 +37,7 @@ public final class Bible extends Activity {
   TextView playerTitle, playerState, playerToggle;
   boolean playing;
   // The carried ribbon's color (none: no ribbon carried) and the title.
-  String carried = "", titleWords = "";
+  String carried = "", titleWords = "", versionWord = "";
   // The card Share as Image draws (core's CUSTOM_CARD row, its last).
   Screen.Row card;
   // What a reminder opened says, once core has begun (-1: none).
@@ -46,7 +46,7 @@ public final class Bible extends Activity {
   String saving;
   FrameLayout root;
   LinearLayout bar;
-  TextView title, version, settings, library, shelf;
+  TextView title, settings, library, shelf;
   android.widget.ImageView search;
   // A screen or a chapter being said (between its first line and end).
   Screen building;
@@ -83,7 +83,6 @@ public final class Bible extends Activity {
       Native.send("titlemenu");
       return true;
     });
-    version = button("", "versions");
     settings = button("Aa", "settings");
     settings.setContentDescription("Settings");
     // (The Library: what is kept, Memory, and the languages.)
@@ -101,7 +100,6 @@ public final class Bible extends Activity {
     bar.addView(shelf);
     bar.addView(library);
     bar.addView(search, new LinearLayout.LayoutParams(dp(44), dp(44)));
-    bar.addView(version);
     bar.addView(settings);
     root.addView(bar, new FrameLayout.LayoutParams(-1, dp(52), Gravity.TOP));
     reader.topInset = dp(52);
@@ -460,15 +458,24 @@ public final class Bible extends Activity {
   }
 
   // The bar's title, the carried ribbon's glyph before it in its color.
+  // The title: the ribbon carried (a strip of its color), the chapter, and
+  // the version, faint and smaller, as the iPhone's title has it.
   void showTitle() {
-    if (carried.isEmpty()) {
-      title.setText(titleWords);
-      return;
+    String lead = carried.isEmpty() ? "" : "\u258E ";
+    String tail = versionWord.isEmpty() ? "" : "  " + versionWord;
+    android.text.SpannableString s = new android.text.SpannableString(lead + titleWords + tail);
+    if (!carried.isEmpty())
+      s.setSpan(new android.text.style.ForegroundColorSpan(Look.color(carried)), 0, 1,
+          android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    if (!tail.isEmpty()) {
+      int from = s.length() - tail.length();
+      s.setSpan(new android.text.style.ForegroundColorSpan(look.faint), from, s.length(),
+          android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+      s.setSpan(new android.text.style.RelativeSizeSpan(0.75f), from, s.length(),
+          android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
-    android.text.SpannableString s = new android.text.SpannableString("\u258E " + titleWords);
-    s.setSpan(new android.text.style.ForegroundColorSpan(Look.color(carried)), 0, 1,
-        android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     title.setText(s);
+    title.setContentDescription(versionWord.isEmpty() ? titleWords : titleWords + ", " + versionWord);
   }
 
   private final android.os.Handler timers = new android.os.Handler(android.os.Looper.getMainLooper());
@@ -577,7 +584,7 @@ public final class Bible extends Activity {
     reader.setBackgroundColor(look.bg);
     bar.setBackgroundColor(look.bg);
     title.setTextColor(look.ink);
-    version.setTextColor(look.accent);
+    showTitle();
     settings.setTextColor(look.accent);
     library.setTextColor(look.accent);
     search.setColorFilter(look.accent);
@@ -997,8 +1004,8 @@ public final class Bible extends Activity {
         showTitle();
         break;
       case "version":
-        version.setText(w.field(1));
-        version.setContentDescription("Version: " + w.field(1));
+        versionWord = w.field(1);
+        showTitle();
         break;
       default:
         break;

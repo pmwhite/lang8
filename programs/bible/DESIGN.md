@@ -31,6 +31,12 @@ them. Opening a package, making a Bible a version and decoding a large
 commentary block happen a step at a time between the screen's updates
 (core asks the skin for a turn with `next`), so the app keeps answering
 its reader however slowly it runs, as it does interpreted under hot reload.
+Go To and the Library list what can be read in one way
+(`core/shelf_screens.l8`'s documents): the bundled versions, the original
+languages, the ESV and the Bookshelf's modules. A Bible chosen becomes the
+reader's version; any other is read beside the page where the panel fits.
+The Library lists what is on the device before what can be downloaded, and
+leaves out the catalog's editions of the bundled versions.
 
 The reader and a plan's day use the same references and shared reading
 rules. Marks are keyed by reference, so switching versions preserves their
