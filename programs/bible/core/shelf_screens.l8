@@ -203,6 +203,8 @@ sk_shelf_opening(kind: int, arg: int) {
 // catalog come, a module opened; Go To while it searches the catalog); a
 // commentary beside the page whose text has come brought to its focus.
 shelf_screens_changed() {
+    // (A commentary read beside the page: its chapters that were coming.)
+    bb_comments_came();
     for i in 0..sk_n {
         k: int = sk_kinds[i];
         if (k >= SCR_SHELF && k <= SCR_SHELF_BOOK || k == SCR_VERSE_STUDY || k == SCR_GOTO && sk_q_n > 0) {
@@ -1248,6 +1250,13 @@ sk_shelf_subtitle(i: int) {
 }
 
 sk_build_shelf_commentary(id: int, arg: int) {
+    // (In the panel of a skin that draws a reader there: read as the page
+    // is, every chapter in turn.)
+    at_built: int = sk_find(id);
+    if (sk_has_panel_reader && at_built >= 0 && sk_groups[at_built] == 1) {
+        bb_build_commentary_reader(id, arg);
+        return
+    }
     slot: int = arg / SHELF_PLACE;
     c: int = arg % SHELF_PLACE;
     i: int = shelf_find_slot(slot);
@@ -1533,6 +1542,191 @@ commentary_section(
         }
     }
     shown
+}
+
+// The first verse of the comment on verse v of chapter c in the commentary
+// in slot (0: none before it, or the commentary not open).
+shelf_comment_start(slot: int, c: int, v: int): int {
+    if (c < 0 || c >= chapters || !shelf_open_is(SHELF_USE_STUDY, slot)) return 0;
+    start: int = 0;
+    borrow shelf_open[SHELF_USE_STUDY] as open {
+        match open.reader {
+            Verses r -> {
+                place: CommentaryPlace = commentary_place(r.module, c);
+                if (place.book >= 0) {
+                    system: *Versification = verse_module_system(r.module);
+                    last: int = system.books[place.book].verses[place.chapter - 1];
+                    start = commentary_section_start(r.module, place, if (v > last) last else v)
+                }
+            }
+            _ -> { }
+        }
+    }
+    start
+}
+
+// ---- a commentary's chapter, for a reader ----
+// Chapter c of the commentary in slot laid out as a reader's chapter, into
+// ctx: its number, then each comment, headed by its verses ("Verses
+// 14-16"), its words in the reader's styles (a note's in brackets); each
+// comment a verse of its own, keyed by its first verse, from its heading to
+// its end. Whether its comments were ready (else they are asked for, and
+// nothing is laid out).
+shelf_lay_commentary(slot: int, c: int, ctx: *ChapterLayout): bool {
+    if (c < 0 || c >= chapters || !shelf_ensure_open(slot)) return false;
+    ready: bool = false;
+    borrow shelf_open[SHELF_USE_STUDY] as open {
+        match open.reader {
+            Verses r -> {
+                if (commentary_chapter_ready(slot, r.module, c)) {
+                    ready = true;
+                    shelf_lay_comments(slot, r.module, c, ctx)
+                }
+            }
+            _ -> { }
+        }
+    }
+    ready
+}
+
+shelf_lay_comments(
+    slot: int,
+    module: *VerseModule,
+    c: int,
+    ctx: *ChapterLayout
+) {
+    layout_begin(ctx);
+    lay_begin(ctx, STYLE_NUMERAL, PARA_CENTER, 0);
+    ctx.opener_at = ctx.out_n;
+    lay_int(ctx, ch_num[c]);
+    lay_byte(ctx, 10);
+    place: CommentaryPlace = commentary_place(module, c);
+    if (place.book < 0) return;
+    system: *Versification = verse_module_system(module);
+    last: int = system.books[place.book].verses[place.chapter - 1];
+    v: int = 0;
+    while (v <= last) {
+        entry: VerseEntry = commentary_entry(module, place, v);
+        if (entry.size > 0) {
+            through: int = v;
+            while (through < last && verse_entries_same(entry, commentary_entry(module,
+                place, through + 1))) through = through + 1;
+            shelf_lay_comment(slot, module, entry, v, through, ctx);
+            v = through + 1
+        } else v = v + 1
+    }
+}
+
+// One comment, on verses from to through, laid out (none, if it has no
+// words of its own: only a chapter's titles).
+shelf_lay_comment(
+    slot: int,
+    module: *VerseModule,
+    entry: VerseEntry,
+    from: int,
+    through: int,
+    ctx: *ChapterLayout
+) {
+    region {
+        try {
+            markup: []i8 = if (entry.block >= 0) shelf_block_text(slot, module, entry) else verse_module_text(module,
+                verse_module_testament_text(module, entry.testament), entry);
+            rich: *RichText = rich_new();
+            state: MarkupState = markup_state_new();
+            markup_convert(rich, &state, verse_module_info(module).markup, markup,
+                0, len(markup));
+            if (rich_has_words(rich)) {
+                // (Its verses, a verse of the reader's: its first, from its
+                // heading on. An introduction, verse 0, is the chapter's
+                // top.)
+                if (from > 0) {
+                    verse_open(ctx, from, from);
+                    verse_here(ctx)
+                }
+                // (One that heads its parts itself is not headed again.)
+                if (!rich_has_sections(rich)) {
+                    lay_begin(ctx, STYLE_HEAD, PARA_PROSE, 0);
+                    fbuf_n = 0;
+                    if (from == 0 && through == 0) fput_str("Introduction") else if (through > from) {
+                        fput_str("Verses ");
+                        fput_int(if (from == 0) 1 else from);
+                        fput_str("\â\€\“");
+                        fput_int(through)
+                    } else {
+                        fput_str("Verse ");
+                        fput_int(from)
+                    }
+                    for k in 0..fbuf_n lay_byte(ctx, fbuf[k] as int);
+                    lay_byte(ctx, 10)
+                }
+                shelf_lay_rich(rich, ctx);
+                if (from > 0) verse_on(ctx)
+            }
+        } with SwordError _error -> {
+            lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
+            lay_str(ctx, "This part of the commentary is damaged.");
+            lay_byte(ctx, 10)
+        }
+    }
+}
+
+// A comment's rich text laid out: its paragraphs and lines a line each,
+// its headings in the reader's heading, its words in the reader's styles
+// (italic as supplied words are, the divine name in small capitals, the
+// words of Jesus as the page has them), a note's words in brackets, as a
+// cross reference's; it ends with a line's end.
+shelf_lay_rich(rich: *RichText, ctx: *ChapterLayout) {
+    heading: bool = false;
+    note: bool = false;
+    line_open: bool = false;
+    for i in 0..rich.count {
+        match rich.pieces[i] {
+            Paragraph -> line_open = shelf_lay_line_end(ctx, line_open);
+            Line _l -> line_open = shelf_lay_line_end(ctx, line_open);
+            LineBreak -> line_open = shelf_lay_line_end(ctx, line_open);
+            HeadingStart h -> {
+                line_open = shelf_lay_line_end(ctx, line_open);
+                heading = (match h.role {
+                    BookTitle -> false;
+                    ChapterTitle -> false;
+                    _ -> true
+                })
+            }
+            HeadingEnd -> {
+                line_open = shelf_lay_line_end(ctx, line_open);
+                heading = false
+            }
+            NoteStart _n -> {
+                note = true;
+                lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
+                lay_str(ctx, " [");
+                line_open = true
+            }
+            NoteEnd -> {
+                if (note) {
+                    lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
+                    lay_byte(ctx, 93)
+                }
+                note = false
+            }
+            Words w -> {
+                if (w.to > w.from) {
+                    style: int = if (heading) STYLE_HEAD else if (note) STYLE_REF else if (w.style.divine || w.style.small_caps) STYLE_CAPS else if (w.style.jesus) STYLE_JESUS else if (w.style.italic || w.style.added) STYLE_SUPPLIED else STYLE_BODY;
+                    lay_begin(ctx, style, PARA_PROSE, 0);
+                    for k in w.from..w.to lay_byte(ctx, rich.text.data[k] as int);
+                    line_open = true
+                }
+            }
+            _ -> { }
+        }
+    }
+    _closed: bool = shelf_lay_line_end(ctx, line_open)
+}
+
+// A line ended, if one is open; none is now.
+shelf_lay_line_end(ctx: *ChapterLayout, open: bool): bool {
+    if (open) lay_byte(ctx, 10);
+    false
 }
 
 // "Verses 14â€“16" (or "Introduction" for a chapter's verse 0) heading a

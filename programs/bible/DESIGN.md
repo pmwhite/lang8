@@ -24,7 +24,9 @@ Bible (the Bookshelf, the document read beside the page, Study) as a stack
 of screens of its own, kept while sheets come and go and opened again as
 it was left. Its document is a version or a Bookshelf module; a version or a
 commentary there follows the page. Where the skin draws a reader in the
-panel, a version is read there as the page is, every chapter in turn.
+panel, a version or a commentary is read there as the page is, every
+chapter in turn (a commentary's comments laid out as a chapter, each a
+verse of its own, by core/shelf_screens.l8).
 Linked with the page (a button at its foot), the two move together,
 whichever a hand moves leading; unlinked, neither moves the other, and
 linked again it comes to the page's place (elsewhere, a version is a page

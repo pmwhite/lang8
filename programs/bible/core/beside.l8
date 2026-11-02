@@ -153,6 +153,7 @@ sk_beside_toggle() {
 // Study let go.
 sk_beside_read(slot: int) {
     sk_beside_keep(PanelDocument.Module { slot: slot });
+    bb_reader_begin();
     sk_beside_show_kept()
 }
 
@@ -249,6 +250,7 @@ sk_beside_make() {
             if (sk_beside_can_read(v.text)) sk_beside_push(SCR_BESIDE_BIBLE, v.text * SHELF_PLACE + (if (sk_c >= 0 && sk_c < chapters) sk_c else 0)) else sk_beside_keep(PanelDocument.NoDocument)
         }
         Module m -> {
+            bb_reader_begin();
             i: int = shelf_find_slot(m.slot);
             if (i >= 0 && shelf_ready_at(i) && shelf_kind_at(i) != SHELF_KIND_BIBLE) shelf_open_reading(i,
                 true) else sk_beside_keep(PanelDocument.NoDocument)
@@ -412,11 +414,13 @@ sk_beside_select() {
         ui_effect("refill", sk_ids[top], 1);
         return
     }
-    if (sk_kinds[top] == SCR_SHELF_COMMENTARY) {
+    if (bb_reader_at() == top) {
+        sk_beside_held_c = -1;
+        bb_reader_jump_to(top, sk_sel_c, sk_sel_v[0])
+    } else if (sk_kinds[top] == SCR_SHELF_COMMENTARY) {
         sk_beside_held_c = -1;
         sk_beside_commentary_to(top, sk_sel_c, sk_sel_v[0])
-    }
-    if (sk_kinds[top] == SCR_BESIDE_BIBLE) {
+    } else if (sk_kinds[top] == SCR_BESIDE_BIBLE) {
         sk_beside_held_c = -1;
         sk_beside_version_to(top, sk_sel_c, sk_sel_v[0])
     }
@@ -432,8 +436,8 @@ sk_beside_rest(c: int, v: int) {
         if (c == sk_beside_held_c) return;
         sk_beside_held_c = -1
     }
-    if (sk_kinds[top] == SCR_BESIDE_BIBLE) sk_beside_version_to(top, c, v) else sk_beside_commentary_to(top,
-        c, v)
+    if (bb_reader_at() == top) bb_reader_follow(top, c, v) else if (sk_kinds[top] == SCR_BESIDE_BIBLE) sk_beside_version_to(top,
+        c, v) else sk_beside_commentary_to(top, c, v)
 }
 
 // The commentary at screen at shown at chapter c, its comment on verse v
@@ -799,20 +803,10 @@ sk_beside_linked(): bool {
 // again when it has come).
 bb_build_reader(id: int, arg: int) {
     t: int = arg / SHELF_PLACE;
-    if (bb_reader_c < 0 || bb_reader_c >= chapters) {
-        bb_reader_c = (if (sk_c >= 0 && sk_c < chapters) sk_c else 0);
-        bb_reader_v = sk_v
-    }
-    fbuf_n = 0;
-    fput_title(bb_reader_c);
-    ui_begin(id, SCR_BESIDE_BIBLE, arg, "");
-    ui_set_screen_title_fbuf();
+    bb_reader_title(id, SCR_BESIDE_BIBLE, arg);
     fbuf_n = 0;
     fput_text_name(t);
     ui_set_subtitle_fbuf();
-    // (A plain page, as the page is: no list's insets at its sides.)
-    ui_plain = true;
-    ui_page = true;
     if (!sk_beside_can_read(t)) {
         ui_set_empty("books.vertical", "Not Here", "");
         return
@@ -829,8 +823,49 @@ bb_build_reader(id: int, arg: int) {
         ui_set_faint();
         return
     }
+    bb_reader_link(ReaderFollows.ByVerse)
+}
+
+// A commentary read beside the page as the page is (its arg its slot times
+// SHELF_PLACE plus its chapter): its comments a chapter at a time, every
+// chapter in turn, following by comment. The module not open yet: a row
+// that says it is opening.
+bb_build_commentary_reader(id: int, arg: int) {
+    slot: int = arg / SHELF_PLACE;
+    i: int = shelf_find_slot(slot);
+    bb_reader_title(id, SCR_SHELF_COMMENTARY, arg);
+    sk_shelf_subtitle(i);
+    if (i < 0) {
+        ui_set_empty("books.vertical", "Not on Your Bookshelf", "");
+        return
+    }
+    if (!shelf_ensure_open(slot)) {
+        shelf_opening_rows(slot, i);
+        return
+    }
+    bb_reader_link(ReaderFollows.ByComment)
+}
+
+// A reader's screen begun: its title the chapter at its top; a plain page,
+// as the page is (no list's insets at its sides).
+bb_reader_title(id: int, kind: int, arg: int) {
+    if (bb_reader_c < 0 || bb_reader_c >= chapters) {
+        bb_reader_c = (if (sk_c >= 0 && sk_c < chapters) sk_c else 0);
+        bb_reader_v = sk_v
+    }
+    fbuf_n = 0;
+    fput_title(bb_reader_c);
+    ui_begin(id, kind, arg, "");
+    ui_set_screen_title_fbuf();
+    ui_plain = true;
+    ui_page = true
+}
+
+// The reader's place, how it follows the page, and its link button
+// (filled while linked).
+bb_reader_link(follows: ReaderFollows) {
     linked: bool = sk_beside_linked();
-    ui_set_reader(bb_reader_c, bb_reader_v, linked);
+    ui_set_reader(bb_reader_c, bb_reader_v, linked, follows);
     ui_tool("", "link", ACT_BESIDE_LINK, 0, if (linked) UI_TOOL_PROMINENT else UI_TOOL_PLAIN,
         2);
     fbuf_n = 0;
@@ -841,17 +876,59 @@ bb_build_reader(id: int, arg: int) {
 // The panel's reader's screen (its index; -1: none).
 bb_reader_at(): int {
     top: int = sk_beside_top();
-    if (!sk_has_panel_reader || top < 0 || sk_kinds[top] != SCR_BESIDE_BIBLE) return -1;
+    if (!sk_has_panel_reader || top < 0 || sk_kinds[top] != SCR_BESIDE_BIBLE && sk_kinds[top] != SCR_SHELF_COMMENTARY) return -1;
     top
 }
 
-// `besidewant C`: chapter c of the panel's version, as its reader's lines.
+// `besidewant C`: chapter c of what the panel reads, as its reader's lines:
+// a version's; a commentary's comments, or, not here yet, a line that says
+// it is coming (the chapter told again when it has come).
 sk_beside_want(c: int) {
     at: int = bb_reader_at();
     if (at < 0 || c < 0 || c >= chapters) return;
+    if (sk_kinds[at] == SCR_SHELF_COMMENTARY) {
+        bb_write_comments(sk_args[at] / SHELF_PLACE, c);
+        return
+    }
     t: int = sk_args[at] / SHELF_PLACE;
     if (t != text_cur && !text_ready(t)) return;
     sk_write_chapter_as(t, c, "besidechapter ")
+}
+
+// The commentary chapters told as coming, to be told again as they come
+// (a flag each chapter of the Bible's).
+bb_coming: []bool = new bool[len(ch_num)](false);
+
+bb_write_comments(slot: int, c: int) {
+    if (shelf_lay_commentary(slot, c, &sk_layout)) {
+        bb_coming[c] = false;
+        measure_chapter(&sk_layout, &sk_ranges, c);
+        sk_write_laid(c, "besidechapter ", LaidText.Comments);
+        return
+    }
+    bb_coming[c] = true;
+    layout_begin(&sk_layout);
+    lay_begin(&sk_layout, STYLE_REF, PARA_PROSE, 0);
+    lay_str(&sk_layout, "Opening\â\€\¦");
+    measure_chapter(&sk_layout, &sk_ranges, c);
+    sk_write_laid(c, "besidechapter ", LaidText.Comments)
+}
+
+// A commentary's text come (shelf_screens_changed): the chapters told as
+// coming told again, those that have come, and the reader told to show
+// them (`besidechapterready C`).
+bb_comments_came() {
+    at: int = bb_reader_at();
+    if (at < 0 || sk_kinds[at] != SCR_SHELF_COMMENTARY) return;
+    slot: int = sk_args[at] / SHELF_PLACE;
+    for c in 0..chapters {
+        if (bb_coming[c] && shelf_lay_commentary(slot, c, &sk_layout)) {
+            bb_coming[c] = false;
+            measure_chapter(&sk_layout, &sk_ranges, c);
+            sk_write_laid(c, "besidechapter ", LaidText.Comments);
+            ui_effect("besidechapterready", c, -1)
+        }
+    }
 }
 
 // `besideplace C V`: the panel's reader's top. Its title made again as its
@@ -892,11 +969,14 @@ bb_reader_follow(at: int, c: int, v: int) {
 // reader moved there, linked (not while it leads).
 bb_reader_jump_to(at: int, c: int, v: int) {
     if (!sk_beside_linked() || bb_hand) return;
+    // (A commentary: to the comment on the verse, its first verse.)
+    to_v: int = if (sk_kinds[at] == SCR_SHELF_COMMENTARY) shelf_comment_start(sk_args[at] / SHELF_PLACE,
+        c, v) else v;
     was: int = bb_reader_c;
     bb_reader_c = c;
-    bb_reader_v = v;
+    bb_reader_v = to_v;
     if (c != was) bb_remake(at);
-    ui_effect("besidejump", c, v)
+    ui_effect("besidejump", c, to_v)
 }
 
 // Link or Unlink: linked again, the reader comes to the page's place.
@@ -940,10 +1020,11 @@ sk_beside_jumped(c: int, v: int) {
     bb_reader_jump_to(at, c, v)
 }
 
-// A version opened beside the page anew: at the page's place, the page
-// leading.
+// A version or a commentary opened beside the page anew: at the page's
+// place, the page leading, no chapter waited for.
 bb_reader_begin() {
     bb_hand = false;
+    for c in 0..len(bb_coming) bb_coming[c] = false;
     bb_reader_c = (if (sk_c >= 0 && sk_c < chapters) sk_c else 0);
     bb_reader_v = sk_v
 }
