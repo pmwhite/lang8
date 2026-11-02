@@ -998,8 +998,11 @@ function makeReader(main, view, words) {
     const s = this.section(j.c);
     let y = s.getBoundingClientRect().top;
     if (j.v > 0) {
-      const t = s.querySelector(`[data-v="${j.v}"]`);
-      if (t) y = t.getBoundingClientRect().top - (j.f * emPx()) / 1000;
+      // (The verse, else the latest of the chapter's at or before it: a
+      // commentary's comment on it.)
+      let t = s.querySelector(`[data-v="${j.v}"]`);
+      if (!t) for (const x of s.querySelectorAll("[data-vs]")) if (+x.dataset.v <= j.v) t = x;
+      if (t) y = t.getBoundingClientRect().top - (t.dataset.v == j.v ? (j.f * emPx()) / 1000 : 0);
     }
     this.scrollTo(this.view.top() + y - this.view.inset());
     this.extend();

@@ -1544,27 +1544,6 @@ commentary_section(
     shown
 }
 
-// The first verse of the comment on verse v of chapter c in the commentary
-// in slot (0: none before it, or the commentary not open).
-shelf_comment_start(slot: int, c: int, v: int): int {
-    if (c < 0 || c >= chapters || !shelf_open_is(SHELF_USE_STUDY, slot)) return 0;
-    start: int = 0;
-    borrow shelf_open[SHELF_USE_STUDY] as open {
-        match open.reader {
-            Verses r -> {
-                place: CommentaryPlace = commentary_place(r.module, c);
-                if (place.book >= 0) {
-                    system: *Versification = verse_module_system(r.module);
-                    last: int = system.books[place.book].verses[place.chapter - 1];
-                    start = commentary_section_start(r.module, place, if (v > last) last else v)
-                }
-            }
-            _ -> { }
-        }
-    }
-    start
-}
-
 // ---- a commentary's chapter, for a reader ----
 // Chapter c of the commentary in slot laid out as a reader's chapter, into
 // ctx: its number, then each comment, headed by its verses ("Verses
@@ -1616,7 +1595,11 @@ shelf_lay_comments(
             out_n: int = ctx.out_n;
             runs: int = ctx.runs;
             verses: int = ctx.verse_count;
-            shelf_lay_comment(slot, module, entry, v, through, ctx);
+            // (Its labels may begin the verses after it that have no
+            // comment of their own.)
+            reach: int = through;
+            while (reach < last && commentary_entry(module, place, reach + 1).size == 0) reach = reach + 1;
+            shelf_lay_comment(slot, module, entry, v, through, reach, ctx);
             if (shelf_layout_full(ctx)) {
                 ctx.out_n = out_n;
                 ctx.runs = runs;
@@ -1640,13 +1623,15 @@ shelf_layout_full(ctx: *ChapterLayout): bool {
 }
 
 // One comment, on verses from to through, laid out (none, if it has no
-// words of its own: only a chapter's titles).
+// words of its own: only a chapter's titles); its labels may begin verses
+// as far as reach.
 shelf_lay_comment(
     slot: int,
     module: *VerseModule,
     entry: VerseEntry,
     from: int,
     through: int,
+    reach: int,
     ctx: *ChapterLayout
 ) {
     region {
@@ -1681,7 +1666,8 @@ shelf_lay_comment(
                     for k in 0..fbuf_n lay_byte(ctx, fbuf[k] as int);
                     lay_byte(ctx, 10)
                 }
-                shelf_lay_rich(rich, ctx);
+                verses: CommentVerses = CommentVerses { last: reach, anchored: from };
+                shelf_lay_rich(rich, ctx, &verses);
                 if (from > 0) verse_on(ctx)
             }
         } with SwordError _error -> {
@@ -1692,12 +1678,26 @@ shelf_lay_comment(
     }
 }
 
+// The verses of a comment being laid out: the last its labels may begin
+// (its own last, or a later one with no comment of its own), and the latest a
+// verse of the reader's begins at (its first, at its start; 0 an
+// introduction, which has none).
+type CommentVerses = {
+    last: int;
+    anchored: int
+}
+
 // A comment's rich text laid out: its paragraphs and lines a line each,
 // its headings in the reader's heading, its words in the reader's styles
 // (italic as supplied words are, the divine name in small capitals, the
 // words of Jesus as the page has them), a note's words in brackets, as a
-// cross reference's; it ends with a line's end.
-shelf_lay_rich(rich: *RichText, ctx: *ChapterLayout) {
+// cross reference's; it ends with a line's end. A paragraph (or heading)
+// that begins with a later verse of the comment's, labelled as
+// commentators label them ("Verse 3.", "Ver. 3.", "v. 3"), begins that
+// verse of the reader's there: a comment on several verses is followed
+// verse by verse where its author marked them. (A later run of labels
+// starting over, a commentary's notes after its exposition, isn't.)
+shelf_lay_rich(rich: *RichText, ctx: *ChapterLayout, verses: *CommentVerses) {
     heading: bool = false;
     note: bool = false;
     line_open: bool = false;
@@ -1732,7 +1732,18 @@ shelf_lay_rich(rich: *RichText, ctx: *ChapterLayout) {
                 note = false
             }
             Words w -> {
-                if (w.to > w.from) {
+                // (Spaces before a paragraph's first words: not its words.)
+                if (w.to > w.from && (line_open || !shelf_spaces_only(rich.text.data,
+                    w.from, w.to))) {
+                    if (!line_open && !note && verses.anchored > 0) {
+                        label: int = verse_label_at(rich.text.data, w.from, w.to);
+                        if (label > verses.anchored && label <= verses.last) {
+                            verse_on(ctx);
+                            verse_open(ctx, label, label);
+                            verse_here(ctx);
+                            verses.anchored = label
+                        }
+                    }
                     style: int = if (heading) STYLE_HEAD else if (note) STYLE_REF else if (w.style.divine || w.style.small_caps) STYLE_CAPS else if (w.style.jesus) STYLE_JESUS else if (w.style.italic || w.style.added) STYLE_SUPPLIED else STYLE_BODY;
                     lay_begin(ctx, style, PARA_PROSE, 0);
                     for k in w.from..w.to lay_byte(ctx, rich.text.data[k] as int);
@@ -1743,6 +1754,65 @@ shelf_lay_rich(rich: *RichText, ctx: *ChapterLayout) {
         }
     }
     _closed: bool = shelf_lay_line_end(ctx, line_open)
+}
+
+// Whether data[from..to] is spaces alone (or line ends).
+shelf_spaces_only(data: []i8, from: int, to: int): bool {
+    for k in from..to {
+        x: int = data[k] as int;
+        if (x != 32 && x != 10 && x != 13 && x != 9) return false
+    }
+    true
+}
+
+// The verse a paragraph's first words label, as commentators write it:
+// "Verse 3.", "Verses 3-5." (its first), "Ver. 3.", "Vers. 3", "v. 3"
+// (in any case, after any spaces), its number followed by a stop, a colon,
+// a comma, a dash or a space; 0 if they don't begin with one.
+verse_label_at(data: []i8, from: int, to: int): int {
+    at: int = from;
+    while (at < to && data[at] as int == 32) at = at + 1;
+    word_end: int = at;
+    while (word_end < to && verse_label_letter(data[word_end] as int)) word_end = word_end + 1;
+    if (!verse_label_word(data, at, word_end)) return 0;
+    at = word_end;
+    if (at < to && data[at] as int == 46) at = at + 1;
+    while (at < to && data[at] as int == 32) at = at + 1;
+    digits_from: int = at;
+    n: int = 0;
+    while (at < to && at - digits_from < 4 && data[at] as int >= 48 && data[at] as int <= 57) {
+        n = n * 10 + data[at] as int - 48;
+        at = at + 1
+    }
+    if (at == digits_from) return 0;
+    if (at < to) {
+        k: int = data[at] as int & 255;
+        // (A stop, a colon, a comma, a hyphen, a space, or a dash's first
+        // byte.)
+        if (k != 46 && k != 58 && k != 44 && k != 45 && k != 32 && k != 226) return 0
+    }
+    n
+}
+
+verse_label_letter(k: int): bool {
+    k >= 65 && k <= 90 || k >= 97 && k <= 122
+}
+
+// Whether data[from..to] is a word that labels a verse: verse, verses,
+// ver, vers, v (in any case).
+verse_label_word(data: []i8, from: int, to: int): bool {
+    for word in ["verse", "verses", "ver", "vers", "v"] {
+        if (to - from == len(word)) {
+            same: bool = true;
+            for k in 0..len(word) {
+                x: int = data[from + k] as int;
+                if (x >= 65 && x <= 90) x = x + 32;
+                if (x != word[k] as int) same = false
+            }
+            if (same) return true
+        }
+    }
+    false
 }
 
 // A line ended, if one is open; none is now.
