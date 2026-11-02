@@ -1,0 +1,610 @@
+tag bible_ios;
+
+use_tag std, ios, bible, bible_wire;
+
+// The panel's reader (core/beside.l8's): a version read beside the page as
+// the page is read, every chapter in turn, in the table of core's screen
+// that says `reader C V`. Its chapters are core's `besidechapter` blocks,
+// kept with the page's (ios/reader.l8, as their chapter plus PR_KEY) and
+// set as the page sets its own; its rows are a chapter each. Core moves it
+// (`besidejump C V`) while it keeps in step with the page; its top is told
+// back as it changes (`besideplace C V FRAC`), and a finger's drag says it
+// is going its own way (`besidemoving`).
+
+// The table it is read in (0: none), and the place last told.
+pr_table: int = 0;
+
+pr_told_c: int = -1;
+
+pr_told_v: int = -1;
+
+// Scrolls of its own under way (a jump's): not told as a finger's.
+pr_self: int = 0;
+
+is_panel_reader(t: int): bool {
+    t != 0 && t == pr_table
+}
+
+// Table t, core's screen's, made the panel's reader, at chapter c, verse v.
+pr_attach(t: int, c: int, v: int) {
+    pr_table = t;
+    pr_told_c = -1;
+    pr_told_v = -1;
+    msg1(t, sel("setSeparatorStyle:"), 0);
+    msg1(t, sel("setAllowsSelection:"), 0);
+    msg_set_f(t, sel("setRowHeight:"), objc_const_f("UITableViewAutomaticDimension"));
+    msg_set_f(t, sel("setEstimatedRowHeight:"), em * 140.0f64);
+    if (responds(t, "setSectionHeaderTopPadding:")) msg_set_f(t, sel("setSectionHeaderTopPadding:"),
+        0.0f64);
+    msg_set_f(t, sel("setSectionHeaderHeight:"), 0.0f64);
+    msg_set_f(t, sel("setSectionFooterHeight:"), 0.0f64);
+    msg_set_f(t, sel("setEstimatedSectionHeaderHeight:"), 0.0f64);
+    msg_set_f(t, sel("setEstimatedSectionFooterHeight:"), 0.0f64);
+    msg1(t, sel("setBackgroundColor:"), c_bg);
+    msg(t, sel("reloadData"));
+    msg(t, sel("layoutIfNeeded"));
+    pr_jump(c, v)
+}
+
+// Table t let go (its screen gone).
+pr_detach(t: int) {
+    if (t == pr_table) pr_table = 0
+}
+
+// The text's side margins in the panel's width: the setting's, or wider,
+// a column of 34 em centred.
+pr_margin(): f64 {
+    w: f64 = view_width(pr_table);
+    m: f64 = margin_for(w);
+    cw: f64 = column_width(w, m);
+    if (cw < w - 2.0f64 * m) m = (w - cw) / 2.0f64;
+    m
+}
+
+// Chapter c's row: its text view (not scrolling by itself), set as the
+// page sets a chapter. Its words can be selected; taps on them are the
+// page's alone for now.
+pr_cell(t: int, path: int): int {
+    c: int = msg(path, sel("row"));
+    cell: int = msg1(t, sel("dequeueReusableCellWithIdentifier:"), nsstring("besidechapter"));
+    if (cell == 0) {
+        cell = msg(msg2(msg(cls("UITableViewCell"), sel("alloc")), sel("initWithStyle:reuseIdentifier:"),
+            0, nsstring("besidechapter")), sel("autorelease"));
+        msg1(cell, sel("setSelectionStyle:"), 0);
+        content: int = msg(cell, sel("contentView"));
+        tv: int = msg_rect(msg(cls("UITextView"), sel("alloc")), sel("initWithFrame:"),
+            0.0f64, 0.0f64, 320.0f64, 100.0f64);
+        msg1(tv, sel("setScrollEnabled:"), 0);
+        msg1(tv, sel("setEditable:"), 0);
+        msg1(tv, sel("setBackgroundColor:"), msg(cls("UIColor"), sel("clearColor")));
+        msg_set_f(msg(tv, sel("textContainer")), sel("setLineFragmentPadding:"), 0.0f64);
+        msg1(tv, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+        msg1(content, sel("addSubview:"), tv);
+        release(tv);
+        pin(tv, content, "leadingAnchor");
+        pin(tv, content, "trailingAnchor");
+        pin(tv, content, "topAnchor");
+        pin(tv, content, "bottomAnchor")
+    }
+    msg1(cell, sel("setBackgroundColor:"), c_bg);
+    tv: int = text_of_cell(cell);
+    msg1(tv, sel("setTintColor:"), c_accent);
+    m: f64 = pr_margin();
+    top: f64 = if (c == 0) top_gap() else em * 2.4f64;
+    msg_rect(tv, sel("setTextContainerInset:"), top, m, if (c + 1 == chapters_n) 120.0f64 else 0.0f64,
+        m);
+    msg1(tv, sel("setAttributedText:"), chapter_text(PR_KEY + c));
+    cell
+}
+
+// Chapter c's text view (0: not laid out).
+pr_view_of(c: int): int {
+    if (pr_table == 0 || c < 0 || c >= chapters_n) return 0;
+    cell: int = msg1(pr_table, sel("cellForRowAtIndexPath:"), chapter_path(c));
+    if (cell == 0) 0 else text_of_cell(cell)
+}
+
+// Where verse v of chapter c begins, down from the table's top (its
+// chapter's top, for verse 0 or one not laid out).
+pr_verse_y(c: int, v: int): f64 {
+    l8_msg_hfa(hfa, pr_table, sel("rectForRowAtIndexPath:"), chapter_path(c), 0, 0);
+    y: f64 = hfa[1];
+    if (v <= 0) return y;
+    tv: int = pr_view_of(c);
+    if (tv == 0) return y;
+    k: int = verse_unit(PR_KEY + c, v);
+    if (k < 0 || !range_rect(tv, k, 1)) return y;
+    y + hfa[1]
+}
+
+// The table scrolled to y (under its header), as its own scroll.
+pr_set_offset(y: f64) {
+    least: f64 = -top_inset(pr_table);
+    pr_self = pr_self + 1;
+    msg_ff1(pr_table, sel("setContentOffset:animated:"), 0.0f64, if (y < least) least else y,
+        0);
+    pr_self = pr_self - 1
+}
+
+// `besidejump C V`: chapter c's verse v (0: its top) at the top, under the
+// header; placed again once the rows around it are laid out.
+pr_jump(c: int, v: int) {
+    if (pr_table == 0 || c < 0 || c >= chapters_n) return;
+    pr_self = pr_self + 1;
+    msg3(pr_table, sel("scrollToRowAtIndexPath:atScrollPosition:animated:"), chapter_path(c),
+        1, 0);
+    pr_self = pr_self - 1;
+    for _pass in 0..3 {
+        msg(pr_table, sel("layoutIfNeeded"));
+        pr_set_offset(pr_verse_y(c, v) - top_inset(pr_table))
+    }
+    pr_told_c = c;
+    pr_told_v = v
+}
+
+// Its top told to core as its verse changes: the chapter whose row holds
+// it, the verse there (0 above the first), thousandths of an em into it.
+pr_place_tell() {
+    if (!pr_measure()) return;
+    c: int = pr_at_c;
+    v: int = pr_at_v;
+    frac: int = pr_at_frac;
+    if (c == pr_told_c && v == pr_told_v) return;
+    pr_told_c = c;
+    pr_told_v = v;
+    to_core_str("besideplace");
+    to_core_arg(c);
+    to_core_arg(v);
+    to_core_arg(if (frac < 0) 0 else frac);
+    to_core_end();
+    uk_effects()
+}
+
+// Its top: the chapter whose row holds it, the verse there (0 above the
+// first), thousandths of an em into it (pr_at_c, pr_at_v, pr_at_frac);
+// whether there is one.
+pr_at_c: int = -1;
+
+pr_at_v: int = 0;
+
+pr_at_frac: int = 0;
+
+pr_measure(): bool {
+    if (pr_table == 0) return false;
+    top: f64 = offset_y(pr_table) + top_inset(pr_table);
+    path: int = msg_ff(pr_table, sel("indexPathForRowAtPoint:"), 40.0f64, top + 1.0f64);
+    if (path == 0) return false;
+    c: int = msg(path, sel("row"));
+    l8_msg_hfa(hfa, pr_table, sel("rectForRowAtIndexPath:"), path, 0, 0);
+    into: f64 = top - hfa[1];
+    v: int = 0;
+    frac: int = (into * 1000.0f64 / em) as int;
+    tv: int = pr_view_of(c);
+    if (tv != 0) {
+        pos: int = msg_ff(tv, sel("closestPositionToPoint:"), pr_margin() + 4.0f64,
+            into + 2.0f64);
+        if (pos != 0) {
+            k: int = msg2(tv, sel("offsetFromPosition:toPosition:"), msg(tv, sel("beginningOfDocument")),
+                pos);
+            found: int = verse_from_unit(PR_KEY + c, k);
+            b: int = if (found > 0) verse_unit(PR_KEY + c, found) else -1;
+            if (b >= 0 && range_rect(tv, b, 1)) {
+                v = found;
+                frac = ((into - hfa[1]) * 1000.0f64 / em) as int
+            }
+        }
+    }
+    pr_at_c = c;
+    pr_at_v = v;
+    pr_at_frac = frac;
+    true
+}
+
+// Its scroll: its place told; moved by a finger (or gliding after one)
+// while linked and leading, the page kept with it.
+pr_scrolled() {
+    pr_place_tell();
+    if (pr_self == 0 && pr_linked && link_leader_panel && touched(pr_table)) pr_lead_page()
+}
+
+// Which leads, linked: the one a finger last touched (the panel's reader,
+// or else the page). A finger on one stops the other's glide, so that it
+// can be held still.
+link_leader_panel: bool = false;
+
+// A finger down on the page: it leads, the reader's glide stopped.
+pr_page_touched() {
+    link_leader_panel = false;
+    if (pr_table != 0 && (msg(pr_table, sel("isDecelerating")) & 255) != 0) pr_set_offset(offset_y(pr_table))
+}
+
+// Whether scroll view sv is moving by a finger, or gliding after one (not
+// moved by the app).
+touched(sv: int): bool {
+    (msg(sv, sel("isTracking")) & 255) != 0 || (msg(sv, sel("isDecelerating")) & 255) != 0
+}
+
+// ---- linked, moving together ----
+// The two kept at the same verse, as far through it as each other: each
+// version's verses are as long as they are, so the one followed is placed
+// that far through its own. A verse runs from the top of the line its
+// number begins to the top of the next verse's (the chapter's top before
+// its first verse; the next chapter's top after its last), so that a top
+// moving smoothly through one reader moves the other smoothly too, verse
+// to verse and chapter to chapter.
+
+// Whether the reader is linked with the page (its screen's `reader` line).
+pr_linked: bool = false;
+
+// The page, or the panel's reader.
+type LinkSide =
+    | Page
+    | Panel
+
+// Chapter c's key in the chapters kept, on side.
+side_key(side: LinkSide, c: int): int {
+    match side {
+        Page -> c;
+        Panel -> PR_KEY + c
+    }
+}
+
+side_table(side: LinkSide): int {
+    match side {
+        Page -> table;
+        Panel -> pr_table
+    }
+}
+
+// Where chapter c's row begins, and its verse v, down from the side's
+// table's top.
+side_row_y(side: LinkSide, c: int): f64 {
+    l8_msg_hfa(hfa, side_table(side), sel("rectForRowAtIndexPath:"), chapter_path(c),
+        0, 0);
+    hfa[1]
+}
+
+side_verse_y(side: LinkSide, c: int, v: int): f64 {
+    match side {
+        Page -> verse_y(c, v);
+        Panel -> pr_verse_y(c, v)
+    }
+}
+
+// The side's top (in its table's content).
+side_top(side: LinkSide): f64 {
+    t: int = side_table(side);
+    offset_y(t) + top_inset(t)
+}
+
+// The verses of a chapter in order, each once: their count and the i-th's
+// number (in the chapter kept as key).
+link_verse_count(key: int): int {
+    s: int = rs_need(key);
+    if (s < 0) 0 else rs_v_n[s]
+}
+
+link_verse_num(key: int, i: int): int {
+    s: int = rs_need(key);
+    if (s < 0 || i < 0 || i >= rs_v_n[s]) -1 else rs_v_num[s * VS_MOST + i]
+}
+
+// A verse's span on a side (span_a to span_b, down from its table's top):
+// verse index i of chapter c (-1: above its first).
+span_a: f64 = 0.0f64;
+
+span_b: f64 = 0.0f64;
+
+link_span(side: LinkSide, c: int, i: int) {
+    key: int = side_key(side, c);
+    n: int = link_verse_count(key);
+    span_a = (if (i < 0) side_row_y(side, c) else side_verse_y(side, c, link_verse_num(key,
+        i)));
+    span_b = (if (i + 1 < n) side_verse_y(side, c, link_verse_num(key, i + 1)) else if (c + 1 < chapters_n) side_row_y(side,
+        c + 1) else span_a + view_height(side_table(side)))
+}
+
+// Where a side's top is: its chapter, the index of the verse whose span
+// holds it (-1 above the first), and how far through that span (0 to 1):
+// at_c, at_i, at_part. The search starts at the index last found there.
+at_c: int = -1;
+
+at_i: int = -1;
+
+at_part: f64 = 0.0f64;
+
+link_hint_page: int = -1;
+
+link_hint_panel: int = -1;
+
+link_locate(side: LinkSide): bool {
+    t: int = side_table(side);
+    if (t == 0) return false;
+    y: f64 = side_top(side);
+    path: int = msg_ff(t, sel("indexPathForRowAtPoint:"), 40.0f64, y + 1.0f64);
+    if (path == 0) return false;
+    c: int = msg(path, sel("row"));
+    key: int = side_key(side, c);
+    n: int = link_verse_count(key);
+    i: int = match side {
+        Page -> link_hint_page;
+        Panel -> link_hint_panel
+    };
+    if (i >= n) i = n - 1;
+    if (i < -1) i = -1;
+    // (Back while above the verse's start; on while past the next's.)
+    link_span(side, c, i);
+    while (i >= 0 && y < span_a) {
+        i = i - 1;
+        link_span(side, c, i)
+    }
+    while (i + 1 < n && y >= span_b) {
+        i = i + 1;
+        link_span(side, c, i)
+    }
+    match side {
+        Page -> link_hint_page = i;
+        Panel -> link_hint_panel = i
+    }
+    at_c = c;
+    at_i = i;
+    d: f64 = span_b - span_a;
+    at_part = (if (d < 1.0f64) 0.0f64 else (y - span_a) / d);
+    if (at_part < 0.0f64) at_part = 0.0f64;
+    if (at_part > 1.0f64) at_part = 1.0f64;
+    true
+}
+
+// ---- the curve between them ----
+// Where the follower's top goes for the leader's at y: through the verses'
+// starts on both sides (each verse lands where it begins), and between
+// them along a monotone cubic (Fritsch and Carlson's), its slope at each
+// verse's start the harmonic mean of the two verses' ratios either side, so
+// that the follower's speed changes gradually from verse to verse, never
+// at once, and it never moves against the leader.
+
+// The start of the span of verse v of chapter c on side (v 0: the chapter's
+// top, above its first verse; LINK_NEXT: the next chapter's top), and
+// whether the side has that verse.
+LINK_NEXT: int = -2;
+
+link_found: bool = false;
+
+link_anchor(side: LinkSide, c: int, v: int): f64 {
+    link_found = true;
+    if (v == 0) return side_row_y(side, c);
+    if (v == LINK_NEXT) return if (c + 1 < chapters_n) side_row_y(side, c + 1) else side_row_y(side,
+        c) + view_height(side_table(side)) * 4.0f64;
+    key: int = side_key(side, c);
+    if (verse_unit(key, v) < 0) {
+        link_found = false;
+        return 0.0f64
+    }
+    side_verse_y(side, c, v)
+}
+
+// The leader's verse number k places from its index i (-1: above the
+// first, 0; past the last, LINK_NEXT).
+link_number(key: int, i: int): int {
+    n: int = link_verse_count(key);
+    if (i < 0) return 0;
+    if (i >= n) return LINK_NEXT;
+    link_verse_num(key, i)
+}
+
+// The ratio of a follower's span to a leader's (its slope there).
+link_ratio(
+    l0: f64,
+    l1: f64,
+    f0: f64,
+    f1: f64
+): f64 {
+    if (l1 - l0 < 1.0f64) 1.0f64 else (f1 - f0) / (l1 - l0)
+}
+
+// The harmonic mean of two slopes (0 if either isn't forward).
+link_mean(a: f64, b: f64): f64 {
+    if (a <= 0.0f64 || b <= 0.0f64) 0.0f64 else 2.0f64 * a * b / (a + b)
+}
+
+// The follower's y for the leader's top in chapter c, verse index i (as
+// link_locate found it), part of the way through that span.
+link_map(
+    leader: LinkSide,
+    follower: LinkSide,
+    c: int,
+    i: int,
+    part: f64
+): f64 {
+    lkey: int = side_key(leader, c);
+    // (The two verses' starts the top is between, and one either side.)
+    va: int = link_number(lkey, i);
+    vb: int = link_number(lkey, i + 1);
+    l1: f64 = link_anchor(leader, c, va);
+    l2: f64 = link_anchor(leader, c, vb);
+    f1: f64 = link_anchor(follower, c, va);
+    ok1: bool = link_found;
+    f2: f64 = link_anchor(follower, c, vb);
+    ok2: bool = link_found;
+    // (A verse the follower hasn't: its chapter's top, as far through.)
+    if (!ok1 || !ok2) {
+        top: f64 = link_anchor(follower, c, 0);
+        end: f64 = link_anchor(follower, c, LINK_NEXT);
+        return top + part * (end - top)
+    }
+    m: f64 = link_ratio(l1, l2, f1, f2);
+    d1: f64 = m;
+    d2: f64 = m;
+    if (i >= 0) {
+        v0: int = link_number(lkey, i - 1);
+        l0: f64 = link_anchor(leader, c, v0);
+        f0: f64 = link_anchor(follower, c, v0);
+        if (link_found && l1 - l0 >= 1.0f64) d1 = link_mean(link_ratio(l0, l1, f0,
+            f1), m)
+    }
+    if (vb != LINK_NEXT) {
+        v3: int = link_number(lkey, i + 2);
+        l3: f64 = link_anchor(leader, c, v3);
+        f3: f64 = link_anchor(follower, c, v3);
+        if (link_found && l3 - l2 >= 1.0f64) d2 = link_mean(m, link_ratio(l2, l3,
+            f2, f3))
+    }
+    h: f64 = l2 - l1;
+    t: f64 = part;
+    t2: f64 = t * t;
+    t3: f64 = t2 * t;
+    (2.0f64 * t3 - 3.0f64 * t2 + 1.0f64) * f1 + (t3 - 2.0f64 * t2 + t) * h * d1 + (-2.0f64 * t3 + 3.0f64 * t2) * f2 + (t3 - t2) * h * d2
+}
+
+// ---- near the verses, at a steady speed ----
+// The curve through every verse's start still changes speed from verse to
+// verse, as much as their lengths differ. The follower goes instead along a
+// steadier line, fitted through the verses' starts about LINK_REACH_LINES
+// either way (each weighted less the farther it is), but is kept within
+// half a line of the curve (softly: the nearer the limit, the less it moves
+// apart), so that no verse is ever more than that from its place.
+LINK_REACH_LINES: f64 = 6.0f64;
+
+LINK_SLACK_EM: f64 = 0.5f64;
+
+// How many verses either way the line is fitted through.
+LINK_FIT_VERSES: int = 5;
+
+// The follower's y for the leader's top at y (in chapter c, verse index i,
+// part of the way through it, as link_locate found it).
+link_map_near(
+    leader: LinkSide,
+    follower: LinkSide,
+    c: int,
+    i: int,
+    part: f64,
+    y: f64
+): f64 {
+    exact: f64 = link_map(leader, follower, c, i, part);
+    lkey: int = side_key(leader, c);
+    n: int = link_verse_count(lkey);
+    reach: f64 = em * 1.5f64 * LINK_REACH_LINES;
+    // (A weighted least-squares line through the starts, x the leader's y
+    // from the top's, so that its value at the top is its intercept.)
+    sw: f64 = 0.0f64;
+    sx: f64 = 0.0f64;
+    sy: f64 = 0.0f64;
+    sxx: f64 = 0.0f64;
+    sxy: f64 = 0.0f64;
+    from: int = if (i - LINK_FIT_VERSES < -1) -1 else i - LINK_FIT_VERSES;
+    to: int = if (i + LINK_FIT_VERSES + 1 > n) n else i + LINK_FIT_VERSES + 1;
+    for k in from..to + 1 {
+        v: int = link_number(lkey, k);
+        l: f64 = link_anchor(leader, c, v);
+        f: f64 = link_anchor(follower, c, v);
+        if (link_found) {
+            x: f64 = l - y;
+            u: f64 = x / reach;
+            w: f64 = 1.0f64 / ((1.0f64 + u * u) * (1.0f64 + u * u));
+            sw = sw + w;
+            sx = sx + w * x;
+            sy = sy + w * f;
+            sxx = sxx + w * x * x;
+            sxy = sxy + w * x * f
+        }
+    }
+    det: f64 = sw * sxx - sx * sx;
+    if (sw <= 0.0f64 || det <= 0.000001f64 * sw * sw) return exact;
+    slope: f64 = (sw * sxy - sx * sy) / det;
+    if (slope <= 0.0f64) return exact;
+    steady: f64 = (sy - slope * sx) / sw;
+    // (Kept near the curve: apart by d, it goes d / (1 + |d| / slack).)
+    slack: f64 = em * LINK_SLACK_EM;
+    d: f64 = steady - exact;
+    far: f64 = if (d < 0.0f64) -d else d;
+    exact + d / (1.0f64 + far / slack)
+}
+
+// The page moved by a finger: the panel's reader with it.
+pr_follow_page() {
+    if (pr_table == 0 || !pr_linked || link_leader_panel || chapters_n == 0) return;
+    if (!link_locate(LinkSide.Page)) return;
+    c: int = at_c;
+    // (Its chapter not near: there first.)
+    if (pr_view_of(c) == 0) pr_jump(c, if (at_i < 0) 0 else link_verse_num(c, at_i));
+    pr_set_offset(link_map_near(LinkSide.Page, LinkSide.Panel, c, at_i, at_part, side_top(LinkSide.Page)) - top_inset(pr_table));
+    pr_place_tell()
+}
+
+// The panel's reader moved by a finger: the page with it.
+pr_lead_page() {
+    if (table == 0 || !link_locate(LinkSide.Panel)) return;
+    c: int = at_c;
+    if (view_of(c) == 0) go_place(c, if (at_i < 0) 0 else link_verse_num(PR_KEY + c,
+        at_i), 0);
+    set_offset(link_map_near(LinkSide.Panel, LinkSide.Page, c, at_i, at_part, side_top(LinkSide.Panel)) - top_inset(table));
+    find_place();
+    place_tell()
+}
+
+// `besiderelayout`: every chapter made again (the look or the settings
+// changed), at the same place.
+pr_relayout() {
+    if (pr_table == 0) return;
+    c: int = pr_told_c;
+    v: int = pr_told_v;
+    msg(pr_table, sel("reloadData"));
+    msg(pr_table, sel("layoutIfNeeded"));
+    if (c >= 0) pr_jump(c, if (v < 0) 0 else v)
+}
+
+// Where the reader is to open, once its table is in the window (a jump
+// before then has no rows laid out to measure): -1 none.
+pr_open_c: int = -1;
+
+pr_open_v: int = 0;
+
+// Its table made the panel's reader, opened at chapter c, verse v as soon
+// as the screen is shown.
+pr_attach_later(t: int, c: int, v: int) {
+    pr_open_c = c;
+    pr_open_v = v;
+    pr_table = t;
+    _t: int = after_common(0.05f64, "besideOpened:")
+}
+
+// (The timer's: the reader made and opened where it was to; the chapters
+// not counted yet (a launch's first lines), when they are.)
+pr_opened(_self: int, _cmd: int, _timer: int): int {
+    if (chapters_n == 0) return 0;
+    if (pr_table != 0 && pr_open_c >= 0) pr_attach(pr_table, pr_open_c, pr_open_v);
+    pr_open_c = -1;
+    0
+}
+
+// The reader's screen coming into sight (a launch's, a reload's, the panel
+// opened again): made again where it was to open, or is.
+pr_appeared() {
+    if (chapters_n == 0) return;
+    pr_count_changed()
+}
+
+// The page's chapters counted (`reader N`, a launch's or a version's):
+// the panel's reader made again, at its place (or opened, if it waited).
+pr_count_changed() {
+    if (pr_table == 0) return;
+    if (pr_open_c >= 0) {
+        c: int = pr_open_c;
+        pr_open_c = -1;
+        pr_attach(pr_table, c, pr_open_v);
+        return
+    }
+    msg(pr_table, sel("reloadData"));
+    if (pr_told_c >= 0) pr_jump(pr_told_c, if (pr_told_v < 0) 0 else pr_told_v)
+}
+
+// A finger's drag begun on it: a hand moves it now (linked, it leads the
+// page, the page's glide stopped).
+pr_drag_began() {
+    link_leader_panel = true;
+    if (table != 0 && (msg(table, sel("isDecelerating")) & 255) != 0) msg_ff1(table,
+        sel("setContentOffset:animated:"), 0.0f64, offset_y(table), 0);
+    to_core_str("besidemoving");
+    to_core_end();
+    uk_effects()
+}

@@ -341,6 +341,7 @@ A screen, from core:
 | `scopes` VALUE TITLES LABELS | the field's scopes, the one chosen |
 | `plain` | a plain list, not grouped |
 | `page`, `grid` | its rows a page's paragraphs; its rows square buttons, their VALUE their words |
+| `reader C V LINKED` | the screen is a reader of its own (the version read beside the page, for a skin that said `panelreader`): drawn as the page's reader is, at chapter C, verse V, from core's `besidechapter` lines, in place of rows; LINKED 1 while it is linked with the page |
 | `empty` SYMBOL TITLE LINE | what it shows with no rows |
 | `button` TITLE, then `command` ACTION ARG TITLE FLAGS | its button at the top and its menu (`x`: destructive) |
 | `section` HEADER FOOTER BUTTON ACTION SUFFIX CREDIT COLUMNS | a section: a button in its header doing ACTION; faint words after its header; CREDIT the credit under it (0 none; each said at `start` by a `credit` line); COLUMNS a grid's columns' names |
@@ -401,6 +402,7 @@ Other lines from core:
 | `reader N` | the reader has N chapters |
 | `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA`, `verse V A B`, `link A B KIND ARG` (a footnote's mark, KIND 0, ARG its place; a reference, 1, ARG the reference; a word of the original's, 2), `gloss A B` (a word of the original glossed under its paragraph) and `mark V HEX BOOKMARK NOTE` lines (a verse's highlight's color, `-` none; bookmarked; noted; verse 0 the chapter's own note, marked after its label), then `end`. A `layout ORIG RTL VERSELINES OPENER LABEL` line after the first says whether the chapter is the original's, set right to left, a verse a line, and where its opener and its label end (UTF-16; 0 none); a `name` TITLE line names it as the bar does. A skin ignores the lines it does not know |
 | `jump C V`, `goto C V`, `relayout` | the reader moved; the screens away, then moved; every chapter to be asked for again |
+| `besidechapter C` TEXT, `besidejump C V`, `besiderelayout` | the panel's reader's (a `reader` screen's): a chapter of its version, as `chapter`'s lines; moved to C:V (linked, following the page); every chapter to be asked for again |
 | `highlights SWATCH WASH STRENGTH...`, `themes DAY NIGHT PAGE INK...`, then `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT THEME CHOSEN HAIRLINE SELECTION SHEET CELL` | all a skin needs of look.l8. `highlights`: each of the five by the color its `mark` lines name it with, and the wash a highlighted verse shows now (STRENGTH, like GLOSS, HAIRLINE and SELECTION, in thousandths). `themes`: the themes Auto follows by day and at night, then each theme's page and ink, in the Theme setting's order (for its swatches). `look`: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument); THEME the theme it is and CHOSEN the one chosen (0 Auto), of `themes`; HAIRLINE a rule's strength (RULE's color), SELECTION a selection's (ACCENT's); SHEET and CELL a sheet's color and its rows' (`-`: the platform's grouped colors) |
 | `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation, shown faint after the title (which opens Go To); the version is chosen in Go To or the Library, not from the bar |
 | `url` ADDRESS | a page outside the app to open |
@@ -466,6 +468,8 @@ From the skin:
 | `windowrows 0/1` | choose full lazy sections (the default) or their counts with rows fetched on demand; available to every skin |
 | `editmenu COMMAND` | perform one of core's text-selection menu commands on the current selection |
 | `want C` | chapter C's text, to show |
+| `panelreader 1`, `panelreader 2` | before `start`: the skin draws a reader in the panel, so a version beside the page is a `reader` screen, else a page of paragraphs; with 2, the skin also keeps the two together as a finger moves either, linked (core then moves the panel's reader only as the page jumps) |
+| `besidewant C`, `besideplace C V FRAC`, `besidemoving` | the panel's reader's: chapter C wanted; its top; moved by a hand (linked with the page, it leads: the page follows its places until the page is moved by a hand, `moving`, or jumps) |
 | `place C V FRAC` | the reader's top: chapter, verse, thousandths of an em into it |
 | `dark 0/1` | the system's appearance changed |
 | `esvstatus STATUS ESV`, `esvact WHAT C` | whether the site's Worker gives the ESV (STATUS its answer's, 0 none); a tap on chapter C's ESV line (`link` KIND 3: ARG `ESV_TRY`, `ESV_BSB`, `ESV_SITE`). Core asks for the ESV's chapters near the place as a wire skin reads it (its host's `fetch`), draws one not here as its line, and ends each with "(ESV) · esv.org" |

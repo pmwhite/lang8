@@ -272,6 +272,15 @@ sk_has_downloads: bool = false;
 // HostIO.fetch and read_kept): the bookshelf is offered.
 sk_has_shelf: bool = false;
 
+// Whether the skin draws a reader in the panel (`panelreader 1`): a
+// version beside the page is read there as the page is (core/beside.l8),
+// else as a page of paragraphs. With `panelreader 2`, the skin also keeps
+// the two linked as either is scrolled, smoothly: core moves its reader
+// only as the page jumps.
+sk_has_panel_reader: bool = false;
+
+sk_panel_links_live: bool = false;
+
 // Whether the skin draws cards (CUSTOM_CARD) and shares their images
 // (share_image): Share opens core's composer where verses fit a card.
 sk_has_card: bool = false;
@@ -960,20 +969,41 @@ sk_ranges: ChapterRanges = chapter_ranges();
 // Chapter c of the version read laid out as the reader shows it, into
 // sk_layout and measured into sk_ranges.
 sk_lay(c: int) {
+    sk_lay_version(text_cur, c, ChapterHead.Whole)
+}
+
+// How a chapter is headed: as the page heads it (a rule, the book's name
+// or label, the number), or by its number alone (the panel's reader,
+// whose title names the chapter, in a narrower column).
+type ChapterHead =
+    | Whole
+    | NumberOnly
+
+// Chapter c of version t laid out as the reader lays it out, headed as
+// head says (into sk_layout and sk_ranges).
+sk_lay_version(t: int, c: int, head: ChapterHead) {
     sk_apply_prefs();
     ctx: *ChapterLayout = &sk_layout;
+    // (A passage's start has no rule, label or book's name, its number
+    // kept: from its first verse, to its end.)
+    ctx.lay_passage = (match head {
+        Whole -> false;
+        NumberOnly -> true
+    });
+    ctx.lay_v1 = 0;
+    ctx.lay_v2 = 0;
     ctx.lay_verse_numbers = lay_verse_numbers;
     ctx.lay_headings = lay_headings;
     ctx.lay_notes = lay_notes;
     ctx.lay_verse_lines = lay_verse_lines;
     ctx.lay_accents = lay_accents;
     // (The original's glosses made first: its apparatus.)
-    if (text_cur == TEXT_ORIG && og_n > 0) {
+    if (t == TEXT_ORIG && og_n > 0) {
         borrow language_data {
             orig_prepare(language_data, c)
         }
     }
-    borrow texts[text_cur] as source {
+    borrow texts[t] as source {
         layout_chapter_from(source, ctx, c)
     }
     measure_chapter(ctx, &sk_ranges, c)
@@ -1018,16 +1048,23 @@ sk_write_chapter(c: int) {
         sk_write_esv_wait(c);
         return
     }
-    sk_lay(c);
+    sk_write_chapter_as(text_cur, c, "chapter ")
+}
+
+// Chapter c of version t as a reader's lines, the first begun with word
+// (`chapter `, the page's, headed whole; `besidechapter `, the panel's
+// reader's, headed by its number alone).
+sk_write_chapter_as(t: int, c: int, word: str) {
+    sk_lay_version(t, c, if (word == "chapter ") ChapterHead.Whole else ChapterHead.NumberOnly);
     ctx: *ChapterLayout = &sk_layout;
     u: []int = sk_ranges.u16_at;
-    ui_str("chapter ");
+    ui_str(word);
     ui_int(c);
     ui_byte(9);
     ui_field_bytes(ctx.out, 0, ctx.out_n);
     // (The ESV's notice after its words, esv.org its link: Crossway's
     // terms.)
-    esv_tail: bool = text_cur == TEXT_ESV;
+    esv_tail: bool = t == TEXT_ESV;
     if (esv_tail) {
         ew_tail();
         ui_field_bytes(fbuf, 0, fbuf_n)
@@ -1177,7 +1214,8 @@ sk_title_menus() {
 sk_relayout() {
     sk_write_look();
     ui_effect("relayout", -1, -1);
-    ui_effect("jump", sk_c, sk_v)
+    ui_effect("jump", sk_c, sk_v);
+    sk_beside_relayout()
 }
 
 // ---- screens ----
@@ -4604,6 +4642,10 @@ sk_act(
             sk_beside_bible_step(at, arg);
             return
         }
+        if (action == ACT_BESIDE_LINK) {
+            sk_beside_link_toggle(at);
+            return
+        }
         if (action == ACT_OPEN) {
             if (arg == OPEN_HISTORY) sk_open(SCR_HISTORY, 0, true) else if (arg == OPEN_GLOSSES) sk_open(SCR_GLOSSES,
                 0, true) else if (arg == OPEN_VOICES) sk_open(SCR_VOICES, 0, true) else if (arg == OPEN_ACKNOWLEDGEMENTS) sk_open(SCR_ACKNOWLEDGEMENTS,
@@ -4684,7 +4726,8 @@ sk_goto(c: int, v: int) {
     ui_effect("goto", c, v);
     // (What the panel reads beside the page follows it there at once: a
     // skin tells where the reader rests only once it is moved by hand.)
-    sk_beside_rest(c, v);
+    sk_beside_page_hand();
+    sk_beside_jumped(c, v);
     sk_write_title();
     sk_keep_place();
     sk_save()
@@ -4972,7 +5015,18 @@ sk_take(line: []i8, b: int, e: int) {
         // turns at its midnight.)
         if (sk_num_end < e) sk_tz = sk_num(line, sk_num_end, e);
         sk_start()
-    } else if (sk_word_is(line, b, e, "want")) {
+    } else if (sk_word_is(line, b, e, "panelreader")) {
+        pr: int = sk_num(line, b + 12, e);
+        sk_has_panel_reader = pr != 0;
+        sk_panel_links_live = pr == 2
+    } else if (sk_word_is(line, b, e, "besidewant")) sk_beside_want(sk_num(line, b + 11,
+        e)) else if (sk_word_is(line, b, e, "besideplace")) {
+        // (besideplace C V FRAC: the panel's reader's top.)
+        pc: int = sk_num(line, b + 12, e);
+        pv: int = sk_num(line, sk_num_end, e);
+        sk_beside_placed(pc, pv)
+    } else if (sk_word_is(line, b, e, "besidemoving")) sk_beside_hand() else if (sk_word_is(line,
+        b, e, "want")) {
         wc: int = sk_num(line, b + 4, e);
         // (In the ESV, one not here asked for, near the place:
         // core/esv_client.l8.)
@@ -5121,6 +5175,7 @@ sk_take(line: []i8, b: int, e: int) {
         sk_wake();
         sk_awake()
     } else if (sk_word_is(line, b, e, "moving")) {
+        sk_beside_page_hand();
         rd_scroll(sk_num(line, b + 6, e) as f64 / 1000.0f64);
         lw_dragged(true, 0.0f64);
         sk_wake()

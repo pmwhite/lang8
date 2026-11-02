@@ -551,6 +551,9 @@ function screenLine(w) {
     case "page":
       s.page = true;
       break;
+    case "reader":
+      s.reader = { c: w.num(1), v: w.num(2) };
+      break;
     case "grid":
       s.grid = true;
       break;
@@ -602,7 +605,7 @@ function line(w) {
   }
   if (chapter) {
     if (word === "end") {
-      reader.chapter(chapter.c, chapter.text, chapter.lines);
+      chapter.into?.chapter(chapter.c, chapter.text, chapter.lines);
       chapter = null;
     } else chapter.lines.push(w);
     return;
@@ -615,7 +618,16 @@ function line(w) {
       building = newScreen(w);
       break;
     case "chapter":
-      chapter = { c: w.num(1), text: w.field(1), lines: [] };
+      chapter = { c: w.num(1), text: w.field(1), lines: [], into: reader };
+      break;
+    case "besidechapter":
+      chapter = { c: w.num(1), text: w.field(1), lines: [], into: besideReader };
+      break;
+    case "besidejump":
+      besideReader?.jump(w.num(1), w.num(2), 0);
+      break;
+    case "besiderelayout":
+      besideReader?.relayout();
       break;
     case "present":
       panel.present(w.num(1));
@@ -920,8 +932,15 @@ $(".bar .aa").addEventListener("click", () => send("tap settings"));
 const barHeight = () => $(".bar").getBoundingClientRect().bottom;
 const emPx = () => parseFloat(getComputedStyle($("#reader")).fontSize) || 19;
 
-const reader = {
-  main: $("#reader"),
+// A reader: its chapters in main, scrolled in view (the window, for the
+// page; the panel's list, for the version read beside it), its lines to
+// core begun with words (the page's `want`, `place`, `rest`, `moving`; the
+// panel's `besidewant`, `besideplace`, none, `besidemoving`).
+function makeReader(main, view, words) {
+  return {
+  main,
+  view,
+  words,
   count: 0,
   lo: 0,
   hi: -1,
@@ -951,7 +970,7 @@ const reader = {
   want(c) {
     if (c < 0 || c >= this.count || this.asked.has(c)) return;
     this.asked.add(c);
-    send(`want ${c}`);
+    send(`${this.words.want} ${c}`);
   },
 
   // The reader to chapter c's verse v (0: its top), f thousandths of an em
@@ -982,7 +1001,7 @@ const reader = {
       const t = s.querySelector(`[data-v="${j.v}"]`);
       if (t) y = t.getBoundingClientRect().top - (j.f * emPx()) / 1000;
     }
-    this.scrollTo(window.scrollY + y - barHeight());
+    this.scrollTo(this.view.top() + y - this.view.inset());
     this.extend();
     // (Told now: a jump to where the page already is scrolls nothing.)
     requestAnimationFrame(() => {
@@ -994,21 +1013,22 @@ const reader = {
 
   scrollTo(y) {
     this.self++;
-    window.scrollTo(0, Math.max(0, y));
+    this.view.scrollTo(Math.max(0, y));
     requestAnimationFrame(() => this.self--);
   },
 
   // More chapters put on the page while either end is near; one above the
   // place put in without moving what is read.
   extend() {
-    const top = window.scrollY;
-    const height = document.documentElement.scrollHeight;
-    if (this.hi < this.count - 1 && top + innerHeight * 2.5 > height) {
+    const top = this.view.top();
+    const height = this.view.scrollHeight();
+    const seen = this.view.height();
+    if (this.hi < this.count - 1 && top + seen * 2.5 > height) {
       this.hi++;
       this.main.appendChild(this.section(this.hi));
       this.want(this.hi);
     }
-    if (this.lo > 0 && top < innerHeight * 1.5) {
+    if (this.lo > 0 && top < seen * 1.5) {
       this.lo--;
       this.keepPlace(() => this.main.insertBefore(this.section(this.lo), this.main.firstChild));
       this.want(this.lo);
@@ -1022,13 +1042,13 @@ const reader = {
     change();
     if (anchor) {
       const d = anchor.getBoundingClientRect().top - before;
-      if (Math.abs(d) > 0.5) this.scrollTo(window.scrollY + d);
+      if (Math.abs(d) > 0.5) this.scrollTo(this.view.top() + d);
     }
   },
 
   // The first chapter on the screen (below the bar).
   anchor() {
-    const y = barHeight() + 2;
+    const y = this.view.inset() + 2;
     for (const s of this.main.children) if (s.getBoundingClientRect().bottom > y) return s;
     return null;
   },
@@ -1052,7 +1072,7 @@ const reader = {
       else if (k === "mark") marks.set(w.num(1), { hex: w.word(2), bm: w.num(3) === 1, note: w.num(4) === 1 });
     }
     const body = layChapter(text, spans, verses, links, marks);
-    const above = s.getBoundingClientRect().bottom <= barHeight() + 1 && this.loaded.size > 0;
+    const above = s.getBoundingClientRect().bottom <= this.view.inset() + 1 && this.loaded.size > 0;
     const put = () => {
       s.replaceChildren(body);
       // (A chapter still to come, its line alone, kept a page tall.)
@@ -1083,7 +1103,7 @@ const reader = {
   // The place at the top: chapter, verse and how far into it, told as it
   // changes.
   place() {
-    const y = barHeight() + 1;
+    const y = this.view.inset() + 1;
     const s = this.anchor();
     if (!s || !this.loaded.has(+s.dataset.c)) return null;
     const c = +s.dataset.c;
@@ -1116,8 +1136,8 @@ const reader = {
     if (p.c !== s.c || p.v !== s.v || Math.abs(p.f - s.f) > 400) {
       const chapterChanged = p.c !== s.c;
       this.said = p;
-      send(`place ${p.c} ${p.v} ${p.f}`);
-      if (chapterChanged) address(p.c);
+      send(`${this.words.place} ${p.c} ${p.v} ${p.f}`);
+      if (chapterChanged && this.words.address) address(p.c);
     }
   },
 
@@ -1127,8 +1147,8 @@ const reader = {
     this.moving = false;
     this.tell();
     const p = this.said;
-    if (p.c < 0) return;
-    const bottom = innerHeight;
+    if (p.c < 0 || !this.words.rest) return;
+    const bottom = this.view.bottom();
     let end = 0;
     let endsHi = p.c - 1;
     for (const s of this.main.children) {
@@ -1147,7 +1167,7 @@ const reader = {
       this.userMoving = false;
       if (!this.moving) {
         this.moving = true;
-        send(`moving ${clock()}`);
+        send(this.words.rest ? `${this.words.moving} ${clock()}` : this.words.moving);
       }
     }
     this.extend();
@@ -1165,7 +1185,7 @@ const reader = {
   // A page down (1) or up (-1), less three lines.
   page(d) {
     const line = emPx() * look.spacing;
-    window.scrollBy({ top: d * Math.max(line, innerHeight - barHeight() - 3 * line), behavior: "smooth" });
+    this.view.scrollBy(d * Math.max(line, this.view.height() - this.view.inset() - 3 * line));
   },
 
   // Listen's verse followed: moved to it if it isn't on the screen.
@@ -1174,8 +1194,8 @@ const reader = {
     const t = s && this.loaded.has(c) ? s.querySelector(`[data-v="${v}"]`) : null;
     if (t) {
       const r = t.getBoundingClientRect();
-      if (r.top >= barHeight() && r.top < innerHeight * 0.7) return;
-      this.scrollTo(window.scrollY + r.top - barHeight() - innerHeight / 4);
+      if (r.top >= this.view.inset() && r.top < this.view.bottom() * 0.7) return;
+      this.scrollTo(this.view.top() + r.top - this.view.inset() - this.view.height() / 4);
       return;
     }
     this.jump(c, v, 0);
@@ -1237,10 +1257,42 @@ const reader = {
         return;
       }
     }
+    if (!this.words.tap) return;
     const v = e.target.closest("[data-v]");
     send(v && +v.dataset.v > 0 ? `tapverse ${c} ${v.dataset.v}` : "tapnone");
   },
+  };
+}
+
+// The page's view: the window, under the bar.
+const windowView = {
+  top: () => window.scrollY,
+  height: () => innerHeight,
+  scrollHeight: () => document.documentElement.scrollHeight,
+  inset: () => barHeight(),
+  bottom: () => innerHeight,
+  scrollTo: (y) => window.scrollTo(0, y),
+  scrollBy: (dy) => window.scrollBy({ top: dy, behavior: "smooth" }),
 };
+
+// A scrolling element's view (the panel's list).
+function elementView(box) {
+  return {
+    top: () => box.scrollTop,
+    height: () => box.clientHeight,
+    scrollHeight: () => box.scrollHeight,
+    inset: () => box.getBoundingClientRect().top,
+    bottom: () => box.getBoundingClientRect().bottom,
+    scrollTo: (y) => (box.scrollTop = y),
+    scrollBy: (dy) => box.scrollBy({ top: dy, behavior: "smooth" }),
+  };
+}
+
+const reader = makeReader($("#reader"), windowView, { want: "want", place: "place", rest: "rest", moving: "moving", tap: true, address: true });
+
+// The version read in the panel beside the page, as the page is (core's
+// screen with a `reader` line): its reader while that screen shows.
+let besideReader = null;
 
 // A chapter laid out as the page's paragraphs: each line of its text a
 // paragraph (its kind from its runs), each run a span in its style, with
@@ -1375,6 +1427,8 @@ const panel = {
   typed: 0,
   pending: null,
   shown: -1,
+  // The screen whose reader the list holds (-1: none).
+  readerFor: -1,
   depth: 0,
   ignorePops: 0,
 
@@ -1385,6 +1439,11 @@ const panel = {
     p.innerHTML = `<div class="pbar"><button type="button" class="pback"></button><h2 class="ptitle"></h2><button type="button" class="psort" hidden></button><button type="button" class="pbutton" hidden></button><button type="button" class="pfull" hidden aria-label="Full Screen"></button></div><div class="pfield" hidden><input type="search" enterkeyhint="search" autocomplete="off" spellcheck="false"></div><div class="pscopes" hidden></div><div class="psegments" hidden></div><div class="pfilter" hidden></div><div class="plist"></div><div class="ptools" hidden></div>`;
     document.body.appendChild(p);
     this.box = p;
+    // (The panel's reader: told of its scrolling, and of a hand's.)
+    const list = $(".plist", p);
+    list.addEventListener("scroll", () => besideReader?.scrolled(), { passive: true });
+    for (const t of ["wheel", "touchmove", "pointerdown"]) list.addEventListener(t, () => besideReader && (besideReader.userMoving = true), { passive: true });
+    list.addEventListener("click", (e) => besideReader?.tapped(e));
     $(".pback", p).addEventListener("click", () => {
       const s = this.top();
       if (s && s.left && s.leftAction) send(`act ${s.id} ${s.leftAction} 0 0`);
@@ -1716,7 +1775,21 @@ const panel = {
     this.showSegments(s);
     this.showFilter(s);
     this.showTools(s);
-    list.replaceChildren(this.rows(s));
+    // (A version read as the page is: its reader kept while its screen
+    // shows, made again only as another screen comes.)
+    const reading = !!s.reader;
+    if (reading && this.readerFor !== s.id) {
+      const box = el("div", "preader");
+      list.replaceChildren(box);
+      besideReader = makeReader(box, elementView(list), { want: "besidewant", place: "besideplace", rest: null, moving: "besidemoving", tap: false, address: false });
+      besideReader.setCount(reader.count);
+      this.readerFor = s.id;
+      besideReader.jump(s.reader.c, s.reader.v, 0);
+    } else if (!reading) {
+      besideReader = null;
+      this.readerFor = -1;
+      list.replaceChildren(this.rows(s));
+    }
     // (A screen that takes letters: a field of its own, so a phone's
     // keyboard comes up; what is typed in it goes to core a letter at a
     // time.)
@@ -1749,7 +1822,9 @@ const panel = {
       f.focus();
       f.setSelectionRange(focused[0], focused[1]);
     }
-    if (fresh) {
+    if (reading) {
+      // (The reader keeps its own place.)
+    } else if (fresh) {
       const fr = list.querySelector(".focus");
       if (fr) {
         const at = fr.getBoundingClientRect().top - list.getBoundingClientRect().top + list.scrollTop;
@@ -2426,7 +2501,7 @@ function marked(node, r) {
 
 // Core's icons (Apple's symbols' names) as the page's own (icons.svg).
 const SYMBOLS = {
-  "play.fill": "play", repeat: "repeat", "speaker.wave.2": "volume", keyboard: "keyboard",
+  link: "link", "play.fill": "play", repeat: "repeat", "speaker.wave.2": "volume", keyboard: "keyboard",
   "keyboard.chevron.compact.down": "keyboard-off", plus: "plus", "square.and.arrow.up": "share",
   "square.and.pencil": "square-pen", "chevron.up": "chevron-up", "chevron.down": "chevron-down",
   "pause.fill": "pause", "stop.fill": "square", book: "book", "book.closed": "book",
@@ -2828,6 +2903,9 @@ function begin() {
   // (The panel beside the page always fits: at its right on a wide
   // window, under it on a narrow one.)
   send("panelfits 1");
+  // (A reader drawn in the panel: a version beside the page is read there
+  // as the page is.)
+  send("panelreader 1");
   send(`start ${innerWidth} ${innerHeight} ${Math.round(devicePixelRatio * 100)} ${matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0} ${-new Date().getTimezoneOffset() * 60}`);
   tellNetwork();
   addEventListener("online", tellNetwork);

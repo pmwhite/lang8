@@ -22,9 +22,13 @@ study records, original languages, audio timings and the ESV cache.
 `core/beside.l8` keeps the panel beside the page: what is read with the
 Bible (the Bookshelf, the document read beside the page, Study) as a stack
 of screens of its own, kept while sheets come and go and opened again as
-it was left. Its document is a version (laid out as the reader lays it
-out, a row each paragraph) or a Bookshelf module; a version or a
-commentary there follows the page.
+it was left. Its document is a version or a Bookshelf module; a version or a
+commentary there follows the page. Where the skin draws a reader in the
+panel, a version is read there as the page is, every chapter in turn.
+Linked with the page (a button at its foot), the two move together,
+whichever a hand moves leading; unlinked, neither moves the other, and
+linked again it comes to the page's place (elsewhere, a version is a page
+of paragraphs, a chapter at a time).
 `core/shelf.l8` keeps the Bookshelf: SWORD modules downloaded on request
 rather than bundled. A Bible among them becomes a version in a text slot of
 its own, its records made from the module when it is opened; commentaries,

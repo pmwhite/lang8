@@ -166,6 +166,7 @@ sk_beside_read_version(t: int) {
         return
     }
     sk_beside_keep(PanelDocument.Version { text: t });
+    bb_reader_begin();
     sk_beside_show_kept()
 }
 
@@ -244,6 +245,7 @@ sk_beside_make() {
     sk_open_panel(SCR_SHELF, 0);
     match sk_beside_kept() {
         Version v -> {
+            bb_reader_begin();
             if (sk_beside_can_read(v.text)) sk_beside_push(SCR_BESIDE_BIBLE, v.text * SHELF_PLACE + (if (sk_c >= 0 && sk_c < chapters) sk_c else 0)) else sk_beside_keep(PanelDocument.NoDocument)
         }
         Module m -> {
@@ -526,6 +528,13 @@ bb_shown_c: int = -1;
 sk_build_beside_bible(id: int, arg: int) {
     t: int = arg / SHELF_PLACE;
     c: int = arg % SHELF_PLACE;
+    // (In the panel of a skin that draws a reader there: read as the page
+    // is.)
+    at_built: int = sk_find(id);
+    if (sk_has_panel_reader && at_built >= 0 && sk_groups[at_built] == 1) {
+        bb_build_reader(id, arg);
+        return
+    }
     fbuf_n = 0;
     fput_title(c);
     ui_begin(id, SCR_BESIDE_BIBLE, arg, "");
@@ -717,6 +726,10 @@ bb_heading_style(style: int): bool {
 // The version at screen at shown at chapter c, the paragraph of verse v
 // in sight (made again only if that moves what it shows).
 sk_beside_version_to(at: int, c: int, v: int) {
+    if (sk_has_panel_reader) {
+        bb_reader_follow(at, c, v);
+        return
+    }
     t: int = sk_args[at] / SHELF_PLACE;
     was_c: int = sk_args[at] % SHELF_PLACE;
     if (was_c == c && bb_shown_t == t && bb_shown_c == c && v == sk_beside_shown_v) return;
@@ -750,4 +763,187 @@ sk_beside_bible_step(at: int, direction: int) {
     sk_build(at);
     ui_effect("update", sk_ids[at], -1);
     ui_effect("focus", sk_ids[at], -1)
+}
+
+// ---- the panel's reader ----
+// A skin that draws a reader in the panel (`panelreader 1`) reads a
+// version there as the page is read: every chapter in turn, as it is
+// scrolled to (`besidewant C`: core's `besidechapter` lines, as `chapter`'s
+// for the page), its top told back (`besideplace C V FRAC`). Linked with
+// the page (besideLinked, the default), the two move together: the page
+// resting or jumping moves the reader there (`besidejump C V`), and the
+// reader moved by a hand (`besidemoving`, then its places) moves the page
+// (until the page is moved by a hand, or jumps). Unlinked, neither moves
+// the other; linked again, the reader comes to the page's place. Its foot's
+// button links and unlinks them.
+
+// The panel's reader's place (its chapter, -1 none yet, and verse), and
+// whether a hand has moved it since the page was last moved (it leads).
+bb_reader_c: int = -1;
+
+bb_reader_v: int = 0;
+
+bb_hand: bool = false;
+
+// Link or Unlink.
+ACT_BESIDE_LINK: int = 332;
+
+// Whether the panel's reader is linked with the page.
+sk_beside_linked(): bool {
+    pref_on("besideLinked", true)
+}
+
+// The reader's screen: its title the chapter at its top, its subtitle the
+// version; at its foot, the button that links or unlinks it (filled while
+// linked). The version not read yet: a row that says it is opening (made
+// again when it has come).
+bb_build_reader(id: int, arg: int) {
+    t: int = arg / SHELF_PLACE;
+    if (bb_reader_c < 0 || bb_reader_c >= chapters) {
+        bb_reader_c = (if (sk_c >= 0 && sk_c < chapters) sk_c else 0);
+        bb_reader_v = sk_v
+    }
+    fbuf_n = 0;
+    fput_title(bb_reader_c);
+    ui_begin(id, SCR_BESIDE_BIBLE, arg, "");
+    ui_set_screen_title_fbuf();
+    fbuf_n = 0;
+    fput_text_name(t);
+    ui_set_subtitle_fbuf();
+    // (A plain page, as the page is: no list's insets at its sides.)
+    ui_plain = true;
+    ui_page = true;
+    if (!sk_beside_can_read(t)) {
+        ui_set_empty("books.vertical", "Not Here", "");
+        return
+    }
+    if (t != text_cur && !text_ready(t) && sk_num_of(SK_NUM_TEXT, t) != 1) {
+        ui_section("", "");
+        ui_row(UI_ITEM, 0, 0);
+        fbuf_n = 0;
+        fput_str("Opening ");
+        fput_text_abbr(t);
+        fput_str("\â\€\¦");
+        ui_set_title_fbuf();
+        ui_set_busy();
+        ui_set_faint();
+        return
+    }
+    linked: bool = sk_beside_linked();
+    ui_set_reader(bb_reader_c, bb_reader_v, linked);
+    ui_tool("", "link", ACT_BESIDE_LINK, 0, if (linked) UI_TOOL_PROMINENT else UI_TOOL_PLAIN,
+        2);
+    fbuf_n = 0;
+    fput_str(if (linked) "Linked with the Page" else "Not Linked");
+    ui_set_tool_label_fbuf()
+}
+
+// The panel's reader's screen (its index; -1: none).
+bb_reader_at(): int {
+    top: int = sk_beside_top();
+    if (!sk_has_panel_reader || top < 0 || sk_kinds[top] != SCR_BESIDE_BIBLE) return -1;
+    top
+}
+
+// `besidewant C`: chapter c of the panel's version, as its reader's lines.
+sk_beside_want(c: int) {
+    at: int = bb_reader_at();
+    if (at < 0 || c < 0 || c >= chapters) return;
+    t: int = sk_args[at] / SHELF_PLACE;
+    if (t != text_cur && !text_ready(t)) return;
+    sk_write_chapter_as(t, c, "besidechapter ")
+}
+
+// `besideplace C V`: the panel's reader's top. Its title made again as its
+// chapter changes; moved by a hand while linked (or filling the screen,
+// leading), the page follows it.
+sk_beside_placed(c: int, v: int) {
+    at: int = bb_reader_at();
+    if (at < 0 || c < 0 || c >= chapters) return;
+    was: int = bb_reader_c;
+    bb_reader_c = c;
+    bb_reader_v = v;
+    if (c != was) bb_remake(at);
+    // (A skin that links them as they scroll has moved the page already.)
+    leads: bool = sk_beside_linked() && !sk_panel_links_live && (bb_hand || sk_beside_full());
+    if (leads && (c != sk_c || v != sk_v)) ui_effect("jump", c, v)
+}
+
+// `besidemoving`: the panel's reader moved by a hand: it leads, until the
+// page is moved by a hand or jumps.
+sk_beside_hand() {
+    if (bb_reader_at() >= 0) bb_hand = true
+}
+
+// The page moved by a hand (`moving`), or jumped: it leads again.
+sk_beside_page_hand() {
+    bb_hand = false
+}
+
+// The page at rest at chapter c, verse v: the panel's reader moved there,
+// linked (not while it leads: the page is following it; nor where the
+// skin keeps them linked as they scroll).
+bb_reader_follow(at: int, c: int, v: int) {
+    if (sk_panel_links_live) return;
+    bb_reader_jump_to(at, c, v)
+}
+
+// The page jumped to chapter c, verse v (or at rest there): the panel's
+// reader moved there, linked (not while it leads).
+bb_reader_jump_to(at: int, c: int, v: int) {
+    if (!sk_beside_linked() || bb_hand) return;
+    was: int = bb_reader_c;
+    bb_reader_c = c;
+    bb_reader_v = v;
+    if (c != was) bb_remake(at);
+    ui_effect("besidejump", c, v)
+}
+
+// Link or Unlink: linked again, the reader comes to the page's place.
+sk_beside_link_toggle(at: int) {
+    linked: bool = !sk_beside_linked();
+    set_pref_on("besideLinked", linked);
+    sk_save();
+    bb_hand = false;
+    if (linked) {
+        bb_reader_c = sk_c;
+        bb_reader_v = sk_v
+    }
+    bb_remake(at);
+    if (linked) ui_effect("besidejump", sk_c, sk_v)
+}
+
+// The panel's reader's screen made again (its title, its button).
+bb_remake(at: int) {
+    sk_build(at);
+    ui_effect("update", sk_ids[at], -1)
+}
+
+// Every chapter laid out again (the look or the settings changed): the
+// panel's reader's too, at its place.
+sk_beside_relayout() {
+    if (bb_reader_at() < 0) return;
+    ui_effect("besiderelayout", -1, -1);
+    ui_effect("besidejump", bb_reader_c, bb_reader_v)
+}
+
+// The page jumped to chapter c, verse v (Go To, a link, a ribbon): what
+// the panel reads follows it there, a version's reader as a jump.
+sk_beside_jumped(c: int, v: int) {
+    at: int = bb_reader_at();
+    if (at < 0) {
+        sk_beside_rest(c, v);
+        return
+    }
+    if (sk_beside_held_c >= 0 && c == sk_beside_held_c) return;
+    sk_beside_held_c = -1;
+    bb_reader_jump_to(at, c, v)
+}
+
+// A version opened beside the page anew: at the page's place, the page
+// leading.
+bb_reader_begin() {
+    bb_hand = false;
+    bb_reader_c = (if (sk_c >= 0 && sk_c < chapters) sk_c else 0);
+    bb_reader_v = sk_v
 }
