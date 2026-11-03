@@ -6,7 +6,8 @@ use_tag std, ios, bible, bible_wire;
 // the page is read, every chapter in turn, in the table of core's screen
 // that says `reader C V`. Its chapters are core's `besidechapter` blocks,
 // kept with the page's (ios/reader.l8, as their chapter plus PR_KEY) and
-// set as the page sets its own; its rows are a chapter each. Core moves it
+// set as the page sets its own; its sections are a chapter each, and their
+// rows the chapter's pieces (below). Core moves it
 // (`besidejump C V`) while it keeps in step with the page; its top is told
 // back as it changes (`besideplace C V FRAC`), and a finger's drag says it
 // is going its own way (`besidemoving`).
@@ -30,10 +31,11 @@ pr_attach(t: int, c: int, v: int) {
     pr_table = t;
     pr_told_c = -1;
     pr_told_v = -1;
+    pr_rows_reset();
     msg1(t, sel("setSeparatorStyle:"), 0);
     msg1(t, sel("setAllowsSelection:"), 0);
     msg_set_f(t, sel("setRowHeight:"), objc_const_f("UITableViewAutomaticDimension"));
-    msg_set_f(t, sel("setEstimatedRowHeight:"), em * 140.0f64);
+    msg_set_f(t, sel("setEstimatedRowHeight:"), em * 40.0f64);
     if (responds(t, "setSectionHeaderTopPadding:")) msg_set_f(t, sel("setSectionHeaderTopPadding:"),
         0.0f64);
     msg_set_f(t, sel("setSectionHeaderHeight:"), 0.0f64);
@@ -61,11 +63,12 @@ pr_margin(): f64 {
     m
 }
 
-// Chapter c's row: its text view (not scrolling by itself), set as the
-// page sets a chapter. Its words can be selected; taps on them are the
-// page's alone for now.
+// Piece p of chapter c's row: its text view (not scrolling by itself), set
+// as the page sets a chapter. Its words can be selected; taps on them are
+// the page's alone for now.
 pr_cell(t: int, path: int): int {
-    c: int = msg(path, sel("row"));
+    c: int = msg(path, sel("section"));
+    p: int = msg(path, sel("row"));
     cell: int = msg1(t, sel("dequeueReusableCellWithIdentifier:"), nsstring("besidechapter"));
     if (cell == 0) {
         cell = msg(msg2(msg(cls("UITableViewCell"), sel("alloc")), sel("initWithStyle:reuseIdentifier:"),
@@ -90,30 +93,266 @@ pr_cell(t: int, path: int): int {
     tv: int = text_of_cell(cell);
     msg1(tv, sel("setTintColor:"), c_accent);
     m: f64 = pr_margin();
-    top: f64 = if (c == 0) top_gap() else em * 2.4f64;
-    msg_rect(tv, sel("setTextContainerInset:"), top, m, if (c + 1 == chapters_n) 120.0f64 else 0.0f64,
+    // (A chapter not kept, while either moves: empty until they rest.)
+    owed: bool = !pr_holds(c) && pr_moving();
+    if (owed) pr_owed = true;
+    // (A chapter's first piece below the space between chapters; another,
+    // below the space its paragraphs had between them.)
+    text: int = if (owed) msg(make("NSMutableAttributedString"), sel("autorelease")) else pr_piece_text(c,
+        p);
+    top: f64 = if (p > 0) pr_piece_gap else if (c == 0) top_gap() else em * 2.4f64;
+    last: bool = c + 1 == chapters_n && p + 1 >= pr_rows(c);
+    msg_rect(tv, sel("setTextContainerInset:"), top, m, if (last) 120.0f64 else 0.0f64,
         m);
-    msg1(tv, sel("setAttributedText:"), chapter_text(PR_KEY + c));
+    msg1(tv, sel("setAttributedText:"), text);
     cell
 }
 
-// Chapter c's text view (0: not laid out).
-pr_view_of(c: int): int {
-    if (pr_table == 0 || c < 0 || c >= chapters_n) return 0;
-    cell: int = msg1(pr_table, sel("cellForRowAtIndexPath:"), chapter_path(c));
+// ---- a chapter's pieces ----
+// A chapter is read in pieces of about PR_PIECE_UNITS (UTF-16) each, split
+// where a paragraph ends, each a row of its chapter's section: so that
+// UIKit lays out and measures only the pieces near the screen, however
+// long the chapter (a commentary's psalm can be a book's length). Each
+// slot's pieces are found as its chapter is kept: how many, and where each
+// begins in the text shown. A piece holds its paragraphs without the line
+// end after its last; the space between that paragraph and the next is
+// the next piece's top inset.
+PR_PIECE_UNITS: int = 2000;
+
+PR_PIECES_MOST: int = 1024;
+
+pr_pc_n: []int = new int[RS_SLOTS](1);
+
+pr_pc_at: []int = new int[RS_SLOTS * PR_PIECES_MOST](0);
+
+// How many rows each chapter's section has, as the table was last told
+// (1 until its chapter is kept: then its pieces, from the next reload; a
+// chapter let go keeps its count, its pieces as many when it is kept
+// again).
+PR_CHAPTERS_MOST: int = 2048;
+
+pr_count: []int = new int[PR_CHAPTERS_MOST](1);
+
+pr_rows(c: int): int {
+    if (c < 0 || c >= PR_CHAPTERS_MOST) 1 else pr_count[c]
+}
+
+// Every chapter's rows counted afresh (the chapters themselves changed: a
+// version or a look), as pr_rows_counted.
+pr_rows_reset() {
+    for c in 0..PR_CHAPTERS_MOST pr_count[c] = 1;
+    pr_rows_counted()
+}
+
+// The rows of the chapters kept counted again: their pieces.
+pr_rows_counted() {
+    for s in 0..RS_SLOTS {
+        c: int = rs_c[s] - PR_KEY;
+        if (rs_c[s] >= PR_KEY && c < PR_CHAPTERS_MOST) pr_count[c] = pr_pc_n[s]
+    }
+}
+
+// Chapter c kept in slot s (`besidechapter`, ios/reader.l8): its pieces
+// found; if they are not as many as its rows, the table made again with
+// them soon (not now: this may be in the middle of its laying out).
+pr_chapter_stored(c: int, s: int) {
+    text: int = rs_text[s];
+    n: int = if (text == 0) 0 else msg(text, sel("length"));
+    pieces: int = 1;
+    pr_pc_at[s * PR_PIECES_MOST] = 0;
+    at: int = 0;
+    while (pieces < PR_PIECES_MOST && at + PR_PIECE_UNITS < n - 1) {
+        nl: int = msg4(text, sel("rangeOfString:options:range:"), nsstring("\n"),
+            0, at + PR_PIECE_UNITS, n - at - PR_PIECE_UNITS);
+        if (nl < 0 || nl >= n - 1)
+            break;
+        at = nl + 1;
+        pr_pc_at[s * PR_PIECES_MOST + pieces] = rs_shifted(s, at, true);
+        pieces = pieces + 1
+    }
+    pr_pc_n[s] = pieces;
+    if (pr_table != 0 && c < PR_CHAPTERS_MOST && pieces != pr_count[c]) pr_remake_soon()
+}
+
+// The piece of chapter c holding unit k of its text shown (no further
+// than the rows the table has for it).
+pr_piece_of(c: int, k: int): int {
+    s: int = rs_slot(PR_KEY + c);
+    if (s < 0) return 0;
+    p: int = 0;
+    while (p + 1 < pr_pc_n[s] && p + 1 < pr_rows(c) && pr_pc_at[s * PR_PIECES_MOST + p + 1] <= k) p = p + 1;
+    p
+}
+
+// Where piece p of chapter c begins in its text shown (0: not kept).
+pr_piece_at(c: int, p: int): int {
+    s: int = rs_slot(PR_KEY + c);
+    if (s < 0 || p <= 0 || p >= pr_pc_n[s]) 0 else pr_pc_at[s * PR_PIECES_MOST + p]
+}
+
+// The panel's chapters made whole (attributed and washed, as chapter_text
+// makes them), kept for the pieces cut from them: a few, each with the
+// slot's count of chapters given (rs_gen) when it was made.
+PR_MADE_MOST: int = 4;
+
+pr_made_c: []int = new int[PR_MADE_MOST](-1);
+
+pr_made_gen: []int = new int[PR_MADE_MOST](0);
+
+pr_made_text: []int = new int[PR_MADE_MOST](0);
+
+pr_made_used: []int = new int[PR_MADE_MOST](0);
+
+pr_made_clock: int = 0;
+
+pr_made_forget() {
+    for k in 0..PR_MADE_MOST {
+        pr_made_c[k] = -1;
+        pr_made_text[k] = held(pr_made_text[k], 0)
+    }
+}
+
+// Whether chapter c's whole text is made, as it is kept now.
+pr_made_has(c: int): bool {
+    s: int = rs_slot(PR_KEY + c);
+    if (s < 0) return false;
+    for k in 0..PR_MADE_MOST
+        if (pr_made_c[k] == c && pr_made_gen[k] == rs_gen[s] && pr_made_text[k] != 0) return true;
+    false
+}
+
+// Chapter c's whole text (asked for, if it is not kept).
+pr_whole(c: int): int {
+    s: int = rs_need(PR_KEY + c);
+    if (s < 0) return chapter_text(PR_KEY + c);
+    pr_made_clock = pr_made_clock + 1;
+    at: int = 0;
+    for k in 0..PR_MADE_MOST {
+        if (pr_made_c[k] == c && pr_made_gen[k] == rs_gen[s] && pr_made_text[k] != 0) {
+            pr_made_used[k] = pr_made_clock;
+            return pr_made_text[k]
+        }
+        if (pr_made_used[k] < pr_made_used[at]) at = k
+    }
+    pr_made_c[at] = c;
+    pr_made_gen[at] = rs_gen[s];
+    pr_made_used[at] = pr_made_clock;
+    pr_made_text[at] = held(pr_made_text[at], chapter_text(PR_KEY + c));
+    pr_made_text[at]
+}
+
+// The space above a piece: its last paragraph's below and the next's
+// above, as they were in the whole (pr_piece_text's).
+pr_piece_gap: f64 = 0.0f64;
+
+// Piece p of chapter c (autoreleased; empty past its last), and the space
+// above it (pr_piece_gap).
+pr_piece_text(c: int, p: int): int {
+    whole: int = pr_whole(c);
+    pr_piece_gap = 0.0f64;
+    s: int = rs_slot(PR_KEY + c);
+    n: int = msg(whole, sel("length"));
+    pieces: int = if (s < 0) 1 else pr_pc_n[s];
+    if (p >= pieces) return msg(make("NSMutableAttributedString"), sel("autorelease"));
+    if (pieces == 1) return whole;
+    from: int = pr_piece_at(c, p);
+    to: int = if (p + 1 < pieces) pr_piece_at(c, p + 1) - 1 else n;
+    if (from > n) from = n;
+    if (to > n) to = n;
+    if (to < from) to = from;
+    a: int = msg(msg2(whole, sel("attributedSubstringFromRange:"), from, to - from),
+        sel("mutableCopy"));
+    msg(a, sel("autorelease"));
+    if (to == from) return a;
+    if (p > 0) {
+        // (The space between: moved out of its paragraphs into the inset.)
+        below: int = if (from >= 2) msg3(whole, sel("attribute:atIndex:effectiveRange:"),
+            k_para, from - 2, 0) else 0;
+        above: int = msg3(a, sel("attribute:atIndex:effectiveRange:"), k_para, 0,
+            0);
+        if (below != 0) pr_piece_gap = msg_f(below, sel("paragraphSpacing"));
+        if (above != 0) {
+            pr_piece_gap = pr_piece_gap + msg_f(above, sel("paragraphSpacingBefore"));
+            pr_para_spacing_zeroed(a, 0, "setParagraphSpacingBefore:")
+        }
+    }
+    if (p + 1 < pieces) pr_para_spacing_zeroed(a, to - from - 1, "setParagraphSpacing:");
+    a
+}
+
+// The paragraph of a holding unit k given no space by setter.
+pr_para_spacing_zeroed(a: int, k: int, setter: str) {
+    ps: int = msg3(a, sel("attribute:atIndex:effectiveRange:"), k_para, k, 0);
+    if (ps == 0) return;
+    string: int = msg(a, sel("string"));
+    n: int = msg(string, sel("length"));
+    before: int = msg4(string, sel("rangeOfString:options:range:"), nsstring("\n"),
+        4, 0, k);
+    after: int = msg4(string, sel("rangeOfString:options:range:"), nsstring("\n"),
+        0, k, n - k);
+    from: int = if (before >= 0 && before < k) before + 1 else 0;
+    to: int = if (after >= 0 && after < n) after else n;
+    p2: int = msg(ps, sel("mutableCopy"));
+    msg_set_f(p2, sel(setter), 0.0f64);
+    msg4(a, sel("addAttribute:value:range:"), k_para, p2, from, to - from);
+    release(p2)
+}
+
+// Row p of chapter c's section.
+pr_path(c: int, p: int): int {
+    msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), if (p < 0) 0 else p,
+        if (c < 0) 0 else c)
+}
+
+// Where piece p of chapter c begins, down from the table's top.
+pr_row_y(c: int, p: int): f64 {
+    l8_msg_hfa(hfa, pr_table, sel("rectForRowAtIndexPath:"), pr_path(c, p), 0, 0);
+    hfa[1]
+}
+
+// Where chapter c's section begins, down from the table's top.
+pr_chapter_y(c: int): f64 {
+    l8_msg_hfa(hfa, pr_table, sel("rectForSection:"), c, 0, 0);
+    hfa[1]
+}
+
+// Piece p of chapter c's text view, if its row is laid out (else 0).
+pr_view_at(c: int, p: int): int {
+    if (pr_table == 0 || c < 0 || c >= chapters_n || p < 0 || p >= pr_rows(c)) return 0;
+    cell: int = msg1(pr_table, sel("cellForRowAtIndexPath:"), pr_path(c, p));
     if (cell == 0) 0 else text_of_cell(cell)
 }
 
+// Whether a row of chapter c is laid out (near the screen).
+pr_chapter_near(c: int): bool {
+    if (pr_table == 0) return false;
+    paths: int = msg(pr_table, sel("indexPathsForVisibleRows"));
+    for i in 0..if (paths != 0) msg(paths, sel("count")) else 0 {
+        if (msg(msg1(paths, sel("objectAtIndex:"), i), sel("section")) == c) return true
+    }
+    false
+}
+
 // Where verse v of chapter c begins, down from the table's top (its
-// chapter's top, for verse 0 or one not laid out).
+// chapter's top, for verse 0; its piece's, for one not laid out): where
+// it is first, if the chapter has it more than once.
 pr_verse_y(c: int, v: int): f64 {
-    l8_msg_hfa(hfa, pr_table, sel("rectForRowAtIndexPath:"), chapter_path(c), 0, 0);
+    s: int = rs_need(PR_KEY + c);
+    if (v <= 0 || s < 0) return pr_chapter_y(c);
+    pr_index_y(c, rs_verse_index(s, v))
+}
+
+// Where verse index i of chapter c begins (as pr_verse_y; -1: the
+// chapter's top).
+pr_index_y(c: int, i: int): f64 {
+    s: int = rs_slot(PR_KEY + c);
+    if (s < 0 || i < 0 || i >= rs_v_n[s]) return pr_chapter_y(c);
+    k: int = rs_vb2[s * VS_MOST + i];
+    p: int = pr_piece_of(c, k);
+    l8_msg_hfa(hfa, pr_table, sel("rectForRowAtIndexPath:"), pr_path(c, p), 0, 0);
     y: f64 = hfa[1];
-    if (v <= 0) return y;
-    tv: int = pr_view_of(c);
-    if (tv == 0) return y;
-    k: int = verse_unit(PR_KEY + c, v);
-    if (k < 0 || !range_rect(tv, k, 1)) return y;
+    tv: int = pr_view_at(c, p);
+    if (tv == 0 || !range_rect(tv, k - pr_piece_at(c, p), 1)) return y;
     y + hfa[1]
 }
 
@@ -130,18 +369,76 @@ pr_set_offset(y: f64) {
 // header; placed again once the rows around it are laid out.
 pr_jump(c: int, to_v: int) {
     if (pr_table == 0 || c < 0 || c >= chapters_n) return;
-    // (Following by comment: the latest of its verses at or before it.)
-    v: int = if (pr_by_comment) pr_comment_start(c, to_v) else to_v;
+    // (Its chapter kept, and the table told its pieces, first: so that the
+    // verse's piece is a row.)
+    s: int = rs_need(PR_KEY + c);
+    if (s >= 0 && c < PR_CHAPTERS_MOST && pr_pc_n[s] != pr_count[c]) {
+        pr_rows_counted();
+        msg(pr_table, sel("reloadData"))
+    }
+    // (Following by comment: the first place that comments on it.)
+    i: int = if (s < 0 || to_v <= 0) -1 else if (pr_by_comment) pr_comment_first(c,
+        to_v) else rs_verse_index(s, to_v);
+    k: int = if (i >= 0) rs_vb2[s * VS_MOST + i] else -1;
     pr_self = pr_self + 1;
-    msg3(pr_table, sel("scrollToRowAtIndexPath:atScrollPosition:animated:"), chapter_path(c),
-        1, 0);
+    msg3(pr_table, sel("scrollToRowAtIndexPath:atScrollPosition:animated:"), pr_path(c,
+        if (k > 0) pr_piece_of(c, k) else 0), 1, 0);
     pr_self = pr_self - 1;
     for _pass in 0..3 {
         msg(pr_table, sel("layoutIfNeeded"));
-        pr_set_offset(pr_verse_y(c, v) - top_inset(pr_table))
+        pr_set_offset(pr_index_y(c, i) - top_inset(pr_table))
     }
+    v: int = if (i >= 0) rs_v_num[s * VS_MOST + i] else 0;
     pr_told_c = c;
-    pr_told_v = v
+    pr_told_v = v;
+    pr_glided_forget();
+    if (pr_aim_c != c || pr_aim_v != to_v) pr_aim_tries = 0;
+    pr_aim_c = c;
+    pr_aim_v = to_v;
+    pr_aim_until = CACurrentMediaTime() + 1.0f64
+}
+
+// ---- a jump held ----
+// UIKit may move the reader just after a jump, by itself: laying it out
+// again as its screen settles, it measures again the rows it had only
+// estimated, and keeps another place on the screen (chapters away, among
+// short ones). For a moment after a jump, a move not a finger's nor the
+// app's sends it back there once UIKit is done, a few times at most; a
+// finger, or the reader placed another way, lets the jump go.
+pr_aim_c: int = -1;
+
+pr_aim_v: int = 0;
+
+pr_aim_until: f64 = 0.0f64;
+
+pr_aim_tries: int = 0;
+
+pr_aim_due: bool = false;
+
+pr_aim_drop() {
+    pr_aim_c = -1
+}
+
+// (pr_scrolled's: the reader moved.)
+pr_aim_moved() {
+    if (pr_aim_c < 0 || pr_self != 0 || pr_aim_due || touched(pr_table)) return;
+    if (CACurrentMediaTime() > pr_aim_until || pr_aim_tries >= 3) {
+        pr_aim_drop();
+        return
+    }
+    pr_aim_due = true;
+    _t: int = after_common(0.0f64, "besideAim:")
+}
+
+pr_aim_fired(_self: int, _cmd: int, _timer: int): int {
+    pr_aim_due = false;
+    if (pr_table == 0 || pr_aim_c < 0 || touched(pr_table)) return 0;
+    top: f64 = offset_y(pr_table) + top_inset(pr_table);
+    path: int = msg_ff(pr_table, sel("indexPathForRowAtPoint:"), 40.0f64, top + 1.0f64);
+    if (path != 0 && msg(path, sel("section")) == pr_aim_c) return 0;
+    pr_aim_tries = pr_aim_tries + 1;
+    pr_jump(pr_aim_c, pr_aim_v);
+    0
 }
 
 // Its top told to core as its verse changes: the chapter whose row holds
@@ -152,6 +449,7 @@ pr_place_tell() {
     v: int = pr_at_v;
     frac: int = pr_at_frac;
     if (c == pr_told_c && v == pr_told_v) return;
+    if (c != pr_told_c) pr_ahead_soon();
     pr_told_c = c;
     pr_told_v = v;
     to_core_str("besideplace");
@@ -176,23 +474,24 @@ pr_measure(): bool {
     top: f64 = offset_y(pr_table) + top_inset(pr_table);
     path: int = msg_ff(pr_table, sel("indexPathForRowAtPoint:"), 40.0f64, top + 1.0f64);
     if (path == 0) return false;
-    c: int = msg(path, sel("row"));
+    c: int = msg(path, sel("section"));
+    p: int = msg(path, sel("row"));
     l8_msg_hfa(hfa, pr_table, sel("rectForRowAtIndexPath:"), path, 0, 0);
     into: f64 = top - hfa[1];
     v: int = 0;
-    frac: int = (into * 1000.0f64 / em) as int;
-    tv: int = pr_view_of(c);
+    frac: int = ((top - pr_chapter_y(c)) * 1000.0f64 / em) as int;
+    tv: int = pr_view_at(c, p);
     if (tv != 0) {
         pos: int = msg_ff(tv, sel("closestPositionToPoint:"), pr_margin() + 4.0f64,
             into + 2.0f64);
         if (pos != 0) {
-            k: int = msg2(tv, sel("offsetFromPosition:toPosition:"), msg(tv, sel("beginningOfDocument")),
-                pos);
-            found: int = verse_from_unit(PR_KEY + c, k);
-            b: int = if (found > 0) verse_unit(PR_KEY + c, found) else -1;
-            if (b >= 0 && range_rect(tv, b, 1)) {
-                v = found;
-                frac = ((into - hfa[1]) * 1000.0f64 / em) as int
+            k: int = pr_piece_at(c, p) + msg2(tv, sel("offsetFromPosition:toPosition:"),
+                msg(tv, sel("beginningOfDocument")), pos);
+            s: int = rs_slot(PR_KEY + c);
+            i: int = if (s < 0) -1 else rs_index_before(s, k);
+            if (i >= 0 && rs_v_num[s * VS_MOST + i] > 0) {
+                v = rs_v_num[s * VS_MOST + i];
+                frac = ((top - pr_index_y(c, i)) * 1000.0f64 / em) as int
             }
         }
     }
@@ -205,8 +504,38 @@ pr_measure(): bool {
 // Its scroll: its place told; moved by a finger (or gliding after one)
 // while linked and leading, the page kept with it.
 pr_scrolled() {
+    if (pr_glide_edge()) return;
+    pr_aim_moved();
     pr_place_tell();
     if (pr_self == 0 && pr_linked && link_leader_panel && touched(pr_table)) pr_lead_page()
+}
+
+// ---- a glide stopped at a chapter not known ----
+// A glide (after a finger's flick, not its drag) into a chapter not known
+// yet (a line holding its place while core reads it, or not kept) would
+// pass through the little it shows, and on, leaving it to come in
+// somewhere behind: it stops at its edge instead, so that the chapter
+// comes in where it is. Going up into it, the chapter below begins at the
+// top; going down, it does.
+pr_last_top: f64 = 0.0f64;
+
+// Whether the reader glides after a flick.
+pr_gliding(): bool {
+    pr_table != 0 && ((msg(pr_table, sel("isDecelerating")) & 255) != 0 || devwire_gliding(pr_table))
+}
+
+// (pr_scrolled's: whether it stopped the glide.)
+pr_glide_edge(): bool {
+    top: f64 = side_top(LinkSide.Panel);
+    up: bool = top < pr_last_top;
+    pr_last_top = top;
+    if (pr_self != 0 || !pr_gliding()) return false;
+    c: int = pr_top_chapter();
+    if (c < 0 || pr_known(c) || up && c + 1 >= chapters_n) return false;
+    pr_set_offset(pr_chapter_y(if (up) c + 1 else c) - top_inset(pr_table));
+    pr_last_top = side_top(LinkSide.Panel);
+    if (devwire_gliding(pr_table)) devwire_glide_end(pr_table) else pr_panel_rested();
+    true
 }
 
 // Which leads, linked: the one a finger last touched (the panel's reader,
@@ -217,13 +546,14 @@ link_leader_panel: bool = false;
 // A finger down on the page: it leads, the reader's glide stopped.
 pr_page_touched() {
     link_leader_panel = false;
+    pr_glided_forget();
     if (pr_table != 0 && (msg(pr_table, sel("isDecelerating")) & 255) != 0) pr_set_offset(offset_y(pr_table))
 }
 
 // Whether scroll view sv is moving by a finger, or gliding after one (not
 // moved by the app).
 touched(sv: int): bool {
-    (msg(sv, sel("isTracking")) & 255) != 0 || (msg(sv, sel("isDecelerating")) & 255) != 0
+    (msg(sv, sel("isTracking")) & 255) != 0 || (msg(sv, sel("isDecelerating")) & 255) != 0 || devwire_gliding(sv)
 }
 
 // ---- linked, moving together ----
@@ -261,15 +591,29 @@ side_table(side: LinkSide): int {
 // Where chapter c's row begins, and its verse v, down from the side's
 // table's top.
 side_row_y(side: LinkSide, c: int): f64 {
-    l8_msg_hfa(hfa, side_table(side), sel("rectForRowAtIndexPath:"), chapter_path(c),
-        0, 0);
-    hfa[1]
+    match side {
+        Page -> {
+            l8_msg_hfa(hfa, table, sel("rectForRowAtIndexPath:"), chapter_path(c),
+                0, 0);
+            hfa[1]
+        }
+        Panel -> pr_chapter_y(c)
+    }
 }
 
 side_verse_y(side: LinkSide, c: int, v: int): f64 {
     match side {
         Page -> verse_y(c, v);
         Panel -> pr_verse_y(c, v)
+    }
+}
+
+// Where verse index i of chapter c begins on a side (the panel's may have
+// a verse more than once).
+side_index_y(side: LinkSide, c: int, i: int): f64 {
+    match side {
+        Page -> verse_y(c, link_verse_num(c, i));
+        Panel -> pr_index_y(c, i)
     }
 }
 
@@ -300,9 +644,8 @@ span_b: f64 = 0.0f64;
 link_span(side: LinkSide, c: int, i: int) {
     key: int = side_key(side, c);
     n: int = link_verse_count(key);
-    span_a = (if (i < 0) side_row_y(side, c) else side_verse_y(side, c, link_verse_num(key,
-        i)));
-    span_b = (if (i + 1 < n) side_verse_y(side, c, link_verse_num(key, i + 1)) else if (c + 1 < chapters_n) side_row_y(side,
+    span_a = (if (i < 0) side_row_y(side, c) else side_index_y(side, c, i));
+    span_b = (if (i + 1 < n) side_index_y(side, c, i + 1) else if (c + 1 < chapters_n) side_row_y(side,
         c + 1) else span_a + view_height(side_table(side)))
 }
 
@@ -325,7 +668,11 @@ link_locate(side: LinkSide): bool {
     y: f64 = side_top(side);
     path: int = msg_ff(t, sel("indexPathForRowAtPoint:"), 40.0f64, y + 1.0f64);
     if (path == 0) return false;
-    c: int = msg(path, sel("row"));
+    // (The page's rows are its chapters; the panel's sections are.)
+    c: int = msg(path, sel(match side {
+        Page -> "row";
+        Panel -> "section"
+    }));
     key: int = side_key(side, c);
     n: int = link_verse_count(key);
     i: int = match side {
@@ -531,17 +878,54 @@ pr_glided_c: int = -1;
 
 pr_glided_v: int = -1;
 
-// The first verse of the comment on verse v of chapter c in the reader (its
-// verses are its comments' first verses): the last that begins at or
-// before v (0: the chapter's top).
-pr_comment_start(c: int, v: int): int {
+// The comment glided to forgotten: the follower moved some other way (a
+// finger on either, a jump), so the next comment is glided to even if it
+// is the one before.
+pr_glided_forget() {
+    pr_glided_c = -1;
+    pr_glided_v = -1
+}
+
+// Whether verse index i of the reader's chapter c is where verse v is
+// commented on: the last of its run of verses (going on, until the
+// commentator goes through them again) at or before v.
+pr_covers(c: int, i: int, v: int): bool {
     key: int = PR_KEY + c;
-    start: int = 0;
-    for k in 0..link_verse_count(key) {
-        n: int = link_verse_num(key, k);
-        if (n > 0 && n <= v) start = n
+    n: int = link_verse_count(key);
+    if (i < 0 || i >= n) return false;
+    a: int = link_verse_num(key, i);
+    if (a <= 0 || a > v) return false;
+    if (i + 1 >= n) return true;
+    b: int = link_verse_num(key, i + 1);
+    b > v || b <= a
+}
+
+// The verse index of the first place in the reader's chapter c where
+// verse v is commented on (-1: none, the chapter's top).
+pr_comment_first(c: int, v: int): int {
+    for i in 0..link_verse_count(PR_KEY + c)
+        if (pr_covers(c, i, v)) return i;
+    -1
+}
+
+// Of the places in the reader's chapter c where verse v is commented on
+// (one each time the commentator goes through the verses), the verse index
+// of the nearest to the reader's top (-1: none, the chapter's top).
+pr_comment_nearest(c: int, v: int): int {
+    top: f64 = side_top(LinkSide.Panel);
+    best: int = -1;
+    best_d: f64 = 0.0f64;
+    for i in 0..link_verse_count(PR_KEY + c) {
+        if (pr_covers(c, i, v)) {
+            d: f64 = pr_index_y(c, i) - top;
+            if (d < 0.0f64) d = -d;
+            if (best < 0 || d < best_d) {
+                best = i;
+                best_d = d
+            }
+        }
     }
-    start
+    best
 }
 
 // The page moved by a finger, the reader following by comment: it glides
@@ -551,17 +935,25 @@ pr_comment_start(c: int, v: int): int {
 pr_follow_by_comment() {
     if (!link_locate(LinkSide.Page)) return;
     c: int = at_c;
+    if (pr_link_waits(c)) return;
     v: int = if (at_i < 0) 0 else link_verse_num(c, at_i);
-    start: int = pr_comment_start(c, v);
-    if (c == pr_glided_c && start == pr_glided_v) return;
+    if (c == pr_glided_c && v == pr_glided_v) return;
     pr_glided_c = c;
-    pr_glided_v = start;
-    if (pr_view_of(c) == 0) {
-        pr_jump(c, start);
+    pr_glided_v = v;
+    // (The reader at a comment on that verse already, wherever in it: it
+    // stays. A long comment is a long way to its start.)
+    if (pr_top_chapter() == c && link_locate(LinkSide.Panel) && at_c == c && (if (at_i < 0) v == 0 else pr_covers(c,
+        at_i, v))) return;
+    pr_aim_drop();
+    // (Its chapter not near: there at once, at its first comment on the
+    // verse; the verse kept after the jump, which forgets the one before.)
+    if (!pr_chapter_near(c)) {
+        pr_jump(c, v);
+        pr_glided_c = c;
+        pr_glided_v = v;
         return
     }
-    y: f64 = (if (start > 0) pr_verse_y(c, start) else side_row_y(LinkSide.Panel,
-        c)) - top_inset(pr_table);
+    y: f64 = pr_index_y(c, pr_comment_nearest(c, v)) - top_inset(pr_table);
     least: f64 = -top_inset(pr_table);
     msg_ff1(pr_table, sel("setContentOffset:animated:"), 0.0f64, if (y < least) least else y,
         if (reduce_motion()) 0 else 1)
@@ -576,29 +968,158 @@ pr_follow_page() {
     }
     if (!link_locate(LinkSide.Page)) return;
     c: int = at_c;
+    if (pr_link_waits(c)) return;
     // (Its chapter not near: there first.)
-    if (pr_view_of(c) == 0) pr_jump(c, if (at_i < 0) 0 else link_verse_num(c, at_i));
+    if (!pr_chapter_near(c)) pr_jump(c, if (at_i < 0) 0 else link_verse_num(c, at_i));
     pr_set_offset(link_map_near(LinkSide.Page, LinkSide.Panel, c, at_i, at_part, side_top(LinkSide.Page)) - top_inset(pr_table));
     pr_place_tell()
 }
 
+// ---- linked, while a chapter isn't known ----
+// Core takes a while to make a chapter of the panel's reader (a
+// commentary's is laid out whole), long enough for a frame missed: so
+// never while either moves. And a commentary's may come later still
+// (`coming`: a line holds its place, its verses not known). The link maps
+// one's place through both chapters' verses: with the panel's chapter not
+// known, it doesn't guess (its top, or another chapter's verse), and the
+// follower stays where it is (pr_link_due) until both rest or the chapter
+// comes; then it is placed at the leader's place. At rest, the chapters
+// either side of the reader's are asked for ahead, one at a time.
+pr_link_due: bool = false;
+
+pr_ahead_due: bool = false;
+
+// Whether chapter c of the panel's reader is kept.
+pr_holds(c: int): bool {
+    rs_slot(PR_KEY + c) >= 0
+}
+
+// Whether chapter c of the panel's reader is kept, its verses known.
+pr_known(c: int): bool {
+    s: int = rs_slot(PR_KEY + c);
+    s >= 0 && !rs_coming[s]
+}
+
+// Whether the page or the reader moves.
+pr_moving(): bool {
+    pr_table != 0 && touched(pr_table) || table != 0 && touched(table)
+}
+
+// Whether a row was laid out empty, its chapter not kept (pr_cell): its
+// chapters asked for at rest, and the rows made again.
+pr_owed: bool = false;
+
+// Whether the link through the panel's chapter c waits for it to be
+// known (at rest, it is asked for now, if it isn't kept).
+pr_link_waits(c: int): bool {
+    if (pr_known(c)) return false;
+    if (!pr_holds(c) && !pr_moving()) _s: int = rs_need(PR_KEY + c);
+    if (pr_known(c)) return false;
+    pr_link_due = true;
+    true
+}
+
+// The follower placed at the leader's place, if it waited and neither
+// moves now.
+pr_link_settle() {
+    if (!pr_link_due || pr_table == 0 || pr_moving()) return;
+    pr_link_due = false;
+    if (!pr_linked) return;
+    pr_glided_forget();
+    if (link_leader_panel) pr_lead_page() else pr_follow_page()
+}
+
+// The page at rest (reader_rested), or the reader: what waited for them,
+// and the reader's chapters either side asked for soon.
+pr_page_rested() {
+    pr_link_settle();
+    pr_ahead_soon()
+}
+
+pr_panel_rested() {
+    pr_place_tell();
+    pr_link_settle();
+    pr_ahead_soon()
+}
+
+// The chapter at the reader's top (-1: none).
+pr_top_chapter(): int {
+    if (pr_table == 0) return -1;
+    path: int = msg_ff(pr_table, sel("indexPathForRowAtPoint:"), 40.0f64, side_top(LinkSide.Panel) + 1.0f64);
+    if (path == 0) -1 else msg(path, sel("section"))
+}
+
+pr_ahead_soon() {
+    if (pr_ahead_due || pr_table == 0) return;
+    pr_ahead_due = true;
+    _t: int = after_common(0.3f64, "besideAhead:")
+}
+
+// (The timer's: the next chapter not kept asked for, and the timer set
+// again for another; while either moves, it waits.)
+pr_ahead_fired(_self: int, _cmd: int, _timer: int): int {
+    pr_ahead_due = false;
+    if (pr_table == 0 || pr_told_c < 0) return 0;
+    if (pr_moving()) {
+        pr_ahead_soon();
+        return 0
+    }
+    if (pr_owed) {
+        pr_owed = false;
+        paths: int = msg(pr_table, sel("indexPathsForVisibleRows"));
+        for i in 0..if (paths != 0) msg(paths, sel("count")) else 0 {
+            c: int = msg(msg1(paths, sel("objectAtIndex:"), i), sel("section"));
+            if (!pr_holds(c)) _s: int = rs_need(PR_KEY + c)
+        }
+        pr_remake();
+        pr_link_settle();
+        pr_ahead_soon();
+        return 0
+    }
+    // (Each kept, then made whole: a long chapter's text takes a while to
+    // make, as its first piece is shown.)
+    for d in 0..2 {
+        c: int = if (d == 0) pr_told_c + 1 else pr_told_c - 1;
+        if (c >= 0 && c < chapters_n && !pr_holds(c)) {
+            _s: int = rs_need(PR_KEY + c);
+            pr_ahead_soon();
+            return 0
+        }
+        if (c >= 0 && c < chapters_n && pr_known(c) && !pr_made_has(c)) {
+            _w: int = pr_whole(c);
+            pr_ahead_soon();
+            return 0
+        }
+    }
+    0
+}
+
 // The panel's reader, following by comment, moved by a finger: the page
 // glides to the first verse of the comment at its top as that changes (it
-// stays while a comment is read).
+// stays while a comment is read). A verse commented on again later (notes
+// after an exposition) takes the page back to it.
 pr_lead_by_comment() {
     if (!link_locate(LinkSide.Panel)) return;
     c: int = at_c;
-    v: int = if (at_i < 0) 0 else link_verse_num(PR_KEY + c, at_i);
+    i: int = at_i;
+    v: int = if (i < 0) 0 else link_verse_num(PR_KEY + c, i);
     if (c == pr_glided_c && v == pr_glided_v) return;
     pr_glided_c = c;
     pr_glided_v = v;
+    // (The page at a verse that comment is on already: it stays.)
+    if (i >= 0 && view_of(c) != 0 && link_locate(LinkSide.Page) && at_c == c && pr_covers(c,
+        i, if (at_i < 0) 0 else link_verse_num(c, at_i))) return;
     if (view_of(c) == 0) {
         go_place(c, v, 0);
         find_place();
         place_tell();
         return
     }
-    y: f64 = (if (v > 0) verse_y(c, v) else row_y(c)) - top_inset(table);
+    // (While they move, where the verse nearly is, and exactly once they
+    // rest.)
+    at: VerseY = if (pr_moving()) verse_y_soon(c, v) else VerseY { y: verse_y(c, v), exact: true };
+    if (!at.exact) pr_link_due = true;
+    y: f64 = at.y - top_inset(table);
     least: f64 = -top_inset(table);
     msg_ff1(table, sel("setContentOffset:animated:"), 0.0f64, if (y < least) least else y,
         if (reduce_motion()) 0 else 1)
@@ -606,6 +1127,8 @@ pr_lead_by_comment() {
 
 // The panel's reader moved by a finger: the page with it.
 pr_lead_page() {
+    top: int = pr_top_chapter();
+    if (top < 0 || pr_link_waits(top)) return;
     if (pr_by_comment) {
         pr_lead_by_comment();
         return
@@ -625,6 +1148,8 @@ pr_relayout() {
     if (pr_table == 0) return;
     c: int = pr_told_c;
     v: int = pr_told_v;
+    pr_made_forget();
+    pr_rows_reset();
     msg(pr_table, sel("reloadData"));
     msg(pr_table, sel("layoutIfNeeded"));
     if (c >= 0) pr_jump(c, if (v < 0) 0 else v)
@@ -671,6 +1196,7 @@ pr_count_changed() {
         pr_attach(pr_table, c, pr_open_v);
         return
     }
+    pr_rows_reset();
     msg(pr_table, sel("reloadData"));
     if (pr_told_c >= 0) pr_jump(pr_told_c, if (pr_told_v < 0) 0 else pr_told_v)
 }
@@ -681,18 +1207,56 @@ pr_count_changed() {
 // not the chapters it was told of: an assertion that ends the app.)
 pr_chapter_came(c: int) {
     if (pr_table == 0 || c < 0 || c >= chapters_n) return;
-    // (The chapters above may have grown: put back where it was, unless a
-    // finger has it.)
-    at_c: int = pr_told_c;
-    at_v: int = pr_told_v;
+    pr_remake();
+    pr_link_settle()
+}
+
+// The table made again with its chapters as they are kept now, their
+// pieces counted again: at once, or (pr_remake_soon) once UIKit has done
+// what it is doing. The same words are kept at its top by its offset alone
+// (the chapters above may have grown), which a glide goes on from: a jump
+// would stop it.
+pr_remake_due: bool = false;
+
+pr_remake_soon() {
+    if (pr_remake_due) return;
+    pr_remake_due = true;
+    _t: int = after_common(0.0f64, "besideRemake:")
+}
+
+pr_remake_fired(_self: int, _cmd: int, _timer: int): int {
+    if (pr_remake_due) pr_remake();
+    0
+}
+
+pr_remake() {
+    pr_remake_due = false;
+    if (pr_table == 0) return;
+    top: f64 = offset_y(pr_table) + top_inset(pr_table);
+    path: int = msg_ff(pr_table, sel("indexPathForRowAtPoint:"), 40.0f64, top + 1.0f64);
+    c: int = if (path == 0) -1 else msg(path, sel("section"));
+    p: int = if (path == 0) 0 else msg(path, sel("row"));
+    // (Kept by the piece at the top, if its chapter's pieces stay as they
+    // were: the chapter's top may be far above, among rows only estimated.)
+    rows: int = pr_rows(c);
+    into: f64 = if (c < 0) 0.0f64 else top - pr_row_y(c, p);
+    into_chapter: f64 = if (c < 0) 0.0f64 else top - pr_chapter_y(c);
+    pr_rows_counted();
     msg(pr_table, sel("reloadData"));
-    if (at_c >= 0 && !touched(pr_table)) pr_jump(at_c, if (at_v < 0) 0 else at_v)
+    if (c < 0) return;
+    msg(pr_table, sel("layoutIfNeeded"));
+    y: f64 = if (pr_rows(c) == rows) pr_row_y(c, p) + into else pr_chapter_y(c) + into_chapter;
+    pr_self = pr_self + 1;
+    _o: int = msg_ff(pr_table, sel("setContentOffset:"), 0.0f64, y - top_inset(pr_table));
+    pr_self = pr_self - 1
 }
 
 // A finger's drag begun on it: a hand moves it now (linked, it leads the
 // page, the page's glide stopped).
 pr_drag_began() {
     link_leader_panel = true;
+    pr_glided_forget();
+    pr_aim_drop();
     if (table != 0 && (msg(table, sel("isDecelerating")) & 255) != 0) msg_ff1(table,
         sel("setContentOffset:animated:"), 0.0f64, offset_y(table), 0);
     to_core_str("besidemoving");

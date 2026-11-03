@@ -26,27 +26,36 @@ it was left. Its document is a version or a Bookshelf module; a version or a
 commentary there follows the page. Where the skin draws a reader in the
 panel, a version or a commentary is read there as the page is, every
 chapter in turn (a commentary's comments laid out as a chapter, each a
-verse of its own, by core/shelf_screens.l8).
+verse of its own, by core/shelf_screens.l8). The iPhone's is a table of
+pieces (each chapter's text cut where paragraphs end), so UIKit lays out
+only those near the screen; a chapter core hasn't made yet is asked for
+when the page and panel rest, never while they move, and the chapters
+either side are asked for ahead.
 Linked with the page (a button at its foot), the two move together,
 whichever a hand moves leading; unlinked, neither moves the other, and
 linked again it comes to the page's place (elsewhere, a version is a page
 of paragraphs, a chapter at a time).
 `core/shelf.l8` keeps the Bookshelf: SWORD modules downloaded on request
-rather than bundled. A Bible among them becomes a version in a text slot of
-its own, its records made from the module when it is opened; commentaries,
-dictionaries and books are read from their packages while a screen shows
-them. Opening a package, making a Bible a version and decoding a large
-commentary block happen a step at a time between the screen's updates
-(core asks the skin for a turn with `next`), so the app keeps answering
-its reader however slowly it runs, as it does interpreted under hot reload.
-Go To and Bibles and Books (the catalog) list what can be read in one way
+rather than bundled. A module is made as part of its download: a Bible
+becomes a version in a text slot of its own, and a commentary, dictionary
+or book a folio (`programs/folio`), read a chapter, an entry or a part at a
+time while a screen shows it. Until it is made it shows as downloading,
+one bar for fetching and making, and it is said ready to read once it is
+made, so opening it reads only the folio's head. Modules downloaded while
+another is being made wait their turn. Making happens a step at a time
+between the screen's updates (core asks the skin for a turn with `next`),
+so the app keeps answering its reader however slowly it runs, as it does
+interpreted under hot reload.
+Go To and the Bookshelf list what can be read in one way
 (`core/shelf_screens.l8`'s documents): the bundled versions, the original
 languages, the ESV and the Bookshelf's modules. Each pane's lists read into that pane:
 over the reader, a Bible chosen becomes the reader's version (Read Beside
 reads it in the panel) and any other is read beside the page where the
 panel fits; in the panel, anything chosen is read there.
-Bibles and Books lists what is on the device before what can be downloaded, and
-leaves out the catalog's editions of the bundled versions.
+The Bookshelf is one screen, the panel's first: by kind, what is on the
+device, then the catalog, whose rows download on a tap and show their
+progress in place. It leaves out the catalog's editions of the bundled
+versions.
 
 The reader and a plan's day use the same references and shared reading
 rules. Marks are keyed by reference, so switching versions preserves their

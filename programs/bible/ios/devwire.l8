@@ -8,7 +8,9 @@ use_tag std, ios, bible, bible_wire;
 // lines for core (`node web/devctl.mjs wire tap shelf`), long-polling
 // GET /wire?since=N, and gives each to core as the skin gives its own. A
 // line beginning ! is the app's: `!screens` writes the screens shown to
-// the log, `!close` closes the sheets shown (as their Done does), `!tap
+// the log, `!close` closes the sheets shown (as their Done does), `!back`
+// goes back a screen (the top sheet's, else the panel's), `!info WORDS`
+// taps a row's ⓘ as `!tap` taps the row, `!tap
 // WORDS` taps the row or the toolbar's button of a screen shown whose
 // title (or spoken label) begins with WORDS. While it is connected, the screen stays on (a phone's
 // Auto-Lock, not ten minutes of Keep Screen On) and its diagnostics are
@@ -28,7 +30,8 @@ dw_task: int = 0;
 
 dw_body: int = 0;
 
-dw_session: int = 0;
+// (Kept through a hot reload: one session, not one a build.)
+persistent dw_session: int = 0;
 
 // Whether the server has answered: the app is being driven.
 dw_on: bool = false;
@@ -50,13 +53,21 @@ dw_server(): int {
     keep(msg1(nsstring("http://"), sel("stringByAppendingString:"), ns))
 }
 
-// Begun at launch (and again after a reload), if a server is set.
+extern os_proc_available_memory(): int;
+
+// Begun at launch (and again after a reload), if a server is set; how much
+// memory the app may still take written to the log (a reload that leaks
+// shows here).
 devwire_begin() {
     if (dw_url == 0) dw_url = dw_server();
     if (dw_url == 0) {
         dw_data_state = DW_DATA_READY;
         return
     }
+    tb_n = 0;
+    tb_str("bible: memory available MB ");
+    tb_int(os_proc_available_memory() / 1048576);
+    note_ns(tb_ns());
     if (dw_session == 0) {
         config: int = msg(cls("NSURLSessionConfiguration"), sel("ephemeralSessionConfiguration"));
         msg_set_f(config, sel("setTimeoutIntervalForRequest:"), 40.0f64);
@@ -69,11 +80,13 @@ devwire_begin() {
 }
 
 // ---- data files from the server ----
-// The files changed there (GET /data: NAME TAB SIZE a line, NAME as core
-// asks for it), each fetched (GET /data/NAME) into a file of the app's
-// temporary directory before any data file is read; until then core's
-// asks wait (devwire_data_ready). The server out of reach, or a file that
-// fails: the bundle's.
+// The files there that differ from the bundle's (POST /data with what the
+// bundle holds, its dev-data.txt, from tools/ios/hot.sh; a bundle without
+// one asks GET /data, those changed since the server started: NAME TAB
+// SIZE a line, NAME as core asks for it), each fetched (GET /data/NAME)
+// into a file of the app's temporary directory before any data file is
+// read; until then core's asks wait (devwire_data_ready). The server out
+// of reach, or a file that fails: the bundle's.
 DW_DATA_MOST: int = 32;
 
 DW_DATA_NAME_MOST: int = 64;
@@ -106,14 +119,19 @@ devwire_data_ready(): bool {
     dw_data_state == DW_DATA_READY
 }
 
-// A request for path on the server, not waited for long: the app starts
-// at once when the server can't be reached.
-devwire_data_get(path: int) {
+// A request for path on the server (posting body, an NSData, unless it is
+// 0), not waited for long: the app starts at once when the server can't
+// be reached.
+devwire_data_get(path: int, body: int) {
     url: int = msg1(cls("NSURL"), sel("URLWithString:"), msg1(dw_url, sel("stringByAppendingString:"),
         path));
     request: int = if (url == 0) 0 else msg1(cls("NSMutableURLRequest"), sel("requestWithURL:"),
         url);
     if (request != 0) _t: int = msg_set_f(request, sel("setTimeoutInterval:"), 3.0f64);
+    if (request != 0 && body != 0) {
+        msg1(request, sel("setHTTPMethod:"), nsstring("POST"));
+        msg1(request, sel("setHTTPBody:"), body)
+    }
     task: int = if (request == 0) 0 else msg1(dw_session, sel("dataTaskWithRequest:"),
         request);
     if (task == 0) {
@@ -128,7 +146,11 @@ devwire_data_get(path: int) {
 devwire_data_list() {
     dw_data_state = DW_DATA_LISTING;
     dw_data_n = 0;
-    devwire_data_get(nsstring("/data"))
+    path: int = msg2(msg(cls("NSBundle"), sel("mainBundle")), sel("pathForResource:ofType:"),
+        nsstring("dev-data"), nsstring("txt"));
+    held: int = if (path == 0) 0 else msg1(cls("NSData"), sel("dataWithContentsOfFile:"),
+        path);
+    devwire_data_get(nsstring("/data"), held)
 }
 
 // The list come: its names kept, the first fetched.
@@ -167,7 +189,7 @@ devwire_data_next() {
     tb_str("/data/");
     k: int = dw_data_at;
     for i in 0..dw_data_name_n[k] tb_byte(dw_data_names[k * DW_DATA_NAME_MOST + i] as int);
-    devwire_data_get(tb_ns())
+    devwire_data_get(tb_ns(), 0)
 }
 
 // File dw_data_at come: written where it is read from, the next asked
@@ -284,6 +306,7 @@ devwire_lines(body: int) {
             dw_on = true;
             diag_on = true;
             set_idle_disabled(true);
+            devwire_frames_watched();
             note("bible: driven from the development server")
         }
         at: int = 0;
@@ -301,7 +324,7 @@ devwire_lines(body: int) {
     }
 }
 
-// One line: the app's (!screens, !close, !tap), else core's.
+// One line: the app's (!screens, !close, !back, !tap, !info), else core's.
 devwire_line(b: []i8, from: int, to: int) {
     if (devwire_line_is(b, from, to, "!screens")) {
         devwire_screens();
@@ -315,8 +338,20 @@ devwire_line(b: []i8, from: int, to: int) {
         dismiss_sheets();
         return
     }
+    if (devwire_line_is(b, from, to, "!back")) {
+        devwire_back();
+        return
+    }
+    if (to - from > 7 && devwire_line_is(b, from, from + 7, "!flick ")) {
+        devwire_flick(b, from + 7, to);
+        return
+    }
     if (to - from > 5 && devwire_line_is(b, from, from + 5, "!tap ")) {
-        devwire_tap(b, from + 5, to);
+        devwire_tap(b, from + 5, to, false);
+        return
+    }
+    if (to - from > 6 && devwire_line_is(b, from, from + 6, "!info ")) {
+        devwire_tap(b, from + 6, to, true);
         return
     }
     if (b[from] as int == 33) {
@@ -327,10 +362,27 @@ devwire_line(b: []i8, from: int, to: int) {
     to_core_end()
 }
 
+// `!back`: back a screen, as the bar's Back does: the top sheet's, else
+// the panel's.
+devwire_back() {
+    nav: int = top_presented();
+    if (nav == 0 || (msg1(nav, sel("isKindOfClass:"), cls("UINavigationController")) & 255) == 0) nav = bs_nav;
+    if (nav == 0 || msg(msg(nav, sel("viewControllers")), sel("count")) < 2) {
+        note("bible: driven: no screen to go back from");
+        return
+    }
+    _p: int = msg1(nav, sel("popViewControllerAnimated:"), 1)
+}
+
 // `!tap WORDS`: the first row (or toolbar button) of a screen shown, the
 // top of its navigation, whose title or spoken label begins with WORDS,
-// tapped as a finger would.
-devwire_tap(b: []i8, from: int, to: int) {
+// tapped as a finger would; `!info WORDS`, the first such row's ⓘ.
+devwire_tap(
+    b: []i8,
+    from: int,
+    to: int,
+    info: bool
+) {
     tb_n = 0;
     for i in from..to tb_byte(b[i] as int);
     words: int = keep(tb_ns());
@@ -341,15 +393,18 @@ devwire_tap(b: []i8, from: int, to: int) {
             sel("window")) != 0 && uk_ensure(k)) {
             for ri in 0..uk_ui.rows_n {
                 row: UiRow = uk_ui.rows[ri];
-                if (!row.disabled && (row.kind == UI_ITEM || row.kind == UI_BUTTON) && devwire_begins(uk_text(row.title),
+                if (!row.disabled && (row.kind == UI_ITEM || row.kind == UI_BUTTON) && (!info || row.info_action != 0) && devwire_begins(uk_text(row.title),
                     words)) {
                     release(words);
                     uk_nav = nav;
-                    uk_wire_act(uk_ids[k], row.action, row.arg, 0);
+                    uk_wire_act(uk_ids[k], if (info) row.info_action else row.action,
+                        row.arg, 0);
                     uk_effects();
                     return
                 }
             }
+            if (info)
+                continue;
             for ti in 0..uk_ui.tools_n {
                 tool: UiTool = uk_ui.tools[ti];
                 if (devwire_begins(uk_text(tool.title), words) || devwire_begins(uk_text(tool.label),
@@ -449,6 +504,131 @@ devwire_screens() {
     }
 }
 
+// ---- frames ----
+// While it is driven, each frame's interval watched: one much longer than
+// the screen's while the page or the panel's reader moves (a stall the eye
+// sees: a glide stopping, a stutter) written to the log, with which.
+DW_FRAME_LATE_MS: int = 50;
+
+// (Kept through a hot reload: a link made again each build would go on
+// calling every frame.)
+persistent dw_frame_link: int = 0;
+
+dw_frame_last: f64 = 0.0f64;
+
+devwire_frames_watched() {
+    if (dw_frame_link != 0) return;
+    dw_frame_link = keep(msg2(cls("CADisplayLink"), sel("displayLinkWithTarget:selector:"),
+        app_obj, sel("devwireFrame:")));
+    msg2(dw_frame_link, sel("addToRunLoop:forMode:"), msg(cls("NSRunLoop"), sel("mainRunLoop")),
+        l8_run_loop_common_modes())
+}
+
+devwire_frame(_self: int, _cmd: int, _link: int): int {
+    now: f64 = CACurrentMediaTime();
+    gap: int = ((now - dw_frame_last) * 1000.0f64) as int;
+    page: bool = reader_moving();
+    panel: bool = pr_table != 0 && touched(pr_table);
+    if (dw_frame_last > 0.0f64 && gap >= DW_FRAME_LATE_MS && (page || panel)) {
+        tb_n = 0;
+        tb_str("bible: frame late ms ");
+        tb_int(gap);
+        tb_str(if (page) " page moving" else " panel moving");
+        note_ns(tb_ns())
+    }
+    if (dw_glide_view != 0) {
+        if (dw_frame_last > 0.0f64 && gap >= DW_FRAME_LATE_MS) dw_glide_late = dw_glide_late + 1;
+        if (gap > dw_glide_worst) dw_glide_worst = gap;
+        devwire_glide_step(now)
+    }
+    dw_frame_last = now;
+    0
+}
+
+// ---- a flick ----
+// `!flick page DY`, `!flick panel DY`: the page, or the panel's reader,
+// moved as a finger's flick moves it: a drag begun, a glide DY points
+// down (negative: up) over DW_GLIDE_S, slowing as a glide does, frame by
+// frame, then ended; meanwhile it counts as moving by a finger. Its end
+// written to the log: how many frames were late, and the worst.
+DW_GLIDE_S: f64 = 1.2f64;
+
+dw_glide_view: int = 0;
+
+dw_glide_from: f64 = 0.0f64;
+
+dw_glide_by: f64 = 0.0f64;
+
+dw_glide_t0: f64 = 0.0f64;
+
+dw_glide_late: int = 0;
+
+dw_glide_worst: int = 0;
+
+// Whether scroll view sv is being flicked so.
+devwire_gliding(sv: int): bool {
+    sv != 0 && sv == dw_glide_view
+}
+
+devwire_flick(b: []i8, from: int, to: int) {
+    e: int = from;
+    while (e < to && b[e] as int != 32) e = e + 1;
+    panel: bool = devwire_line_is(b, from, e, "panel");
+    sv: int = if (panel) pr_table else table;
+    if (sv == 0 || dw_glide_view != 0) {
+        note("bible: driven: nothing to flick");
+        return
+    }
+    at: int = e;
+    while (at < to && b[at] as int == 32) at = at + 1;
+    up: bool = at < to && b[at] as int == 45;
+    if (up) at = at + 1;
+    dy: int = 0;
+    while (at < to && b[at] as int >= 48 && b[at] as int <= 57) {
+        dy = dy * 10 + b[at] as int - 48;
+        at = at + 1
+    }
+    _b: int = scroll_began(app_obj, 0, sv);
+    dw_glide_view = sv;
+    dw_glide_from = offset_y(sv);
+    dw_glide_by = (if (up) -dy else dy) as f64;
+    dw_glide_t0 = CACurrentMediaTime();
+    dw_glide_late = 0;
+    dw_glide_worst = 0
+}
+
+// The flick's place at time now (as a glide slows: fast, then gently), and
+// at its end, the glide ended.
+devwire_glide_step(now: f64) {
+    sv: int = dw_glide_view;
+    t: f64 = (now - dw_glide_t0) / DW_GLIDE_S;
+    done: bool = t >= 1.0f64;
+    if (done) t = 1.0f64;
+    u: f64 = 1.0f64 - t;
+    y: f64 = dw_glide_from + dw_glide_by * (1.0f64 - u * u * u);
+    l8_msg_hfa(hfa, sv, sel("contentSize"), 0, 0, 0);
+    most: f64 = hfa[1] + bottom_inset(sv) - view_height(sv);
+    if (y > most) y = most;
+    if (y < -top_inset(sv)) y = -top_inset(sv);
+    _o: int = msg_ff(sv, sel("setContentOffset:"), 0.0f64, y);
+    if (!done) return;
+    devwire_glide_end(sv)
+}
+
+// Scroll view sv's flick ended now, where it is (as a glide stopped).
+devwire_glide_end(sv: int) {
+    if (sv == 0 || sv != dw_glide_view) return;
+    dw_glide_view = 0;
+    _e: int = scroll_ended(app_obj, 0, sv);
+    tb_n = 0;
+    tb_str("bible: flick ended late ");
+    tb_int(dw_glide_late);
+    tb_str(" worst ms ");
+    tb_int(dw_glide_worst);
+    note_ns(tb_ns())
+}
+
 add_devwire_methods(app: int) {
-    add_method1(app, sel("devwireAgain:"), &devwire_again, "v@:@")
+    add_method1(app, sel("devwireAgain:"), &devwire_again, "v@:@");
+    add_method1(app, sel("devwireFrame:"), &devwire_frame, "v@:@")
 }

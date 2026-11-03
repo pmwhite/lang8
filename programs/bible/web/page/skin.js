@@ -490,7 +490,7 @@ const CUSTOM_SWATCHES = 6;
 const CUSTOM_FONT = 4;
 const CUSTOM_CARD = 11;
 // (Something coming, a download or a module being opened: its value is its
-// progress in thousandths, drawn as a bar in its number's place.)
+// progress in thousandths, drawn as a bar at its end.)
 const CUSTOM_DOWNLOAD = 7;
 
 function screenLine(w) {
@@ -2055,12 +2055,12 @@ const panel = {
       const bar = el("progress", "coming");
       bar.max = 1000;
       bar.value = Math.max(0, Math.min(1000, r.value));
-      if (r.detail) bar.setAttribute("aria-valuetext", r.detail);
+      bar.setAttribute("aria-valuetext", `${Math.floor(bar.value / 10)}%`);
       line.appendChild(bar);
     }
     if (r.trailing) line.appendChild(el("span", "trailing" + (r.flag("a") ? " accent" : ""), r.trailing));
     if (tappable) {
-      if (r.detail && r.flag("v") && r.custom !== CUSTOM_DOWNLOAD) line.appendChild(el("span", "value", r.detail));
+      if (r.detail && r.flag("v")) line.appendChild(el("span", "value", r.detail));
       const mark = r.acc === "check" || r.acc === "done" ? "check" : r.acc === "more" ? "chevron-right" : r.acc === "link" ? "arrow-up-right" : "";
       if (mark) {
         const a = el("span", `acc acc-${r.acc}`);
@@ -2525,7 +2525,7 @@ const SYMBOLS = {
   bookmark: "bookmark", "bookmark.fill": "bookmark", "books.vertical": "library", brain: "brain",
   calendar: "calendar", "character.book.closed": "book-a", "doc.on.doc": "copy",
   "note.text": "sticky-note", "text.quote": "text-quote", "clock.arrow.circlepath": "history",
-  globe: "globe", "arrow.right.circle": "circle-arrow-right", "arrow.right.circle.fill": "circle-arrow-right",
+  globe: "globe", "arrow.right.circle": "circle-arrow-right", "arrow.down.circle": "circle-arrow-down", "arrow.right.circle.fill": "circle-arrow-right",
   "arrow.triangle.branch": "split", "arrow.up.arrow.down": "arrow-up-down", "checkmark.circle": "circle-check",
   "circle.slash": "circle-slash", "hand.tap": "pointer", "info.circle": "info", "textformat.abc": "case-sensitive",
   "textformat.size": "a-large-small", "text.book.closed": "book-text", trash: "trash-2",

@@ -401,7 +401,12 @@ Other lines from core:
 | `refill ID FADE` | screen ID made again as its field is typed in (FADE 1: a cross-fade) |
 | `retext ID`, `blur ID` | the fields to show the screen's words again (its search field's, and a `field` row's detail, though it is being typed in); the keyboard put away |
 | `reader N` | the reader has N chapters |
-| `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA`, `verse V A B`, `link A B KIND ARG` (a footnote's mark, KIND 0, ARG its place; a reference, 1, ARG the reference; a word of the original's, 2), `gloss A B` (a word of the original glossed under its paragraph) and `mark V HEX BOOKMARK NOTE` lines (a verse's highlight's color, `-` none; bookmarked; noted; verse 0 the chapter's own note, marked after its label), then `end`. A `layout ORIG RTL VERSELINES OPENER LABEL` line after the first says whether the chapter is the original's, set right to left, a verse a line, and where its opener and its label end (UTF-16; 0 none); a `name` TITLE line names it as the bar does. A skin ignores the lines it does not know |
+| `chapter C` TEXT | chapter C's text; then `span A B STYLE PARA`, `verse V A B`, `link A B KIND ARG` (a footnote's mark, KIND 0, ARG its place; a reference, 1, ARG the reference; a word of the original's, 2), `gloss A B` (a word of the original glossed under its paragraph) and `mark V HEX BOOKMARK NOTE` lines (a verse's highlight's color, `-` none; bookmarked; noted; verse 0 the chapter's own note, marked after its label), then `end`. In a commentary's chapter (`besidechapter`) the `verse` lines
+are its comments' verses in order, and may name a verse again where its
+commentator goes through the verses again (notes after an exposition): the
+first is where a jump to the verse goes; a reader following the page goes to
+the nearest. A `coming` line says the chapter only holds its place until it
+has been read. A `layout ORIG RTL VERSELINES OPENER LABEL` line after the first says whether the chapter is the original's, set right to left, a verse a line, and where its opener and its label end (UTF-16; 0 none); a `name` TITLE line names it as the bar does. A skin ignores the lines it does not know |
 | `jump C V`, `goto C V`, `relayout` | the reader moved; the screens away, then moved; every chapter to be asked for again |
 | `besidechapter C` TEXT, `besidejump C V`, `besiderelayout`, `besidechapterready C` | the panel's reader's (a `reader` screen's): a chapter of what it reads, as `chapter`'s lines (a commentary's comments not here yet: a line saying so, the chapter sent again when they come, then `besidechapterready`, its row to be made again); moved to C:V (linked, following the page); every chapter to be asked for again |
 | `highlights SWATCH WASH STRENGTH...`, `themes DAY NIGHT PAGE INK...`, then `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT THEME CHOSEN HAIRLINE SELECTION SHEET CELL` | all a skin needs of look.l8. `highlights`: each of the five by the color its `mark` lines name it with, and the wash a highlighted verse shows now (STRENGTH, like GLOSS, HAIRLINE and SELECTION, in thousandths). `themes`: the themes Auto follows by day and at night, then each theme's page and ink, in the Theme setting's order (for its swatches). `look`: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument); THEME the theme it is and CHOSEN the one chosen (0 Auto), of `themes`; HAIRLINE a rule's strength (RULE's color), SELECTION a selection's (ACCENT's); SHEET and CELL a sheet's color and its rows' (`-`: the platform's grouped colors) |
@@ -537,7 +542,7 @@ Search (the ESV's results too: the iPhone asks its server, core keeps and
 shows them), History, the reading settings, Glosses, Voice and the
 voices, Downloads, the Manual's list, Acknowledgements and Changes, Reading
 Plans, a plan's days and its Daily Reminder, A Chapter a Day, Begin At, New
-Ribbon and a ribbon's screen, the Bookshelf and Bibles and Books, the Library and Memory (Add Passage, a
+Ribbon and a ribbon's screen, the Bookshelf, the Library and Memory (Add Passage, a
 passage, its versions, Memory's reminder), Compare, a word's study, its
 grammar and concordance, the language page and what it pushes (Sounds
 Written As, the Alphabet, Your Words, Add Words and its preview, Verses You

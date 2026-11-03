@@ -507,12 +507,13 @@ comment_has_sections(data: []i8, comment: CommentSpan): bool {
 
 // ---- as a reader's chapter ----
 // A chapter's comments laid out as a reader's chapter, into ctx: its
-// number, then each comment, headed by its verses ("Verses 14-16") unless
-// it heads its parts itself, its words in the reader's styles (a note's in
-// brackets); each comment a verse of its own, keyed by its first verse,
-// from its heading to its end, and each verse its labels turn to too. A
-// comment that doesn't fit whole is taken out again, and a line says the
-// rest isn't shown: never cut in its words.
+// number (and a line saying it has none, if none), then each comment,
+// headed by its verses ("Verses 14-16") unless it heads its parts itself,
+// its words in the reader's styles (a note's in brackets); each comment a
+// verse of its own, keyed by its first verse, from its heading to its
+// end, and each verse its labels turn to too. A comment that doesn't fit
+// whole is taken out again, and a line says the rest isn't shown: never
+// cut in its words.
 lay_comment_records(data: []i8, c: int, ctx: *ChapterLayout) {
     layout_begin(ctx);
     lay_begin(ctx, STYLE_NUMERAL, PARA_CENTER, 0);
@@ -520,16 +521,25 @@ lay_comment_records(data: []i8, c: int, ctx: *ChapterLayout) {
     lay_int(ctx, ch_num[c]);
     lay_byte(ctx, 10);
     comment: CommentSpan = first_comment(data);
+    // (A chapter it says nothing on: so, not its numeral alone.)
+    if (comment.from < 0) {
+        lay_begin(ctx, STYLE_REF, PARA_CENTER, 0);
+        lay_str(ctx, "No comments on this chapter.");
+        lay_byte(ctx, 10)
+    }
     while (comment.from >= 0) {
         out_n: int = ctx.out_n;
         runs: int = ctx.runs;
         verses: int = ctx.verse_count;
-        lay_comment(data, comment, ctx);
+        cut: bool = lay_comment(data, comment, ctx);
         if (shelf_layout_full(ctx)) {
             ctx.out_n = out_n;
             ctx.runs = runs;
             ctx.verse_count = verses;
             if (runs > 0) ctx.run_end[runs - 1] = out_n;
+            cut = true
+        }
+        if (cut) {
             lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
             lay_str(ctx, "The rest of this chapter\â\€\™s commentary is too long to show here.");
             lay_byte(ctx, 10);
@@ -539,7 +549,20 @@ lay_comment_records(data: []i8, c: int, ctx: *ChapterLayout) {
     }
 }
 
-lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout) {
+// Whether it was cut short: at a paragraph's end, nearly too long for the
+// chapter (a comment as long as a book, as on Psalm 119).
+//
+// Its verses (`V` records) go on through it; a commentator may go through
+// them again after (Spurgeon's explanatory notes and hints after his
+// exposition, each "Verse 3." in turn), which the folio's records don't
+// mark: a paragraph labelled with a verse the comment has passed is a verse
+// of its own too, again (not the same one twice in a row: several notes on
+// one verse). So a chapter's verses can be numbered 1 to 29 and then from 1
+// again, each where it is.
+lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout): bool {
+    // (The furthest verse marked, and the one last begun.)
+    furthest: int = comment.from;
+    last: int = comment.from;
     if (comment.from > 0) {
         verse_open(ctx, comment.from, comment.from);
         verse_here(ctx)
@@ -552,10 +575,15 @@ lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout) {
         lay_byte(ctx, 10)
     }
     line_open: bool = false;
+    cut: bool = false;
     at: int = record_line(data, comment.start).next;
     while (at < comment.end) {
         line: RecordLine = record_line(data, at);
         kind: i8 = data[line.from];
+        if ((kind == 'P' || kind == 'S' || kind == 's') && shelf_layout_nearly_full(ctx)) {
+            cut = true;
+            break
+        }
         if (kind == 'P') line_open = shelf_lay_line_end(ctx, line_open) else if (kind == 'S' || kind == 's') {
             line_open = shelf_lay_line_end(ctx, line_open);
             lay_begin(ctx, STYLE_HEAD, PARA_PROSE, 0);
@@ -565,7 +593,9 @@ lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout) {
             n: int = record_number(data, line.from + 1, line.to);
             verse_on(ctx);
             verse_open(ctx, n, n);
-            verse_here(ctx)
+            verse_here(ctx);
+            if (n > furthest) furthest = n;
+            last = n
         } else if (kind == 'F') {
             lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
             lay_str(ctx, " [");
@@ -579,6 +609,16 @@ lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout) {
             for k in tab + 1..line.to lay_byte(ctx, data[k] as int);
             line_open = true
         } else if (kind == 'T' || kind == 'I' || kind == 'G' || kind == 'U' || kind == 'W' || kind == 'J') {
+            // (A paragraph's first words labelling a verse passed: again.)
+            if (!line_open && comment.from > 0) {
+                label: int = verse_label_at(data, line.from + 1, line.to);
+                if (label >= comment.from && label <= furthest && label <= comment.through && label != last) {
+                    verse_on(ctx);
+                    verse_open(ctx, label, label);
+                    verse_here(ctx);
+                    last = label
+                }
+            }
             lay_begin(ctx, record_style(kind), PARA_PROSE, 0);
             for k in line.from + 1..line.to lay_byte(ctx, data[k] as int);
             line_open = true
@@ -586,7 +626,9 @@ lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout) {
         at = line.next
     }
     _closed: bool = shelf_lay_line_end(ctx, line_open);
-    if (comment.from > 0) verse_on(ctx)
+    // (Cut short, the verse open ends here too: a verse must end.)
+    if (comment.from > 0 || cut && ctx.verse_count > 0 && ctx.verse_end[ctx.verse_count - 1] < 0) verse_on(ctx);
+    cut
 }
 
 // The reader's style for a record of words.
@@ -798,6 +840,30 @@ shelf_lay_commentary(slot: int, c: int, ctx: *ChapterLayout): bool {
         }
     }
     ready
+}
+
+// Chapter c of the commentary open in slot asked for ahead of its being
+// read: its blocks read from the kept file (once the bookshelf rests), so
+// that a reader coming to it lays it out at once, not a line saying it is
+// coming. Whether it is held already (or has nothing to read).
+shelf_commentary_ahead(slot: int, c: int): bool {
+    if (c < 0 || c >= chapters || !shelf_open_is(SHELF_USE_STUDY, slot)) return true;
+    held: bool = true;
+    borrow shelf_open[SHELF_USE_STUDY] as open {
+        match open.reader {
+            Document d -> {
+                division: int = folio_chapter_division(d.folio, c);
+                if (division >= 0) {
+                    start: int = folio::folio_division_start(d.folio, division);
+                    end: int = folio::folio_division_end(d.folio, division);
+                    if (end > start) held = shelf_span_ready(slot, folio_range_span(d.folio,
+                        start, end))
+                }
+            }
+            _ -> { }
+        }
+    }
+    held
 }
 
 // ---- a dictionary's entries, and one entry ----

@@ -199,20 +199,29 @@ node web/devctl.mjs log
 
 Started with `--data DIR` (`node web/dev.mjs --data programs/bible/data --
 programs/bible/ios/app.l8 -o .build/dev/bible-ios.wasm`), the server also
-gives the data files changed under DIR since it started: `GET /data` lists
-them and `GET /data/PATH` is one. Smooth Bible's hot reload build reads
-those in place of its bundle's copies before it reads any data file, and a
-change to one is a new build, so a course or the Manual reloads without a
-new app. Data the server doesn't list (or a server out of reach after
-three seconds) comes from the bundle.
+gives the data files under DIR that differ from an app's bundle's copies:
+the app posts what its bundle holds (`dev-data.txt`, each file's name and
+hash, written by `tools/ios/hot.sh`) to `/data`, which lists the files
+that differ, and `GET /data/PATH` is one. A bundle without `dev-data.txt`
+asks `GET /data`, the files changed since the server started. Smooth
+Bible's hot reload build reads those in place of its bundle's copies
+before it reads any data file, and a change to one is a new build, so a
+course or the Manual reloads without a new app. Data the server doesn't
+list (or a server out of reach after three seconds) comes from the bundle.
 
 `wire` lines go to the app rather than the host: a Smooth Bible build for
 hot reload (`programs/bible/ios/devwire.l8`) long-polls the server's
 `/wire` and gives each line to core as its skin would (`select C V`,
 `trayact ACTION 0`, `act ID ACTION ARG VALUE`; `|` separates several;
-`!screens` writes the screens shown to the log, and `!close` closes the
-sheets shown, as their Done does). While it is connected the
-app keeps the screen on and writes its diagnostics. A build without a
+`!screens` writes the screens shown to the log, `!close` closes the
+sheets shown, as their Done does, `!back` goes back a screen (the top
+sheet's, else the panel's), `!tap WORDS` taps the row or button whose
+title begins with WORDS, `!info WORDS` that row's ⓘ, `!flick page DY` or
+`!flick panel DY` flicks the page or the panel's reader DY points, and
+`!state` writes the wire's flags). While it is connected the app keeps the
+screen on and writes its diagnostics, among them each frame drawn late
+while the page or panel moves (`frame late ms N`) and, at a flick's end,
+how many were (`flick ended late N worst ms M`). A build without a
 server set asks nothing.
 
 These commands use `http://localhost:8777` by default (`--server URL`
@@ -243,4 +252,12 @@ arena and unmaps its memory. The initial instance can remain suspended inside
 reload sessions retain the current instance and that initial suspended instance,
 plus a candidate during replacement. There is no process-heap threshold requiring
 a restart after a fixed number of reloads. External UIKit resources still need
-the program's normal explicit cleanup.
+the program's normal explicit cleanup: what the old build's ordinary globals
+retained is never released, since those globals are gone with its memory.
+Smooth Bible's `reload()` (`programs/bible/ios/app.l8`) empties the old
+build's views before it makes its own (their text and drawing let go, their
+data sources and delegates no longer the app), and keeps what must outlive
+a build (its run-loop display link, URL session and reachability watcher)
+in `persistent` globals; each reload writes `memory available MB` to the log.
+Without that, the old screens' drawing used up the address space for a new
+instance after about 35 reloads ("no memory for the build").

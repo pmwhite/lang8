@@ -409,18 +409,23 @@ row_y(c: int): f64 {
 }
 
 // The rect of UTF-16 units k to k + n of text view tv (in its own
-// coordinates): hfa.
+// coordinates): hfa. Not laid out yet: laid out, and asked again (not
+// through the layout manager, which would turn the view to the older text
+// system).
 range_rect(tv: int, k: int, n: int): bool {
+    if (range_rect_if_laid_out(tv, k, n)) return true;
+    msg(tv, sel("layoutIfNeeded"));
+    range_rect_if_laid_out(tv, k, n)
+}
+
+// The same, only if the view has laid out those units already (laying out
+// a long chapter takes a while: not while it moves).
+range_rect_if_laid_out(tv: int, k: int, n: int): bool {
     begin: int = msg(tv, sel("beginningOfDocument"));
     a: int = msg2(tv, sel("positionFromPosition:offset:"), begin, k);
     b: int = msg2(tv, sel("positionFromPosition:offset:"), begin, k + n);
     if (a == 0 || b == 0) return false;
     range: int = msg2(tv, sel("textRangeFromPosition:toPosition:"), a, b);
-    l8_msg_hfa(hfa, tv, sel("firstRectForRange:"), range, 0, 0);
-    if (hfa[3] > 0.0f64 && hfa[1] < 1.0e9f64) return true;
-    // (Not laid out yet: laid out, and asked again. Not the layout
-    // manager, which would turn the view to the older text system.)
-    msg(tv, sel("layoutIfNeeded"));
     l8_msg_hfa(hfa, tv, sel("firstRectForRange:"), range, 0, 0);
     hfa[3] > 0.0f64 && hfa[1] < 1.0e9f64
 }
@@ -590,7 +595,7 @@ resting: bool = false;
 
 reader_moving(): bool {
     if (table == 0) return false;
-    !resting && ((msg(table, sel("isTracking")) & 255) != 0 || (msg(table, sel("isDecelerating")) & 255) != 0)
+    !resting && ((msg(table, sel("isTracking")) & 255) != 0 || (msg(table, sel("isDecelerating")) & 255) != 0 || devwire_gliding(table))
 }
 
 offset_writes_moving: int = 0;
@@ -637,6 +642,28 @@ set_offset_animated(y: f64) {
     if (to > most) to = most;
     if (to < -top_inset(table)) to = -top_inset(table);
     msg_ff1(table, sel("setContentOffset:animated:"), 0.0f64, to, 1)
+}
+
+// Where a verse is, down the reader's table, and whether as exactly as
+// verse_y tells it (else nearly: its chapter not laid out that far).
+type VerseY = {
+    y: f64;
+    exact: bool
+}
+
+// Where verse v of chapter c is, as nearly as can be told without laying
+// out its chapter: exactly if it is laid out, else as far down its row as
+// it is through its text.
+verse_y_soon(c: int, v: int): VerseY {
+    y: f64 = row_y(c);
+    h: f64 = hfa[3];
+    tv: int = view_of(c);
+    k: int = if (v > 0) verse_unit(c, v) else -1;
+    if (tv == 0 || k < 0) return VerseY { y: y, exact: true };
+    if (range_rect_if_laid_out(tv, k, 1)) return VerseY { y: y + hfa[1], exact: true };
+    s: int = rs_slot(c);
+    n: int = if (s < 0 || rs_text[s] == 0) 0 else msg(rs_text[s], sel("length"));
+    VerseY { y: if (n <= 0) y else y + h * k as f64 / n as f64, exact: false }
 }
 
 // Where verse v of chapter c begins, down from the table's top (or its
@@ -859,7 +886,7 @@ scrolled(_self: int, _cmd: int, sv: int): int {
 }
 
 scroll_ended(_self: int, _cmd: int, sv: int): int {
-    if (is_panel_reader(sv)) pr_place_tell();
+    if (is_panel_reader(sv)) pr_panel_rested();
     if (is_reader(sv)) {
         bar_settle();
         title_settle();
@@ -879,6 +906,7 @@ reader_rested() {
     } else if (relayout_due) relayout();
     if (wk_due) width_relayout();
     rest_tell();
+    pr_page_rested();
     resting = false
 }
 
@@ -893,6 +921,7 @@ scroll_dragged(
         title_settle();
         reader_rested()
     }
+    if (is_panel_reader(sv) && (decelerate & 255) == 0) pr_panel_rested();
     0
 }
 
@@ -1257,14 +1286,51 @@ app_launched(
 // Hot reload (RELOAD.md): this build's app in the window the old build
 // made, core begun again on what is kept (each data file read again into
 // this build's datasets). Its classes are the first build's (class_make),
-// a method new to one added.
+// a method new to one added. The old build's screens are emptied first:
+// its globals, which kept them, are gone with it, so its views would live
+// on with their text and drawing (each reload's, until there was no room
+// for another build).
 reload() {
     if (window == 0 || app_obj == 0) return;
     make_classes();
+    old: int = msg(window, sel("rootViewController"));
+    if (old != 0) {
+        shown: int = msg(old, sel("presentedViewController"));
+        while (shown != 0) {
+            reload_emptied(msg(shown, sel("view")));
+            shown = msg(shown, sel("presentedViewController"))
+        }
+        reload_emptied(msg(old, sel("view")))
+    }
     msg1(window, sel("setRootViewController:"), 0);
     build_ui(scene_obj);
     platform_begin();
     devwire_begin()
+}
+
+// View v and those in it let go of the text they show, and of this app as
+// their data source and delegate (so that they ask this build nothing).
+// They stay where they are, UIKit's own views among them, to be let go as
+// UIKit lets go of their controllers.
+reload_emptied(v: int) {
+    if (v == 0) return;
+    subs: int = msg(msg(v, sel("subviews")), sel("copy"));
+    for i in 0..msg(subs, sel("count")) reload_emptied(msg1(subs, sel("objectAtIndex:"),
+        i));
+    release(subs);
+    if (is_a(v, "UITableView") && msg(v, sel("dataSource")) == app_obj) msg1(v, sel("setDataSource:"),
+        0);
+    if (is_a(v, "UIScrollView") && msg(v, sel("delegate")) == app_obj) msg1(v, sel("setDelegate:"),
+        0);
+    if (is_a(v, "UITextView")) msg1(v, sel("setAttributedText:"), msg(make("NSAttributedString"),
+        sel("autorelease")));
+    // (What it has drawn let go: a material's, a screen's size, most of all.)
+    if (is_a(v, "UIVisualEffectView")) msg1(v, sel("setEffect:"), 0);
+    msg1(msg(v, sel("layer")), sel("setContents:"), 0)
+}
+
+is_a(object: int, name: str): bool {
+    (msg1(object, sel("isKindOfClass:"), cls(name)) & 255) != 0
 }
 
 // The app's one scene, connected: its window, the chapters in it.

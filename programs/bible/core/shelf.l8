@@ -372,7 +372,8 @@ shelf_text_of(i: int): int {
     TEXT_SHELF_FIRST + shelf_slot_at(i)
 }
 
-// Item i's form, kept in shelf.tsv.
+// Item i's form, kept in shelf.tsv (made as part of its download: said
+// ready to read).
 shelf_save_form(i: int, form: ShelfForm) {
     if (shelf_list != null) {
         borrow shelf_list as list {
@@ -380,7 +381,14 @@ shelf_save_form(i: int, form: ShelfForm) {
         }
     }
     shelf_format(-1);
-    shelf_keep_fbuf()
+    shelf_keep_fbuf();
+    if (shelf_slot_at(i) == shelf_making_announced) {
+        shelf_making_announced = -1;
+        match form {
+            Packaged -> { }
+            _ -> shelf_toast_ready(i)
+        }
+    }
 }
 
 shelf_set_broken(i: int, broken: bool) {
@@ -1031,8 +1039,8 @@ shelf_fetched(id: int, status: int, bytes: int) {
             if (i >= 0) {
                 if (ok) {
                     shelf_save_with(i, true, bytes);
-                    shelf_toast_ready(i);
-                    shelf_prepare(i)
+                    shelf_to_make_add(p.slot);
+                    shelf_prepare_next()
                 } else {
                     shelf_failed_slot = p.slot;
                     shelf_failed_offline = status == 0
@@ -1192,6 +1200,7 @@ shelf_remove(i: int) {
     if (pref_get("studyCommentary") == slot + 1) set_pref("studyCommentary", 0);
     sk_save();
     shelf_pump();
+    shelf_prepare_next();
     shelf_screens_changed();
     sk_update_all()
 }
@@ -1447,13 +1456,15 @@ shelf_work_step() {
 }
 
 // How far it has come (thousandths): the screens that show it made again
-// when it shows a percent more.
+// when it shows a percent more. (Never less: a work's measure of itself
+// may step back a little, as a large block's decoding gives way to the
+// comments made from it.)
 shelf_work_shown(done: int) {
-    if (done / 10 == shelf_work_done / 10) return;
+    if (done / 10 <= shelf_work_done / 10) return;
     shelf_work_done = done;
     for k in 0..sk_n {
         kind: int = sk_kinds[k];
-        if (kind == SCR_SHELF || kind == SCR_SHELF_ITEM || kind == SCR_SHELF_COMMENTARY || kind == SCR_SHELF_ENTRIES || kind == SCR_SHELF_ENTRY || kind == SCR_SHELF_BOOK || kind == SCR_VERSE_STUDY) {
+        if (kind == SCR_SHELF_BROWSE || kind == SCR_SHELF_ITEM || kind == SCR_SHELF_COMMENTARY || kind == SCR_SHELF_ENTRIES || kind == SCR_SHELF_ENTRY || kind == SCR_SHELF_BOOK || kind == SCR_VERSE_STUDY) {
             sk_build(k);
             ui_effect("update", sk_ids[k], -1)
         }
@@ -1467,19 +1478,97 @@ shelf_work_rests() {
     t: int = shelf_text_waiting;
     shelf_text_waiting = -1;
     if (t >= 0) shelf_ask_text(t);
-    shelf_open_settled()
+    shelf_open_settled();
+    shelf_making_announced = -1;
+    shelf_prepare_next()
 }
 
-// A module downloaded: made (a Bible a version, any other a folio) now, if
-// the bookshelf rests, so that it opens quickly; else when it is first
-// opened.
-shelf_prepare(i: int) {
-    if (shelf_busy() || !shelf_ready_at(i)) return;
+// ---- a module made as it downloads ----
+// A module downloaded is made (a Bible a version, any other a folio) as
+// part of its download: shown coming until it is made, then said ready in
+// a toast, so that it opens quickly. Those downloaded this session wait
+// here (their slots, in the order they came) while the bookshelf is busy,
+// and are made one after another as it rests. (Not across launches: one
+// that couldn't be made isn't tried each time the app opens; it is made
+// when it is opened. So is one downloaded while SHELF_TO_MAKE_MOST wait.)
+SHELF_TO_MAKE_MOST: int = 32;
+
+shelf_to_make: []int = new int[SHELF_TO_MAKE_MOST](0);
+
+shelf_to_make_n: int = 0;
+
+// The slot being made as part of its download (-1: none): said ready once
+// it is made.
+shelf_making_announced: int = -1;
+
+// Of a download's progress, the share that fetching its package is (the
+// rest: making it), in thousandths.
+SHELF_DOWNLOAD_SHARE: int = 250;
+
+shelf_to_make_add(slot: int) {
+    if (shelf_to_make_has(slot) || shelf_to_make_n == SHELF_TO_MAKE_MOST) return;
+    shelf_to_make[shelf_to_make_n] = slot;
+    shelf_to_make_n = shelf_to_make_n + 1
+}
+
+shelf_to_make_has(slot: int): bool {
+    for k in 0..shelf_to_make_n
+        if (shelf_to_make[k] == slot) return true;
+    false
+}
+
+// The first slot waiting taken from the queue (-1: none).
+shelf_to_make_take(): int {
+    if (shelf_to_make_n == 0) return -1;
+    slot: int = shelf_to_make[0];
+    for k in 1..shelf_to_make_n shelf_to_make[k - 1] = shelf_to_make[k];
+    shelf_to_make_n = shelf_to_make_n - 1;
+    slot
+}
+
+// Whether slot is being made now (a Bible a version, or a folio).
+shelf_making_slot(slot: int): bool {
+    match shelf_work {
+        MakingBible w -> w.slot == slot;
+        MakingDocument w -> w.slot == slot;
+        _ -> false
+    }
+}
+
+// Whether item i is still coming: downloading or waiting to, or
+// downloaded and being made (or waiting its turn) as part of its download.
+shelf_coming_at(i: int): bool {
+    if (i < 0 || i >= shelf_count()) return false;
+    if (!shelf_ready_at(i) || shelf_broken_at(i)) return !shelf_ready_at(i);
+    slot: int = shelf_slot_at(i);
     match shelf_form_at(i) {
-        Packaged -> {
-            if (shelf_kind_at(i) == SHELF_KIND_BIBLE) shelf_bible_make(i, shelf_text_of(i)) else shelf_document_make(i)
+        Packaged -> shelf_to_make_has(slot) || shelf_making_slot(slot) && shelf_making_announced == slot;
+        _ -> false
+    }
+}
+
+// Whether item i is here to read: downloaded, and made if it was
+// downloaded this session.
+shelf_here_at(i: int): bool {
+    shelf_ready_at(i) && !shelf_coming_at(i)
+}
+
+// The next module downloaded and waiting begun being made, if the
+// bookshelf rests (those removed, broken or made already let go).
+shelf_prepare_next() {
+    while (!shelf_busy() && shelf_to_make_n > 0) {
+        slot: int = shelf_to_make_take();
+        i: int = shelf_find_slot(slot);
+        if (i >= 0 && shelf_ready_at(i) && !shelf_broken_at(i)) {
+            match shelf_form_at(i) {
+                Packaged -> {
+                    shelf_making_announced = slot;
+                    if (shelf_kind_at(i) == SHELF_KIND_BIBLE) shelf_bible_make(i,
+                        shelf_text_of(i)) else shelf_document_make(i)
+                }
+                _ -> { }
+            }
         }
-        _ -> { }
     }
 }
 
@@ -1934,7 +2023,9 @@ shelf_open_is(use: int, slot: int): bool {
 // The spans of open modules' text files last read (a commentary's folio's
 // blocks holding a chapter; a dictionary's block; a book's part), each in
 // an arena of its own: a few, so that screens over one another each keep
-// theirs, the one used longest ago let go for the next wanted.
+// theirs and a commentary read beside the page has the chapters on either
+// side of its reader's read ahead, the one used longest ago let go for the
+// next wanted.
 type HeldText = {
     slot: int;
     ending: str;
@@ -1946,7 +2037,7 @@ type HeldText = {
     failed: bool
 }
 
-SHELF_HELD_MOST: int = 4;
+SHELF_HELD_MOST: int = 6;
 
 shelf_held: []?owned *HeldText = new ?owned *HeldText[SHELF_HELD_MOST](null);
 
