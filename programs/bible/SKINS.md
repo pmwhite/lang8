@@ -49,8 +49,9 @@ a concrete implementation: `web/main.l8` (the platform) and
   (`kp_name`) read into `fbuf`, written from it, added to, deleted
   (`core/kept.l8` names them and says what goes in each).
 - `host_io = HostIO { ask, http, file, fetch, read_kept, read_kept_range, keep, say }`: a data file asked
-  for by name (the site's `data/` names: `bsb` ... `ylt`, `orig.txt`,
-  `lang/*`, `help.txt`, `xrefs.bin`, `mhcc.txt`, `audio/*.tim`,
+  for by name (the site's `data/` names: `bsb.folio` ... `ylt.folio`,
+  `orig.folio`,
+  `lang/*`, `help.txt`, `xrefs.bin`, `mhcc.folio`, `audio/*.tim`,
   `audio/henson.paths`), a GET, a file or answer's bytes, a recording
   fetched into a kept file, lines to the skin. `fetch` (a GET into the
   kept file named, written whole only when the answer is 200, and kept out
@@ -580,7 +581,7 @@ end), Day Done.
 
 Since 2026-10-22 its host is core's (`core/host.l8`), as the web's is: its
 L8 (`android/main.l8`) is only the platform's primitives, read from the
-app's files (a version asked as `bsb` is `bsb.txt`), the kept files there,
+app's files (a version asked as `bsb.folio` is that folio), the kept files there,
 and a GET made by the Java side (`http_get ID URL` to it; it writes the
 body to the files' `http/ID` and says `http ID STATUS SIZE`); it sends
 `api https://smoothbible.com/api/v1/` and waits for `ready` before
@@ -640,7 +641,8 @@ Core runs in WebAssembly (`web/main.l8`, built with `l8 wasm --async
 bw_wait`): its host's loop waits on the page (`bw_wait`) as Android's
 waits for its Java side, so what core keeps is made outside any callback.
 The host asks the page for the data files by id (`bw_ask`: the site's
-`data/HASH/NAME.gz`, each the page's fetch, given back as `got ID SIZE`),
+`data/HASH/NAME`, a folio as it is and any other file gzipped as
+`NAME.gz`, each the page's fetch, given back as `got ID SIZE`),
 reads the reader's version and the plans first, then what is kept, and
 says `ready`; the language data comes after, and Study appears once it
 has. What is kept is `core/kept.l8`'s files, a key each in the

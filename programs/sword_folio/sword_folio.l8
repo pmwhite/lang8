@@ -1,0 +1,1020 @@
+tag sword_folio_internal;
+
+use_tag std, sword, folio, builder;
+
+// SWORD modules made into folios (programs/folio): a commentary's comments
+// as records, a chapter at a time. See README.md for the contract.
+import "../sword/sword.l8";
+
+import "../folio/folio.l8";
+
+import "../builder/builder.l8";
+
+// ---- books ----
+// The books SWORD's versifications hold, by OSIS name, and the USFM code
+// each is keyed by in a folio (ADE and ENO, which USFM lacks, are this
+// library's).
+book_osis_names: []str = ["Gen", "Exod", "Lev", "Num", "Deut", "Josh", "Judg", "Ruth",
+    "1Sam", "2Sam", "1Kgs", "2Kgs", "1Chr", "2Chr", "Ezra", "Neh", "Esth", "Job",
+    "Ps", "Prov", "Eccl", "Song", "Isa", "Jer", "Lam", "Ezek", "Dan", "Hos", "Joel",
+    "Amos", "Obad", "Jonah", "Mic", "Nah", "Hab", "Zeph", "Hag", "Zech", "Mal", "Matt",
+    "Mark", "Luke", "John", "Acts", "Rom", "1Cor", "2Cor", "Gal", "Eph", "Phil", "Col",
+    "1Thess", "2Thess", "1Tim", "2Tim", "Titus", "Phlm", "Heb", "Jas", "1Pet", "2Pet",
+    "1John", "2John", "3John", "Jude", "Rev", "Tob", "Jdt", "EsthGr", "AddEsth", "Wis",
+    "Sir", "Bar", "EpJer", "PrAzar", "Sus", "Bel", "AddDan", "1Macc", "2Macc", "3Macc",
+    "4Macc", "PrMan", "1Esd", "2Esd", "AddPs", "Odes", "PssSol", "EpLao", "1En"];
+
+book_usfm_codes: []str = ["GEN", "EXO", "LEV", "NUM", "DEU", "JOS", "JDG", "RUT",
+    "1SA", "2SA", "1KI", "2KI", "1CH", "2CH", "EZR", "NEH", "EST", "JOB", "PSA", "PRO",
+    "ECC", "SNG", "ISA", "JER", "LAM", "EZK", "DAN", "HOS", "JOL", "AMO", "OBA", "JON",
+    "MIC", "NAM", "HAB", "ZEP", "HAG", "ZEC", "MAL", "MAT", "MRK", "LUK", "JHN", "ACT",
+    "ROM", "1CO", "2CO", "GAL", "EPH", "PHP", "COL", "1TH", "2TH", "1TI", "2TI", "TIT",
+    "PHM", "HEB", "JAS", "1PE", "2PE", "1JN", "2JN", "3JN", "JUD", "REV", "TOB", "JDT",
+    "ESG", "ADE", "WIS", "SIR", "BAR", "LJE", "S3Y", "SUS", "BEL", "DAG", "1MA", "2MA",
+    "3MA", "4MA", "MAN", "1ES", "2ES", "PS2", "ODA", "PSS", "LAO", "ENO"];
+
+// The USFM code of the book whose OSIS name is osis ("" if it is none of
+// SWORD's).
+tag sword_folio
+book_usfm_code(osis: str): str {
+    for k in 0..len(book_osis_names) {
+        if (book_osis_names[k] == osis) return book_usfm_codes[k]
+    }
+    ""
+}
+
+// ---- metadata ----
+// What the folio says of the module it is made of (its values' tabs and
+// line ends as spaces).
+tag sword_folio
+module_folio_meta(writer: *FolioWriter@new, info: *ModuleInfo) raises FolioError {
+    // (kind: what a reader makes of it: chapters, entries or parts; what:
+    // what SWORD calls it.)
+    folio_meta(writer, "kind", match info.storage {
+        ByVerse _ -> if (info.kind == ModuleKind.Bible) "bible" else "commentary";
+        ByKey _ -> "dictionary";
+        _ -> "book"
+    });
+    folio_meta(writer, "what", match info.kind {
+        Bible -> "bible";
+        Commentary -> "commentary";
+        Dictionary -> "dictionary";
+        Glossary -> "glossary";
+        Devotional -> "devotional";
+        Book -> "book";
+        Images -> "images";
+        Other -> "other"
+    });
+    import_meta_text(writer, "name", info.name);
+    import_meta_text(writer, "title", info.description);
+    import_meta_text(writer, "language", info.language);
+    import_meta_text(writer, "versification", info.versification);
+    import_meta_text(writer, "license", info.license);
+    import_meta_text(writer, "copyright", info.copyright);
+    import_meta_text(writer, "version", info.version);
+    folio_meta(writer, "source", "CrossWire SWORD module")
+}
+
+import_meta_text(writer: *FolioWriter@new, key: str, value: str) raises FolioError {
+    if (len(value) == 0) return;
+    plain: []i8 = new i8[len(value)](0i8);
+    for k in 0..len(value) plain[k] = (if (value[k] as int == 9 || value[k] as int == 10 || value[k] as int == 13) ' ' as i8 else value[k]);
+    folio_meta_bytes(writer, key, plain, 0, len(plain))
+}
+
+// ---- a commentary, a chapter at a time ----
+// Where the making of a commentary's folio is: the book and chapter to
+// make next (the module's own; chapter 0 a book's introduction), whether
+// the book's B record is written, and the large block kept (a book's: one
+// decoded once for all of its chapters).
+tag sword_folio
+type CommentaryImport = tag sword_folio_internal {
+    module: *VerseModule;
+    book: int;
+    chapter: int;
+    book_written: bool;
+    block_testament: int;
+    block_number: int;
+    block: []i8;
+    // The large block being decoded, a step at a time (none: no block is).
+    decoding: ?*BlockDecoding
+}
+
+// A block of a module larger than this is a book's (the Treasury of
+// David's Psalms are one of 15 MB): decoded once and kept while its
+// chapters are made. A smaller one is decoded for the chapter it holds.
+IMPORT_SMALL_BLOCK: int = 65536;
+
+tag sword_folio
+commentary_import_new(module: *VerseModule@new): *CommentaryImport@new {
+    new CommentaryImport {
+        module: module,
+        book: 0,
+        chapter: 0,
+        book_written: false,
+        block_testament: 0,
+        block_number: -1,
+        block: new i8[0](0i8),
+        decoding: null
+    }
+}
+
+// How far it has come, in thousandths.
+tag sword_folio
+commentary_import_progress(making: *CommentaryImport): int {
+    books: int = len(verse_module_system(making.module).books);
+    if (books == 0) 1000 else making.book * 1000 / books
+}
+
+// The large block the next chapter's comments are in decoded about budget
+// bytes further and kept, if it isn't yet: whether it is (or the chapter
+// needs none). Call it, between chapters, until it says so, where the
+// making was allocated (what it decodes is allocated there).
+tag sword_folio
+commentary_import_prepare(making: *CommentaryImport@new, budget: int) raises SwordError: bool {
+    module: *VerseModule = making.module;
+    system: *Versification = verse_module_system(module);
+    // (Past a book's last chapter, the next is the next book's: found by
+    // commentary_import_next, prepared the next time.)
+    if (making.book >= len(system.books) || making.chapter > len(system.books[making.book].verses)) return true;
+    last: int = import_chapter_last_verse(module, making.book, making.chapter);
+    for v in 0..last + 1 {
+        entry: VerseEntry = import_commentary_entry(module, making.book, making.chapter,
+            v);
+        if (entry.size > 0 && entry.block >= 0 && import_block_is_large(module, entry)) {
+            if (entry.block == making.block_number && entry.testament == making.block_testament) return true;
+            decoding: ?*BlockDecoding = making.decoding;
+            if (decoding == null || !verse_block_is(decoding, entry.testament, entry.block)) {
+                begun: *BlockDecoding = verse_block_begin(module, entry.testament,
+                    entry.block, verse_block_size(module, entry.testament, entry.block));
+                making.decoding = begun;
+                decoding = begun
+            }
+            if (decoding == null || !verse_block_step(decoding, budget)) return false;
+            making.block = verse_block_data(decoding);
+            making.block_number = entry.block;
+            making.block_testament = entry.testament;
+            making.decoding = null;
+            return true
+        }
+    }
+    true
+}
+
+import_block_is_large(module: *VerseModule, entry: VerseEntry): bool {
+    verse_block_size(module, entry.testament, entry.block) > IMPORT_SMALL_BLOCK
+}
+
+// The next chapter that has comments made, its records into out (its
+// book's B record before its first, a book's introduction after that), or
+// some chapters without comments passed over (out left as it was); false
+// once every chapter is made. What it decodes along the way is
+// allocated where out is: call it in a region of its own, a chapter at a
+// time, after commentary_import_prepare.
+tag sword_folio
+commentary_import_next(making: *CommentaryImport, out: *ByteBuilder@new) raises SwordError: bool {
+    module: *VerseModule = making.module;
+    system: *Versification = verse_module_system(module);
+    // (Chapters without comments are passed over some at a time: a module of
+    // one book passes over the rest in several calls, each brief.)
+    passed: int = 0;
+    while (making.book < len(system.books) && passed < IMPORT_CHAPTERS_PASSED) {
+        book: int = making.book;
+        chapter: int = making.chapter;
+        chapters: int = len(system.books[book].verses);
+        if (chapter > chapters) {
+            // (Its chapters made: the next book.)
+            making.book = book + 1;
+            making.chapter = 0;
+            making.book_written = false;
+            continue
+        }
+        making.chapter = chapter + 1;
+        if (verse_module_has(module, system.books[book].testament) && import_chapter_has_comments(module,
+            book, chapter)) {
+            code: str = book_usfm_code(system.books[book].osis);
+            if (len(code) > 0) {
+                if (!making.book_written) {
+                    builder_str(out, "B");
+                    builder_str(out, code);
+                    builder_byte(out, 32i8);
+                    builder_str(out, system.books[book].name);
+                    builder_byte(out, 10i8);
+                    making.book_written = true
+                }
+                import_chapter_records(making, book, chapter, out);
+                return true
+            }
+        }
+        passed = passed + 1
+    }
+    making.book < len(system.books)
+}
+
+// At most this many chapters without comments are passed over in a call.
+IMPORT_CHAPTERS_PASSED: int = 32;
+
+// A chapter's comment entry at verse v (none if it has no such verse).
+import_commentary_entry(
+    module: *VerseModule,
+    book: int,
+    chapter: int,
+    v: int
+): VerseEntry {
+    try {
+        verse_module_entry(module, verse_slot(verse_module_system(module), book, chapter,
+            v))
+    } with SwordError _error -> {
+        verse_no_entry
+    }
+}
+
+// Its last verse (a book's introduction, chapter 0: 0).
+import_chapter_last_verse(module: *VerseModule, book: int, chapter: int): int {
+    if (chapter == 0) 0 else verse_module_system(module).books[book].verses[chapter - 1]
+}
+
+import_chapter_has_comments(module: *VerseModule, book: int, chapter: int): bool {
+    for v in 0..import_chapter_last_verse(module, book, chapter) + 1 {
+        if (import_commentary_entry(module, book, chapter, v).size > 0) return true
+    }
+    false
+}
+
+// A chapter's comments as records into out: its C (none for a book's
+// introduction, whose records are the book's own), then each comment.
+import_chapter_records(
+    making: *CommentaryImport,
+    book: int,
+    chapter: int,
+    out: *ByteBuilder@new
+) raises SwordError {
+    module: *VerseModule = making.module;
+    if (chapter > 0) {
+        builder_str(out, "C");
+        builder_int(out, chapter);
+        builder_byte(out, 10i8)
+    }
+    book_entry: *VersificationBook = &verse_module_system(module).books[book];
+    last: int = import_chapter_last_verse(module, book, chapter);
+    small: []i8 = new i8[0](0i8);
+    small_number: int = -1;
+    small_testament: int = 0;
+    v: int = 0;
+    while (v <= last) {
+        entry: VerseEntry = import_commentary_entry(module, book, chapter, v);
+        if (entry.size > 0) {
+            through: int = v;
+            while (through < last && verse_entries_same(entry, import_commentary_entry(module,
+                book, chapter, through + 1))) through = through + 1;
+            // (Its labels may begin the verses after it that have no comment
+            // of their own.)
+            reach: int = through;
+            while (reach < last && import_commentary_entry(module, book, chapter,
+                reach + 1).size == 0) reach = reach + 1;
+            markup: []i8 = new i8[0](0i8);
+            if (entry.block < 0) markup = verse_module_text(module, verse_module_testament_text(module,
+                entry.testament), entry) else if (import_block_is_large(module, entry) && entry.block == making.block_number && entry.testament == making.block_testament) markup = verse_module_text(module,
+                making.block, entry) else {
+                if (entry.block != small_number || entry.testament != small_testament) {
+                    small = verse_module_block(module, entry.testament, entry.block);
+                    small_number = entry.block;
+                    small_testament = entry.testament
+                }
+                markup = verse_module_text(module, small, entry)
+            }
+            rich: *RichText = rich_new();
+            state: MarkupState = markup_state_new();
+            markup_convert(rich, &state, verse_module_info(module).markup, markup,
+                0, len(markup));
+            if (rich_has_words(rich)) {
+                if (chapter == 0) _anchored: int = import_comment_body_records(out,
+                    rich, ImportCommentPlace {
+                    book: book_entry,
+                    chapter: 0,
+                    from: 0,
+                    through: 0,
+                    reach: 0
+                }) else import_comment_records(out, rich, ImportCommentPlace {
+                    book: book_entry,
+                    chapter: chapter,
+                    from: v,
+                    through: through,
+                    reach: reach
+                })
+            }
+            v = through + 1
+        } else v = v + 1
+    }
+}
+
+// Whether rich has words outside a book's or chapter's titles.
+tag sword_folio
+rich_has_words(rich: *RichText): bool {
+    in_title: bool = false;
+    for i in 0..rich.count {
+        match rich.pieces[i] {
+            HeadingStart h -> in_title = (match h.role {
+                BookTitle -> true;
+                ChapterTitle -> true;
+                _ -> false
+            });
+            HeadingEnd -> in_title = false;
+            Words w -> {
+                if (!in_title && !import_spaces_only(rich.text.data, w.from, w.to)) return true
+            }
+            _ -> { }
+        }
+    }
+    false
+}
+
+// ---- a comment's records ----
+// What a comment is on: its book, its chapter's number, its verses (from
+// 0: the chapter's introduction), and the last verse its labels may begin
+// (its own last, or a later one with no comment of its own).
+type ImportCommentPlace = {
+    book: *VersificationBook;
+    chapter: int;
+    from: int;
+    through: int;
+    reach: int
+}
+
+// How a comment's records are being written: whether a paragraph is open
+// (its words begun), the kind of the next one, what a heading, a note or
+// a link gathers (their words become one record), and the latest verse a
+// label began (the comment's first, at its start).
+type ImportCommentWriting = {
+    paragraph_open: bool;
+    paragraph_kind: str;
+    heading: bool;
+    heading_level: int;
+    note: bool;
+    link: bool;
+    link_target: *ByteBuilder;
+    gathered: *ByteBuilder;
+    anchored: int;
+    // The words written so far ended a sentence (or a heading came, or
+    // none have): a reference after them can begin a paragraph of its own,
+    // not go on with a sentence a line break cut.
+    sentence_ended: bool;
+    // It labels its verses itself (references then begin none).
+    by_labels: bool
+}
+
+// A comment as records into out: its K, then its words, a paragraph's
+// first words labelling a later verse of its own ("Verse 3.") beginning
+// that verse there (a later run of labels starting over, a commentary's
+// notes after its exposition, does not). Its K's verses reach as far as
+// its labels turn to.
+import_comment_records(out: *ByteBuilder@new, rich: *RichText, place: ImportCommentPlace) {
+    body: *ByteBuilder = builder_new(256);
+    anchored: int = import_comment_body_records(body, rich, place);
+    builder_str(out, "K");
+    builder_int(out, place.chapter);
+    builder_byte(out, ':' as i8);
+    builder_int(out, place.from);
+    builder_byte(out, '-' as i8);
+    builder_int(out, place.chapter);
+    builder_byte(out, ':' as i8);
+    builder_int(out, if (anchored > place.through) anchored else place.through);
+    builder_byte(out, 10i8);
+    builder_bytes(out, body.data, 0, body.size)
+}
+
+// A comment's records after its K, into out: the last verse its labels
+// turned to (its first, if none).
+import_comment_body_records(out: *ByteBuilder@new, rich: *RichText, place: ImportCommentPlace): int {
+    writing: ImportCommentWriting = ImportCommentWriting {
+        paragraph_open: false,
+        paragraph_kind: "m",
+        heading: false,
+        heading_level: 1,
+        note: false,
+        link: false,
+        link_target: builder_new(32),
+        gathered: builder_new(256),
+        anchored: place.from,
+        sentence_ended: true,
+        by_labels: import_has_verse_labels(rich)
+    };
+    // (A comment that labels its verses itself ("Verse 3.") is followed by
+    // its labels alone: its references may be an outline's, ahead of them.)
+    by_labels: bool = writing.by_labels;
+    data: []i8 = rich.text.data;
+    for i in 0..rich.count {
+        match rich.pieces[i] {
+            Paragraph -> import_paragraph_ends(&writing, "m");
+            Line l -> import_paragraph_ends(&writing, if (l.indent >= 2) "2" else "1");
+            LineBreak -> import_paragraph_ends(&writing, writing.paragraph_kind);
+            HeadingStart h -> {
+                match h.role {
+                    BookTitle -> { }
+                    ChapterTitle -> { }
+                    _ -> {
+                        import_paragraph_ends(&writing, "m");
+                        writing.heading = true;
+                        writing.heading_level = h.level;
+                        builder_clear(writing.gathered)
+                    }
+                }
+            }
+            HeadingEnd -> {
+                if (writing.heading) {
+                    import_gathered_line(out, if (writing.heading_level <= 1) "S" else "s",
+                        writing.gathered);
+                    writing.heading = false;
+                    writing.sentence_ended = true
+                }
+            }
+            NoteStart _n -> {
+                if (!writing.heading) {
+                    writing.note = true;
+                    builder_clear(writing.gathered)
+                }
+            }
+            NoteEnd -> {
+                if (writing.note) {
+                    import_gathered_line(out, "F", writing.gathered);
+                    writing.note = false
+                }
+            }
+            LinkStart l -> {
+                if (!writing.heading && !writing.note) {
+                    kind: str = match l.kind {
+                        OsisReference -> "osis:";
+                        Passage -> "passage:";
+                        _ -> ""
+                    };
+                    if (len(kind) > 0) {
+                        writing.link = true;
+                        builder_clear(writing.link_target);
+                        builder_str(writing.link_target, kind);
+                        import_plain_words(writing.link_target, data, l.from, l.to);
+                        builder_clear(writing.gathered)
+                    }
+                }
+            }
+            LinkEnd -> {
+                if (writing.link) {
+                    import_link_line(out, &writing, place);
+                    writing.link = false
+                }
+            }
+            Words w -> {
+                if (writing.heading || writing.note || writing.link) import_plain_words(writing.gathered,
+                    data, w.from, w.to) else if (writing.paragraph_open || !import_spaces_only(data,
+                    w.from, w.to)) {
+                    // (Spaces before a paragraph's first words: not its words.)
+                    if (!writing.paragraph_open) {
+                        import_paragraph_begins(out, &writing);
+                        label: int = verse_label_at(data, w.from, w.to);
+                        if (label == 0 && writing.sentence_ended && !by_labels) label = reference_label_at(data,
+                            w.from, w.to, place.book, place.chapter);
+                        import_anchor(out, &writing, place, label)
+                    }
+                    builder_str(out, import_style_letter(w.style));
+                    import_plain_words(out, data, w.from, w.to);
+                    builder_byte(out, 10i8);
+                    import_note_sentence(&writing, data, w.from, w.to)
+                }
+            }
+        }
+    }
+    writing.anchored
+}
+
+// A paragraph ended: the next one's kind.
+import_paragraph_ends(writing: *ImportCommentWriting, kind: str@writing) {
+    writing.paragraph_open = false;
+    writing.paragraph_kind = kind
+}
+
+import_paragraph_begins(out: *ByteBuilder@new, writing: *ImportCommentWriting) {
+    builder_str(out, "P");
+    builder_str(out, writing.paragraph_kind);
+    builder_byte(out, 10i8);
+    writing.paragraph_open = true
+}
+
+// Whether any of rich's words begin with a verse's label ("Verse 3.").
+import_has_verse_labels(rich: *RichText): bool {
+    for i in 0..rich.count {
+        match rich.pieces[i] {
+            Words w -> {
+                if (verse_label_at(rich.text.data, w.from, w.to) > 0) return true
+            }
+            _ -> { }
+        }
+    }
+    false
+}
+
+// Whether words written end a sentence: their last letter a stop, a
+// question or exclamation mark, a colon, or a closing quotation mark (as
+// UTF-8: E2 80 9D, E2 80 99, or "). Spaces after them leave it as it was.
+import_note_sentence(
+    writing: *ImportCommentWriting,
+    data: []i8,
+    from: int,
+    to: int
+) {
+    end: int = to;
+    while (end > from && import_spaces_only(data, end - 1, end)) end = end - 1;
+    if (end == from) return;
+    last: int = data[end - 1] as int & 255;
+    quote: bool = last == '"' as int || end - from >= 3 && (data[end - 3] as int & 255) == 226 && (data[end - 2] as int & 255) == 128 && (last == 157 || last == 153);
+    writing.sentence_ended = quote || last == '.' as int || last == '?' as int || last == '!' as int || last == ':' as int
+}
+
+// A verse a paragraph's start labels (0: none) begun there, if it is a
+// later one of the comment's own (else nothing).
+import_anchor(
+    out: *ByteBuilder@new,
+    writing: *ImportCommentWriting,
+    place: ImportCommentPlace,
+    label: int
+) {
+    if (place.from == 0 || label <= writing.anchored || label > place.reach) return;
+    builder_str(out, "V");
+    builder_int(out, label);
+    builder_byte(out, 10i8);
+    writing.anchored = label
+}
+
+// The verse a reference at the start of data[from..to) names, if it is in
+// the chapter given of the book given: "Gen 1:3", "{Mt 1:25 ...", "1Ki
+// 2:3-5", "2:1-12" (no book: the comment's own), an OSIS target
+// "Gen.1.3-Gen.1.5"; 0 if they don't begin with one. A book is named
+// loosely, as commentators abbreviate (Mt, Lk, Ge): its letters in order
+// in the book's name, its number its first.
+tag sword_folio
+reference_label_at(
+    data: []i8,
+    from: int,
+    to: int,
+    book: *VersificationBook,
+    chapter: int
+): int {
+    at: int = from;
+    while (at < to && (data[at] == ' ' || data[at] == '{' || data[at] == '(' || data[at] == '[')) at = at + 1;
+    token_from: int = at;
+    letters: bool = false;
+    while (at < to && at - token_from < 16 && (label_digit(data[at]) || import_label_letter(data[at] as int))) {
+        if (import_label_letter(data[at] as int)) letters = true;
+        at = at + 1
+    }
+    token_to: int = at;
+    if (letters) {
+        if (!book_abbreviates(data, token_from, token_to, book)) return 0;
+        // (Then a space or a stop before the chapter.)
+        if (at < to && data[at] == '.') at = at + 1;
+        while (at < to && data[at] == ' ') at = at + 1
+    } else at = token_from;
+    chapter_from: int = at;
+    n: int = 0;
+    while (at < to && label_digit(data[at]) && at - chapter_from < 4) {
+        n = n * 10 + data[at] as int - 48;
+        at = at + 1
+    }
+    if (at == chapter_from || n != chapter || at >= to || data[at] != ':' && data[at] != '.') return 0;
+    at = at + 1;
+    verse_from: int = at;
+    v: int = 0;
+    while (at < to && label_digit(data[at]) && at - verse_from < 4) {
+        v = v * 10 + data[at] as int - 48;
+        at = at + 1
+    }
+    if (at == verse_from) 0 else v
+}
+
+label_digit(k: i8): bool {
+    k as int >= 48 && k as int <= 57
+}
+
+// Whether data[from..to) names book as commentators abbreviate it: its
+// first letter the name's first (after a number, the number its own), and
+// its letters in order in the name or the OSIS name, in any case.
+book_abbreviates(
+    data: []i8,
+    from: int,
+    to: int,
+    book: *VersificationBook
+): bool {
+    import_name_holds(data, from, to, book.name) || import_name_holds(data, from,
+        to, book.osis)
+}
+
+import_name_holds(
+    data: []i8,
+    from: int,
+    to: int,
+    name: str
+): bool {
+    at: int = from;
+    k: int = 0;
+    // (A book's number: 1Ki for I Kings and 1Kgs alike.)
+    if (at < to && label_digit(data[at])) {
+        number: int = data[at] as int - 48;
+        roman: int = 0;
+        while (k < len(name) && name[k] == 'I') {
+            roman = roman + 1;
+            k = k + 1
+        }
+        if (k < len(name) && name[k] == 'V') {
+            roman = 5 - roman;
+            k = k + 1
+        }
+        if (roman == 0 && k < len(name) && label_digit(name[k])) {
+            roman = name[k] as int - 48;
+            k = k + 1
+        }
+        if (roman != number) return false;
+        at = at + 1;
+        while (k < len(name) && name[k] == ' ') k = k + 1
+    }
+    if (to - at < 2) return false;
+    first: bool = true;
+    while (at < to) {
+        want: int = import_lower(data[at] as int);
+        while (k < len(name) && import_lower(name[k] as int) != want) {
+            if (first) return false;
+            k = k + 1
+        }
+        if (k >= len(name)) return false;
+        first = false;
+        k = k + 1;
+        at = at + 1
+    }
+    true
+}
+
+import_lower(k: int): int {
+    if (k >= 'A' as int && k <= 'Z' as int) k + 32 else k
+}
+
+// What a heading or a note gathered as a record of its own (none if it is
+// only spaces).
+import_gathered_line(out: *ByteBuilder@new, letter: str, gathered: *ByteBuilder) {
+    from: int = 0;
+    to: int = gathered.size;
+    while (from < to && gathered.data[from] as int == 32) from = from + 1;
+    while (to > from && gathered.data[to - 1] as int == 32) to = to - 1;
+    if (to == from) return;
+    builder_str(out, letter);
+    builder_bytes(out, gathered.data, from, to);
+    builder_byte(out, 10i8)
+}
+
+// A link's words and where it points, as an L record (none if it has no
+// words).
+import_link_line(out: *ByteBuilder@new, writing: *ImportCommentWriting, place: ImportCommentPlace) {
+    if (writing.gathered.size == 0) return;
+    if (!writing.paragraph_open) {
+        import_paragraph_begins(out, writing);
+        target: *ByteBuilder = writing.link_target;
+        colon: int = 0;
+        while (colon < target.size && target.data[colon] != ':') colon = colon + 1;
+        if (writing.sentence_ended && !writing.by_labels) import_anchor(out, writing,
+            place, reference_label_at(target.data, colon + 1, target.size, place.book,
+            place.chapter))
+    }
+    builder_str(out, "L");
+    builder_bytes(out, writing.link_target.data, 0, writing.link_target.size);
+    builder_byte(out, 9i8);
+    builder_bytes(out, writing.gathered.data, 0, writing.gathered.size);
+    builder_byte(out, 10i8);
+    import_note_sentence(writing, writing.gathered.data, 0, writing.gathered.size)
+}
+
+// The record letter for words in a style.
+import_style_letter(style: RichStyle): str {
+    if (style.jesus)
+        if (style.italic || style.added) "J" else "W" else if (style.divine || style.small_caps) "U" else if (style.bold) "G" else if (style.italic || style.added) "I" else "T"
+}
+
+// Words into a record: their line ends and tabs as spaces.
+import_plain_words(
+    out: *ByteBuilder@new,
+    data: []i8,
+    from: int,
+    to: int
+) {
+    for k in from..to {
+        x: int = data[k] as int;
+        builder_byte(out, if (x == 10 || x == 13 || x == 9) ' ' as i8 else data[k])
+    }
+}
+
+// Whether data[from..to) is spaces alone (or line ends).
+import_spaces_only(data: []i8, from: int, to: int): bool {
+    for k in from..to {
+        x: int = data[k] as int;
+        if (x != 32 && x != 10 && x != 13 && x != 9) return false
+    }
+    true
+}
+
+// The verse a paragraph's first words label, as commentators write it:
+// "Verse 3.", "Verses 3-5." (its first), "Ver. 3.", "Vers. 3", "v. 3"
+// (in any case, after any spaces), its number followed by a stop, a colon,
+// a comma, a dash or a space; 0 if they don't begin with one.
+tag sword_folio
+verse_label_at(data: []i8, from: int, to: int): int {
+    at: int = from;
+    while (at < to && data[at] == ' ') at = at + 1;
+    word_end: int = at;
+    while (word_end < to && import_label_letter(data[word_end] as int)) word_end = word_end + 1;
+    if (!import_label_word(data, at, word_end)) return 0;
+    at = word_end;
+    if (at < to && data[at] == '.') at = at + 1;
+    while (at < to && data[at] == ' ') at = at + 1;
+    digits_from: int = at;
+    n: int = 0;
+    while (at < to && at - digits_from < 4 && data[at] as int >= 48 && data[at] as int <= 57) {
+        n = n * 10 + data[at] as int - 48;
+        at = at + 1
+    }
+    if (at == digits_from) return 0;
+    if (at < to) {
+        // (A stop, a colon, a comma, a hyphen, a space, or the first byte
+        // of a dash: E2 80 93 or 94 in UTF-8.)
+        k: int = data[at] as int & 255;
+        if (k != '.' as int && k != ':' as int && k != ',' as int && k != '-' as int && k != ' ' as int && k != 226) return 0
+    }
+    n
+}
+
+import_label_letter(k: int): bool {
+    k >= 'A' as int && k <= 'Z' as int || k >= 'a' as int && k <= 'z' as int
+}
+
+// Whether data[from..to) is a word that labels a verse: verse, verses,
+// ver, vers, v (in any case).
+import_label_word(data: []i8, from: int, to: int): bool {
+    for word in ["verse", "verses", "ver", "vers", "v"] {
+        if (to - from == len(word)) {
+            same: bool = true;
+            for k in 0..len(word) {
+                x: int = data[from + k] as int;
+                if (x >= 'A' as int && x <= 'Z' as int) x = x + 32;
+                if (x != word[k] as int) same = false
+            }
+            if (same) return true
+        }
+    }
+    false
+}
+
+// ---- dictionaries and books: entries and parts in chunks ----
+// What some entries (or a book's parts) made: their records, and where
+// each begins among them, a line each: its key, a tab, its title (empty
+// for an entry), a tab and its start in records (records before the
+// first: the document's own, its introduction).
+tag sword_folio
+type ImportChunk = tag sword_folio_internal {
+    records: *ByteBuilder;
+    divisions: *ByteBuilder
+}
+
+tag sword_folio
+import_chunk_new(): *ImportChunk@new {
+    new ImportChunk { records: builder_new(4096), divisions: builder_new(256) }
+}
+
+import_chunk_division(chunk: *ImportChunk@new, key: []i8, title: []i8) {
+    import_plain_words(chunk.divisions, key, 0, len(key));
+    builder_byte(chunk.divisions, 9i8);
+    import_plain_words(chunk.divisions, title, 0, len(title));
+    builder_byte(chunk.divisions, 9i8);
+    builder_int(chunk.divisions, chunk.records.size);
+    builder_byte(chunk.divisions, 10i8)
+}
+
+// A chunk added to a folio: each division begun where it begins, its
+// records after it (call it where the writer was allocated).
+tag sword_folio
+import_chunk_append(writer: *FolioWriter@new, chunk: *ImportChunk) raises FolioError {
+    lines: []i8 = chunk.divisions.data;
+    records: []i8 = chunk.records.data;
+    at: int = 0;
+    written: int = 0;
+    while (at < chunk.divisions.size) {
+        key_end: int = at;
+        while (lines[key_end] != 9i8) key_end = key_end + 1;
+        title_end: int = key_end + 1;
+        while (lines[title_end] != 9i8) title_end = title_end + 1;
+        line_end: int = title_end + 1;
+        start: int = 0;
+        while (lines[line_end] != 10i8) {
+            start = start * 10 + lines[line_end] as int - 48;
+            line_end = line_end + 1
+        }
+        folio_append(writer, records, written, start);
+        written = start;
+        // (A key a division has already, its records go on with the one
+        // before: a folio's keys are unique.)
+        if (!folio_division_begun(writer, lines, at, key_end)) folio_division_titled(writer,
+            lines, at, key_end, lines, key_end + 1, title_end);
+        at = line_end + 1
+    }
+    folio_append(writer, records, written, chunk.records.size)
+}
+
+// A text's records: its paragraphs, headings, notes and links, as a
+// comment's are (none if it has no words).
+import_text_records(out: *ByteBuilder@new, markup: Markup, text: []i8) {
+    rich: *RichText = rich_new();
+    state: MarkupState = markup_state_new();
+    markup_convert(rich, &state, markup, text, 0, len(text));
+    if (!rich_has_words(rich)) return;
+    _anchored: int = import_comment_body_records(out, rich, ImportCommentPlace {
+        book: &no_book,
+        chapter: 0,
+        from: 0,
+        through: 0,
+        reach: 0
+    })
+}
+
+no_book: VersificationBook = VersificationBook {
+    osis: "",
+    name: "",
+    testament: 0,
+    verses: new int[0](0),
+    chapter_slots: new int[0](0)
+};
+
+// What the folio says of a dictionary's keys besides: whether they are
+// kept in capitals (a word looked up is found in capitals) and whether
+// Strong's numbers among them are padded (G25 found as G0025).
+tag sword_folio
+dictionary_folio_meta(writer: *FolioWriter@new, module: *KeyModule) raises FolioError {
+    module_folio_meta(writer, key_module_info(module));
+    folio_meta(writer, "keys", if (key_module_case_sensitive(module)) "as-written" else "capitals");
+    // (How its keys read: dates of a devotional (01.15), Strong's numbers
+    // of Greek or Hebrew definitions (00025), or words.)
+    info: *ModuleInfo = key_module_info(module);
+    folio_meta(writer, "entries", if (info.kind == ModuleKind.Devotional) "dates" else if (info.greek_definitions) "greek" else if (info.hebrew_definitions) "hebrew" else "words");
+    if (key_module_strongs_padding(module)) folio_meta(writer, "strongs-padding",
+        "yes")
+}
+
+// Where a dictionary's folio's making is: the entry to make next.
+tag sword_folio
+type DictionaryImport = tag sword_folio_internal {
+    module: *KeyModule;
+    entry: int;
+    // How many entries were damaged (left out).
+    damaged: int
+}
+
+tag sword_folio
+dictionary_import_new(module: *KeyModule@new): *DictionaryImport@new {
+    new DictionaryImport { module: module, entry: 0, damaged: 0 }
+}
+
+tag sword_folio
+dictionary_import_progress(making: *DictionaryImport): int {
+    count: int = key_module_count(making.module);
+    if (count == 0) 1000 else making.entry * 1000 / count
+}
+
+// Some more entries made into chunk: those in the next entry's block (one
+// block decoded once), or some hundreds of a dictionary not compressed, at
+// most about IMPORT_STEP bytes of their records;
+// false once every entry is made. What it decodes is allocated where chunk
+// is: call it in a region of its own.
+tag sword_folio
+dictionary_import_next(making: *DictionaryImport, chunk: *ImportChunk@new): bool {
+    module: *KeyModule = making.module;
+    count: int = key_module_count(module);
+    if (making.entry >= count) return false;
+    markup: Markup = key_module_info(module).markup;
+    block: int = -1;
+    decoded: []i8 = new i8[0](0i8);
+    made: int = 0;
+    while (making.entry < count && made < IMPORT_ENTRIES_AT_ONCE && chunk.records.size < IMPORT_STEP) {
+        i: int = making.entry;
+        // (An entry that is damaged, or a link to none, is left out; the
+        // rest are made.)
+        try {
+            text: []i8 = new i8[0](0i8);
+            match key_module_place(module, i) {
+                InRecord _r -> text = key_module_text(module, i);
+                InBlock b -> {
+                    // (A block's entries come together: past its last, the
+                    // next call decodes the next.)
+                    if (block >= 0 && b.block != block) return true;
+                    if (block < 0) {
+                        decoded = key_module_block_decoded(module, b.block);
+                        block = b.block
+                    }
+                    text = key_module_block_entry(module, decoded, b.block, b.entry)
+                }
+            }
+            key: []i8 = bytes(key_module_key(module, i));
+            if (len(key) > 0) {
+                import_chunk_division(chunk, key, new i8[0](0i8));
+                import_text_records(chunk.records, markup, text)
+            } else if (i == 0) import_text_records(chunk.records, markup, text)
+        } with SwordError _error -> {
+            making.damaged = making.damaged + 1
+        }
+        making.entry = i + 1;
+        made = made + 1
+    }
+    true
+}
+
+// At most this many entries are made at once (of a block, all of its).
+IMPORT_ENTRIES_AT_ONCE: int = 400;
+
+// Where a book's folio's making is: the part (node) to make next (-1: all
+// made; 0 the book's own text first), and its place in the book's outline:
+// its depth, and at each depth the number of the part among its siblings
+// (a part's key: 1.2.3).
+tag sword_folio
+type BookImport = tag sword_folio_internal {
+    module: *TreeModule;
+    node: int;
+    depth: int;
+    path: []int;
+    made: int
+}
+
+IMPORT_DEPTH_MOST: int = 32;
+
+tag sword_folio
+book_import_new(module: *TreeModule@new): *BookImport@new {
+    new BookImport {
+        module: module,
+        node: 0,
+        depth: 0,
+        path: new int[IMPORT_DEPTH_MOST](0),
+        made: 0
+    }
+}
+
+tag sword_folio
+book_import_progress(making: *BookImport): int {
+    count: int = tree_module_count(making.module);
+    if (making.node < 0 || count == 0) 1000 else making.made * 1000 / count
+}
+
+// Some more parts made into chunk (about a step's records: IMPORT_STEP
+// bytes), each keyed by its place in the outline and titled by its name;
+// false once every part is made.
+tag sword_folio
+book_import_next(making: *BookImport, chunk: *ImportChunk@new) raises SwordError: bool {
+    module: *TreeModule = making.module;
+    if (making.node < 0) return false;
+    markup: Markup = tree_module_info(module).markup;
+    while (making.node >= 0 && chunk.records.size < IMPORT_STEP) {
+        node: int = making.node;
+        text: []i8 = tree_module_text(module, node);
+        if (node == 0) import_text_records(chunk.records, markup, text) else {
+            key: *ByteBuilder = builder_new(16);
+            for d in 0..making.depth {
+                if (d > 0) builder_byte(key, '.' as i8);
+                builder_int(key, making.path[d])
+            }
+            name: []i8 = bytes(tree_module_name(module, node));
+            import_chunk_division(chunk, builder_slice(key), name);
+            import_text_records(chunk.records, markup, text)
+        }
+        making.made = making.made + 1;
+        // (The next in reading order: its first child, else its next
+        // sibling, else an ancestor's next.)
+        child: int = tree_module_first_child(module, node);
+        if (child >= 0 && making.depth < IMPORT_DEPTH_MOST) {
+            making.path[making.depth] = 1;
+            making.depth = making.depth + 1;
+            making.node = child
+        } else {
+            at: int = node;
+            next: int = -1;
+            while (at > 0 && next < 0) {
+                next = tree_module_next(module, at);
+                if (next < 0) {
+                    at = tree_module_parent(module, at);
+                    making.depth = making.depth - 1
+                }
+            }
+            if (next >= 0) making.path[making.depth - 1] = making.path[making.depth - 1] + 1;
+            making.node = next
+        }
+    }
+    true
+}
+
+// About how many bytes of records a dictionary's or a book's call makes
+// (each call brief, however slowly its program runs).
+IMPORT_STEP: int = 65536;
+
+// A chunk's records (to look at what was made).
+tag sword_folio
+import_chunk_records(chunk: *ImportChunk): *ByteBuilder@chunk {
+    chunk.records
+}

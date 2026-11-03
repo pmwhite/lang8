@@ -5,17 +5,21 @@
     python3 -I mhcc.py XML BSB OUT  (XML: CCEL's ThML, mhcc.xml; BSB: bsb.txt)
 
 The ThML is https://ccel.org/ccel/henry/mhcc.xml (see fetch.sh, which
-checks its sha256), in the public domain. OUT is one record a line:
+checks its sha256), in the public domain. OUT is a commentary's records
+as a folio holds them (programs/folio/README.md), one a line:
 
-    B<CODE>                  a book; its introduction follows as p lines
+    B<CODE>                  a book; its introduction follows
     C<n>                     a chapter
     O<text>\t<v1>[-<v2>]     a line of the chapter's outline
     K<c>:<v>-<c2>:<v2>       a section of comment on those verses
-    p<text>                  a paragraph
+    Pm                       a paragraph, its words after it:
+    T<text>, I<text>         words, words in italic
+    Lref:<ref>\t<text>       words that point to a passage, by its book's
+                             code (ref:JHN.3.16, ref:JHN.3.1-3.8)
 
-In p and O, [[JHN.3.16|ch. 3:16]] is a reference (its text as Henry wrote
-it; [[JHN.3.1-3.8|…]] a range) and _words_ are italic; every other tag is
-dropped. A section's verses run on to the next section's in its chapter
+A paragraph's words come from the ThML's: its italic, its scripRefs (the
+L records), its text; every other tag is dropped, as an outline line's
+tags all are. A section's verses run on to the next section's in its chapter
 (CCEL's John 3:1-8 holds the comment on 3:9-21, as its outline says). A
 chapter with one comment is written by CCEL as the chapter's own <p>s,
 with no Commentary div: it is one section, the whole chapter (its last
@@ -77,6 +81,32 @@ def inline(x):
     return x
 
 
+def paragraph(out, text):
+    # A paragraph's records onto out: Pm, then its words a run a record.
+    out.append("Pm")
+    italic, run, i = False, "", 0
+    while i < len(text):
+        if text.startswith("[[", i):
+            bar = text.index("|", i)
+            end = text.index("]]", bar)
+            if run:
+                out.append(("I" if italic else "T") + run)
+            run = ""
+            out.append("Lref:%s\t%s" % (text[i + 2:bar], text[bar + 1:end]))
+            i = end + 2
+        elif text[i] == "_":
+            if run:
+                out.append(("I" if italic else "T") + run)
+            run = ""
+            italic = not italic
+            i += 1
+        else:
+            run += text[i]
+            i += 1
+    if run:
+        out.append(("I" if italic else "T") + run)
+
+
 def paragraphs(x):
     return [inline(p) for p in re.findall(r"<p(?: [^>]*)?>(.*?)</p>", x, flags=re.S)]
 
@@ -92,7 +122,8 @@ def chapter(out, code, n, ch, last):
             cells = re.findall(r"<td[^>]*>(.*?)</td>", row, flags=re.S)
             if len(cells) != 2:
                 continue
-            text = inline(cells[0])
+            # (Its words alone: an outline's line has no markup.)
+            text = re.sub(r"\[\[[^|]*\|([^\]]*)\]\]", r"\1", inline(cells[0])).replace("_", "")
             vs = []
             for r in re.findall(r'osisRef="Bible:[1-3A-Za-z]+\.\d+\.(\d+)(?:-[1-3A-Za-z]+\.\d+\.(\d+))?"', cells[1]):
                 vs.append(int(r[0]))
@@ -126,7 +157,7 @@ def chapter(out, code, n, ch, last):
             elif i <= 1:
                 # (The summary's dash: "—The Lord is my shepherd.")
                 p = re.sub(r"^\s*—", "", p)
-            out.append("p" + inline(p))
+            paragraph(out, inline(p))
         return 1
     for c1, v1, c2, v2, body in ranges:
         if code == "3JN":
@@ -135,7 +166,7 @@ def chapter(out, code, n, ch, last):
         sections += 1
         for p in paragraphs(re.sub(r"<h3.*?</h3>", "", body, flags=re.S)):
             if p:
-                out.append("p" + p)
+                paragraph(out, p)
     return sections
 
 
@@ -175,18 +206,19 @@ def main():
         lone = re.search(r"<table|<div class=\"Commentary\"", head)
         for p in paragraphs(head[:lone.start()] if lone else head):
             if p:
-                out.append("p" + p)
+                paragraph(out, p)
         if lone:
             sections += chapter(out, code, 1, head[lone.start():], last[code][0])
         elif code == "2CH":
             # (2 Chronicles 1's comment is the book's first lines, under a
             # title of their own, with no verses given: all 17 of them.)
-            del out[len(out) - len([p for p in paragraphs(head) if p]):]
+            while out[-1] != "B" + code:
+                out.pop()
             out.append("C1")
             out.append("K1:1-1:17")
             sections += 1
             for p in paragraphs(head)[1:]:
-                out.append("p" + p)
+                paragraph(out, p)
         for ch in re.split(r"(?=<div2 )", part[first:])[1:]:
             n = int(re.match(r'<div2 title="Chapter (\d+)"', ch).group(1))
             sections += chapter(out, code, n, ch, last[code][n - 1])

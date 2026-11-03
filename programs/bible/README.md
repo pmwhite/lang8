@@ -73,7 +73,14 @@ packaging and storage, and [the user manual](data/help.txt) for features.
 
 ## Data and persistence
 
-`core/text.l8` reads the translation records; `core/lang.l8` and
+`core/text.l8` reads the translation records. The versions, the original
+and Matthew Henry's Concise Commentary are kept in `data/` as records
+(`bsb.txt`, ..., `orig.txt`, `mhcc.txt`) and shipped as folios ([programs/folio](../folio/README.md)): `make bible-folios` packs each
+into `.build/bible-folio/NAME.folio`, which every platform bundles or serves;
+core decodes a version whole as it comes, and reads the commentary a
+chapter at a time. The terminal app and the text skin read
+them from there (`SMOOTH_BIBLE_FOLIOS`, or the text skin's third argument,
+to look elsewhere). `core/lang.l8` and
 `core/orig.l8` read study and original-language records. `core/lessons.l8`
 reads the language courses (`data/lang/lessons-greek.txt`, written by hand:
 the alphabet's lessons, then words' read in verses of the New Testament; its
@@ -94,10 +101,13 @@ operations; the web uses browser storage. The Bookshelf keeps its own files
 beside them (`core/shelf.l8`): `shelf.tsv` lists the modules installed or
 waiting and `shelf-catalog.tar.gz` is the library's catalog as CrossWire
 serves it. `shelf-NAME.zip`, each module's package, is kept only until it
-is unpacked: a Bible is made a version at once (`shelf-NAME.txt`, its
-records), and any other module's files are kept apart (`shelf-NAME.conf`,
-`shelf-NAME.ENDING` for each of its files, listed in `shelf-NAME.files`),
-its text read a span at a time. Reading position, marks, notes,
+is made: a Bible a version (`shelf-NAME.folio`, its records packed into a
+folio; one kept as records, `shelf-NAME.txt`, by an earlier build is
+packed when it is next read), any other module a folio of its own
+(`shelf-NAME.folio`, made by [programs/sword_folio](../sword_folio/README.md)
+a part each step: `core/shelf_folio.l8`), read a chapter, an entry or a
+part at a time. A module unpacked into SWORD's files by an earlier build
+is downloaded and made again. Reading position, marks, notes,
 plans and the lessons finished are local to each installation. There is no
 cross-device synchronization.
 

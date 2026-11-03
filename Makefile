@@ -49,7 +49,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test game skate race cad recipes better bible-web bible-tui bible-spoken \
+.PHONY: all check fmt selfhost compiler-test game skate race cad recipes better bible-web bible-folios bible-tui bible-spoken \
 	terminal callback-test http websocket wasm-test web \
 	profile-explorer \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
@@ -188,18 +188,41 @@ $(BUILD)/better-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s $(ARM_ARENA_RUNTI
 $(BUILD)/better-android.s: l8c3 $(PROGRAMS) runtime-arm64-android.s $(ARM_ARENA_RUNTIME) stdlib/write.arm64-android.s | $(OK)
 	@$(STEP) 'better for Android' sh -c './l8c3 arm64 --target android programs/better/android.l8 -o $@.tmp && mv -f $@.tmp $@'
 
+# Folios (programs/folio): the tool that packs records into them, and the
+# Bible's versions and original, packed from programs/bible/data, which the
+# app reads on every platform (a version whole, decoded as it comes).
+$(BUILD)/folio: l8c3 $(wildcard programs/folio/*.l8 programs/folio/tools/*.l8 programs/deflate/*.l8 programs/builder/*.l8 programs/files/*.l8) $(RUNTIME) | $(OK)
+	@$(STEP) 'folio tool' ./l8c3 build programs/folio/tools/folio_tool.l8 -o $@
+
+BIBLE_VERSIONS := bsb kjv web asv ylt
+BIBLE_FOLIO := $(BUILD)/bible-folio
+BIBLE_FOLIOS := $(addprefix $(BIBLE_FOLIO)/,$(addsuffix .folio,$(BIBLE_VERSIONS) orig mhcc))
+
+$(BIBLE_FOLIO):
+	@mkdir -p $@
+
+$(filter-out %/mhcc.folio,$(BIBLE_FOLIOS)): $(BIBLE_FOLIO)/%.folio: programs/bible/data/%.txt $(BUILD)/folio | $(BIBLE_FOLIO)
+	@$(STEP) 'bible folio $*' $(BUILD)/folio pack $< $@ kind=bible name=$*
+
+$(BIBLE_FOLIO)/mhcc.folio: programs/bible/data/mhcc.txt $(BUILD)/folio | $(BIBLE_FOLIO)
+	@$(STEP) 'bible folio mhcc' $(BUILD)/folio pack $< $@ kind=commentary name=MHCC \
+		"title=Matthew Henry's Concise Commentary on the Whole Bible" language=en license=Public\ Domain source=https://ccel.org/ccel/henry/mhcc.xml
+
+bible-folios: $(BIBLE_FOLIOS)
+
 # Smooth Bible as an Android skin (programs/bible/SKINS.md): its L8, as
 # arm64 assembly (built into an APK by programs/bible/android/build.sh),
 # and the text skin, which speaks the same wire on a terminal.
 $(BUILD)/bible-android.s: l8c3 $(PROGRAMS) runtime-arm64-android.s $(ARM_ARENA_RUNTIME) stdlib/write.arm64-android.s | $(OK)
 	@$(STEP) 'bible for Android' sh -c './l8c3 arm64 --target android programs/bible/android/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
-$(BUILD)/skin-text: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+$(BUILD)/skin-text: l8c3 $(PROGRAMS) $(RUNTIME) $(BIBLE_FOLIOS) | $(OK)
 	@$(STEP) 'bible text skin' ./l8c3 build programs/bible/tools/skin_text.l8 -o $@
 
 # Smooth Bible in a terminal (programs/bible/tui): run it from here,
-# .build/smooth-bible [VERSION], or with SMOOTH_BIBLE_DATA set.
-$(BUILD)/smooth-bible: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+# .build/smooth-bible [VERSION], or with SMOOTH_BIBLE_DATA (the data) and
+# SMOOTH_BIBLE_FOLIOS (the versions) set.
+$(BUILD)/smooth-bible: l8c3 $(PROGRAMS) $(RUNTIME) $(BIBLE_FOLIOS) | $(OK)
 	@$(STEP) 'bible for the terminal' ./l8c3 build programs/bible/tui/main.l8 -o $@
 
 bible-tui: $(BUILD)/smooth-bible
@@ -220,29 +243,24 @@ $(BUILD)/bible.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'bible wasm' sh -c './l8c3 wasm --async bw_wait programs/bible/web/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 # Its site in .build/bible-site: the marketing pages, and read/: the shell,
-# About, the app and its assets under hashed names, and the data (each file
-# gzipped: the versions, the plans, the language data, the Manual), made by
-# programs/bible/web/page/build.py. Serve it as smoothbible.com does: node
-# programs/bible/web/page/serve.mjs.
-BIBLE_VERSIONS := bsb kjv web asv ylt
+# About, the app and its assets under hashed names, and the data (the
+# versions as folios; the plans, the language data and the Manual each
+# gzipped), made by programs/bible/web/page/build.py. Serve it as
+# smoothbible.com does: node programs/bible/web/page/serve.mjs.
 BIBLE_DATA := $(BUILD)/bible-data
-BIBLE_VERSION_GZ := $(addprefix $(BIBLE_DATA)/,$(addsuffix .gz,$(BIBLE_VERSIONS)))
 BIBLE_FILES := $(wildcard programs/bible/data/lang/*.bin programs/bible/data/lang/*.txt) \
-	$(addprefix programs/bible/data/,xref_index.bin xrefs.bin mhcc.txt help.txt orig.txt plans/mcheyne.txt plans/chrono.txt) \
+	$(addprefix programs/bible/data/,xref_index.bin xrefs.bin help.txt plans/mcheyne.txt plans/chrono.txt) \
 	$(wildcard programs/bible/data/audio/*)
 
 $(BIBLE_DATA):
 	@mkdir -p $@
 
-$(BIBLE_VERSION_GZ): $(BIBLE_DATA)/%.gz: programs/bible/data/%.txt programs/bible/web/page/build.py | $(BIBLE_DATA)
-	@$(STEP) 'bible data $*' python3 -I programs/bible/web/page/build.py gz $< $@
-
 $(BIBLE_DATA)/files.stamp: $(BIBLE_FILES) programs/bible/web/page/build.py | $(BIBLE_DATA)
 	@$(STEP) 'bible data files' python3 -I programs/bible/web/page/build.py files programs/bible/data $(BIBLE_DATA)/files
 	@touch $@
 
-$(BIBLE_DATA)/manifest.json: $(BIBLE_VERSION_GZ) $(BIBLE_DATA)/files.stamp programs/bible/web/page/build.py
-	@$(STEP) 'bible data manifest' python3 -I programs/bible/web/page/build.py manifest $(BIBLE_DATA) $@
+$(BIBLE_DATA)/manifest.json: $(BIBLE_FOLIOS) $(BIBLE_DATA)/files.stamp programs/bible/web/page/build.py
+	@$(STEP) 'bible data manifest' python3 -I programs/bible/web/page/build.py manifest $(BIBLE_DATA) $(BIBLE_FOLIO) $@
 
 $(OK)/bible-web: $(BIBLE_DATA)/manifest.json $(BUILD)/bible.wasm web/l8-runtime.js web/reload.js $(wildcard programs/bible/web/page/* programs/bible/web/page/fonts/* programs/bible/site/* programs/bible/site/*/*) | $(OK)
 	@$(STEP) 'bible web site' python3 -I programs/bible/web/page/build.py site $(BUILD)/bible.wasm $(BIBLE_DATA)/manifest.json $(BUILD)/bible-site
@@ -253,8 +271,8 @@ bible-web: $(OK)/bible-web
 # What the app says aloud, a verse a line (DESIGN.md §12.2.3), for the
 # aligner: make bible-spoken VERSION=bsb (or web).
 VERSION ?= bsb
-bible-spoken: l8c3 $(PROGRAMS) $(RUNTIME)
-	@./l8c3 build programs/bible/tools/spoken.l8 -o $(BUILD)/bible-spoken && $(BUILD)/bible-spoken programs/bible/data/$(VERSION).txt
+bible-spoken: l8c3 $(PROGRAMS) $(RUNTIME) $(BIBLE_FOLIO)/$(VERSION).folio
+	@./l8c3 build programs/bible/tools/spoken.l8 -o $(BUILD)/bible-spoken && $(BUILD)/bible-spoken $(BIBLE_FOLIO)/$(VERSION).folio
 
 $(BUILD)/bible-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s $(ARM_ARENA_RUNTIME) | $(OK)
 	@$(STEP) 'bible for iOS' sh -c './l8c3 arm64 --target ios programs/bible/ios/app.l8 -o $@.tmp && mv -f $@.tmp $@'

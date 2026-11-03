@@ -44,7 +44,7 @@ type LanguageData = {
     related: []i8;
     related_size: int;
     // Cross references (xref_index.bin, xrefs.bin), Matthew Henry's Concise
-    // Commentary (mhcc.txt) and meanings in context (meanings.bin,
+    // Commentary (mhcc.folio) and meanings in context (meanings.bin,
     // meanings.txt): each where its functions say.
     xref_index: []i8;
     xref_index_count: int;
@@ -85,8 +85,8 @@ type LanguageData = {
     // Each verse's V line in the BSB's text, and each chapter's first verse.
     verse_line_at: []int;
     chapter_first_verse: []int;
-    // Each chapter's C line in mhcc.txt (-1: none).
-    commentary_chapter_at: []int;
+    // Matthew Henry's folio's head (none until it has come).
+    commentary_folio: ?*folio::Folio;
     // Where each meaning's line begins (mean_at[k] for meaning k; the
     // credit's line is 0).
     mean_at: []int;
@@ -163,7 +163,7 @@ language_empty(): owned *LanguageData {
             related_hebrew: nothing,
             verse_line_at: nothing,
             chapter_first_verse: nothing,
-            commentary_chapter_at: nothing,
+            commentary_folio: null,
             mean_at: nothing,
             mean_count: 0
         }
@@ -304,7 +304,7 @@ le32(b: []i8, i: int): int {
 lang_index(language: *LanguageData@new) {
     borrow texts[TEXT_BSB] as src {
         lang_index_bsb(language, src);
-        mhcc_index(language);
+        mhcc_open(language);
         mean_index(language)
     }
 }
@@ -2101,223 +2101,14 @@ xref_at(language: *LanguageData, vi: int, i: int) {
 }
 
 // ---- Matthew Henry's Concise Commentary (DESIGN.md §9.7) ----
-// mhcc.txt (tools/mhcc.py): B a book, its introduction's p lines; C a
-// chapter; O its outline's lines; K a section (K3:1-3:21), its p lines.
-// Each chapter's C line in mhcc.txt (lang_index's).
-mhcc_index(language: *LanguageData@new) {
-    language.commentary_chapter_at = new int[chapters](-1);
-    b: int = -1;
-    p: int = 0;
-    while (p < language.commentary_size) {
-        e: int = p;
-        while (e < language.commentary_size && language.commentary[e] as int != 10) e = e + 1;
-        k: int = language.commentary[p] as int;
-        if (k == 66) b = b + 1;
-        if (k == 67 && b >= 0 && b < 66) {
-            n: int = 0;
-            for i in p + 1..e {
-                if (is_digit(language.commentary[i] as int)) n = n * 10 + language.commentary[i] as int - 48
-            }
-            if (n >= 1 && n <= book_count[b]) language.commentary_chapter_at[book_first[b] + n - 1] = p
-        }
-        p = e + 1
-    }
-}
-
-// The section mhcc_section found: its K line (-1: none), its verses
-// (chapter numbers and verses), and where its paragraphs are (from mh_p,
-// the line after its K line, to mh_e).
-mh_k: int = -1;
-
-mh_c1: int = 0;
-
-mh_v1: int = 0;
-
-mh_c2: int = 0;
-
-mh_v2: int = 0;
-
-mh_p: int = 0;
-
-mh_e: int = 0;
-
-// A K line's numbers at p (to e): c:v-c2:v2, into mh_c1 and the rest.
-mh_nums: []int = new int[4](0);
-
-mh_range(language: *LanguageData, p: int, e: int) {
-    nums: []int = mh_nums;
-    for i in 0..4 nums[i] = 0;
-    j: int = 0;
-    for i in p + 1..e {
-        k: int = language.commentary[i] as int;
-        if (is_digit(k)) nums[j] = nums[j] * 10 + k - 48 else if (j < 3) j = j + 1
-    }
-    mh_c1 = nums[0];
-    mh_v1 = nums[1];
-    mh_c2 = nums[2];
-    mh_v2 = nums[3]
-}
-
-// The section on verse v of chapter c: the one whose verses hold it, or
-// else the nearest before it in the chapter (or one from the chapter before
-// that runs into it). False if there is none.
-mhcc_section(language: *LanguageData, c: int, v: int): bool {
-    mh_k = -1;
-    if (c < 0 || c >= chapters) return false;
-    n: int = ch_num[c];
-    at: int = v;
-    // (A section of the chapter before may run on into this one.)
-    chapter_at: []int = language.commentary_chapter_at;
-    from: int = if (c > 0 && ch_book[c - 1] == ch_book[c] && chapter_at[c - 1] >= 0) chapter_at[c - 1] else chapter_at[c];
-    if (from < 0) return false;
-    best: int = -1;
-    p: int = from;
-    past: bool = false;
-    while (p < language.commentary_size && !past) {
-        e: int = p;
-        while (e < language.commentary_size && language.commentary[e] as int != 10) e = e + 1;
-        k: int = language.commentary[p] as int;
-        if (k == 66 && p > from || k == 67 && p > chapter_at[c] && chapter_at[c] >= 0) past = true else if (k == 75) {
-            mh_range(language, p, e);
-            starts: bool = mh_c1 < n || mh_c1 == n && mh_v1 <= at;
-            ends: bool = mh_c2 > n || mh_c2 == n && mh_v2 >= at;
-            if (starts && ends) best = p else if (starts && mh_c1 == n && (best < 0 || !mh_holds(language,
-                best, n, at))) best = p
-        }
-        p = e + 1
-    }
-    if (best < 0) return false;
-    e: int = best;
-    while (e < language.commentary_size && language.commentary[e] as int != 10) e = e + 1;
-    mh_range(language, best, e);
-    mh_k = best;
-    mh_p = e + 1;
-    q: int = mh_p;
-    more: bool = true;
-    while (q < language.commentary_size && more) {
-        if (language.commentary[q] as int != 112) more = false else {
-            while (q < language.commentary_size && language.commentary[q] as int != 10) q = q + 1;
-            q = q + 1
-        }
-    }
-    mh_e = q;
-    true
-}
-
-// Whether the K line at p holds verse at of chapter n.
-mh_holds(
-    language: *LanguageData,
-    p: int,
-    n: int,
-    at: int
-): bool {
-    e: int = p;
-    while (e < language.commentary_size && language.commentary[e] as int != 10) e = e + 1;
-    mh_range(language, p, e);
-    (mh_c1 < n || mh_c1 == n && mh_v1 <= at) && (mh_c2 > n || mh_c2 == n && mh_v2 >= at)
-}
-
-// A paragraph of the commentary (lmh's p to e, past its p) as runs, into
-// mo: plain, italic (_words_) and references ([[JHN.3.16|ch. 3:16]], as
-// written; [[JHN.3.1-3.8|…]] a range), each run's reference packed as
-// xref_both.
-MH_PLAIN: int = 0;
-
-MH_ITALIC: int = 1;
-
-MH_REF: int = 2;
-
-mo: []i8 = new i8[65536](0i8);
-
-mo_n: int = 0;
-
-mo_runs: int = 0;
-
-mo_end: []int = new int[2048](0);
-
-mo_kind: []int = new int[2048](0);
-
-mo_ref: []int = new int[2048](0);
-
-// (The next byte put begins a run of its own.)
-mo_split: bool = false;
-
-mo_put(k: int, kind: int, ref: int) {
-    if (mo_n >= len(mo)) return;
-    if (mo_runs == 0 || mo_split || mo_kind[mo_runs - 1] != kind || mo_ref[mo_runs - 1] != ref) {
-        if (mo_runs >= len(mo_end)) return;
-        mo_split = false;
-        mo_kind[mo_runs] = kind;
-        mo_ref[mo_runs] = ref;
-        mo_runs = mo_runs + 1
-    }
-    mo[mo_n] = k trunc i8;
-    mo_n = mo_n + 1;
-    mo_end[mo_runs - 1] = mo_n
-}
-
-// The number at lmh[i] (to e): its value; where it ends in num_at.
-mh_num(language: *LanguageData, i: int, e: int): int {
-    n: int = 0;
-    j: int = i;
-    while (j < e && is_digit(language.commentary[j] as int)) {
-        n = n * 10 + language.commentary[j] as int - 48;
-        j = j + 1
-    }
-    num_at = j;
-    n
-}
-
-mh_markup(language: *LanguageData, p: int, e: int) {
-    mo_n = 0;
-    mo_runs = 0;
-    italic: bool = false;
-    q: int = p;
-    while (q < e) {
-        k: int = byte_of(language.commentary, q);
-        if (k == 95) {
-            italic = !italic;
-            q = q + 1
-        } else if (k == 91 && q + 1 < e && language.commentary[q + 1] as int == 91) {
-            // [[BOOK.C.V(-C2.V2)|text]]
-            r: int = q + 2;
-            bk: int = -1;
-            for b in 0..books {
-                if (r + 3 <= e && book_codes[b][0] == language.commentary[r] && book_codes[b][1] == language.commentary[r + 1] && book_codes[b][2] == language.commentary[r + 2]) bk = b
-            }
-            cn: int = mh_num(language, r + 4, e);
-            vn: int = mh_num(language, num_at + 1, e);
-            r = num_at;
-            ce: int = 0;
-            ve: int = 0;
-            if (r < e && language.commentary[r] as int == 45) {
-                ce = mh_num(language, r + 1, e);
-                ve = mh_num(language, num_at + 1, e);
-                r = num_at
-            }
-            while (r < e && language.commentary[r] as int != 124) r = r + 1;
-            r = r + 1;
-            z: int = r;
-            while (z + 1 < e && !(language.commentary[z] as int == 93 && language.commentary[z + 1] as int == 93)) z = z + 1;
-            ref: int = 0;
-            if (bk >= 0 && cn >= 1 && cn <= book_count[bk]) {
-                xr_book = bk;
-                xr_c = cn;
-                xr_v = vn;
-                xr_ce = ce;
-                xr_ve = ve;
-                ref = xref_both()
-            }
-            // (A run of its own, even beside another reference.)
-            mo_split = true;
-            for x in r..z mo_put(byte_of(language.commentary, x), if (ref != 0) MH_REF else MH_PLAIN,
-                ref);
-            mo_split = true;
-            q = z + 2
-        } else {
-            mo_put(k, if (italic) MH_ITALIC else MH_PLAIN, 0);
-            q = q + 1
-        }
+// mhcc.folio (tools/mhcc.py's records, packed: make bible-folios), its
+// head read once it has come (none if it is damaged); a chapter's
+// records are read from it as Study wants them.
+mhcc_open(language: *LanguageData@new) {
+    try {
+        language.commentary_folio = folio::folio_open(language.commentary, language.commentary_size)
+    } with folio::FolioError _error -> {
+        language.commentary_folio = null
     }
 }
 

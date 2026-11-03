@@ -1,0 +1,188 @@
+tag sword_folio_tool;
+
+use_tag std, files, sword, folio, sword_folio, builder;
+
+// A SWORD module's package made into a folio, as the Bible app makes one
+// on the device, for checking this library against real modules:
+//
+//   sword-folio PACKAGE.zip OUT.folio
+//
+// prints what it made: its chapters, comments, the verses its labels
+// turned to, its links and notes, and its size.
+import "../sword_folio.l8";
+
+import "../../files/files.l8";
+
+import "../../../stdlib/print.l8";
+
+import "../../../stdlib/write.l8";
+
+main(argc: int, args: []str): int {
+    try {
+        run(argc, args)
+    } with IoError _error -> {
+        1
+    }
+}
+
+// How many records of each kind were made.
+type Counts = {
+    chapters: int;
+    comments: int;
+    anchors: int;
+    links: int;
+    notes: int;
+    headings: int
+}
+
+count_records(counts: *Counts, data: []i8, size: int) {
+    at: int = 0;
+    while (at < size) {
+        kind: i8 = data[at];
+        if (kind == 'C') counts.chapters = counts.chapters + 1 else if (kind == 'K') counts.comments = counts.comments + 1 else if (kind == 'V') counts.anchors = counts.anchors + 1 else if (kind == 'L') counts.links = counts.links + 1 else if (kind == 'F') counts.notes = counts.notes + 1 else if (kind == 'S' || kind == 's') counts.headings = counts.headings + 1;
+        while (at < size && data[at] != 10i8) at = at + 1;
+        at = at + 1
+    }
+}
+
+run(argc: int, args: []str) raises IoError: int {
+    if (argc != 3) {
+        eprint("usage: sword-folio PACKAGE.zip OUT.folio");
+        return 2
+    }
+    try {
+        data: []i8 = read_file_bytes(args[1]);
+        package: *ModulePackage = package_open(data, len(data));
+        match module_support(&package.info) {
+            Readable -> { }
+            Unreadable _ -> {
+                print("unreadable");
+                return 1
+            }
+        }
+        // (The folio in an arena of its own, each chapter, or some entries
+        // or parts, made in a region and added to it there.)
+        owner: owned *FolioWriter = own {
+            folio_writer_new()
+        };
+        size: int = 0;
+        counts: Counts = Counts {
+            chapters: 0,
+            comments: 0,
+            anchors: 0,
+            links: 0,
+            notes: 0,
+            headings: 0
+        };
+        divisions: int = 0;
+        borrow owner as writer {
+            match package.info.storage {
+                ByVerse _ -> {
+                    match package.info.kind {
+                        Commentary -> { }
+                        _ -> {
+                            print("a Bible: made a version, not a folio, by the app");
+                            return 1
+                        }
+                    }
+                    module: *VerseModule = verse_module_open(package);
+                    allocate writer {
+                        module_folio_meta(writer, &package.info)
+                    }
+                    making: *CommentaryImport = commentary_import_new(module);
+                    more: bool = true;
+                    while (more) {
+                        while (!commentary_import_prepare(making, 1048576)) { }
+                        region {
+                            out: *ByteBuilder = builder_new(4096);
+                            more = commentary_import_next(making, out);
+                            count_records(&counts, out.data, out.size);
+                            allocate writer {
+                                folio_append_records(writer, out.data, 0, out.size)
+                            }
+                        }
+                    }
+                }
+                ByKey _ -> {
+                    module: *KeyModule = key_module_open(package);
+                    allocate writer {
+                        dictionary_folio_meta(writer, module)
+                    }
+                    making: *DictionaryImport = dictionary_import_new(module);
+                    more: bool = true;
+                    while (more) {
+                        region {
+                            chunk: *ImportChunk = import_chunk_new();
+                            more = dictionary_import_next(making, chunk);
+                            count_records(&counts, import_chunk_records(chunk).data,
+                                import_chunk_records(chunk).size);
+                            allocate writer {
+                                import_chunk_append(writer, chunk)
+                            }
+                        }
+                    }
+                }
+                ByTree -> {
+                    module: *TreeModule = tree_module_open(package);
+                    allocate writer {
+                        module_folio_meta(writer, &package.info)
+                    }
+                    making: *BookImport = book_import_new(module);
+                    more: bool = true;
+                    while (more) {
+                        region {
+                            chunk: *ImportChunk = import_chunk_new();
+                            more = book_import_next(making, chunk);
+                            count_records(&counts, import_chunk_records(chunk).data,
+                                import_chunk_records(chunk).size);
+                            allocate writer {
+                                import_chunk_append(writer, chunk)
+                            }
+                        }
+                    }
+                }
+                _ -> {
+                    print("stored in a way not supported");
+                    return 1
+                }
+            }
+            allocate writer {
+                packed: []i8 = folio_finish(writer);
+                size = len(packed);
+                replace_file_bytes(args[2], packed, len(packed));
+                divisions = folio_division_count(folio_open(packed, len(packed)))
+            }
+        }
+        drop owner;
+        write(1, package.info.name);
+        write(1, "\tchapters ");
+        write_int(1, counts.chapters);
+        write(1, "\tcomments ");
+        write_int(1, counts.comments);
+        write(1, "\tanchors ");
+        write_int(1, counts.anchors);
+        write(1, "\tlinks ");
+        write_int(1, counts.links);
+        write(1, "\tnotes ");
+        write_int(1, counts.notes);
+        write(1, "\theadings ");
+        write_int(1, counts.headings);
+        write(1, "\tdivisions ");
+        write_int(1, divisions);
+        write(1, "\tbytes ");
+        write_int(1, size);
+        print("");
+        0
+    } with FileError error -> {
+        eprint(file_operation_name(error.operation));
+        1
+    } with SwordError error -> {
+        write(2, "sword-folio: ");
+        eprint(sword_failure_name(error.failure));
+        1
+    } with FolioError error -> {
+        write(2, "sword-folio: ");
+        eprint(folio_failure_name(error.failure));
+        1
+    }
+}

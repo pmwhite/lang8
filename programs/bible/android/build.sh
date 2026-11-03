@@ -24,8 +24,9 @@ keys=$HOME/.config/smoothbible-android
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# The app, as arm64 assembly, and the library.
-(cd "$top" && ./l8c3 arm64 --target android programs/bible/android/main.l8 -o "$work/bible.s")
+# The app, as arm64 assembly, and the library; and the versions, packed
+# into folios.
+(cd "$top" && ./l8c3 arm64 --target android programs/bible/android/main.l8 -o "$work/bible.s" && make -j4 bible-folios)
 mkdir -p "$work/apk/lib/arm64-v8a"
 "$cc" -shared -fPIC -O2 -o "$work/apk/lib/arm64-v8a/libsmoothbible.so" \
   "$work/bible.s" "$here/glue.c" -landroid -llog -lm \
@@ -34,12 +35,12 @@ mkdir -p "$work/apk/lib/arm64-v8a"
 
 # Its resources, manifest and the versions.
 mkdir -p "$work/assets"
-for v in bsb kjv web asv ylt; do cp "$top/programs/bible/data/$v.txt" "$work/assets/"; done
+for v in bsb kjv web asv ylt orig mhcc; do cp "$top/.build/bible-folio/$v.folio" "$work/assets/"; done
 # (And the language data, the cross references, the commentary and the
 # Manual: Study, Learn and the Manual's pages.)
 mkdir -p "$work/assets/lang"
 cp "$top"/programs/bible/data/lang/*.bin "$top"/programs/bible/data/lang/*.txt "$work/assets/lang/"
-for f in xref_index.bin xrefs.bin mhcc.txt help.txt orig.txt; do cp "$top/programs/bible/data/$f" "$work/assets/"; done
+for f in xref_index.bin xrefs.bin help.txt; do cp "$top/programs/bible/data/$f" "$work/assets/"; done
 mkdir -p "$work/assets/audio"
 cp "$top"/programs/bible/data/audio/*.tim "$top/programs/bible/data/audio/henson.paths" "$work/assets/audio/"
 mkdir -p "$work/assets/plans"

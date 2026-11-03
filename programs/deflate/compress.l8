@@ -1,0 +1,590 @@
+tag deflate_internal;
+
+use_tag std;
+
+// DEFLATE encoding (RFC 1951). Matches are found through hash chains over
+// a 32 KiB window, with lazy matching (a match is put off by a byte when
+// the next byte begins a longer one), as zlib finds them. Symbols gather
+// into blocks of at most BLOCK_SYMBOLS; each block is written whichever
+// way is smallest: with codes made for it, with the fixed codes, or
+// stored. A block's code lengths are limited to 15 bits (7 for the code
+// lengths' own code) by flattening its frequencies until they fit.
+//
+// The writer keeps at most 7 bits plus the bits being put (at most 16)
+// in its buffer, well within an int.
+HASH_SIZE: int = 32768;
+
+HASH_MASK: int = 32767;
+
+WINDOW_MASK: int = 32767;
+
+MIN_MATCH: int = 3;
+
+MAX_MATCH: int = 258;
+
+MAX_DISTANCE: int = 32768;
+
+// How many earlier positions a match is looked for at, at most.
+MAX_CHAIN: int = 256;
+
+// A match at least this long is taken at once, not put off.
+LAZY_ENOUGH: int = 32;
+
+BLOCK_SYMBOLS: int = 16384;
+
+END_OF_BLOCK: int = 256;
+
+// The most a stored block holds.
+STORED_MOST: int = 65535;
+
+// A stream being written: whole bytes in out (at most len(out)), and
+// count bits waiting in bits.
+type BitWriter = {
+    out: []i8;
+    at: int;
+    bits: int;
+    count: int
+}
+
+put_bits(writer: *BitWriter, value: int, count: int) {
+    writer.bits = writer.bits | value << writer.count;
+    writer.count = writer.count + count;
+    while (writer.count >= 8) {
+        writer.out[writer.at] = (writer.bits & 255) trunc i8;
+        writer.at = writer.at + 1;
+        writer.bits = writer.bits >> 8;
+        writer.count = writer.count - 8
+    }
+}
+
+// The bits waiting written out, the last byte padded with zeros.
+align_to_byte(writer: *BitWriter) {
+    if (writer.count > 0) put_bits(writer, 0, 8 - writer.count)
+}
+
+// A block's symbols, as found: a literal (length 0, value the byte) or a
+// back-reference (length 3 to 258, value its distance); and how often
+// each literal-or-length symbol and each distance symbol occurs.
+type BlockSymbols = {
+    lengths: []int;
+    values: []int;
+    count: int;
+    literal_counts: []int;
+    distance_counts: []int
+}
+
+block_symbols_new(): BlockSymbols@new {
+    BlockSymbols {
+        lengths: new int[BLOCK_SYMBOLS](0),
+        values: new int[BLOCK_SYMBOLS](0),
+        count: 0,
+        literal_counts: new int[286](0),
+        distance_counts: new int[30](0)
+    }
+}
+
+block_symbols_clear(symbols: *BlockSymbols) {
+    symbols.count = 0;
+    for i in 0..286 symbols.literal_counts[i] = 0;
+    for i in 0..30 symbols.distance_counts[i] = 0
+}
+
+add_literal(symbols: *BlockSymbols, byte: int) {
+    symbols.lengths[symbols.count] = 0;
+    symbols.values[symbols.count] = byte;
+    symbols.count = symbols.count + 1;
+    symbols.literal_counts[byte] = symbols.literal_counts[byte] + 1
+}
+
+add_match(symbols: *BlockSymbols, length: int, distance: int) {
+    symbols.lengths[symbols.count] = length;
+    symbols.values[symbols.count] = distance;
+    symbols.count = symbols.count + 1;
+    code: int = 257 + length_index(length);
+    symbols.literal_counts[code] = symbols.literal_counts[code] + 1;
+    index: int = distance_index(distance);
+    symbols.distance_counts[index] = symbols.distance_counts[index] + 1
+}
+
+// A match length's index into length_bases (its symbol less 257).
+length_index(length: int): int {
+    index: int = 28;
+    while (length_bases[index] > length) index = index - 1;
+    index
+}
+
+// A distance's index into distance_bases (its symbol).
+distance_index(distance: int): int {
+    index: int = 29;
+    while (distance_bases[index] > distance) index = index - 1;
+    index
+}
+
+// ---- Huffman code lengths ----
+// Code lengths for counts[0..n) (0 for a symbol that never occurs), none
+// longer than most_bits, into lengths. A single symbol that occurs gets a
+// one-bit code (an incomplete code, which RFC 1951 allows of one code).
+code_lengths_for(
+    counts: []int,
+    n: int,
+    most_bits: int,
+    lengths: []int
+) {
+    region {
+        weights: []int = new int[n](0);
+        for symbol in 0..n weights[symbol] = counts[symbol];
+        while (!huffman_lengths(weights, n, most_bits, lengths)) {
+            // (Too deep: flatten the counts, keeping each one that occurs.)
+            for symbol in 0..n {
+                if (weights[symbol] > 0) weights[symbol] = (weights[symbol] + 1) / 2
+            }
+        }
+    }
+}
+
+// Huffman code lengths for weights[0..n) into lengths; false if a code
+// would be longer than most_bits.
+huffman_lengths(
+    weights: []int,
+    n: int,
+    most_bits: int,
+    lengths: []int
+): bool {
+    for symbol in 0..n lengths[symbol] = 0;
+    region {
+        // Leaves in order of weight, then nodes made by joining the two
+        // lightest of what remains: node k's weight and parent. Leaves are
+        // nodes 0..leaves, joined nodes follow.
+        leaf_symbols: []int = new int[n](0);
+        leaves: int = 0;
+        for symbol in 0..n {
+            if (weights[symbol] > 0) {
+                at: int = leaves;
+                while (at > 0 && weights[leaf_symbols[at - 1]] > weights[symbol]) {
+                    leaf_symbols[at] = leaf_symbols[at - 1];
+                    at = at - 1
+                }
+                leaf_symbols[at] = symbol;
+                leaves = leaves + 1
+            }
+        }
+        if (leaves == 0) return true;
+        if (leaves == 1) {
+            lengths[leaf_symbols[0]] = 1;
+            return true
+        }
+        node_weights: []int = new int[2 * leaves](0);
+        parents: []int = new int[2 * leaves](0);
+        for k in 0..leaves node_weights[k] = weights[leaf_symbols[k]];
+        // (Two queues, both in order of weight: leaves not yet joined, and
+        // joined nodes not yet joined again.)
+        next_leaf: int = 0;
+        next_joined: int = leaves;
+        made: int = leaves;
+        while (made < 2 * leaves - 1) {
+            for _side in 0..2 {
+                take_leaf: bool = next_leaf < leaves && (next_joined >= made || node_weights[next_leaf] <= node_weights[next_joined]);
+                child: int = if (take_leaf) next_leaf else next_joined;
+                if (take_leaf) next_leaf = next_leaf + 1 else next_joined = next_joined + 1;
+                node_weights[made] = node_weights[made] + node_weights[child];
+                parents[child] = made
+            }
+            made = made + 1
+        }
+        // (Depths from the root down: a node's parent was made after it.)
+        depths: []int = new int[2 * leaves](0);
+        root: int = made - 1;
+        k: int = root - 1;
+        while (k >= 0) {
+            depths[k] = depths[parents[k]] + 1;
+            k = k - 1
+        }
+        for leaf in 0..leaves {
+            if (depths[leaf] > most_bits) return false;
+            lengths[leaf_symbols[leaf]] = depths[leaf]
+        }
+    }
+    true
+}
+
+// Canonical codes (RFC 1951 §3.2.2) for lengths[0..n), each reversed, as
+// the stream holds a code: written least significant bit first.
+canonical_codes(lengths: []int, n: int, codes: []int) {
+    length_counts: [16]int = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    next_code: [16]int = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for symbol in 0..n length_counts[lengths[symbol]] = length_counts[lengths[symbol]] + 1;
+    length_counts[0] = 0;
+    value: int = 0;
+    for bits in 1..16 {
+        value = value + length_counts[bits - 1] << 1;
+        next_code[bits] = value
+    }
+    for symbol in 0..n {
+        bits: int = lengths[symbol];
+        codes[symbol] = 0;
+        if (bits > 0) {
+            canonical: int = next_code[bits];
+            next_code[bits] = canonical + 1;
+            reversed: int = 0;
+            for b in 0..bits reversed = reversed << 1 | canonical >> b & 1;
+            codes[symbol] = reversed
+        }
+    }
+}
+
+// ---- a block's codes ----
+// The codes a block is written with: lengths and reversed codes for the
+// 286 literal-or-length symbols and the 30 distance symbols.
+type BlockCodes = {
+    literal_lengths: []int;
+    literal_codes: []int;
+    distance_lengths: []int;
+    distance_codes: []int
+}
+
+block_codes_new(): BlockCodes@new {
+    BlockCodes {
+        literal_lengths: new int[286](0),
+        literal_codes: new int[286](0),
+        distance_lengths: new int[30](0),
+        distance_codes: new int[30](0)
+    }
+}
+
+fixed_codes_into(codes: *BlockCodes) {
+    for symbol in 0..286 codes.literal_lengths[symbol] = (if (symbol < 144) 8 else if (symbol < 256) 9 else if (symbol < 280) 7 else 8);
+    for symbol in 0..30 codes.distance_lengths[symbol] = 5;
+    canonical_codes(codes.literal_lengths, 286, codes.literal_codes);
+    canonical_codes(codes.distance_lengths, 30, codes.distance_codes)
+}
+
+// The bits a block's symbols take written with codes (its header aside),
+// with its end.
+symbols_cost(symbols: *BlockSymbols, codes: *BlockCodes): int {
+    bits: int = 0;
+    for symbol in 0..286 bits = bits + symbols.literal_counts[symbol] * codes.literal_lengths[symbol];
+    for index in 0..29 bits = bits + symbols.literal_counts[257 + index] * length_extra_bits[index];
+    for index in 0..30 bits = bits + symbols.distance_counts[index] * (codes.distance_lengths[index] + distance_extra_bits[index]);
+    bits
+}
+
+write_symbols(writer: *BitWriter, symbols: *BlockSymbols, codes: *BlockCodes) {
+    for i in 0..symbols.count {
+        length: int = symbols.lengths[i];
+        value: int = symbols.values[i];
+        if (length == 0) put_bits(writer, codes.literal_codes[value], codes.literal_lengths[value]) else {
+            index: int = length_index(length);
+            put_bits(writer, codes.literal_codes[257 + index], codes.literal_lengths[257 + index]);
+            put_bits(writer, length - length_bases[index], length_extra_bits[index]);
+            where: int = distance_index(value);
+            put_bits(writer, codes.distance_codes[where], codes.distance_lengths[where]);
+            put_bits(writer, value - distance_bases[where], distance_extra_bits[where])
+        }
+    }
+    put_bits(writer, codes.literal_codes[END_OF_BLOCK], codes.literal_lengths[END_OF_BLOCK])
+}
+
+// A dynamic block's header: the code lengths of both codes, run-length
+// coded (16 repeats the last length 3 to 6 times, 17 and 18 repeat zero
+// 3 to 10 and 11 to 138 times), in a code of their own.
+type DynamicHeader = {
+    literal_count: int;
+    distance_count: int;
+    // The run-length symbols and their extra bits' values.
+    runs: []int;
+    run_extras: []int;
+    run_count: int;
+    length_lengths: []int;
+    length_codes: []int;
+    // How many of code_length_order's lengths are sent.
+    length_code_count: int
+}
+
+dynamic_header_new(): DynamicHeader@new {
+    DynamicHeader {
+        literal_count: 0,
+        distance_count: 0,
+        runs: new int[316](0),
+        run_extras: new int[316](0),
+        run_count: 0,
+        length_lengths: new int[19](0),
+        length_codes: new int[19](0),
+        length_code_count: 0
+    }
+}
+
+add_run(header: *DynamicHeader, symbol: int, extra: int) {
+    header.runs[header.run_count] = symbol;
+    header.run_extras[header.run_count] = extra;
+    header.run_count = header.run_count + 1
+}
+
+// The header for codes, and the bits it takes.
+dynamic_header_for(header: *DynamicHeader, codes: *BlockCodes): int {
+    literal_count: int = 286;
+    while (literal_count > 257 && codes.literal_lengths[literal_count - 1] == 0) literal_count = literal_count - 1;
+    distance_count: int = 30;
+    while (distance_count > 1 && codes.distance_lengths[distance_count - 1] == 0) distance_count = distance_count - 1;
+    header.literal_count = literal_count;
+    header.distance_count = distance_count;
+    header.run_count = 0;
+    total: int = literal_count + distance_count;
+    region {
+        all: []int = new int[total](0);
+        for i in 0..literal_count all[i] = codes.literal_lengths[i];
+        for i in 0..distance_count all[literal_count + i] = codes.distance_lengths[i];
+        i: int = 0;
+        while (i < total) {
+            length: int = all[i];
+            run: int = 1;
+            while (i + run < total && all[i + run] == length) run = run + 1;
+            if (length == 0 && run >= 3) {
+                taken: int = if (run > 138) 138 else run;
+                if (taken >= 11) add_run(header, 18, taken - 11) else add_run(header,
+                    17, taken - 3);
+                i = i + taken
+            } else if (length != 0 && run >= 4) {
+                // (The length once, then repeats of it.)
+                add_run(header, length, 0);
+                left: int = run - 1;
+                while (left >= 3) {
+                    taken: int = if (left > 6) 6 else left;
+                    add_run(header, 16, taken - 3);
+                    left = left - taken
+                }
+                i = i + run - left
+            } else {
+                add_run(header, length, 0);
+                i = i + 1
+            }
+        }
+    }
+    run_counts: [19]int = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for k in 0..header.run_count run_counts[header.runs[k]] = run_counts[header.runs[k]] + 1;
+    region {
+        counts: []int = new int[19](0);
+        for symbol in 0..19 counts[symbol] = run_counts[symbol];
+        code_lengths_for(counts, 19, 7, header.length_lengths)
+    }
+    canonical_codes(header.length_lengths, 19, header.length_codes);
+    length_code_count: int = 19;
+    while (length_code_count > 4 && header.length_lengths[code_length_order[length_code_count - 1]] == 0) length_code_count = length_code_count - 1;
+    header.length_code_count = length_code_count;
+    bits: int = 5 + 5 + 4 + 3 * length_code_count;
+    for k in 0..header.run_count bits = bits + header.length_lengths[header.runs[k]] + run_extra_bits(header.runs[k]);
+    bits
+}
+
+run_extra_bits(symbol: int): int {
+    if (symbol == 16) 2 else if (symbol == 17) 3 else if (symbol == 18) 7 else 0
+}
+
+write_dynamic_header(writer: *BitWriter, header: *DynamicHeader) {
+    put_bits(writer, header.literal_count - 257, 5);
+    put_bits(writer, header.distance_count - 1, 5);
+    put_bits(writer, header.length_code_count - 4, 4);
+    for k in 0..header.length_code_count put_bits(writer, header.length_lengths[code_length_order[k]],
+        3);
+    for k in 0..header.run_count {
+        symbol: int = header.runs[k];
+        put_bits(writer, header.length_codes[symbol], header.length_lengths[symbol]);
+        put_bits(writer, header.run_extras[k], run_extra_bits(symbol))
+    }
+}
+
+// ---- writing a block ----
+// What one stream's encoding works with: the input, the window's hash
+// chains (head: the latest position whose next three bytes hash to a
+// value; previous: the position before it with the same hash, by
+// position in the window), the block being gathered, and its codes.
+type Encoder = {
+    source: []i8;
+    start: int;
+    end: int;
+    head: []int;
+    previous: []int;
+    symbols: BlockSymbols;
+    dynamic: BlockCodes;
+    fixed: BlockCodes;
+    header: DynamicHeader
+}
+
+// The block of input from block_start to block_end, its symbols gathered,
+// written the smallest way.
+write_block(
+    writer: *BitWriter,
+    encoder: *Encoder,
+    block_start: int,
+    block_end: int,
+    last: bool
+) {
+    symbols: *BlockSymbols = &encoder.symbols;
+    symbols.literal_counts[END_OF_BLOCK] = 1;
+    codes: *BlockCodes = &encoder.dynamic;
+    code_lengths_for(symbols.literal_counts, 286, 15, codes.literal_lengths);
+    code_lengths_for(symbols.distance_counts, 30, 15, codes.distance_lengths);
+    canonical_codes(codes.literal_lengths, 286, codes.literal_codes);
+    canonical_codes(codes.distance_lengths, 30, codes.distance_codes);
+    dynamic_bits: int = 3 + dynamic_header_for(&encoder.header, codes) + symbols_cost(symbols,
+        codes);
+    fixed_bits: int = 3 + symbols_cost(symbols, &encoder.fixed);
+    size: int = block_end - block_start;
+    chunks: int = if (size == 0) 1 else (size + STORED_MOST - 1) / STORED_MOST;
+    // (Each stored chunk: its header, at most 7 bits to align, and its
+    // length and complement.)
+    stored_bits: int = chunks * (3 + 7 + 32) + 8 * size;
+    final_bit: int = if (last) 1 else 0;
+    if (stored_bits <= dynamic_bits && stored_bits <= fixed_bits) {
+        at: int = block_start;
+        for chunk in 0..chunks {
+            n: int = if (block_end - at > STORED_MOST) STORED_MOST else block_end - at;
+            put_bits(writer, if (chunk == chunks - 1) final_bit else 0, 1);
+            put_bits(writer, 0, 2);
+            align_to_byte(writer);
+            put_bits(writer, n, 16);
+            put_bits(writer, n ^ 65535, 16);
+            memcpy(writer.out, writer.at, encoder.source, at, n);
+            writer.at = writer.at + n;
+            at = at + n
+        }
+    } else if (fixed_bits <= dynamic_bits) {
+        put_bits(writer, final_bit, 1);
+        put_bits(writer, 1, 2);
+        write_symbols(writer, symbols, &encoder.fixed)
+    } else {
+        put_bits(writer, final_bit, 1);
+        put_bits(writer, 2, 2);
+        write_dynamic_header(writer, &encoder.header);
+        write_symbols(writer, symbols, codes)
+    }
+    block_symbols_clear(symbols)
+}
+
+// ---- finding matches ----
+hash_at(source: []i8, at: int): int {
+    ((source[at] as int & 255) << 10 ^ (source[at + 1] as int & 255) << 5 ^ source[at + 2] as int & 255) & HASH_MASK
+}
+
+// Position at in the hash chains (when three bytes begin there), and the
+// latest earlier position with the same hash (-1: none).
+insert_position(encoder: *Encoder, at: int): int {
+    if (at + MIN_MATCH > encoder.end) return -1;
+    hash: int = hash_at(encoder.source, at);
+    earlier: int = encoder.head[hash];
+    encoder.previous[at & WINDOW_MASK] = earlier;
+    encoder.head[hash] = at;
+    earlier
+}
+
+// The longest match for the bytes at at among the chain from candidate,
+// longer than at_least: its length << 16 | its distance (0: none).
+longest_match(
+    encoder: *Encoder,
+    at: int,
+    first_candidate: int,
+    at_least: int
+): int {
+    source: []i8 = encoder.source;
+    most: int = if (encoder.end - at < MAX_MATCH) encoder.end - at else MAX_MATCH;
+    best_length: int = at_least;
+    best_distance: int = 0;
+    candidate: int = first_candidate;
+    chain: int = MAX_CHAIN;
+    while (candidate >= 0 && candidate < at && at - candidate <= MAX_DISTANCE && chain > 0 && best_length < most) {
+        if (source[candidate + best_length] == source[at + best_length]) {
+            length: int = 0;
+            while (length < most && source[candidate + length] == source[at + length]) length = length + 1;
+            if (length > best_length) {
+                best_length = length;
+                best_distance = at - candidate
+            }
+        }
+        next: int = encoder.previous[candidate & WINDOW_MASK];
+        // (A link older than the window, overwritten since: the chain ends.)
+        if (next >= candidate) candidate = -1 else candidate = next;
+        chain = chain - 1
+    }
+    if (best_distance == 0) 0 else best_length << 16 | best_distance
+}
+
+// The most bytes deflate_compress makes of count bytes: every block
+// stored, each stored chunk five bytes more than its bytes, and each
+// block's end padded to a byte.
+tag deflate
+deflate_compress_bound(count: int): int {
+    count + 5 * (count / STORED_MOST + count / BLOCK_SYMBOLS + 2) + 16
+}
+
+// source[start..start + count) as a raw DEFLATE stream (RFC 1951), in a
+// new slice of exactly its size. A span outside the source fails as a
+// slice's bounds do: it is the caller's mistake, not the data's.
+tag deflate
+deflate_compress(source: []i8, start: int, count: int): []i8@new {
+    most: int = deflate_compress_bound(count);
+    out: []i8 = new i8[most](0i8);
+    written: int = 0;
+    region {
+        writer: BitWriter = BitWriter {
+            out: out,
+            at: 0,
+            bits: 0,
+            count: 0
+        };
+        encoder: Encoder = Encoder {
+            source: source,
+            start: start,
+            end: start + count,
+            head: new int[HASH_SIZE](-1),
+            previous: new int[WINDOW_MASK + 1](-1),
+            symbols: block_symbols_new(),
+            dynamic: block_codes_new(),
+            fixed: block_codes_new(),
+            header: dynamic_header_new()
+        };
+        fixed_codes_into(&encoder.fixed);
+        end: int = start + count;
+        block_start: int = start;
+        at: int = start;
+        // (A match found at the byte before, put off to see whether this
+        // byte begins a longer one: its length (0: none) and distance.)
+        waiting: bool = false;
+        waiting_length: int = 0;
+        waiting_distance: int = 0;
+        while (at < end) {
+            candidate: int = insert_position(&encoder, at);
+            found: int = 0;
+            if (candidate >= 0 && !(waiting && waiting_length >= LAZY_ENOUGH)) found = longest_match(&encoder,
+                at, candidate, if (waiting && waiting_length > 0) waiting_length else MIN_MATCH - 1);
+            found_length: int = found >> 16;
+            if (waiting && waiting_length >= MIN_MATCH && found_length <= waiting_length) {
+                // (The match at the byte before stands: at is its second
+                // byte, already in the chains.)
+                add_match(&encoder.symbols, waiting_length, waiting_distance);
+                match_end: int = at - 1 + waiting_length;
+                for later in at + 1..match_end _earlier: int = insert_position(&encoder,
+                    later);
+                at = match_end;
+                waiting = false
+            } else {
+                if (waiting) add_literal(&encoder.symbols, source[at - 1] as int & 255);
+                waiting = true;
+                waiting_length = found_length;
+                waiting_distance = found & 65535;
+                at = at + 1
+            }
+            if (encoder.symbols.count >= BLOCK_SYMBOLS - 1) {
+                // (A waiting byte goes in the next block.)
+                block_end: int = if (waiting) at - 1 else at;
+                write_block(&writer, &encoder, block_start, block_end, false);
+                block_start = block_end
+            }
+        }
+        if (waiting) add_literal(&encoder.symbols, source[end - 1] as int & 255);
+        write_block(&writer, &encoder, block_start, end, true);
+        align_to_byte(&writer);
+        written = writer.at
+    }
+    result: []i8 = new i8[written](0i8);
+    memcpy(result, 0, out, 0, written);
+    result
+}

@@ -13,9 +13,11 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `base64/` | `base64.l8` | `base64` | Padded RFC 4648 Base64 encoding of binary data; native and Wasm |
 | `sha1/` | `sha1.l8` | `sha1` | SHA-1 digests for protocol compatibility; native and Wasm |
 | `utf8/` | `utf8.l8` | `utf8` | Strict UTF-8 prefix validation; native and Wasm |
-| `deflate/` | `deflate.l8` | `deflate` | DEFLATE, zlib and gzip decoding with CRC-32 and Adler-32; native and Wasm ([README](deflate/README.md)) |
+| `deflate/` | `deflate.l8` | `deflate` | DEFLATE, zlib and gzip decoding, DEFLATE encoding, CRC-32 and Adler-32; native and Wasm ([README](deflate/README.md)) |
 | `archive/` | `archive.l8` | `archive` | Zip and tar reading from memory; imports deflate; native and Wasm ([README](archive/README.md)) |
 | `builder/` | `builder.l8` | `builder` | A growing byte slice for text or data of unknown size; native and Wasm ([README](builder/README.md)) |
+| `folio/` | `folio.l8` | `folio` | Documents for reading software (Bibles, commentaries, books, dictionaries): text records in compressed blocks with an index of their divisions, written and read a part at a time; imports deflate and builder; native and Wasm ([README](folio/README.md)) |
+| `sword_folio/` | `sword_folio.l8` | `sword_folio` | SWORD modules made into folios a part at a time: a commentary's chapters (its verse labels followed), a dictionary's entries, a book's parts; imports sword, folio and builder; native and Wasm ([README](sword_folio/README.md)) |
 | `sword/` | `sword.l8` | `sword` | CrossWire SWORD modules read from their packages: Bibles, commentaries, dictionaries and books, their verse numbering and markup as rich text; imports deflate, archive and builder; native and Wasm ([README](sword/README.md)) |
 | `http/` | `http.l8` | `http` | HTTP/1.1 client, server, and streaming APIs |
 | `websocket/` | `websocket.l8` | `websocket` | RFC 6455 client, server, and message APIs; imports HTTP |

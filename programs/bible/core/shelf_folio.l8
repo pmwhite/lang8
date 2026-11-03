@@ -1,0 +1,1146 @@
+tag bible;
+
+use_tag std, sword, builder, sword_folio;
+
+// Commentaries on the bookshelf as folios (folio/README.md): a module is
+// made into one when it is first wanted (programs/sword_folio, some
+// chapters a step: core/shelf.l8's work), kept as shelf-NAME.folio, and
+// read a chapter at a time: the blocks holding a chapter are a span of
+// the kept file (shelf_span_ready), decoded as they are read. The page
+// beside the Bible (core/beside.l8), the Bookshelf's commentary and Study
+// all read a chapter's records: its C, then each comment, begun by K (its
+// verses), with V where it turns to a verse, S and s headings, P
+// paragraphs, words in their styles, L words that point to a passage and
+// F a note's words.
+import "../../sword/sword.l8";
+
+import "../../folio/folio.l8";
+
+import "../../sword_folio/sword_folio.l8";
+
+// A module being made a folio: its package's bytes and their opening,
+// then its making (programs/sword_folio: a commentary a chapter at a time,
+// a dictionary's entries or a book's parts some at a time); the folio
+// being written, and whether it is finished and being kept.
+type DocumentJob = {
+    data: []i8;
+    opening: *PackageOpening;
+    making: DocumentMaking;
+    writer: *folio::FolioWriter;
+    // A commentary's chapter made, its records added to the folio a piece a
+    // step: those before pending_at are; and whether every chapter is made.
+    pending: *ByteBuilder;
+    pending_at: int;
+    made_all: bool;
+    keeping: bool
+}
+
+// About how much a step of a commentary's making does: the records it
+// adds to the folio (compressing them), or the large block it decodes.
+DOCUMENT_PIECE: int = 65536;
+
+// What is being made of it: nothing yet (its package being taken out), a
+// commentary's chapters, a dictionary's entries or a book's parts.
+type DocumentMaking =
+    | Opening
+    | Comments { making: *CommentaryImport }
+    | Entries { making: *DictionaryImport }
+    | Parts { making: *BookImport }
+
+shelf_document_job: ?owned *DocumentJob = null;
+
+// A module's package read, to be made a folio.
+shelf_document_make(i: int) {
+    if (!shelf_kept_at(i, ".zip")) {
+        shelf_file_gone(i);
+        return
+    }
+    shelf_work = ShelfWork.MakingDocument { slot: shelf_slot_at(i) };
+    shelf_work_done = 0;
+    shelf_read_named(i)
+}
+
+shelf_document_got(i: int, id: int, size: int) {
+    if (size <= 0) {
+        shelf_file_gone(i);
+        return
+    }
+    try {
+        next: owned *DocumentJob = own {
+            data: []i8 = new i8[size](0i8);
+            hs_file(id, data);
+            new DocumentJob {
+                data: data,
+                opening: package_begin(data, size),
+                making: DocumentMaking.Opening,
+                writer: folio::folio_writer_new(),
+                pending: builder_new(DOCUMENT_PIECE),
+                pending_at: 0,
+                made_all: false,
+                keeping: false
+            }
+        };
+        drop shelf_document_job;
+        shelf_document_job = move next;
+        shelf_work_next()
+    } with SwordError _error -> {
+        shelf_set_broken(i, true);
+        shelf_work_rests()
+    }
+}
+
+// Whether it is still being made (stepped; then its folio is kept).
+shelf_document_stepping(): bool {
+    if (shelf_document_job == null) return false;
+    stepping: bool = false;
+    borrow shelf_document_job as job {
+        stepping = !job.keeping
+    }
+    stepping
+}
+
+// A step of a module's making: its package's files taken out, then a
+// commentary's chapters (about SHELF_STEP_BYTES of records a step), a
+// dictionary's entries or a book's parts made; after the last, its folio
+// finished and kept.
+shelf_document_step() {
+    i: int = shelf_find_slot(shelf_work_slot());
+    if (i < 0 || shelf_document_job == null) {
+        drop shelf_document_job;
+        shelf_work_rests();
+        return
+    }
+    progress: int = 0;
+    failed: bool = false;
+    finished: bool = false;
+    unkept: bool = false;
+    try {
+        borrow shelf_document_job as job {
+            match job.making {
+                Opening -> {
+                    whole: bool = false;
+                    allocate job {
+                        whole = package_step(job.opening, SHELF_STEP_BYTES)
+                    }
+                    progress = package_progress(job.opening) * SHELF_PACKAGE_SHARE / 1000;
+                    if (whole) {
+                        allocate job {
+                            package: *ModulePackage = package_opened(job.opening);
+                            match package.info.storage {
+                                ByVerse _ -> {
+                                    module_folio_meta(job.writer, &package.info);
+                                    job.making = DocumentMaking.Comments { making: commentary_import_new(verse_module_open(package)) }
+                                }
+                                ByKey _ -> {
+                                    module: *KeyModule = key_module_open(package);
+                                    dictionary_folio_meta(job.writer, module);
+                                    job.making = DocumentMaking.Entries { making: dictionary_import_new(module) }
+                                }
+                                ByTree -> {
+                                    module_folio_meta(job.writer, &package.info);
+                                    job.making = DocumentMaking.Parts { making: book_import_new(tree_module_open(package)) }
+                                }
+                                _ -> raise SwordError { failure: SwordFailure.NotSupported }
+                            }
+                        }
+                    }
+                }
+                Comments c -> {
+                    // (Each step one thing, brief however slowly the app runs:
+                    // a piece of the records made added to the folio; else a
+                    // piece of a book's large block decoded; else a chapter
+                    // made, its records kept for the steps after.)
+                    pending: *ByteBuilder = job.pending;
+                    if (job.pending_at < pending.size) {
+                        end: int = if (pending.size - job.pending_at > DOCUMENT_PIECE) job.pending_at + DOCUMENT_PIECE else pending.size;
+                        while (end < pending.size && pending.data[end - 1] != 10i8) end = end + 1;
+                        allocate job {
+                            folio::folio_append_records(job.writer, pending.data,
+                                job.pending_at, end)
+                        }
+                        job.pending_at = end
+                    } else if (!job.made_all) {
+                        ready: bool = false;
+                        allocate job {
+                            ready = commentary_import_prepare(c.making, DOCUMENT_PIECE)
+                        }
+                        if (ready) {
+                            region {
+                                out: *ByteBuilder = builder_new(4096);
+                                job.made_all = !commentary_import_next(c.making, out);
+                                allocate job {
+                                    builder_clear(pending);
+                                    builder_bytes(pending, out.data, 0, out.size)
+                                }
+                                job.pending_at = 0
+                            }
+                        }
+                    }
+                    progress = commentary_import_progress(c.making);
+                    finished = job.made_all && job.pending_at >= pending.size
+                }
+                Entries e -> {
+                    region {
+                        chunk: *ImportChunk = import_chunk_new();
+                        finished = !dictionary_import_next(e.making, chunk);
+                        allocate job {
+                            import_chunk_append(job.writer, chunk)
+                        }
+                    }
+                    progress = dictionary_import_progress(e.making)
+                }
+                Parts b -> {
+                    region {
+                        chunk: *ImportChunk = import_chunk_new();
+                        finished = !book_import_next(b.making, chunk);
+                        allocate job {
+                            import_chunk_append(job.writer, chunk)
+                        }
+                    }
+                    progress = book_import_progress(b.making)
+                }
+            }
+            match job.making {
+                Opening -> { }
+                _ -> progress = SHELF_PACKAGE_SHARE + (1000 - SHELF_PACKAGE_SHARE) * progress / 1000
+            }
+            if (finished) {
+                job.keeping = true;
+                allocate job {
+                    packed: []i8 = folio::folio_finish(job.writer);
+                    if (shelf_kept_at(i, ".folio")) shelf_keep_named(i, packed, len(packed)) else unkept = true
+                }
+            }
+        }
+    } with SwordError _error -> {
+        failed = true
+    } with folio::FolioError _error -> {
+        failed = true
+    }
+    if (failed || unkept) {
+        drop shelf_document_job;
+        if (failed) shelf_set_broken(i, true);
+        shelf_work_rests();
+        return
+    }
+    if (!finished) shelf_work_shown(progress)
+}
+
+// Its folio kept (or not: made again when it is next wanted): its package
+// let go, and the module read from its folio from now on.
+shelf_document_kept(i: int, ok: bool) {
+    drop shelf_document_job;
+    if (ok) {
+        if (shelf_kept_at(i, ".zip")) {
+            f: fn() = kept_store.remove;
+            f()
+        }
+        shelf_save_form(i, ShelfForm.Folio)
+    }
+    shelf_work_rests()
+}
+
+// ---- a folio opened ----
+// Its head read (the file's first bytes, which say how many the head is;
+// then the head), and the module put to its use.
+shelf_folio_open(i: int, use: int) {
+    if (!shelf_kept_at(i, ".folio")) return;
+    shelf_work = ShelfWork.OpeningFolio { slot: shelf_slot_at(i), use: use, head: 0 };
+    shelf_work_done = 0;
+    shelf_read_named_range(i, 0, folio::FOLIO_PREFIX)
+}
+
+shelf_folio_got(
+    i: int,
+    id: int,
+    size: int,
+    use: int,
+    head: int
+) {
+    if (size <= 0) {
+        // (Gone: downloaded and made again.)
+        shelf_file_gone(i);
+        return
+    }
+    try {
+        if (head == 0) {
+            head_size: int = 0;
+            region {
+                prefix: []i8 = new i8[size](0i8);
+                hs_file(id, prefix);
+                head_size = folio::folio_head_size(prefix, size)
+            }
+            if (!shelf_kept_at(i, ".folio")) return;
+            shelf_work = ShelfWork.OpeningFolio { slot: shelf_slot_at(i), use: use, head: head_size };
+            shelf_read_named_range(i, 0, head_size);
+            return
+        }
+        next: owned *OpenModule = own {
+            data: []i8 = new i8[size](0i8);
+            hs_file(id, data);
+            new OpenModule { slot: shelf_slot_at(i), reader: OpenReader.Document { folio: folio::folio_open(data,
+                size) } }
+        };
+        drop shelf_open[use];
+        shelf_open[use] = move next;
+        shelf_open_slots[use] = shelf_slot_at(i);
+        shelf_set_broken(i, false)
+    } with folio::FolioError _error -> {
+        shelf_set_broken(i, true)
+    }
+    shelf_work_rests()
+}
+
+// ---- a chapter of a folio read ----
+// What a chapter of the open folio is: its blocks still being read, or
+// damaged; not in it (no comment on it); or its records.
+type FolioChapter =
+    | ChapterWaiting
+    | ChapterDamaged
+    | ChapterNone
+    | ChapterRecords { data: []i8 }
+
+// The division of folio for chapter c (CODE.n; -1: it has none).
+folio_chapter_division(folio: *folio::Folio, c: int): int {
+    found: int = -1;
+    region {
+        key: *ByteBuilder = builder_new(16);
+        builder_str(key, book_code(ch_book[c]));
+        builder_byte(key, '.' as i8);
+        builder_int(key, ch_num[c]);
+        found = folio::folio_find_bytes(folio, key.data, 0, key.size)
+    }
+    found
+}
+
+// The span of the kept folio that holds the blocks of a part of its
+// content (start to end).
+folio_range_span(folio: *folio::Folio, start: int, end: int): TextSpan {
+    first: int = folio::folio_block_first(folio, start);
+    last: int = if (end > start) folio::folio_block_last(folio, end) else first;
+    from: int = folio::folio_block_offset(folio, first);
+    to: int = folio::folio_block_offset(folio, last) + folio::folio_block_compressed(folio,
+        last);
+    TextSpan { ending: "folio", offset: from, count: to - from }
+}
+
+// Chapter c of the folio open in slot: its records (shelf_folio_range).
+shelf_folio_chapter(slot: int, folio: *folio::Folio, c: int): FolioChapter@new {
+    if (c < 0 || c >= chapters) return FolioChapter.ChapterNone;
+    d: int = folio_chapter_division(folio, c);
+    if (d < 0) FolioChapter.ChapterNone else shelf_folio_division(slot, folio, d)
+}
+
+// A division of the folio open in slot (an entry, a book's part).
+shelf_folio_division(slot: int, folio: *folio::Folio, d: int): FolioChapter@new {
+    shelf_folio_range(slot, folio, folio::folio_division_start(folio, d), folio::folio_division_end(folio,
+        d))
+}
+
+// What the folio has before its first division: its own words (a book's
+// before its parts, a dictionary's introduction).
+shelf_folio_own(slot: int, folio: *folio::Folio): FolioChapter@new {
+    end: int = if (folio::folio_division_count(folio) > 0) folio::folio_division_start(folio,
+        0) else folio::folio_content_size(folio);
+    shelf_folio_range(slot, folio, 0, end)
+}
+
+// A part of the content of the folio open in slot: its records, decoded
+// from the span of its blocks held (else asked for, once the bookshelf
+// rests, and the screens made again when it comes).
+shelf_folio_range(
+    slot: int,
+    folio: *folio::Folio,
+    start: int,
+    end: int
+): FolioChapter@new {
+    if (end <= start) return FolioChapter.ChapterRecords { data: new i8[0](0i8) };
+    span: TextSpan = folio_range_span(folio, start, end);
+    if (!shelf_span_ready(slot, span)) return FolioChapter.ChapterWaiting;
+    at: int = shelf_holds(slot, span);
+    if (at < 0) return FolioChapter.ChapterWaiting;
+    out: []i8 = new i8[end - start](0i8);
+    damaged: bool = false;
+    borrow shelf_held[at] as held {
+        if (held.failed) damaged = true else {
+            try {
+                for block in folio::folio_block_first(folio, start)..folio::folio_block_last(folio,
+                    end) + 1 {
+                    region {
+                        decoded: []i8 = folio::folio_decode_block(folio, block, held.bytes,
+                            folio::folio_block_offset(folio, block) - held.offset);
+                        block_start: int = folio::folio_block_start(folio, block);
+                        take_from: int = if (start > block_start) start else block_start;
+                        block_end: int = block_start + len(decoded);
+                        take_to: int = if (end < block_end) end else block_end;
+                        memcpy(out, take_from - start, decoded, take_from - block_start,
+                            take_to - take_from)
+                    }
+                }
+            } with folio::FolioError _error -> {
+                damaged = true
+            }
+        }
+    }
+    if (damaged) FolioChapter.ChapterDamaged else FolioChapter.ChapterRecords { data: out }
+}
+
+// ---- a chapter's comments ----
+// A record of a chapter's: where its line begins and ends (its letter at
+// from), and the next's start.
+type RecordLine = {
+    from: int;
+    to: int;
+    next: int
+}
+
+record_line(data: []i8, at: int): RecordLine {
+    end: int = at;
+    while (end < len(data) && data[end] as int != 10) end = end + 1;
+    RecordLine { from: at, to: end, next: end + 1 }
+}
+
+// A comment found among a chapter's records: its verses (from -1: none),
+// where its K record begins and where the next comment's does.
+type CommentSpan = {
+    from: int;
+    through: int;
+    start: int;
+    end: int
+}
+
+no_comment: CommentSpan = CommentSpan {
+    from: -1,
+    through: -1,
+    start: 0,
+    end: 0
+};
+
+// The comment whose K record begins at at (a K record's verses: K<c>:<v>-
+// <c>:<v2>).
+comment_at(data: []i8, at: int): CommentSpan {
+    line: RecordLine = record_line(data, at);
+    colon: int = line.from + 1;
+    while (colon < line.to && data[colon] as int != 58) colon = colon + 1;
+    dash: int = colon + 1;
+    while (dash < line.to && data[dash] as int != 45) dash = dash + 1;
+    second: int = dash + 1;
+    while (second < line.to && data[second] as int != 58) second = second + 1;
+    from: int = record_number(data, colon + 1, dash);
+    through: int = record_number(data, second + 1, line.to);
+    end: int = line.next;
+    while (end < len(data) && data[end] != 'K') end = record_line(data, end).next;
+    CommentSpan {
+        from: from,
+        through: if (through < from) from else through,
+        start: at,
+        end: if (end > len(data)) len(data) else end
+    }
+}
+
+record_number(data: []i8, from: int, to: int): int {
+    n: int = 0;
+    for k in from..to {
+        digit: int = data[k] as int - 48;
+        if (digit >= 0 && digit <= 9) n = n * 10 + digit
+    }
+    n
+}
+
+// The first comment among a chapter's records (from -1: none).
+first_comment(data: []i8): CommentSpan {
+    at: int = 0;
+    while (at < len(data) && data[at] != 'K') at = record_line(data, at).next;
+    if (at >= len(data)) no_comment else comment_at(data, at)
+}
+
+// The comment on verse v: the one whose verses hold it, else the nearest
+// before it (from -1: none).
+comment_on(data: []i8, v: int): CommentSpan {
+    found: CommentSpan = no_comment;
+    comment: CommentSpan = first_comment(data);
+    while (comment.from >= 0) {
+        if (comment.from <= v && comment.from > 0 || comment.from == 0 && v == 0) found = comment;
+        if (comment.from <= v && v <= comment.through && comment.from > 0) return comment;
+        comment = (if (comment.end < len(data)) comment_at(data, comment.end) else no_comment)
+    }
+    found
+}
+
+// Whether a comment heads its parts itself (an S or s record in it).
+comment_has_sections(data: []i8, comment: CommentSpan): bool {
+    at: int = record_line(data, comment.start).next;
+    while (at < comment.end) {
+        if (data[at] == 'S' || data[at] == 's') return true;
+        at = record_line(data, at).next
+    }
+    false
+}
+
+// ---- as a reader's chapter ----
+// A chapter's comments laid out as a reader's chapter, into ctx: its
+// number, then each comment, headed by its verses ("Verses 14-16") unless
+// it heads its parts itself, its words in the reader's styles (a note's in
+// brackets); each comment a verse of its own, keyed by its first verse,
+// from its heading to its end, and each verse its labels turn to too. A
+// comment that doesn't fit whole is taken out again, and a line says the
+// rest isn't shown: never cut in its words.
+lay_comment_records(data: []i8, c: int, ctx: *ChapterLayout) {
+    layout_begin(ctx);
+    lay_begin(ctx, STYLE_NUMERAL, PARA_CENTER, 0);
+    ctx.opener_at = ctx.out_n;
+    lay_int(ctx, ch_num[c]);
+    lay_byte(ctx, 10);
+    comment: CommentSpan = first_comment(data);
+    while (comment.from >= 0) {
+        out_n: int = ctx.out_n;
+        runs: int = ctx.runs;
+        verses: int = ctx.verse_count;
+        lay_comment(data, comment, ctx);
+        if (shelf_layout_full(ctx)) {
+            ctx.out_n = out_n;
+            ctx.runs = runs;
+            ctx.verse_count = verses;
+            if (runs > 0) ctx.run_end[runs - 1] = out_n;
+            lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
+            lay_str(ctx, "The rest of this chapter\â\€\™s commentary is too long to show here.");
+            lay_byte(ctx, 10);
+            return
+        }
+        comment = (if (comment.end < len(data)) comment_at(data, comment.end) else no_comment)
+    }
+}
+
+lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout) {
+    if (comment.from > 0) {
+        verse_open(ctx, comment.from, comment.from);
+        verse_here(ctx)
+    }
+    if (!comment_has_sections(data, comment)) {
+        lay_begin(ctx, STYLE_HEAD, PARA_PROSE, 0);
+        fbuf_n = 0;
+        fput_comment_verses(comment);
+        for k in 0..fbuf_n lay_byte(ctx, fbuf[k] as int);
+        lay_byte(ctx, 10)
+    }
+    line_open: bool = false;
+    at: int = record_line(data, comment.start).next;
+    while (at < comment.end) {
+        line: RecordLine = record_line(data, at);
+        kind: i8 = data[line.from];
+        if (kind == 'P') line_open = shelf_lay_line_end(ctx, line_open) else if (kind == 'S' || kind == 's') {
+            line_open = shelf_lay_line_end(ctx, line_open);
+            lay_begin(ctx, STYLE_HEAD, PARA_PROSE, 0);
+            for k in line.from + 1..line.to lay_byte(ctx, data[k] as int);
+            lay_byte(ctx, 10)
+        } else if (kind == 'V') {
+            n: int = record_number(data, line.from + 1, line.to);
+            verse_on(ctx);
+            verse_open(ctx, n, n);
+            verse_here(ctx)
+        } else if (kind == 'F') {
+            lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
+            lay_str(ctx, " [");
+            for k in line.from + 1..line.to lay_byte(ctx, data[k] as int);
+            lay_byte(ctx, 93);
+            line_open = true
+        } else if (kind == 'L') {
+            tab: int = line.from + 1;
+            while (tab < line.to && data[tab] as int != 9) tab = tab + 1;
+            lay_begin(ctx, STYLE_BODY, PARA_PROSE, 0);
+            for k in tab + 1..line.to lay_byte(ctx, data[k] as int);
+            line_open = true
+        } else if (kind == 'T' || kind == 'I' || kind == 'G' || kind == 'U' || kind == 'W' || kind == 'J') {
+            lay_begin(ctx, record_style(kind), PARA_PROSE, 0);
+            for k in line.from + 1..line.to lay_byte(ctx, data[k] as int);
+            line_open = true
+        }
+        at = line.next
+    }
+    _closed: bool = shelf_lay_line_end(ctx, line_open);
+    if (comment.from > 0) verse_on(ctx)
+}
+
+// The reader's style for a record of words.
+record_style(kind: i8): int {
+    if (kind == 'U') STYLE_CAPS else if (kind == 'W' || kind == 'J') STYLE_JESUS else if (kind == 'I') STYLE_SUPPLIED else STYLE_BODY
+}
+
+// A comment's verses as its heading says them, onto fbuf: "Introduction",
+// "Verse 3", "Verses 3â€“5".
+fput_comment_verses(comment: CommentSpan) {
+    if (comment.from == 0 && comment.through == 0) fput_str("Introduction") else if (comment.through > comment.from) {
+        fput_str("Verses ");
+        fput_int(if (comment.from == 0) 1 else comment.from);
+        fput_str("\â\€\“");
+        fput_int(comment.through)
+    } else {
+        fput_str("Verse ");
+        fput_int(comment.from)
+    }
+}
+
+// ---- as rows ----
+// A comment as page paragraphs (the Bookshelf's commentary, Study): its
+// verses' label (unless it heads its parts itself), then a row each
+// paragraph (a heading's its own, marked as one), its words in their
+// styles, its passages previewed on link_action, its notes in brackets,
+// small.
+comment_rows(data: []i8, comment: CommentSpan, link_action: int) {
+    if (comment_has_sections(data, comment)) ui_section("", "") else commentary_section_label(comment.from,
+        comment.through);
+    records_rows(data, record_line(data, comment.start).next, comment.end, link_action)
+}
+
+// Records from up to to as page paragraphs: a row each paragraph (a
+// heading's its own, marked as one), its words in their styles, its
+// passages previewed on link_action, its notes in brackets, small.
+records_rows(
+    data: []i8,
+    from: int,
+    to: int,
+    link_action: int
+) {
+    rows: RichRows = rich_rows_new();
+    at: int = from;
+    while (at < to && !rows.stopped) {
+        line: RecordLine = record_line(data, at);
+        kind: i8 = data[line.from];
+        if (kind == 'P') rich_rows_end(&rows, link_action) else if (kind == 'S' || kind == 's') {
+            rich_rows_end(&rows, link_action);
+            rich_rows_begin(&rows, true);
+            if (rows.open) {
+                for k in line.from + 1..line.to fput(data[k] as int & 255);
+                ui_rich(RUN_STRONG)
+            }
+            rich_rows_end(&rows, link_action)
+        } else if (kind == 'F') {
+            rich_rows_begin(&rows, false);
+            if (rows.open) {
+                fput_str(" [");
+                for k in line.from + 1..line.to fput(data[k] as int & 255);
+                fput(93);
+                ui_rich(RUN_SMALL)
+            }
+        } else if (kind == 'L') {
+            rich_rows_begin(&rows, false);
+            if (rows.open) {
+                ui_rich(RUN_PLAIN);
+                if (rows.links >= SHELF_LINKS_MOST) {
+                    rich_rows_end(&rows, link_action);
+                    rich_rows_begin(&rows, false)
+                }
+                tab: int = line.from + 1;
+                while (tab < line.to && data[tab] as int != 9) tab = tab + 1;
+                target: int = record_link_target(data, line.from + 1, tab);
+                link_at: int = ui_rich_u;
+                for k in tab + 1..line.to fput(data[k] as int & 255);
+                ui_rich(if (target >= 0) RUN_ACCENT else RUN_PLAIN);
+                if (target >= 0 && ui_rich_u > link_at) {
+                    rows.link_from[rows.links] = link_at;
+                    rows.link_to[rows.links] = ui_rich_u;
+                    rows.link_ref[rows.links] = target;
+                    rows.links = rows.links + 1
+                }
+            }
+        } else if (kind == 'T' || kind == 'I' || kind == 'G' || kind == 'U' || kind == 'W' || kind == 'J') {
+            rich_rows_begin(&rows, false);
+            if (rows.open) {
+                // (The words, the divine name in capitals.)
+                for k in line.from + 1..line.to {
+                    x: int = data[k] as int & 255;
+                    if (kind == 'U' && x >= 97 && x <= 122) fput(x - 32) else fput(x)
+                }
+                ui_rich(if (kind == 'G') RUN_STRONG else if (kind == 'I' || kind == 'J') RUN_ITALIC else RUN_PLAIN);
+                rows.runs = rows.runs + 1;
+                // (A paragraph of more runs goes on in a row of its own.)
+                if (rows.runs >= SHELF_RUNS_MOST) rich_rows_end(&rows, link_action)
+            }
+        }
+        at = line.next
+    }
+    rich_rows_end(&rows, link_action)
+}
+
+// Where an L record's target (osis:..., passage:...) points: a reference
+// this app can show, or -1.
+record_link_target(data: []i8, from: int, to: int): int {
+    if (record_starts(data, from, to, "osis:")) return shelf_osis_ref(data, from + 5,
+        to);
+    if (record_starts(data, from, to, "passage:")) return shelf_passage_ref(data,
+        from + 8, to);
+    if (record_starts(data, from, to, "ref:")) return record_code_ref(data, from + 4,
+        to);
+    -1
+}
+
+// A passage by its book's code (JHN.3.16, JHN.3.1-3.8, JHN.3.36-4.2) as a
+// reference this app can show, or -1.
+record_code_ref(data: []i8, from: int, to: int): int {
+    if (to - from < 7 || data[from + 3] != '.') return -1;
+    book: int = -1;
+    for b in 0..books {
+        if (book_codes[b][0] == data[from] && book_codes[b][1] == data[from + 1] && book_codes[b][2] == data[from + 2]) book = b
+    }
+    if (book < 0) return -1;
+    dot: int = from + 4;
+    while (dot < to && data[dot] != '.') dot = dot + 1;
+    dash: int = dot + 1;
+    while (dash < to && data[dash] != '-') dash = dash + 1;
+    chapter: int = record_number(data, from + 4, dot);
+    if (chapter < 1 || chapter > book_count[book]) return -1;
+    xr_book = book;
+    xr_c = chapter;
+    xr_v = record_number(data, dot + 1, dash);
+    xr_ce = 0;
+    xr_ve = 0;
+    if (dash < to) {
+        second: int = dash + 1;
+        while (second < to && data[second] != '.') second = second + 1;
+        xr_ce = record_number(data, dash + 1, second);
+        xr_ve = record_number(data, second + 1, to)
+    }
+    xref_both()
+}
+
+record_starts(
+    data: []i8,
+    from: int,
+    to: int,
+    prefix: str
+): bool {
+    if (to - from < len(prefix)) return false;
+    for k in 0..len(prefix) {
+        if (data[from + k] != prefix[k]) return false
+    }
+    true
+}
+
+// ---- the commentary's chapter, for its screen and the reader ----
+// A chapter's comments as rows, each its section (its verses a way to
+// take the page there); its focus the comment on verse sk_beside_focus_v
+// (if that is not -1). How many comments.
+shelf_commentary_rows(data: []i8, c: int): int {
+    focus: int = if (sk_beside_focus_v >= 0) comment_on(data, sk_beside_focus_v).start else -1;
+    commentary_verses_c = c;
+    shown: int = 0;
+    comment: CommentSpan = first_comment(data);
+    while (comment.from >= 0) {
+        if (comment.start == focus) ui_focus = ui_rows_n;
+        comment_rows(data, comment, ACT_SHELF_LINK);
+        shown = shown + 1;
+        comment = (if (comment.end < len(data)) comment_at(data, comment.end) else no_comment)
+    }
+    commentary_verses_c = -1;
+    shown
+}
+
+// Chapter c of the commentary in slot laid out as a reader's chapter, into
+// ctx (lay_comment_records); a chapter it has no comment on, its number
+// alone; a damaged one, a line saying so. Whether its comments were ready
+// (else they are asked for, and nothing is laid out).
+shelf_lay_commentary(slot: int, c: int, ctx: *ChapterLayout): bool {
+    if (c < 0 || c >= chapters || !shelf_ensure_open(slot)) return false;
+    ready: bool = false;
+    borrow shelf_open[SHELF_USE_STUDY] as open {
+        match open.reader {
+            Document d -> {
+                region {
+                    match shelf_folio_chapter(slot, d.folio, c) {
+                        ChapterWaiting -> { }
+                        ChapterRecords r -> {
+                            lay_comment_records(r.data, c, ctx);
+                            ready = true
+                        }
+                        ChapterNone -> {
+                            lay_comment_records(new i8[0](0i8), c, ctx);
+                            ready = true
+                        }
+                        ChapterDamaged -> {
+                            lay_comment_records(new i8[0](0i8), c, ctx);
+                            lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
+                            lay_str(ctx, "This chapter of the commentary is damaged.");
+                            lay_byte(ctx, 10);
+                            ready = true
+                        }
+                    }
+                }
+            }
+            _ -> { }
+        }
+    }
+    ready
+}
+
+// ---- a dictionary's entries, and one entry ----
+// Entries' arg: its slot. Entry's: slot * SHELF_PLACE + its index (its
+// division's).
+sk_build_shelf_entries(id: int, slot: int) {
+    i: int = shelf_find_slot(slot);
+    ui_begin(id, SCR_SHELF_ENTRIES, slot, "");
+    fbuf_n = 0;
+    fput_shelf_abbreviation(i);
+    ui_set_screen_title_fbuf();
+    ui_set_search("Look Up a Word");
+    ui_set_search_text(shelf_query, shelf_query_n);
+    if (i < 0) return;
+    if (!shelf_ensure_open(slot)) {
+        shelf_opening_rows(slot, i);
+        return
+    }
+    borrow shelf_open[SHELF_USE_ENTRIES] as open {
+        match open.reader {
+            Document d -> shelf_entries_rows(d.folio, slot);
+            _ -> { }
+        }
+    }
+}
+
+// Its keys, made as they are wanted: from what is typed on (the first that
+// is not before it), or with nothing typed every key (a devotional's
+// today's first).
+shelf_entries_rows(folio: *folio::Folio, slot: int) {
+    count: int = folio::folio_division_count(folio);
+    if (shelf_query_n == 0) {
+        today: int = if (folio_meta_says(folio, "entries", "dates")) folio_entry_today(folio) else -1;
+        if (today >= 0) {
+            ui_section("Today", "");
+            shelf_entry_row(folio, slot, today);
+            ui_set_strong()
+        }
+        ui_section("", "");
+        shelf_entries_lazy_from(slot, 0, count);
+        return
+    }
+    from: int = folio_entry_seek(folio, shelf_query, shelf_query_n);
+    ui_section("", "");
+    n: int = count - from;
+    if (n > 0) shelf_entries_lazy_from(slot, from, n) else {
+        ui_row(UI_ITEM, 0, 0);
+        ui_set_title("No entries after this");
+        ui_set_faint()
+    }
+}
+
+// The lazy rows' dictionary, and the entry their first row is.
+shelf_lazy_module_slot: int = -1;
+
+shelf_lazy_first: int = 0;
+
+// Count rows of slot's entries from first on, made as they are wanted.
+shelf_entries_lazy_from(slot: int, first: int, count: int) {
+    shelf_lazy_module_slot = slot;
+    shelf_lazy_first = first;
+    ui_set_lazy(count);
+    ui_lazy_fn = &shelf_entries_lazy
+}
+
+shelf_entries_lazy(_s: int, r: int) {
+    if (!shelf_open_is(SHELF_USE_ENTRIES, shelf_lazy_module_slot)) return;
+    borrow shelf_open[SHELF_USE_ENTRIES] as open {
+        match open.reader {
+            Document d -> shelf_entry_row(d.folio, shelf_lazy_module_slot, shelf_lazy_first + r);
+            _ -> { }
+        }
+    }
+}
+
+// How many entries the dictionary in slot has (-1: it isn't open).
+shelf_entry_count(slot: int): int {
+    if (!shelf_open_is(SHELF_USE_ENTRIES, slot)) return -1;
+    count: int = -1;
+    borrow shelf_open[SHELF_USE_ENTRIES] as open {
+        match open.reader {
+            Document d -> count = folio::folio_division_count(d.folio);
+            _ -> { }
+        }
+    }
+    count
+}
+
+shelf_entry_row(folio: *folio::Folio, slot: int, index: int) {
+    ui_row(UI_ITEM, ACT_SHELF_ENTRY, slot * SHELF_PLACE + index);
+    fbuf_n = 0;
+    fput_folio_entry_key(folio, index);
+    ui_set_title_fbuf();
+    ui_set_acc(ACC_MORE)
+}
+
+sk_build_shelf_entry(id: int, arg: int) {
+    slot: int = arg / SHELF_PLACE;
+    index: int = arg % SHELF_PLACE;
+    i: int = shelf_find_slot(slot);
+    ui_begin(id, SCR_SHELF_ENTRY, arg, "");
+    ui_page = true;
+    sk_shelf_subtitle(i);
+    if (i < 0) return;
+    count: int = shelf_entry_count(slot);
+    ui_tool("", "chevron.up", ACT_SHELF_STEP, -1, if (index > 0) UI_TOOL_PLAIN else UI_TOOL_OFF,
+        0);
+    fbuf_n = 0;
+    fput_str("Previous Entry");
+    ui_set_tool_label_fbuf();
+    ui_tool("", "chevron.down", ACT_SHELF_STEP, 1, if (count < 0 || index + 1 < count) UI_TOOL_PLAIN else UI_TOOL_OFF,
+        2);
+    fbuf_n = 0;
+    fput_str("Next Entry");
+    ui_set_tool_label_fbuf();
+    if (!shelf_ensure_open(slot)) {
+        shelf_opening_rows(slot, i);
+        return
+    }
+    waiting: bool = false;
+    borrow shelf_open[SHELF_USE_ENTRIES] as open {
+        match open.reader {
+            Document d -> {
+                if (index < folio::folio_division_count(d.folio)) {
+                    fbuf_n = 0;
+                    fput_folio_entry_key(d.folio, index);
+                    ui_set_screen_title_fbuf();
+                    region {
+                        match shelf_folio_division(slot, d.folio, index) {
+                            ChapterWaiting -> waiting = true;
+                            ChapterRecords r -> {
+                                ui_section("", "");
+                                records_rows(r.data, 0, len(r.data), ACT_SHELF_LINK)
+                            }
+                            _ -> ui_set_empty("exclamationmark.triangle", "This Entry Is Damaged",
+                                "")
+                        }
+                    }
+                }
+            }
+            _ -> { }
+        }
+    }
+    if (waiting) {
+        shelf_opening_rows(slot, i);
+        return
+    }
+    ui_section("", "");
+    shelf_credit_row(i)
+}
+
+// Whether the folio's metadata says value for key.
+folio_meta_says(folio: *folio::Folio, key: str, value: str): bool {
+    said: bool = false;
+    region {
+        got: []i8 = folio::folio_meta_value(folio, key);
+        said = len(got) == len(value);
+        if (said) {
+            for k in 0..len(value) {
+                if (got[k] != value[k]) said = false
+            }
+        }
+    }
+    said
+}
+
+// The first entry whose key is not before typed (as the dictionary keeps
+// keys: sword_key_normal), its division; the count of them if none. In
+// Greek or Hebrew definitions keyed by number alone, a Strong's number
+// written with its letter (G25, H7225) is looked up by its number.
+folio_entry_seek(folio: *folio::Folio, typed: []i8, n: int): int {
+    found: int = 0;
+    region {
+        letter: int = if (folio_meta_says(folio, "entries", "greek")) 'g' as int else if (folio_meta_says(folio,
+            "entries", "hebrew")) 'h' as int else 0;
+        skip: int = if (n > 1 && letter != 0 && (typed[0] as int | 32) == letter && is_digit(typed[1] as int)) 1 else 0;
+        raw: []i8 = new i8[n - skip](0i8);
+        memcpy(raw, 0, typed, skip, n - skip);
+        normal: []i8 = sword_key_normal(raw, folio_meta_says(folio, "keys", "as-written"),
+            folio_meta_says(folio, "strongs-padding", "yes"));
+        low: int = 0;
+        high: int = folio::folio_division_count(folio);
+        while (low < high) {
+            middle: int = (low + high) / 2;
+            if (folio_key_compare(folio::folio_division_key(folio, middle), normal) < 0) low = middle + 1 else high = middle
+        }
+        found = low
+    }
+    found
+}
+
+// How key a compares with b, byte by byte: below 0, 0 or above.
+folio_key_compare(a: []i8, b: []i8): int {
+    k: int = 0;
+    while (k < len(a) && k < len(b)) {
+        x: int = a[k] as int & 255;
+        y: int = b[k] as int & 255;
+        if (x != y) return x - y;
+        k = k + 1
+    }
+    len(a) - len(b)
+}
+
+// Entry d's key as a reader would name it: a devotional's date (01.15:
+// January 15), a Strong's number without its zeros and with its
+// language's letter (00025: G25); else as it is.
+fput_folio_entry_key(folio: *folio::Folio, d: int) {
+    region {
+        key: []i8 = folio::folio_division_key(folio, d);
+        n: int = len(key);
+        digits: bool = n > 0;
+        for c in key {
+            if (!is_digit(c as int)) digits = false
+        }
+        if (folio_meta_says(folio, "entries", "dates") && n == 5 && key[2] == '.' && is_digit(key[0] as int) && is_digit(key[1] as int) && is_digit(key[3] as int) && is_digit(key[4] as int)) {
+            month: int = (key[0] as int - 48) * 10 + key[1] as int - 48;
+            day: int = (key[3] as int - 48) * 10 + key[4] as int - 48;
+            if (month >= 1 && month <= 12) {
+                fput_str(month_names[month - 1]);
+                fput(32);
+                fput_int(day)
+            } else fput_bytes(key, 0, n)
+        } else if (digits && (folio_meta_says(folio, "entries", "greek") || folio_meta_says(folio,
+            "entries", "hebrew"))) {
+            fput(if (folio_meta_says(folio, "entries", "greek")) 'G' as int else 'H' as int);
+            number: int = 0;
+            for c in key number = number * 10 + c as int - 48;
+            fput_int(number)
+        } else fput_bytes(key, 0, n)
+    }
+}
+
+// A devotional's entry for today: its key MM.DD (as SWORD's daily
+// devotionals name them), -1 if it has none.
+folio_entry_today(folio: *folio::Folio): int {
+    civil_date(sk_local_day(time(0)));
+    found: int = -1;
+    region {
+        key: []i8 = new i8[5](48i8);
+        key[0] = (48 + date_m / 10) trunc i8;
+        key[1] = (48 + date_m % 10) trunc i8;
+        key[2] = '.' as i8;
+        key[3] = (48 + date_d / 10) trunc i8;
+        key[4] = (48 + date_d % 10) trunc i8;
+        found = folio::folio_find_bytes(folio, key, 0, 5)
+    }
+    found
+}
+
+// A devotional's entry for today (-1: it is not open yet, or has none).
+shelf_devotional_today(slot: int): int {
+    if (!shelf_open_is(SHELF_USE_ENTRIES, slot)) return -1;
+    today: int = -1;
+    borrow shelf_open[SHELF_USE_ENTRIES] as open {
+        match open.reader {
+            Document d -> today = folio_entry_today(d.folio);
+            _ -> { }
+        }
+    }
+    today
+}
+
+// ---- a book's parts ----
+// Its arg: slot * SHELF_PLACE + the part: 0 the whole book, else its
+// division's index plus one. A part's key is its place in the book's
+// outline (1, 1.2, 1.2.3), so its depth is its key's numbers' count and its
+// parts follow it, deeper; the parts are in reading order.
+sk_build_shelf_book(id: int, arg: int) {
+    slot: int = arg / SHELF_PLACE;
+    node: int = arg % SHELF_PLACE;
+    i: int = shelf_find_slot(slot);
+    ui_begin(id, SCR_SHELF_BOOK, arg, "");
+    if (node == 0) {
+        fbuf_n = 0;
+        fput_shelf_abbreviation(i);
+        ui_set_screen_title_fbuf()
+    }
+    sk_shelf_subtitle(i);
+    ui_page = true;
+    if (i < 0) return;
+    if (!shelf_ensure_open(slot)) {
+        shelf_opening_rows(slot, i);
+        return
+    }
+    borrow shelf_open[SHELF_USE_BOOK] as open {
+        match open.reader {
+            Document d -> shelf_book_rows(d.folio, slot, node, i);
+            _ -> { }
+        }
+    }
+    ui_section("", "");
+    shelf_credit_row(i)
+}
+
+shelf_book_rows(
+    folio: *folio::Folio,
+    slot: int,
+    node: int,
+    i: int
+) {
+    count: int = folio::folio_division_count(folio);
+    if (node > count) return;
+    if (node > 0) {
+        fbuf_n = 0;
+        region {
+            title: []i8 = folio::folio_division_title(folio, node - 1);
+            fput_bytes(title, 0, len(title))
+        }
+        ui_set_screen_title_fbuf();
+        ui_tool("", "chevron.up", ACT_SHELF_STEP, -1, if (node > 1) UI_TOOL_PLAIN else UI_TOOL_OFF,
+            0);
+        fbuf_n = 0;
+        fput_str("Previous Part");
+        ui_set_tool_label_fbuf();
+        ui_tool("", "chevron.down", ACT_SHELF_STEP, 1, if (node < count) UI_TOOL_PLAIN else UI_TOOL_OFF,
+            2);
+        fbuf_n = 0;
+        fput_str("Next Part");
+        ui_set_tool_label_fbuf()
+    } else {
+        ui_section("", "");
+        ui_row(UI_TEXT, 0, 0);
+        ui_rich_begin();
+        fput_shelf_title(i);
+        ui_rich(RUN_STRONG);
+        ui_rich_title()
+    }
+    // (Its text once it is read; the contents meanwhile.)
+    region {
+        match if (node == 0) shelf_folio_own(slot, folio) else shelf_folio_division(slot,
+            folio, node - 1) {
+            ChapterWaiting -> shelf_opening_rows(slot, i);
+            ChapterRecords r -> {
+                if (len(r.data) > 0) {
+                    ui_section("", "");
+                    records_rows(r.data, 0, len(r.data), ACT_SHELF_LINK)
+                }
+            }
+            _ -> ui_set_empty("exclamationmark.triangle", "This Part Is Damaged",
+                "")
+        }
+    }
+    // (Its parts: those after it a level deeper, until one no deeper.)
+    depth: int = if (node == 0) 0 else folio_part_depth(folio, node - 1);
+    first: bool = true;
+    d: int = node;
+    while (d < count && folio_part_depth(folio, d) > depth) {
+        if (folio_part_depth(folio, d) == depth + 1) {
+            if (first) ui_section(if (node == 0) "Contents" else "", "");
+            first = false;
+            ui_row(UI_ITEM, ACT_SHELF_ENTRY, slot * SHELF_PLACE + d + 1);
+            fbuf_n = 0;
+            region {
+                title: []i8 = folio::folio_division_title(folio, d);
+                fput_bytes(title, 0, len(title))
+            }
+            ui_set_title_fbuf();
+            ui_set_acc(ACC_MORE)
+        }
+        d = d + 1
+    }
+}
+
+// A book's part's depth: its key's numbers' count (1.2.3: 3).
+folio_part_depth(folio: *folio::Folio, d: int): int {
+    depth: int = 1;
+    region {
+        key: []i8 = folio::folio_division_key(folio, d);
+        for c in key {
+            if (c == '.') depth = depth + 1
+        }
+    }
+    depth
+}

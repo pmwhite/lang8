@@ -1,8 +1,8 @@
 # DEFLATE
 
 Import `deflate.l8` and use the `deflate` tag. It decodes DEFLATE data
-(RFC 1951) and its zlib (RFC 1950) and gzip (RFC 1952) containers, and
-computes the CRC-32 and Adler-32 checksums they use. Native and Wasm builds
+(RFC 1951) and its zlib (RFC 1950) and gzip (RFC 1952) containers, encodes
+raw DEFLATE data, and computes the CRC-32 and Adler-32 checksums they use. Native and Wasm builds
 are supported; there are no other dependencies.
 
 ```l8
@@ -60,8 +60,20 @@ describes the variant. Nothing is returned on failure.
 checksums from 0 to 2^32 - 1; `crc32_update(crc, data, start, count)`
 continues a CRC over another span (start from 0).
 
+`deflate_compress(source, start, count)` encodes a span as a raw DEFLATE
+stream, returned in a new slice of exactly its size; `inflate` decodes it.
+It finds back-references through hash chains over the 32 KiB window, with
+lazy matching, and writes each block of up to 16384 symbols whichever way
+is smallest: with codes made for it, with the fixed codes, or stored (so
+data with nothing to find grows by about 5 bytes per 64 KiB). Its output
+is about the size of zlib's at level 9: the BSB's text cut into 64 KiB
+pieces compresses to 1.55 MB, as zlib's does. It raises nothing: a span
+outside the source fails as a slice's bounds do. `deflate_compress_bound(count)`
+is the most it makes of `count` bytes, for a caller that wants room ready.
+
 Huffman codes of up to 10 bits decode with one table lookup. Natively and
 under Node's Wasm, the KJV's text (4.6 MB, `gzip -9`) inflates at about
-125 MB/s; with gzip's CRC-32 check, about 80 MB/s.
+125 MB/s; with gzip's CRC-32 check, about 80 MB/s. Natively, encoding runs at about
+8 MB/s.
 `deflate_test.l8` holds the contract's examples: `l8 test
 programs/deflate/deflate_test.l8`.

@@ -1,0 +1,221 @@
+tag folio_test;
+
+use_tag std, folio;
+
+// The library's contract by example.
+import "folio.l8";
+
+import "../../stdlib/print.l8";
+
+import "../../stdlib/write.l8";
+
+psalms: str = """
+BPSA Psalms
+C1
+Pm
+V1
+TBlessed is the man
+C23
+D
+TA Psalm of David.
+Pm
+V1
+TThe
+ULord
+T is my shepherd;
+C24
+Pm
+V1
+TThe earth is the
+ULord
+T’s
+BJHN John
+C1
+Pm
+V1
+TIn the beginning was the Word
+""";
+
+show_bytes(data: []i8) raises IoError {
+    write_bytes_n(1, data, len(data));
+    print("")
+}
+
+test "a Bible's books and chapters are found by their keys" {
+    try {
+        writer: *FolioWriter = folio_writer_new();
+        folio_meta(writer, "kind", "bible");
+        folio_meta(writer, "title", "Psalms and John");
+        records: []i8 = bytes(psalms);
+        folio_append_records(writer, records, 0, len(records));
+        file: []i8 = folio_finish(writer);
+        folio: *Folio = folio_open(file, len(file));
+        show_bytes(folio_meta_value(folio, "title"));
+        print_int(len(folio_meta_value(folio, "language")));
+        for d in 0..folio_division_count(folio) {
+            if (d > 0) write(1, " ");
+            write_bytes_n(1, folio_division_key(folio, d), len(folio_division_key(folio,
+                d)))
+        }
+        print("");
+        psalm: int = folio_find(folio, "PSA.23");
+        write_bytes_n(1, folio_read(folio, file, folio_division_start(folio, psalm),
+            folio_division_end(folio, psalm)), folio_division_end(folio, psalm) - folio_division_start(folio,
+            psalm));
+        print_int(folio_find(folio, "PSA.150"))
+    } with FolioError error -> {
+        print(folio_failure_name(error.failure))
+    }
+    expect {|
+        Psalms and John
+        0
+        PSA PSA.1 PSA.23 PSA.24 JHN JHN.1
+        C23
+        D
+        TA Psalm of David.
+        Pm
+        V1
+        TThe
+        ULord
+        T is my shepherd;
+        -1
+    |}
+}
+
+// (Lines numbered from 0, each 20 bytes: many blocks' worth.)
+numbered_lines(count: int): []i8@new {
+    out: []i8 = new i8[20 * count](32i8);
+    for line in 0..count {
+        n: int = line;
+        for k in 0..12 {
+            out[20 * line + 18 - k] = (48 + n % 10) trunc i8;
+            n = n / 10
+        }
+        out[20 * line] = 'T' as i8;
+        out[20 * line + 19] = 10i8
+    }
+    out
+}
+
+test "any part of the content is read, across blocks" {
+    try {
+        content: []i8 = numbered_lines(20000);
+        writer: *FolioWriter = folio_writer_new();
+        // (Divisions where the caller says, here every 5000 lines.)
+        for part in 0..4 {
+            key: str = ["first", "second", "third", "fourth"][part];
+            folio_division(writer, bytes(key), 0, len(key));
+            folio_append(writer, content, 100000 * part, 100000 * (part + 1))
+        }
+        file: []i8 = folio_finish(writer);
+        folio: *Folio = folio_open(file, len(file));
+        print_int(folio_content_size(folio));
+        print_int(folio_block_count(folio));
+        third: int = folio_find(folio, "third");
+        from: int = folio_division_start(folio, third);
+        to: int = folio_division_end(folio, third);
+        part: []i8 = folio_read(folio, file, from, to);
+        same: bool = true;
+        for k in 0..len(part) {
+            if (part[k] != content[from + k]) same = false
+        }
+        print(if (same) "the third part, as written" else "the third part, changed");
+        // (A reader fetching blocks: a line that runs across two.)
+        line_from: int = 20 * 3276;
+        first: int = folio_block_first(folio, line_from);
+        last: int = folio_block_last(folio, line_from + 20);
+        print_int(last - first + 1);
+        for block in first..last + 1 {
+            fetched: []i8 = new i8[folio_block_compressed(folio, block)](0i8);
+            memcpy(fetched, 0, file, folio_block_offset(folio, block), len(fetched));
+            decoded: []i8 = folio_decode_block(folio, block, fetched, 0);
+            start: int = folio_block_start(folio, block);
+            take_from: int = if (line_from > start) line_from - start else 0;
+            take_to: int = if (line_from + 19 < start + len(decoded)) line_from + 19 - start else len(decoded);
+            write_bytes_span(1, decoded, take_from, take_to - take_from)
+        }
+        print("")
+    } with FolioError error -> {
+        print(folio_failure_name(error.failure))
+    }
+    expect {|
+        400000
+        7
+        the third part, as written
+        2
+        T      000000003276
+    |}
+}
+
+open_or_say(file: []i8, count: int) raises IoError {
+    try {
+        folio: *Folio = folio_open(file, count);
+        _all: []i8 = folio_content(folio, file);
+        print("read")
+    } with FolioError error -> {
+        print(folio_failure_name(error.failure))
+    }
+}
+
+test "what is not a whole folio is found out" {
+    records: []i8 = bytes(psalms);
+    writer: *FolioWriter = folio_writer_new();
+    try {
+        folio_append_records(writer, records, 0, len(records));
+        // (A key used twice; a value with a line end.)
+        folio_division(writer, bytes("PSA.23"), 0, 6)
+    } with FolioError error -> {
+        print(folio_failure_name(error.failure))
+    }
+    try {
+        folio_meta(writer, "title", """
+two
+lines""")
+    } with FolioError error -> {
+        print(folio_failure_name(error.failure))
+    }
+    file: []i8 = folio_finish(writer);
+    open_or_say(file, len(file));
+    open_or_say(bytes("FOLDER and more bytes than that"), 30);
+    open_or_say(file, 30);
+    newer: []i8 = new i8[len(file)](0i8);
+    memcpy(newer, 0, file, 0, len(file));
+    newer[6] = 2i8;
+    open_or_say(newer, len(newer));
+    // (A byte of the block changed.)
+    damaged: []i8 = new i8[len(file)](0i8);
+    memcpy(damaged, 0, file, 0, len(file));
+    damaged[len(file) - 3] = (damaged[len(file) - 3] as int ^ 255) trunc i8;
+    open_or_say(damaged, len(damaged));
+    expect {|
+        a key or value with a tab or a line end, or a key used twice
+        a key or value with a tab or a line end, or a key used twice
+        read
+        not a folio
+        the folio ends too soon
+        a later version of the folio format
+        a block of the folio is damaged
+    |}
+}
+
+test "a division's title is what a list of them shows" {
+    try {
+        writer: *FolioWriter = folio_writer_new();
+        part: str = "1.2";
+        title: str = "Of the Pilgrim's Setting Out";
+        folio_division_titled(writer, bytes(part), 0, len(part), bytes(title), 0,
+            len(title));
+        folio_append(writer, bytes("""
+Pm
+TAs I walked through the wilderness of this world
+"""), 0, 52);
+        file: []i8 = folio_finish(writer);
+        folio: *Folio = folio_open(file, len(file));
+        show_bytes(folio_division_title(folio, folio_find(folio, "1.2")))
+    } with FolioError error -> {
+        print(folio_failure_name(error.failure))
+    }
+    expect {|
+        Of the Pilgrim's Setting Out
+    |}
+}

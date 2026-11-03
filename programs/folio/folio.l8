@@ -1,0 +1,709 @@
+tag folio_internal;
+
+use_tag std, deflate, builder;
+
+// Folios: documents as text records compressed in blocks, with an index
+// of their divisions and their metadata. See README.md for the format and
+// the contract.
+import "../deflate/deflate.l8";
+
+import "../builder/builder.l8";
+
+tag folio
+type FolioFailure =
+    // The bytes do not begin as a folio does.
+    | NotFolio
+    // A folio of a later version of the format.
+    | UnsupportedVersion
+    // Fewer bytes than the head, or a block, needs.
+    | Truncated
+    // The head's sizes disagree, or its index or metadata is damaged.
+    | BadHead
+    // A block does not decode (FolioError's block says which).
+    | Damaged
+    // A key or value with a tab or a line end, or a division's key used
+    // twice.
+    | BadKey
+
+tag folio
+exception FolioError {
+    failure: FolioFailure;
+    // The block a Damaged failure is in; -1 for the others.
+    block: int
+}
+
+tag folio
+folio_failure_name(failure: FolioFailure): str {
+    match failure {
+        NotFolio -> "not a folio";
+        UnsupportedVersion -> "a later version of the folio format";
+        Truncated -> "the folio ends too soon";
+        BadHead -> "the folio's head is damaged";
+        Damaged -> "a block of the folio is damaged";
+        BadKey -> "a key or value with a tab or a line end, or a key used twice"
+    }
+}
+
+FOLIO_VERSION: int = 1;
+
+// The fixed part of the head, before the blocks' sizes.
+FOLIO_FIXED_HEAD: int = 40;
+
+// What folio_head_size needs to see.
+tag folio
+FOLIO_PREFIX: int = 12;
+
+// The content's bytes in a block, decoded.
+FOLIO_BLOCK_SIZE: int = 65536;
+
+FOLIO_TAB: i8 = 9i8;
+
+FOLIO_LINE_END: i8 = 10i8;
+
+folio_fail(failure: FolioFailure) raises FolioError {
+    raise FolioError { failure: failure, block: -1 }
+}
+
+folio_put_u32(out: *ByteBuilder@new, value: int) {
+    for k in 0..4 builder_byte(out, (value >> 8 * k & 255) trunc i8)
+}
+
+folio_get_u32(source: []i8, at: int): int {
+    source[at] as int & 255 | (source[at + 1] as int & 255) << 8 | (source[at + 2] as int & 255) << 16 | (source[at + 3] as int & 255) << 24
+}
+
+// Whether data[from..to) holds a tab or a line end.
+folio_has_separator(data: []i8, from: int, to: int): bool {
+    for k in from..to {
+        if (data[k] == FOLIO_TAB || data[k] == FOLIO_LINE_END) return true
+    }
+    false
+}
+
+// ---- keys ----
+// A key's hash (FNV-1a), as a non-negative int.
+folio_key_hash(data: []i8, from: int, to: int): int {
+    hash: int = 1469598103934665603;
+    for k in from..to hash = (hash ^ data[k] as int & 255) * 1099511628211;
+    hash & 9223372036854775807
+}
+
+folio_same_bytes(
+    a: []i8,
+    a_from: int,
+    b: []i8,
+    b_from: int,
+    count: int
+): bool {
+    for k in 0..count {
+        if (a[a_from + k] != b[b_from + k]) return false
+    }
+    true
+}
+
+// ---- writing ----
+// A folio being written: the content not yet in a block, the blocks
+// compressed so far and each one's size, the metadata's lines, and the
+// index's lines for the divisions before the open one (open_key, titled
+// open_title, which begins at open_start; open: whether there is one).
+tag folio
+type FolioWriter = tag folio_internal {
+    pending: *ByteBuilder;
+    blocks: *ByteBuilder;
+    block_sizes: *ByteBuilder;
+    block_count: int;
+    // The content's size so far: what is in blocks and pending.
+    content_size: int;
+    meta: *ByteBuilder;
+    index: *ByteBuilder;
+    open: bool;
+    open_key: *ByteBuilder;
+    open_title: *ByteBuilder;
+    open_start: int;
+    // Every key begun, a line each, and a table of them by hash: where a
+    // key's line begins, plus one (0: an empty place).
+    keys: *ByteBuilder;
+    key_places: []int;
+    key_count: int;
+    // folio_append_records's: the book its chapters are in, and a
+    // chapter's key being made.
+    book_code: *ByteBuilder;
+    chapter_key: *ByteBuilder
+}
+
+tag folio
+folio_writer_new(): *FolioWriter@new {
+    new FolioWriter {
+        pending: builder_new(FOLIO_BLOCK_SIZE),
+        blocks: builder_new(FOLIO_BLOCK_SIZE),
+        block_sizes: builder_new(64),
+        block_count: 0,
+        content_size: 0,
+        meta: builder_new(256),
+        index: builder_new(4096),
+        open: false,
+        open_key: builder_new(32),
+        open_title: builder_new(32),
+        open_start: 0,
+        keys: builder_new(4096),
+        key_places: new int[1024](0),
+        key_count: 0,
+        book_code: builder_new(16),
+        chapter_key: builder_new(32)
+    }
+}
+
+tag folio
+folio_meta(writer: *FolioWriter@new, key: str, value: str) raises FolioError {
+    folio_meta_bytes(writer, key, bytes(value), 0, len(value))
+}
+
+tag folio
+folio_meta_bytes(
+    writer: *FolioWriter@new,
+    key: str,
+    value: []i8,
+    from: int,
+    to: int
+) raises FolioError {
+    if (len(key) == 0 || folio_has_separator(bytes(key), 0, len(key)) || folio_has_separator(value,
+        from, to)) folio_fail(FolioFailure.BadKey);
+    builder_str(writer.meta, key);
+    builder_byte(writer.meta, FOLIO_TAB);
+    builder_bytes(writer.meta, value, from, to);
+    builder_byte(writer.meta, FOLIO_LINE_END)
+}
+
+// The open division's line in the index, ending at the content's end.
+folio_close_division(writer: *FolioWriter@new) {
+    if (!writer.open) return;
+    builder_bytes(writer.index, writer.open_key.data, 0, writer.open_key.size);
+    builder_byte(writer.index, FOLIO_TAB);
+    builder_int(writer.index, writer.open_start);
+    builder_byte(writer.index, FOLIO_TAB);
+    builder_int(writer.index, writer.content_size);
+    if (writer.open_title.size > 0) {
+        builder_byte(writer.index, FOLIO_TAB);
+        builder_bytes(writer.index, writer.open_title.data, 0, writer.open_title.size)
+    }
+    builder_byte(writer.index, FOLIO_LINE_END);
+    writer.open = false
+}
+
+// Whether key[from..to) was begun before; if not, it is noted.
+folio_key_noted_before(
+    writer: *FolioWriter@new,
+    key: []i8,
+    from: int,
+    to: int
+): bool {
+    if (2 * (writer.key_count + 1) > len(writer.key_places)) {
+        // (The table doubled, its keys placed again.)
+        places: []int = new int[2 * len(writer.key_places)](0);
+        line: int = 0;
+        while (line < writer.keys.size) {
+            end: int = line;
+            while (writer.keys.data[end] != FOLIO_LINE_END) end = end + 1;
+            place: int = folio_key_hash(writer.keys.data, line, end) % len(places);
+            while (places[place] != 0) place = (place + 1) % len(places);
+            places[place] = line + 1;
+            line = end + 1
+        }
+        writer.key_places = places
+    }
+    places: []int = writer.key_places;
+    place: int = folio_key_hash(key, from, to) % len(places);
+    while (places[place] != 0) {
+        line: int = places[place] - 1;
+        end: int = line;
+        while (writer.keys.data[end] != FOLIO_LINE_END) end = end + 1;
+        if (end - line == to - from && folio_same_bytes(writer.keys.data, line, key,
+            from, to - from)) return true;
+        place = (place + 1) % len(places)
+    }
+    places[place] = writer.keys.size + 1;
+    builder_bytes(writer.keys, key, from, to);
+    builder_byte(writer.keys, FOLIO_LINE_END);
+    writer.key_count = writer.key_count + 1;
+    false
+}
+
+// Whether a division keyed key[from..to) has been begun.
+tag folio
+folio_division_begun(
+    writer: *FolioWriter,
+    key: []i8,
+    from: int,
+    to: int
+): bool {
+    places: []int = writer.key_places;
+    place: int = folio_key_hash(key, from, to) % len(places);
+    while (places[place] != 0) {
+        line: int = places[place] - 1;
+        end: int = line;
+        while (writer.keys.data[end] != FOLIO_LINE_END) end = end + 1;
+        if (end - line == to - from && folio_same_bytes(writer.keys.data, line, key,
+            from, to - from)) return true;
+        place = (place + 1) % len(places)
+    }
+    false
+}
+
+tag folio
+folio_division(
+    writer: *FolioWriter@new,
+    key: []i8,
+    from: int,
+    to: int
+) raises FolioError {
+    folio_division_titled(writer, key, from, to, key, 0, 0)
+}
+
+// The same, the division titled title[title_from..title_to) (what a
+// reader shows of it in a list of them: a book's part's name).
+tag folio
+folio_division_titled(
+    writer: *FolioWriter@new,
+    key: []i8,
+    from: int,
+    to: int,
+    title: []i8,
+    title_from: int,
+    title_to: int
+) raises FolioError {
+    if (to <= from || folio_has_separator(key, from, to) || folio_has_separator(title,
+        title_from, title_to) || folio_key_noted_before(writer, key, from, to)) folio_fail(FolioFailure.BadKey);
+    folio_close_division(writer);
+    builder_clear(writer.open_key);
+    builder_bytes(writer.open_key, key, from, to);
+    builder_clear(writer.open_title);
+    builder_bytes(writer.open_title, title, title_from, title_to);
+    writer.open_start = writer.content_size;
+    writer.open = true
+}
+
+// The pending content's first count bytes compressed into a block, the
+// rest kept pending. (Room for the block at its largest is made first, so
+// that it is compressed in a region of its own.)
+folio_flush_block(writer: *FolioWriter@new, count: int) {
+    pending: *ByteBuilder = writer.pending;
+    blocks: *ByteBuilder = writer.blocks;
+    builder_reserve(blocks, deflate_compress_bound(count));
+    size: int = 0;
+    region {
+        packed: []i8 = deflate_compress(pending.data, 0, count);
+        size = len(packed);
+        memcpy(blocks.data, blocks.size, packed, 0, size)
+    }
+    blocks.size = blocks.size + size;
+    folio_put_u32(writer.block_sizes, size);
+    writer.block_count = writer.block_count + 1;
+    left: int = pending.size - count;
+    memcpy(pending.data, 0, pending.data, count, left);
+    pending.size = left
+}
+
+tag folio
+folio_append(
+    writer: *FolioWriter@new,
+    data: []i8,
+    from: int,
+    to: int
+) {
+    at: int = from;
+    while (at < to) {
+        room: int = FOLIO_BLOCK_SIZE - writer.pending.size;
+        n: int = if (to - at < room) to - at else room;
+        builder_bytes(writer.pending, data, at, at + n);
+        writer.content_size = writer.content_size + n;
+        at = at + n;
+        if (writer.pending.size == FOLIO_BLOCK_SIZE) folio_flush_block(writer, FOLIO_BLOCK_SIZE)
+    }
+}
+
+// Records added, a division begun at each book (B<CODE> ...: keyed CODE)
+// and each chapter (C<n>: keyed CODE.n). data[from..to) holds whole
+// records.
+tag folio
+folio_append_records(
+    writer: *FolioWriter@new,
+    data: []i8,
+    from: int,
+    to: int
+) raises FolioError {
+    line: int = from;
+    written: int = from;
+    while (line < to) {
+        end: int = line;
+        while (end < to && data[end] != FOLIO_LINE_END) end = end + 1;
+        kind: i8 = if (end > line) data[line] else FOLIO_LINE_END;
+        if (kind == 'B' as i8 || kind == 'C' as i8) {
+            folio_append(writer, data, written, line);
+            written = line;
+            if (kind == 'B' as i8) {
+                code_end: int = line + 1;
+                while (code_end < end && data[code_end] != ' ' as i8) code_end = code_end + 1;
+                builder_clear(writer.book_code);
+                builder_bytes(writer.book_code, data, line + 1, code_end);
+                folio_division(writer, data, line + 1, code_end)
+            } else {
+                key: *ByteBuilder = writer.chapter_key;
+                builder_clear(key);
+                builder_bytes(key, writer.book_code.data, 0, writer.book_code.size);
+                builder_byte(key, '.' as i8);
+                builder_bytes(key, data, line + 1, end);
+                folio_division(writer, key.data, 0, key.size)
+            }
+        }
+        line = end + 1
+    }
+    folio_append(writer, data, written, to)
+}
+
+folio_put_u32_at(out: []i8, at: int, value: int) {
+    for k in 0..4 out[at + k] = (value >> 8 * k & 255) trunc i8
+}
+
+// The folio: its head, then the blocks.
+tag folio
+folio_finish(writer: *FolioWriter@new): []i8@new {
+    folio_close_division(writer);
+    if (writer.pending.size > 0) folio_flush_block(writer, writer.pending.size);
+    meta: []i8 = deflate_compress(writer.meta.data, 0, writer.meta.size);
+    index: []i8 = deflate_compress(writer.index.data, 0, writer.index.size);
+    sizes: int = writer.block_sizes.size;
+    head_size: int = FOLIO_FIXED_HEAD + sizes + len(meta) + len(index);
+    out: []i8 = new i8[head_size + writer.blocks.size](0i8);
+    memcpy(out, 0, bytes("FOLIO"), 0, 5);
+    out[6] = FOLIO_VERSION trunc i8;
+    folio_put_u32_at(out, 8, head_size);
+    folio_put_u32_at(out, 12, writer.block_count);
+    folio_put_u32_at(out, 16, writer.content_size);
+    folio_put_u32_at(out, 20, FOLIO_BLOCK_SIZE);
+    folio_put_u32_at(out, 24, len(meta));
+    folio_put_u32_at(out, 28, writer.meta.size);
+    folio_put_u32_at(out, 32, len(index));
+    folio_put_u32_at(out, 36, writer.index.size);
+    memcpy(out, FOLIO_FIXED_HEAD, writer.block_sizes.data, 0, sizes);
+    memcpy(out, FOLIO_FIXED_HEAD + sizes, meta, 0, len(meta));
+    memcpy(out, FOLIO_FIXED_HEAD + sizes + len(meta), index, 0, len(index));
+    memcpy(out, head_size, writer.blocks.data, 0, writer.blocks.size);
+    out
+}
+
+// ---- reading ----
+// A folio's head, read: where each block is in the file (block_offsets has
+// one more, the file's end), its metadata and index decoded, and each
+// division's key (a span of index) and place in the content, with a table
+// of the divisions by their key's hash (a division's number plus one; 0
+// an empty place).
+tag folio
+type Folio = tag folio_internal {
+    head_size: int;
+    block_count: int;
+    content_size: int;
+    block_size: int;
+    block_offsets: []int;
+    meta: []i8;
+    index: []i8;
+    division_count: int;
+    key_from: []int;
+    key_to: []int;
+    // Each one's title (a span of index; empty if it has none).
+    title_from: []int;
+    title_to: []int;
+    starts: []int;
+    ends: []int;
+    places: []int
+}
+
+// Whether source begins as a folio of this version does.
+folio_check_prefix(source: []i8, count: int) raises FolioError {
+    if (count < FOLIO_PREFIX) folio_fail(FolioFailure.Truncated);
+    if (!folio_same_bytes(source, 0, bytes("FOLIO"), 0, 5) || source[5] != 0i8 || source[7] != 0i8) folio_fail(FolioFailure.NotFolio);
+    if (source[6] as int != FOLIO_VERSION) folio_fail(FolioFailure.UnsupportedVersion)
+}
+
+tag folio
+folio_head_size(source: []i8, count: int) raises FolioError: int {
+    folio_check_prefix(source, count);
+    folio_get_u32(source, 8)
+}
+
+// A decimal number in data[from..to); -1 if it is not one.
+folio_decimal_at(data: []i8, from: int, to: int): int {
+    if (to <= from || to - from > 12) return -1;
+    n: int = 0;
+    for k in from..to {
+        digit: int = data[k] as int - 48;
+        if (digit < 0 || digit > 9) return -1;
+        n = n * 10 + digit
+    }
+    n
+}
+
+tag folio
+folio_open(head: []i8, count: int) raises FolioError: *Folio@new {
+    folio_check_prefix(head, count);
+    if (count < FOLIO_FIXED_HEAD) folio_fail(FolioFailure.Truncated);
+    head_size: int = folio_get_u32(head, 8);
+    block_count: int = folio_get_u32(head, 12);
+    content_size: int = folio_get_u32(head, 16);
+    block_size: int = folio_get_u32(head, 20);
+    meta_packed: int = folio_get_u32(head, 24);
+    meta_size: int = folio_get_u32(head, 28);
+    index_packed: int = folio_get_u32(head, 32);
+    index_size: int = folio_get_u32(head, 36);
+    if (block_size == 0 || head_size != FOLIO_FIXED_HEAD + 4 * block_count + meta_packed + index_packed || block_count != (content_size + block_size - 1) / block_size) folio_fail(FolioFailure.BadHead);
+    if (count < head_size) folio_fail(FolioFailure.Truncated);
+    offsets: []int = new int[block_count + 1](0);
+    offsets[0] = head_size;
+    for b in 0..block_count offsets[b + 1] = offsets[b] + folio_get_u32(head, FOLIO_FIXED_HEAD + 4 * b);
+    meta_at: int = FOLIO_FIXED_HEAD + 4 * block_count;
+    meta: []i8 = new i8[0](0i8);
+    index: []i8 = new i8[0](0i8);
+    try {
+        meta = inflate(head, meta_at, meta_packed, meta_size);
+        index = inflate(head, meta_at + meta_packed, index_packed, index_size)
+    } with DeflateError _error -> {
+        folio_fail(FolioFailure.BadHead)
+    }
+    divisions: int = 0;
+    for byte in index {
+        if (byte == FOLIO_LINE_END) divisions = divisions + 1
+    }
+    folio: *Folio = new Folio {
+        head_size: head_size,
+        block_count: block_count,
+        content_size: content_size,
+        block_size: block_size,
+        block_offsets: offsets,
+        meta: meta,
+        index: index,
+        division_count: divisions,
+        key_from: new int[divisions](0),
+        key_to: new int[divisions](0),
+        title_from: new int[divisions](0),
+        title_to: new int[divisions](0),
+        starts: new int[divisions](0),
+        ends: new int[divisions](0),
+        places: new int[2 * divisions + 1](0)
+    };
+    // (Each line: a key, its start and its end, after the one before, and
+    // perhaps a title.)
+    line: int = 0;
+    previous_end: int = -1;
+    for d in 0..divisions {
+        end: int = line;
+        while (index[end] != FOLIO_LINE_END) end = end + 1;
+        first_tab: int = line;
+        while (first_tab < end && index[first_tab] != FOLIO_TAB) first_tab = first_tab + 1;
+        second_tab: int = first_tab + 1;
+        while (second_tab < end && index[second_tab] != FOLIO_TAB) second_tab = second_tab + 1;
+        third_tab: int = second_tab + 1;
+        while (third_tab < end && index[third_tab] != FOLIO_TAB) third_tab = third_tab + 1;
+        if (first_tab == line || second_tab >= end) folio_fail(FolioFailure.BadHead);
+        start: int = folio_decimal_at(index, first_tab + 1, second_tab);
+        stop: int = folio_decimal_at(index, second_tab + 1, third_tab);
+        folio.title_from[d] = (if (third_tab < end) third_tab + 1 else end);
+        folio.title_to[d] = end;
+        if (start < 0 || stop < start || stop > content_size || previous_end >= 0 && start != previous_end) folio_fail(FolioFailure.BadHead);
+        folio.key_from[d] = line;
+        folio.key_to[d] = first_tab;
+        folio.starts[d] = start;
+        folio.ends[d] = stop;
+        if (folio_find_bytes(folio, index, line, first_tab) >= 0) folio_fail(FolioFailure.BadHead);
+        place: int = folio_key_hash(index, line, first_tab) % len(folio.places);
+        while (folio.places[place] != 0) place = (place + 1) % len(folio.places);
+        folio.places[place] = d + 1;
+        previous_end = stop;
+        line = end + 1
+    }
+    if (divisions > 0 && folio.ends[divisions - 1] != content_size) folio_fail(FolioFailure.BadHead);
+    folio
+}
+
+// The metadata's value for key (empty if there is none).
+tag folio
+folio_meta_value(folio: *Folio, key: str): []i8@new {
+    meta: []i8 = folio.meta;
+    line: int = 0;
+    while (line < len(meta)) {
+        end: int = line;
+        while (end < len(meta) && meta[end] != FOLIO_LINE_END) end = end + 1;
+        tab: int = line + len(key);
+        if (tab < end && meta[tab] == FOLIO_TAB && folio_same_bytes(meta, line, bytes(key),
+            0, len(key))) {
+            value: []i8 = new i8[end - tab - 1](0i8);
+            memcpy(value, 0, meta, tab + 1, end - tab - 1);
+            return value
+        }
+        line = end + 1
+    }
+    new i8[0](0i8)
+}
+
+// The division keyed key[from..to): its number, or -1.
+tag folio
+folio_find_bytes(
+    folio: *Folio,
+    key: []i8,
+    from: int,
+    to: int
+): int {
+    places: []int = folio.places;
+    place: int = folio_key_hash(key, from, to) % len(places);
+    while (places[place] != 0) {
+        d: int = places[place] - 1;
+        if (folio.key_to[d] - folio.key_from[d] == to - from && folio_same_bytes(folio.index,
+            folio.key_from[d], key, from, to - from)) return d;
+        place = (place + 1) % len(places)
+    }
+    -1
+}
+
+tag folio
+folio_find(folio: *Folio, key: str): int {
+    folio_find_bytes(folio, bytes(key), 0, len(key))
+}
+
+tag folio
+folio_division_count(folio: *Folio): int {
+    folio.division_count
+}
+
+tag folio
+folio_division_key(folio: *Folio, division: int): []i8@new {
+    from: int = folio.key_from[division];
+    key: []i8 = new i8[folio.key_to[division] - from](0i8);
+    memcpy(key, 0, folio.index, from, len(key));
+    key
+}
+
+// A division's title (empty if it has none).
+tag folio
+folio_division_title(folio: *Folio, division: int): []i8@new {
+    from: int = folio.title_from[division];
+    title: []i8 = new i8[folio.title_to[division] - from](0i8);
+    memcpy(title, 0, folio.index, from, len(title));
+    title
+}
+
+tag folio
+folio_division_start(folio: *Folio, division: int): int {
+    folio.starts[division]
+}
+
+tag folio
+folio_division_end(folio: *Folio, division: int): int {
+    folio.ends[division]
+}
+
+tag folio
+folio_content_size(folio: *Folio): int {
+    folio.content_size
+}
+
+tag folio
+folio_block_count(folio: *Folio): int {
+    folio.block_count
+}
+
+// The block holding the content's byte at offset.
+tag folio
+folio_block_first(folio: *Folio, offset: int): int {
+    offset / folio.block_size
+}
+
+// The last block a part of the content ending at end needs (one before the
+// first, for an empty part at a block's start).
+tag folio
+folio_block_last(folio: *Folio, end: int): int {
+    (end - 1) / folio.block_size
+}
+
+// Where a block begins in the file, and its size there.
+tag folio
+folio_block_offset(folio: *Folio, block: int): int {
+    folio.block_offsets[block]
+}
+
+tag folio
+folio_block_compressed(folio: *Folio, block: int): int {
+    folio.block_offsets[block + 1] - folio.block_offsets[block]
+}
+
+// Where a block's content begins in the content, and its size decoded.
+tag folio
+folio_block_start(folio: *Folio, block: int): int {
+    block * folio.block_size
+}
+
+tag folio
+folio_block_size(folio: *Folio, block: int): int {
+    start: int = block * folio.block_size;
+    if (folio.content_size - start < folio.block_size) folio.content_size - start else folio.block_size
+}
+
+// A block decoded, from its compressed bytes at source[start..).
+tag folio
+folio_decode_block(
+    folio: *Folio,
+    block: int,
+    source: []i8,
+    start: int
+) raises FolioError: []i8@new {
+    packed: int = folio_block_compressed(folio, block);
+    if (start < 0 || len(source) - start < packed) folio_fail(FolioFailure.Truncated);
+    decoded: []i8 = new i8[0](0i8);
+    try {
+        decoded = inflate(source, start, packed, folio_block_size(folio, block))
+    } with DeflateError _error -> {
+        raise FolioError { failure: FolioFailure.Damaged, block: block }
+    }
+    decoded
+}
+
+// The content from offset from to to, decoded from the whole file.
+tag folio
+folio_read(
+    folio: *Folio,
+    file: []i8,
+    from: int,
+    to: int
+) raises FolioError: []i8@new {
+    out: []i8 = new i8[if (to > from) to - from else 0](0i8);
+    folio_read_into(folio, file, from, to, out, 0);
+    out
+}
+
+// The same, into out from out_at (which must have room for it).
+tag folio
+folio_read_into(
+    folio: *Folio,
+    file: []i8,
+    from: int,
+    to: int,
+    out: []i8,
+    out_at: int
+) raises FolioError {
+    if (to <= from) return;
+    for block in folio_block_first(folio, from)..folio_block_last(folio, to) + 1 {
+        region {
+            decoded: []i8 = folio_decode_block(folio, block, file, folio_block_offset(folio,
+                block));
+            block_start: int = folio_block_start(folio, block);
+            take_from: int = if (from > block_start) from else block_start;
+            block_end: int = block_start + len(decoded);
+            take_to: int = if (to < block_end) to else block_end;
+            memcpy(out, out_at + take_from - from, decoded, take_from - block_start,
+                take_to - take_from)
+        }
+    }
+}
+
+// All of the content, decoded from the whole file.
+tag folio
+folio_content(folio: *Folio, file: []i8) raises FolioError: []i8@new {
+    folio_read(folio, file, 0, folio.content_size)
+}

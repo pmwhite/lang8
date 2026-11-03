@@ -56,7 +56,8 @@ public final class Bible extends Activity {
   final ArrayList<Wire> chapterLines = new ArrayList<>();
 
   // (The versions bundled, as assets, copied to the app's files once.)
-  static final String[] VERSIONS = {"bsb.txt", "kjv.txt", "web.txt", "asv.txt", "ylt.txt"};
+  static final String[] VERSIONS = {"bsb.folio", "kjv.folio", "web.folio", "asv.folio", "ylt.folio",
+      "orig.folio", "mhcc.folio"};
 
   @Override
   protected void onCreate(Bundle saved) {
@@ -202,7 +203,7 @@ public final class Bible extends Activity {
 
   // (And the language data, the cross references, the commentary, the
   // Manual.)
-  static final String[] DATA = {"xref_index.bin", "xrefs.bin", "mhcc.txt", "help.txt", "orig.txt",
+  static final String[] DATA = {"xref_index.bin", "xrefs.bin", "help.txt",
       "plans/mcheyne.txt", "plans/chrono.txt", "audio/souer.tim", "audio/hays.tim",
       "audio/gilbert.tim", "audio/henson.tim", "audio/henson.paths"};
 

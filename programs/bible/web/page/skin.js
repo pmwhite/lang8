@@ -85,12 +85,16 @@ function send(line) {
 // priority, after the reader: host ids from 12.)
 const dataRead = new Set();
 
+// (A folio is compressed already, and core decodes it; every other file is
+// gzipped.)
 async function fetchData(id, name) {
   try {
-    dataRead.add(`${DATA}/${name}.gz`);
-    const r = await fetch(`${DATA}/${name}.gz`, { priority: id >= 12 ? "low" : "high" });
+    const folio = name.endsWith(".folio");
+    const url = folio ? `${DATA}/${name}` : `${DATA}/${name}.gz`;
+    dataRead.add(url);
+    const r = await fetch(url, { priority: id >= 12 ? "low" : "high" });
     if (!r.ok) throw new Error(r.status);
-    const body = r.body.pipeThrough(new DecompressionStream("gzip"));
+    const body = folio ? r.body : r.body.pipeThrough(new DecompressionStream("gzip"));
     const bytes = new Uint8Array(await new Response(body).arrayBuffer());
     files.set(id, bytes);
     send(`got ${id} ${bytes.length}`);
@@ -2515,7 +2519,7 @@ const SYMBOLS = {
   "arrow.triangle.branch": "split", "arrow.up.arrow.down": "arrow-up-down", "checkmark.circle": "circle-check",
   "circle.slash": "circle-slash", "hand.tap": "pointer", "info.circle": "info", "textformat.abc": "case-sensitive",
   "textformat.size": "a-large-small", "text.book.closed": "book-text", trash: "trash-2",
-  magnifyingglass: "search", highlighter: "highlighter", xmark: "x", headphones: "headphones",
+  magnifyingglass: "search", highlighter: "highlighter", xmark: "x", headphones: "headphones", link: "link",
   "arrow.up.left.and.arrow.down.right": "maximize-2", "arrow.down.right.and.arrow.up.left": "minimize-2",
 };
 

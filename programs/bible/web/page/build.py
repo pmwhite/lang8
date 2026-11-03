@@ -6,9 +6,11 @@
 The marketing pages (programs/bible/site/, without Markdown documentation) at the root,
 and read/: the assets under hashed names (read.<hash>.css, bible.<hash>.js,
 l8.<hash>.js, reload.<hash>.js, app.<hash>.wasm, icons.<hash>.svg, the fonts); the data under
-data/<hash of it all>/, each file gzipped (each version whole, <v>.gz; the
-plans, the language data, the cross references, the commentary, the Manual
-and the original, by their names under programs/bible/data); the shell
+data/<hash of it all>/: the versions, the original and the commentary as
+their folios (<v>.folio, made by `make bible-folios`: compressed already),
+and each other file gzipped (the plans, the language data, the cross
+references and the Manual, by their names under programs/bible/data, .gz
+added); the shell
 (shell.html), which the Worker answers every reader's address with; and
 About (about.html). Then robots.txt, and worker/boot_hash.js when the boot
 script changed. Make schedules the versions, the other files, the manifest
@@ -27,9 +29,10 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(HERE))))
 WEB = os.path.join(ROOT, "web")
-VERSIONS = ["bsb", "kjv", "web", "asv", "ylt"]
-# The data files besides the versions, by their names under data/.
-FILES = ["xref_index.bin", "xrefs.bin", "mhcc.txt", "help.txt", "orig.txt", "plans/mcheyne.txt", "plans/chrono.txt",
+# The folios, by their names in the folios' folder.
+FOLIOS = ["bsb.folio", "kjv.folio", "web.folio", "asv.folio", "ylt.folio", "orig.folio", "mhcc.folio"]
+# The data files besides the folios, by their names under data/.
+FILES = ["xref_index.bin", "xrefs.bin", "help.txt", "plans/mcheyne.txt", "plans/chrono.txt",
          "audio/souer.tim", "audio/hays.tim", "audio/gilbert.tim", "audio/henson.tim", "audio/henson.paths"]
 
 
@@ -70,9 +73,17 @@ def write_gzip(path, data):
 
 
 def files(data, out):
-    """The data files besides the versions, each gzipped under out (those
-    whose source is newer than their copy)."""
+    """The data files besides the folios, each gzipped under out (those
+    whose source is newer than their copy), and none else: a file no longer
+    shipped is removed."""
     names = FILES + sorted("lang/" + n for n in os.listdir(os.path.join(data, "lang")) if n.endswith((".bin", ".txt")))
+    wanted = {os.path.join(out, name + ".gz") for name in names}
+    if os.path.isdir(out):
+        for directory, _, found in os.walk(out):
+            for filename in found:
+                path = os.path.join(directory, filename)
+                if path not in wanted:
+                    os.remove(path)
     for name in names:
         src = os.path.join(data, name)
         dst = os.path.join(out, name + ".gz")
@@ -82,11 +93,11 @@ def files(data, out):
         write_gzip(dst, open(src, "rb").read())
 
 
-def manifest(cache, output):
+def manifest(cache, folios, output):
     """Every data file by its name under data/, and a hash of them all."""
     files = {}
-    for name in VERSIONS:
-        files[name + ".gz"] = os.path.join(cache, name + ".gz")
+    for name in FOLIOS:
+        files[name] = os.path.join(folios, name)
     root = os.path.join(cache, "files")
     for directory, _, names in os.walk(root):
         for filename in names:
@@ -260,11 +271,9 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     command, *args = sys.argv[1:]
-    if command == "gz" and len(args) == 2:
-        write_gzip(args[1], open(args[0], "rb").read())
-    elif command == "files" and len(args) == 2:
+    if command == "files" and len(args) == 2:
         files(*args)
-    elif command == "manifest" and len(args) == 2:
+    elif command == "manifest" and len(args) == 3:
         manifest(*args)
     elif command == "site" and len(args) == 3:
         build(*args)
