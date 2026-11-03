@@ -16,7 +16,8 @@ tag compiler_internal;
 // region depth recorded at its try.
 //
 // An owned arena is a header plus chunks taken from memory.grow (returned to
-// a free list on drop; wasm cannot unmap). The current arena, when set, is
+// a free list on drop, from which any later chunk is cut, as native memory
+// is mapped again; wasm cannot unmap). The current arena, when set, is
 // what malloc and region checkpoints bump. Extern calls suspend it, so a
 // callback allocates on the process heap.
 //
@@ -63,7 +64,8 @@ WG_ARENA: int = 9;
 
 WG_ARENA_LIVE: int = 10;
 
-// Chunks and headers waiting to be reused. Wasm cannot unmap.
+// Chunks waiting to be reused (in order of address, neighbours joined:
+// wr_chunk_give) and arena headers. Wasm cannot unmap.
 WG_CHUNK_FREE: int = 11;
 
 WG_HEADER_FREE: int = 12;
@@ -294,6 +296,8 @@ wf_arena_suspend: int = 0;
 
 wf_arena_resume: int = 0;
 
+wf_chunk_give: int = 0;
+
 wf_read: int = 0;
 
 wf_argv: int = 0;
@@ -329,7 +333,7 @@ wf_init_globals: int = 0;
 wf_start: int = 0;
 
 // Runtime functions follow the imports in this order; then L8 functions.
-WASM_NRUNTIME: int = 26;
+WASM_NRUNTIME: int = 27;
 
 // ---- code emission ----
 
@@ -3399,11 +3403,7 @@ wr_region_pop() noregion raises Error {
     w_mem(41, 0);
     w_mem(55, 24);
     w_lget(4);
-    w_wrap();
-    w_gget(WG_CHUNK_FREE);
-    w_mem(55, 0);
-    w_lget(4);
-    w_gset(WG_CHUNK_FREE);
+    w_call(wf_chunk_give);
     w_br(chunks);
     w_end();
     w_end();
@@ -3458,8 +3458,211 @@ wr_region_pop() noregion raises Error {
     wasm_emit_body(wasm_sig_i64(0, 0), 0, 5)
 }
 
-// memory.grow a page-aligned block, or take one from the chunk free list.
+// A chunk of size bytes (a multiple of 4096): the smallest free chunk that
+// holds it, the rest of that chunk (4096 bytes or more) left free; else
+// the free chunk that ends memory, grown by what it lacks; else memory
+// grown by whole pages, what the chunk leaves of them freed. Zero when
+// memory is exhausted. As native chunks are mapped and unmapped, memory a
+// chunk was given back from is used again, whatever size is next asked
+// for. Locals: 1 a chunk, 2 the one before it, 3 the best, 4 the one
+// before it, 5 the last, 6 the one before it, 7 what is left, 8 pages, 9
+// the end of memory.
 wr_arena_mmap() noregion raises Error {
+    wasm_begin(null, 1);
+    for local in 2..7 {
+        w_i64(0);
+        w_lset(local)
+    }
+    w_gget(WG_CHUNK_FREE);
+    w_lset(1);
+    done: int = w_block();
+    top: int = w_loop();
+    w_lget(1);
+    w_op(80);
+    w_br_if(done);
+    wr_chunk_load(1, 8);
+    w_lget(0);
+    w_op(90);
+    w_if();
+    w_lget(3);
+    w_op(80);
+    w_if();
+    wr_chunk_best();
+    w_else();
+    wr_chunk_load(1, 8);
+    wr_chunk_load(3, 8);
+    w_op(84);
+    w_if();
+    wr_chunk_best();
+    w_end();
+    w_end();
+    w_end();
+    w_lget(1);
+    w_lset(5);
+    w_lget(2);
+    w_lset(6);
+    w_lget(1);
+    w_lset(2);
+    wr_chunk_load(1, 0);
+    w_lset(1);
+    w_br(top);
+    w_end();
+    w_end();
+    // (The best that holds it: split, or taken whole.)
+    w_lget(3);
+    w_i64(0);
+    w_op(82);
+    w_if();
+    wr_chunk_load(3, 8);
+    w_lget(0);
+    w_op(125);
+    w_lset(7);
+    wr_chunk_take_rest(3);
+    wr_chunk_unlink(3, 4);
+    w_lget(3);
+    w_op(15);
+    w_end();
+    w_op(63);
+    w_op(0);
+    w_extend();
+    w_i64(16);
+    w_op(134);
+    w_lset(9);
+    // (The last free chunk ends memory: grown by what it lacks.)
+    w_lget(5);
+    w_i64(0);
+    w_op(82);
+    w_if();
+    w_lget(5);
+    wr_chunk_load(5, 8);
+    w_op(124);
+    w_lget(9);
+    w_op(81);
+    w_if();
+    w_lget(0);
+    wr_chunk_load(5, 8);
+    w_op(125);
+    w_i64(65535);
+    w_op(124);
+    w_i64(16);
+    w_op(136);
+    w_lset(8);
+    wr_chunk_grow(8);
+    wr_chunk_load(5, 8);
+    w_lget(8);
+    w_i64(16);
+    w_op(134);
+    w_op(124);
+    w_lget(0);
+    w_op(125);
+    w_lset(7);
+    wr_chunk_take_rest(5);
+    wr_chunk_unlink(5, 6);
+    w_lget(5);
+    w_op(15);
+    w_end();
+    w_end();
+    // (Memory grown by whole pages: the chunk at its old end, what is left
+    // of the pages after it freed.)
+    w_lget(0);
+    w_i64(65535);
+    w_op(124);
+    w_i64(16);
+    w_op(136);
+    w_lset(8);
+    wr_chunk_grow(8);
+    w_lget(8);
+    w_i64(16);
+    w_op(134);
+    w_lget(0);
+    w_op(125);
+    w_lset(7);
+    w_lget(7);
+    w_i64(4096);
+    w_op(90);
+    w_if();
+    w_lget(9);
+    w_lget(0);
+    w_op(124);
+    w_wrap();
+    w_lget(7);
+    w_mem(55, 8);
+    w_lget(9);
+    w_lget(0);
+    w_op(124);
+    w_call(wf_chunk_give);
+    w_end();
+    w_lget(9);
+    wasm_emit_body(wasm_sig_i64(1, 1), 0, 9)
+}
+
+// A chunk's word at offset: local's chunk.
+wr_chunk_load(local: int, offset: int) noregion raises Error {
+    w_lget(local);
+    w_wrap();
+    w_mem(41, offset)
+}
+
+// The chunk found (local 1, after local 2) the best yet (locals 3, 4).
+wr_chunk_best() noregion raises Error {
+    w_lget(1);
+    w_lset(3);
+    w_lget(2);
+    w_lset(4)
+}
+
+// If what is left of the free chunk in local (local 7) is 4096 bytes or
+// more: the chunk keeps it, and its end is returned.
+wr_chunk_take_rest(local: int) noregion raises Error {
+    w_lget(7);
+    w_i64(4096);
+    w_op(90);
+    w_if();
+    w_lget(local);
+    w_wrap();
+    w_lget(7);
+    w_mem(55, 8);
+    w_lget(local);
+    w_lget(7);
+    w_op(124);
+    w_op(15);
+    w_end()
+}
+
+// The free chunk in local taken out of the list (the one before it in
+// before_local, 0 if it is the first).
+wr_chunk_unlink(local: int, before_local: int) noregion raises Error {
+    w_lget(before_local);
+    w_op(80);
+    w_if();
+    wr_chunk_load(local, 0);
+    w_gset(WG_CHUNK_FREE);
+    w_else();
+    w_lget(before_local);
+    w_wrap();
+    wr_chunk_load(local, 0);
+    w_mem(55, 0);
+    w_end()
+}
+
+// Memory grown by pages_local's pages; zero returned if it can't be.
+wr_chunk_grow(pages_local: int) noregion raises Error {
+    w_lget(pages_local);
+    w_wrap();
+    w_op(64);
+    w_op(0);
+    w_i32(0 - 1);
+    w_op(70);
+    w_if();
+    w_i64(0);
+    w_op(15);
+    w_end()
+}
+
+// chunk_give(chunk): a chunk (its size at offset 8) back in the free list,
+// which is in order of address, joined with a free neighbour on either
+// side. Locals: 1 the free chunk before it, 2 the one after it.
+wr_chunk_give() noregion raises Error {
     wasm_begin(null, 1);
     w_i64(0);
     w_lset(1);
@@ -3471,62 +3674,74 @@ wr_arena_mmap() noregion raises Error {
     w_op(80);
     w_br_if(done);
     w_lget(2);
-    w_wrap();
-    w_mem(41, 8);
     w_lget(0);
     w_op(90);
-    w_if();
-    w_lget(2);
-    w_wrap();
-    w_mem(41, 0);
-    w_lset(3);
-    w_lget(1);
-    w_op(80);
-    w_if();
-    w_lget(3);
-    w_gset(WG_CHUNK_FREE);
-    w_else();
-    w_lget(1);
-    w_wrap();
-    w_lget(3);
-    w_mem(55, 0);
-    w_end();
-    w_lget(2);
-    w_op(15);
-    w_end();
+    w_br_if(done);
     w_lget(2);
     w_lset(1);
-    w_lget(2);
-    w_wrap();
-    w_mem(41, 0);
+    wr_chunk_load(2, 0);
     w_lset(2);
     w_br(top);
     w_end();
     w_end();
     w_lget(0);
-    w_i64(65535);
-    w_op(124);
-    w_i64(16);
-    w_op(136);
-    w_lset(4);
-    w_op(63);
-    w_op(0);
-    w_extend();
-    w_i64(16);
-    w_op(134);
-    w_lset(5);
-    w_lget(4);
     w_wrap();
-    w_op(64);
-    w_op(0);
-    w_i32(0 - 1);
-    w_op(70);
-    w_if();
+    w_lget(2);
+    w_mem(55, 0);
+    // (Joined with the one after it.)
+    w_lget(2);
     w_i64(0);
-    w_op(15);
+    w_op(82);
+    w_if();
+    w_lget(0);
+    wr_chunk_load(0, 8);
+    w_op(124);
+    w_lget(2);
+    w_op(81);
+    w_if();
+    w_lget(0);
+    w_wrap();
+    wr_chunk_load(0, 8);
+    wr_chunk_load(2, 8);
+    w_op(124);
+    w_mem(55, 8);
+    w_lget(0);
+    w_wrap();
+    wr_chunk_load(2, 0);
+    w_mem(55, 0);
     w_end();
-    w_lget(5);
-    wasm_emit_body(wasm_sig_i64(1, 1), 0, 5)
+    w_end();
+    // (Joined with the one before it, or linked after it.)
+    w_lget(1);
+    w_op(80);
+    w_if();
+    w_lget(0);
+    w_gset(WG_CHUNK_FREE);
+    w_else();
+    w_lget(1);
+    wr_chunk_load(1, 8);
+    w_op(124);
+    w_lget(0);
+    w_op(81);
+    w_if();
+    w_lget(1);
+    w_wrap();
+    wr_chunk_load(1, 8);
+    wr_chunk_load(0, 8);
+    w_op(124);
+    w_mem(55, 8);
+    w_lget(1);
+    w_wrap();
+    wr_chunk_load(0, 0);
+    w_mem(55, 0);
+    w_else();
+    w_lget(1);
+    w_wrap();
+    w_lget(0);
+    w_mem(55, 0);
+    w_end();
+    w_end();
+    wasm_emit_body(wasm_sig_i64(1, 0), 0, 2)
 }
 
 // Return header's chunks to the free list and the header after them.
@@ -3559,11 +3774,7 @@ wr_arena_free() noregion raises Error {
     w_mem(41, 0);
     w_lset(2);
     w_lget(1);
-    w_wrap();
-    w_gget(WG_CHUNK_FREE);
-    w_mem(55, 0);
-    w_lget(1);
-    w_gset(WG_CHUNK_FREE);
+    w_call(wf_chunk_give);
     w_lget(2);
     w_lset(1);
     w_br(top);
@@ -4133,6 +4344,7 @@ wasm_plan() noregion raises Error {
     wf_alloc_enter = base + 23;
     wf_arena_suspend = base + 24;
     wf_arena_resume = base + 25;
+    wf_chunk_give = base + 26;
     next: int = base + WASM_NRUNTIME;
     fn = functions;
     while (fn != null) {
@@ -4242,6 +4454,7 @@ wasm_codegen() noregion raises Error {
     wr_alloc_enter();
     wr_arena_suspend();
     wr_arena_resume();
+    wr_chunk_give();
     fn: ?*Function = functions;
     while (fn != null) {
         if (wasm_emits(fn)) wasm_gen_function(fn);
@@ -4392,7 +4605,7 @@ wasm_name_section(m: *StrBuf@new) raises Error {
         "l8_init_globals", "_start", "l8_exit", "l8_arena_mmap", "l8_arena_free",
         "l8_frame_push", "l8_arena_alloc", "l8_arena_new", "l8_arena_drop", "l8_arena_live",
         "l8_own_enter", "l8_own_commit", "l8_borrow_enter", "l8_alloc_enter", "l8_arena_suspend",
-        "l8_arena_resume"];
+        "l8_arena_resume", "l8_chunk_give"];
     for r in runtime {
         wb_uleb(names, index);
         wb_name(names, bytes(r));
