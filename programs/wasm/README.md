@@ -9,7 +9,7 @@ instances, calls, memory and the transfer of persistent state.
 | File | What it is |
 |---|---|
 | `module.l8` | The decoder: a module's types, imports, functions, table, memory, globals, exports, data, tags, and the `name` and `l8persist` sections |
-| `interp.l8` | The interpreter: each function decoded once into words (an operation and its immediates, branches resolved to a target and a stack height; the most frequent sequences of L8's code, such as `local.set` then `local.get` or a comparison then `if`, fused into one operation where no label falls between them), then run in a loop that dispatches on the operation with one `match`; frames, operands and exception handlers of its own; memory one mapped region read as bytes and as words |
+| `interp.l8` | The interpreter: each function decoded once at instantiation into words (an operation and its immediates, branches resolved to a target and a stack height; frequent local copies, arithmetic, loads, comparison/if, stack-frame setup and the restore before a return fused where no label falls between them; the most frequent comparison kinds have operations of their own, and calls of the module's own functions carry their parameter and local counts), then run in a loop that dispatches on the operation with one `match`; frames, operands and exception handlers of its own; memory one mapped region read as bytes and as words |
 | `sys.l8` | The standard imports (`web/README.md`, "Host interface"), natively: files, output, clocks, the environment, `qsort` through the module's comparator, the `l8 test` protocol on fd 3; helpers for a host's own imports (`wasm_str_at`, `wasm_new_bytes`, `wasm_alloc`) |
 | `persist.l8` | Persistent globals across instances: the manifest, which old value a new type can take, and the copy (`wasm_transfer`), as `web/reload.js` does it |
 | `native.s` | What L8 cannot say: a word view of mapped bytes, float bit casts, a call of a native function by address with integer and float arguments, and 1024 callback trampolines (x86-64 Linux; `native.arm64-darwin.s` for iOS) |
@@ -70,10 +70,31 @@ the host calls it again with the state set to 2 (`tests/reload.l8`).
 
 Every compiler fixture runs through it (`l8 test --wasm --runner
 .build/wasmrun`), the compiler built as a module rebuilds itself under it
-byte for byte (7 s, against a quarter of a second under Node's JIT and a
-fifth natively), and `tests/reload.l8` carries the reload fixture. It also
+byte for byte, and `tests/reload.l8` carries the reload fixture. It also
 constructs and drops 200 native instances, checking that arenas and process-heap
 scratch are reclaimed.
+
+Native builds dispatch dense integer matches through indexed branch tables
+on x86-64 and arm64; a loop that ends in such a match dispatches again from
+the end of each arm, so the processor predicts each operation's successor
+separately. Fused memory operations retain the memory-size check and
+wrap addresses to 32 bits before adding the Wasm memory offset. Fusion never
+crosses a branch target; local aliases retain the original instruction order.
+The native compiler fixture `tests/compiler/native/wasm_fusion.l8` exercises
+these contracts using small Wasm bodies.
+
+For an end-to-end performance comparison, save `.build/wasmrun` before making
+changes, rebuild it, and alternate timed runs of both executables with the
+same compiler module and source tree:
+
+```sh
+make -j4 .build/wasmrun .build/l8.wasm
+/usr/bin/time .build/wasmrun .build/l8.wasm wasm src2/main.l8 -o .build/l8-timed.wasm
+cmp .build/l8.wasm .build/l8-timed.wasm
+```
+
+This includes decoding, execution and output. Keep other builds idle during
+measurement and compare multiple runs; host load can materially affect timings.
 
 ## On an iPhone
 

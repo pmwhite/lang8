@@ -1,0 +1,161 @@
+tag wasm_fusion_test;
+
+use_tag std, wasm;
+
+import "../../../programs/wasm/interp.l8";
+
+// A real Wasm function with two i64 parameters, two i32 locals, one i64
+// result, one mutable i32 global and one page of memory. Small bodies use
+// one-byte lengths.
+fusion_instance(body: []i8) raises WasmFormat, WasmNoMemory: *WasmInstance@new {
+    prefix: []i8 = [0i8, 'a', 's', 'm', 1i8, 0i8, 0i8, 0i8, 1i8, 7i8, 1i8, 96i8, 2i8,
+        126i8, 126i8, 1i8, 126i8, 3i8, 2i8, 1i8, 0i8, 5i8, 3i8, 1i8, 0i8, 1i8, 6i8,
+        6i8, 1i8, 127i8, 1i8, 65i8, 0i8, 11i8];
+    if (len(body) + 5 >= 128) wr_fail("fusion fixture body exceeds one-byte length");
+    module: []i8 = new i8[len(prefix) + 7 + len(body)](0i8);
+    for i, byte in prefix module[i] = byte;
+    at: int = len(prefix);
+    module[at] = 10i8;
+    module[at + 1] = (len(body) + 5) trunc i8;
+    module[at + 2] = 1i8;
+    module[at + 3] = (len(body) + 3) trunc i8;
+    module[at + 4] = 1i8;
+    module[at + 5] = 2i8;
+    module[at + 6] = WT_I32 trunc i8;
+    for i, byte in body module[at + 7 + i] = byte;
+    wasm_instantiate(wasm_decode(module), 1, &wasm_no_host)
+}
+
+fusion_call(inst: *WasmInstance, first: int, second: int) raises WasmFormat: int {
+    args: []int = [first, second];
+    wasm_call(inst, 0, args, 2)
+}
+
+test "fused comparisons preserve both arms and block entry points" {
+    // local.get 0; i64.const 7; i64.eq; if (result i64) 11 else 22.
+    direct: *WasmInstance = fusion_instance([32i8, 0i8, 66i8, 7i8, 81i8, 4i8, 126i8,
+        66i8, 11i8, 5i8, 66i8, 22i8, 11i8, 11i8]);
+    print_int(fusion_call(direct, 7, 0));
+    print_int(fusion_call(direct, 8, 0));
+    // The block's branch lands before the comparison. Its operands must
+    // remain on the stack; fusion must not reach back across that label.
+    joined: *WasmInstance = fusion_instance([32i8, 0i8, 2i8, 126i8, 66i8, 7i8, 12i8,
+        0i8, 66i8, 8i8, 11i8, 81i8, 4i8, 126i8, 66i8, 11i8, 5i8, 66i8, 22i8, 11i8,
+        11i8]);
+    print_int(fusion_call(joined, 7, 0));
+    print_int(fusion_call(joined, 8, 0));
+    expect {|
+        11
+        22
+        11
+        22
+    |}
+}
+
+test "fused loads wrap their address before applying the memory offset" {
+    // local.get 0; i64.const 8; i64.add; i32.wrap_i64; i64.load offset=8.
+    indexed: *WasmInstance = fusion_instance([32i8, 0i8, 66i8, 8i8, 124i8, 167i8,
+        41i8, 3i8, 8i8, 11i8]);
+    wi_store64(indexed, 16, 1234);
+    print_int(fusion_call(indexed, 4294967296, 0));
+    // Addition itself crosses the 32-bit boundary.
+    wi_store64(indexed, 8, 5678);
+    print_int(fusion_call(indexed, 4294967288, 0));
+    wi_store64(indexed, 25, 9012);
+    print_int(fusion_call(indexed, 9, 0));
+    _result: int = fusion_call(indexed, 65520, 0);
+    print_int(if (wasm_trapped(indexed)) 1 else 0);
+    absolute: *WasmInstance = fusion_instance([65i8, 16i8, 41i8, 3i8, 8i8, 11i8]);
+    wi_store64(absolute, 24, 3456);
+    print_int(fusion_call(absolute, 0, 0));
+    expect {|
+        1234
+        5678
+        9012
+        1
+        3456
+    |}
+}
+
+test "fused local copies preserve aliases and addition wraps at 64 bits" {
+    // const 9; set 0; get 0; set 1; get 0; get 1; add.
+    same: *WasmInstance = fusion_instance([66i8, 9i8, 33i8, 0i8, 32i8, 0i8, 33i8,
+        1i8, 32i8, 0i8, 32i8, 1i8, 124i8, 11i8]);
+    print_int(fusion_call(same, 1, 2));
+    // const 9; set 0; get 1; set 0; get 0; get 1; add.
+    overwritten: *WasmInstance = fusion_instance([66i8, 9i8, 33i8, 0i8, 32i8, 1i8,
+        33i8, 0i8, 32i8, 0i8, 32i8, 1i8, 124i8, 11i8]);
+    print_int(fusion_call(overwritten, 1, 7));
+    addition: *WasmInstance = fusion_instance([32i8, 0i8, 32i8, 1i8, 124i8, 11i8]);
+    print_int(fusion_call(addition, 9223372036854775807, 1));
+    expect {|
+        18
+        14
+        -9223372036854775808
+    |}
+}
+
+test "frame setup preserves old and new locals and wraps i32 subtraction" {
+    // global.get 0; local.tee 2; const 24; i32.sub; local.tee 3;
+    // global.set 0; then return the sum of the zero-extended locals.
+    frame: *WasmInstance = fusion_instance([35i8, 0i8, 34i8, 2i8, 65i8, 24i8, 107i8,
+        34i8, 3i8, 36i8, 0i8, 32i8, 2i8, 173i8, 32i8, 3i8, 173i8, 124i8, 11i8]);
+    frame.globals[0] = 16;
+    print_int(fusion_call(frame, 0, 0));
+    print_int(frame.globals[0]);
+    // Both tees may target the same local: the adjusted value wins.
+    alias: *WasmInstance = fusion_instance([35i8, 0i8, 34i8, 2i8, 65i8, 24i8, 107i8,
+        34i8, 2i8, 36i8, 0i8, 32i8, 2i8, 173i8, 11i8]);
+    alias.globals[0] = 16;
+    print_int(fusion_call(alias, 0, 0));
+    // A prefix may end without writing the global.
+    prefix: *WasmInstance = fusion_instance([35i8, 0i8, 34i8, 2i8, 65i8, 24i8, 107i8,
+        173i8, 11i8]);
+    prefix.globals[0] = 16;
+    print_int(fusion_call(prefix, 0, 0));
+    print_int(prefix.globals[0]);
+    expect {|
+        4294967304
+        4294967288
+        4294967288
+        4294967288
+        16
+    |}
+}
+
+test "a stack check after frame setup compares the wrapped frame unsigned" {
+    // The frame setup above, then local.get 3; i32.const 1000; i32.lt_u;
+    // if (result i64) 1 else 2.
+    checked: *WasmInstance = fusion_instance([35i8, 0i8, 34i8, 2i8, 65i8, 24i8, 107i8,
+        34i8, 3i8, 36i8, 0i8, 32i8, 3i8, 65i8, 232i8, 7i8, 73i8, 4i8, 126i8, 66i8,
+        1i8, 5i8, 66i8, 2i8, 11i8, 11i8]);
+    checked.globals[0] = 1000;
+    print_int(fusion_call(checked, 0, 0));
+    checked.globals[0] = 16;
+    print_int(fusion_call(checked, 0, 0));
+    expect {|
+        1
+        2
+    |}
+}
+
+test "returns fused with the global restore keep the result" {
+    // i32.const 5; local.set 2; i64.const 3; local.get 0; i64.add;
+    // local.get 2; global.set 0; and the function's end returns the sum.
+    stacked: *WasmInstance = fusion_instance([65i8, 5i8, 33i8, 2i8, 66i8, 3i8, 32i8,
+        0i8, 124i8, 32i8, 2i8, 36i8, 0i8, 11i8]);
+    print_int(fusion_call(stacked, 10, 0));
+    print_int(stacked.globals[0]);
+    // i32.const 6; local.set 2; i64.const 0; drop; local.get 0;
+    // local.get 2; global.set 0; return: the result is local 0.
+    local: *WasmInstance = fusion_instance([65i8, 6i8, 33i8, 2i8, 66i8, 0i8, 26i8,
+        32i8, 0i8, 32i8, 2i8, 36i8, 0i8, 15i8, 11i8]);
+    print_int(fusion_call(local, 10, 0));
+    print_int(local.globals[0]);
+    expect {|
+        13
+        5
+        10
+        6
+    |}
+}

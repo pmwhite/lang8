@@ -31,7 +31,8 @@ exception WasmTrap {
     msg: str
 }
 
-// WASMTRACE=1 in the environment: every call and import, on stderr.
+// WASMTRACE=1 in the environment: every call and import, on stderr. Set
+// before instantiation, which decides how calls are decoded.
 wi_trace: bool = false;
 
 extern wi_trace_write(fd: int, data: []i8, n: int): int = l8_std_write;
@@ -85,9 +86,12 @@ const OP_BRIF: int = 4;
 // br_table N, then N + 1 targets of four words.
 const OP_BRTABLE: int = 5;
 
-// return N: N results (0 or 1).
+// return N RESULT SAVED GLOBAL: N results (0 or 1). L8's epilogue is fused
+// in: the global set from local SAVED first (GLOBAL -1: none), and the
+// result read from local RESULT (-1: the stack).
 const OP_RET: int = 6;
 
+// call F: an import's, or any call while tracing.
 const OP_CALL: int = 7;
 
 const OP_CALLI: int = 8;
@@ -158,6 +162,24 @@ const OP_I32_EQZ: int = 48;
 
 const OP_I32_EQ: int = 49;
 
+const OP_I32_NE: int = 50;
+
+const OP_I32_LT_S: int = 51;
+
+const OP_I32_LT_U: int = 52;
+
+const OP_I32_GT_S: int = 53;
+
+const OP_I32_GT_U: int = 54;
+
+const OP_I32_LE_S: int = 55;
+
+const OP_I32_LE_U: int = 56;
+
+const OP_I32_GE_S: int = 57;
+
+const OP_I32_GE_U: int = 58;
+
 const OP_I32_CLZ: int = 59;
 
 const OP_I32_ADD: int = 62;
@@ -173,6 +195,20 @@ const OP_I64_EQ: int = 81;
 const OP_I64_NE: int = 82;
 
 const OP_I64_LT_S: int = 83;
+
+const OP_I64_LT_U: int = 84;
+
+const OP_I64_GT_S: int = 85;
+
+const OP_I64_GT_U: int = 86;
+
+const OP_I64_LE_S: int = 87;
+
+const OP_I64_LE_U: int = 88;
+
+const OP_I64_GE_S: int = 89;
+
+const OP_I64_GE_U: int = 90;
 
 const OP_I64_CLZ: int = 91;
 
@@ -244,6 +280,51 @@ const OP_BRIF_CMP: int = 202;
 const OP_LLOAD64: int = 203;
 
 const OP_LLOAD8U: int = 204;
+
+// local.get A, const C, integer comparison, if ELSE_PC.
+const OP_IF_LOCAL_CONST: int = 205;
+
+// local.get A, local.get B, i64.add.
+const OP_LADD: int = 206;
+
+// const ADDRESS, load64 OFFSET; or local.get A, const C, i64.add,
+// i32.wrap_i64, load64 OFFSET. Keep the add before the address wrap.
+const OP_LOAD64_ABSOLUTE: int = 207;
+
+const OP_LADDI_LOAD64: int = 208;
+
+// local.set A, local.get B, local.set C. B may alias A or C.
+const OP_LSET_MOVE: int = 209;
+
+// global.get G; local.tee A. The optional subtraction is const C;
+// i32.sub. The final form also consumes local.tee B; global.set H.
+// These are the stack-frame setup emitted by L8, with aliasing preserved.
+const OP_GLOBAL_TEE: int = 210;
+
+const OP_GLOBAL_TEE_SUB: int = 211;
+
+const OP_GLOBAL_FRAME: int = 212;
+
+// Fused comparisons of the most frequent kinds, each its own operation so
+// that no comparison is chosen while running: equality, inequality and
+// unsigned order (bounds and stack checks) laid out as OP_IF_CMP; and the
+// local-and-constant forms laid out as OP_IF_LOCAL_CONST. Unsigned order
+// holds for i32 values too, which are kept zero-extended.
+const OP_IF_EQ: int = 213;
+
+const OP_IF_NE: int = 214;
+
+const OP_IF_GE_U: int = 215;
+
+const OP_IF_LOCAL_EQ: int = 216;
+
+const OP_IF_LOCAL_NE: int = 217;
+
+const OP_IF_LOCAL_LT_U: int = 218;
+
+// call_func F NPARAMS NLOCALS: a call of one of the module's functions, its
+// frame pushed in the loop as wi_push_frame does.
+const OP_CALL_FUNC: int = 219;
 
 const M32: int = 4294967295;
 
@@ -574,7 +655,15 @@ dc_local_get(d: *Decoder@new, index: int) {
 }
 
 dc_local_set(d: *Decoder@new, index: int) {
-    if (dc_after(d, OP_LGET)) {
+    if (dc_after(d, OP_LSET_LGET)) {
+        set: int = dc_last_word(d, 0);
+        from: int = dc_last_word(d, 1);
+        dc_unwrite(d);
+        dc_op(d, OP_LSET_MOVE);
+        dc_emit(d, set);
+        dc_emit(d, from);
+        dc_emit(d, index)
+    } else if (dc_after(d, OP_LGET)) {
         from: int = dc_last_word(d, 0);
         dc_unwrite(d);
         dc_op(d, OP_LGET_LSET);
@@ -599,12 +688,54 @@ dc_const(d: *Decoder@new, v: int) {
     }
 }
 
+dc_local_tee(d: *Decoder@new, index: int) {
+    if (dc_after(d, OP_GGET)) {
+        global: int = dc_last_word(d, 0);
+        dc_unwrite(d);
+        dc_op(d, OP_GLOBAL_TEE);
+        dc_emit(d, global);
+        dc_emit(d, index)
+    } else {
+        dc_op(d, OP_LTEE);
+        dc_emit(d, index)
+    }
+}
+
+dc_global_set(d: *Decoder@new, index: int) {
+    if (dc_after(d, OP_LTEE) && d.prev_op == OP_GLOBAL_TEE_SUB && d.mark != d.last_at) {
+        local: int = dc_last_word(d, 0);
+        dc_unwrite(d);
+        // Retain the global, original-value local and subtrahend already
+        // written; the two destinations follow them.
+        d.code[d.last_at] = OP_GLOBAL_FRAME;
+        d.last_op = OP_GLOBAL_FRAME;
+        dc_emit(d, local);
+        dc_emit(d, index)
+    } else {
+        dc_op(d, OP_GSET);
+        dc_emit(d, index)
+    }
+}
+
 // A numeric operation, its constant or local operand fused in where it
 // is one of the frequent ones.
 dc_numeric_op(d: *Decoder@new, iop: int) {
     adds: bool = iop == OP_I64_ADD || iop == OP_I64_SUB;
     sign: int = if (iop == OP_I64_SUB) 0 - 1 else 1;
-    if (adds && dc_after(d, OP_CONST)) {
+    if (iop == OP_I32_SUB && dc_after(d, OP_CONST) && d.prev_op == OP_GLOBAL_TEE && d.mark != d.last_at) {
+        subtrahend: int = dc_last_word(d, 0);
+        dc_unwrite(d);
+        d.code[d.last_at] = OP_GLOBAL_TEE_SUB;
+        d.last_op = OP_GLOBAL_TEE_SUB;
+        dc_emit(d, subtrahend)
+    } else if (iop == OP_I64_ADD && dc_after(d, OP_LGET2)) {
+        left: int = dc_last_word(d, 0);
+        right: int = dc_last_word(d, 1);
+        dc_unwrite(d);
+        dc_op(d, OP_LADD);
+        dc_emit(d, left);
+        dc_emit(d, right)
+    } else if (adds && dc_after(d, OP_CONST)) {
         c: int = dc_last_word(d, 0);
         dc_unwrite(d);
         dc_op(d, OP_ADDI);
@@ -630,7 +761,20 @@ dc_numeric_op(d: *Decoder@new, iop: int) {
 // bits anyway), and an address in a local read from there.
 dc_load(d: *Decoder@new, iop: int, off: int) {
     if (dc_after(d, OP_WRAP)) dc_unwrite(d);
-    if ((iop == OP_LOAD64 || iop == OP_LOAD8U) && dc_after(d, OP_LGET)) {
+    if (iop == OP_LOAD64 && dc_after(d, OP_CONST)) {
+        address: int = (dc_last_word(d, 0) & M32) + off;
+        dc_unwrite(d);
+        dc_op(d, OP_LOAD64_ABSOLUTE);
+        dc_emit(d, address)
+    } else if (iop == OP_LOAD64 && dc_after(d, OP_LADDI)) {
+        local: int = dc_last_word(d, 0);
+        addend: int = dc_last_word(d, 1);
+        dc_unwrite(d);
+        dc_op(d, OP_LADDI_LOAD64);
+        dc_emit(d, local);
+        dc_emit(d, addend);
+        dc_emit(d, off)
+    } else if ((iop == OP_LOAD64 || iop == OP_LOAD8U) && dc_after(d, OP_LGET)) {
         local: int = dc_last_word(d, 0);
         dc_unwrite(d);
         dc_op(d, if (iop == OP_LOAD64) OP_LLOAD64 else OP_LLOAD8U);
@@ -647,14 +791,34 @@ dc_is_compare(op: int): bool {
     op >= OP_I32_EQ && op <= OP_I32_EQ + 9 || op >= OP_I64_EQ && op <= OP_I64_EQ + 9
 }
 
+// The fused if for a comparison of two operands, or of a local and a
+// constant: a dedicated operation for the frequent kinds.
+dc_if_compare(compare: int): int {
+    if (compare == OP_I32_EQ || compare == OP_I64_EQ) OP_IF_EQ else if (compare == OP_I32_NE || compare == OP_I64_NE) OP_IF_NE else if (compare == OP_I32_GE_U || compare == OP_I64_GE_U) OP_IF_GE_U else OP_IF_CMP
+}
+
+dc_if_local_compare(compare: int): int {
+    if (compare == OP_I32_EQ || compare == OP_I64_EQ) OP_IF_LOCAL_EQ else if (compare == OP_I32_NE || compare == OP_I64_NE) OP_IF_LOCAL_NE else if (compare == OP_I32_LT_U || compare == OP_I64_LT_U) OP_IF_LOCAL_LT_U else OP_IF_LOCAL_CONST
+}
+
 // An if: a comparison or eqz just before it fused in. Its else word
 // follows (d.n then: the caller records it).
 dc_if(d: *Decoder@new) {
     if (d.last_op >= 0 && dc_is_compare(d.last_op) && d.mark != d.n) {
         compare: int = d.last_op;
         dc_unwrite(d);
-        dc_op(d, OP_IF_CMP);
-        dc_emit(d, compare)
+        if (dc_after(d, OP_LGET_CONST)) {
+            local: int = dc_last_word(d, 0);
+            value: int = dc_last_word(d, 1);
+            dc_unwrite(d);
+            dc_op(d, dc_if_local_compare(compare));
+            dc_emit(d, local);
+            dc_emit(d, value);
+            dc_emit(d, compare)
+        } else {
+            dc_op(d, dc_if_compare(compare));
+            dc_emit(d, compare)
+        }
     } else if (dc_after(d, OP_I32_EQZ) || dc_after(d, OP_I64_EQZ)) {
         dc_unwrite(d);
         dc_op(d, OP_IF_Z)
@@ -672,6 +836,29 @@ dc_br_if(d: *Decoder@new) {
         dc_op(d, OP_BRIF_CMP);
         dc_emit(d, compare)
     } else dc_op(d, OP_BRIF)
+}
+
+// A return, with the stack-pointer restore just before it fused in:
+// local.get B, global.set H; or local.get A, local.get B, global.set H,
+// where A is left as the result.
+dc_return(d: *Decoder@new, results: int) {
+    result_local: int = 0 - 1;
+    saved_local: int = 0 - 1;
+    global: int = 0 - 1;
+    if (dc_after(d, OP_GSET) && d.mark != d.last_at && (d.prev_op == OP_LGET || d.prev_op == OP_LGET2)) {
+        global = dc_last_word(d, 0);
+        dc_unwrite(d);
+        if (d.last_op == OP_LGET) saved_local = dc_last_word(d, 0) else {
+            result_local = dc_last_word(d, 0);
+            saved_local = dc_last_word(d, 1)
+        }
+        dc_unwrite(d)
+    }
+    dc_op(d, OP_RET);
+    dc_emit(d, results);
+    dc_emit(d, result_local);
+    dc_emit(d, saved_local);
+    dc_emit(d, global)
 }
 
 dc_pop(d: *Decoder, n: int) {
@@ -811,8 +998,7 @@ wasm_decode_function(m: *WasmModule@new, fi: int, d: *Decoder@new) raises WasmFo
             d.unreach = false
         } else if (op == 11) {
             if (d.top == 1) {
-                dc_op(d, OP_RET);
-                dc_emit(d, len(sig.results));
+                dc_return(d, len(sig.results));
                 dc_close(d)
             } else {
                 if (d.kind[d.top - 1] == DC_TRY) dc_op(d, OP_HPOP);
@@ -832,16 +1018,22 @@ wasm_decode_function(m: *WasmModule@new, fi: int, d: *Decoder@new) raises WasmFo
             for _k in 0..n + 1 dc_target(d, wr_uleb(r));
             d.unreach = true
         } else if (op == 15) {
-            dc_op(d, OP_RET);
-            dc_emit(d, len(sig.results));
+            dc_return(d, len(sig.results));
             d.unreach = true
         } else if (op == 16) {
             callee: int = wr_uleb(r);
             csig: *WasmSig = wasm_sig_of(m, callee);
             dc_pop(d, len(csig.params));
             dc_push(d, len(csig.results));
-            dc_op(d, OP_CALL);
-            dc_emit(d, callee)
+            if (callee < len(m.imports) || wi_trace) {
+                dc_op(d, OP_CALL);
+                dc_emit(d, callee)
+            } else {
+                dc_op(d, OP_CALL_FUNC);
+                dc_emit(d, callee);
+                dc_emit(d, len(csig.params));
+                dc_emit(d, m.funcs[callee - len(m.imports)].nlocals)
+            }
         } else if (op == 17) {
             tsig: int = wr_uleb(r);
             _table: int = wr_uleb(r);
@@ -876,6 +1068,7 @@ wasm_decode_function(m: *WasmModule@new, fi: int, d: *Decoder@new) raises WasmFo
             if (op == 32 || op == 35) dc_push(d, 1);
             if (op == 33 || op == 36) dc_pop(d, 1);
             if (op == 32) dc_local_get(d, idx) else if (op == 33) dc_local_set(d,
+                idx) else if (op == 34) dc_local_tee(d, idx) else if (op == 36) dc_global_set(d,
                 idx) else {
                 dc_op(d, OP_LGET + op - 32);
                 dc_emit(d, idx)
@@ -1147,15 +1340,30 @@ sx32(v: int): int {
 
 // An integer comparison (its operation: i32's or i64's) of a and b.
 wi_compare(compare: int, a: int, b: int): bool {
-    if (compare >= OP_I64_EQ) {
-        k: int = compare - OP_I64_EQ;
-        if (k == 0) a == b else if (k == 1) a != b else if (k == 2) a < b else if (k == 3) wi_ult(a,
-            b) else if (k == 4) a > b else if (k == 5) wi_ult(b, a) else if (k == 6) a <= b else if (k == 7) !wi_ult(b,
-            a) else if (k == 8) a >= b else !wi_ult(a, b)
-    } else {
-        // (i32 operands are kept zero-extended: unsigned order is theirs.)
-        k2: int = compare - OP_I32_EQ;
-        if (k2 == 0) a == b else if (k2 == 1) a != b else if (k2 == 2) sx32(a) < sx32(b) else if (k2 == 3) a < b else if (k2 == 4) sx32(a) > sx32(b) else if (k2 == 5) a > b else if (k2 == 6) sx32(a) <= sx32(b) else if (k2 == 7) a <= b else if (k2 == 8) sx32(a) >= sx32(b) else a >= b
+    // One table dispatch and no calls: unsigned order flips the sign bits,
+    // and i32 operands, kept zero-extended, are sign-extended for theirs.
+    match compare {
+        OP_I32_EQ -> a == b;
+        OP_I32_NE -> a != b;
+        OP_I32_LT_S -> a << 32 >> 32 < b << 32 >> 32;
+        OP_I32_LT_U -> a < b;
+        OP_I32_GT_S -> a << 32 >> 32 > b << 32 >> 32;
+        OP_I32_GT_U -> a > b;
+        OP_I32_LE_S -> a << 32 >> 32 <= b << 32 >> 32;
+        OP_I32_LE_U -> a <= b;
+        OP_I32_GE_S -> a << 32 >> 32 >= b << 32 >> 32;
+        OP_I32_GE_U -> a >= b;
+        OP_I64_EQ -> a == b;
+        OP_I64_NE -> a != b;
+        OP_I64_LT_S -> a < b;
+        OP_I64_LT_U -> (a ^ 1 << 63) < (b ^ 1 << 63);
+        OP_I64_GT_S -> a > b;
+        OP_I64_GT_U -> (a ^ 1 << 63) > (b ^ 1 << 63);
+        OP_I64_LE_S -> a <= b;
+        OP_I64_LE_U -> (a ^ 1 << 63) <= (b ^ 1 << 63);
+        OP_I64_GE_S -> a >= b;
+        OP_I64_GE_U -> (a ^ 1 << 63) >= (b ^ 1 << 63);
+        _ -> false
     }
 }
 
@@ -1421,12 +1629,92 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
     result: int = 0;
     // Running stops at the return from the frame it began in, or where a
     // trap or an exit may have been set (checked after the loop).
-    running: bool = true;
-    while (running) {
+    while (true) {
         op: int = code[pc];
         pc = pc + 1;
         // (The most frequent first.)
         match op {
+            OP_GLOBAL_TEE -> {
+                value: int = globals[code[pc]];
+                vals[fp + code[pc + 1]] = value;
+                vals[sp] = value;
+                sp = sp + 1;
+                pc = pc + 2
+            }
+            OP_GLOBAL_TEE_SUB -> {
+                value: int = globals[code[pc]];
+                vals[fp + code[pc + 1]] = value;
+                vals[sp] = value - code[pc + 2] & M32;
+                sp = sp + 1;
+                pc = pc + 3
+            }
+            OP_GLOBAL_FRAME -> {
+                value: int = globals[code[pc]];
+                vals[fp + code[pc + 1]] = value;
+                adjusted: int = value - code[pc + 2] & M32;
+                vals[fp + code[pc + 3]] = adjusted;
+                globals[code[pc + 4]] = adjusted;
+                pc = pc + 5
+            }
+            OP_IF_LOCAL_CONST -> {
+                if (wi_compare(code[pc + 2], vals[fp + code[pc]], code[pc + 1])) pc = pc + 4 else pc = code[pc + 3]
+            }
+            OP_IF_LOCAL_LT_U -> {
+                if ((vals[fp + code[pc]] ^ 1 << 63) < (code[pc + 1] ^ 1 << 63)) pc = pc + 4 else pc = code[pc + 3]
+            }
+            OP_IF_LOCAL_EQ -> {
+                if (vals[fp + code[pc]] == code[pc + 1]) pc = pc + 4 else pc = code[pc + 3]
+            }
+            OP_IF_LOCAL_NE -> {
+                if (vals[fp + code[pc]] != code[pc + 1]) pc = pc + 4 else pc = code[pc + 3]
+            }
+            OP_IF_EQ -> {
+                sp = sp - 2;
+                if (vals[sp] == vals[sp + 1]) pc = pc + 2 else pc = code[pc + 1]
+            }
+            OP_IF_NE -> {
+                sp = sp - 2;
+                if (vals[sp] != vals[sp + 1]) pc = pc + 2 else pc = code[pc + 1]
+            }
+            OP_IF_GE_U -> {
+                sp = sp - 2;
+                if ((vals[sp] ^ 1 << 63) >= (vals[sp + 1] ^ 1 << 63)) pc = pc + 2 else pc = code[pc + 1]
+            }
+            OP_LADD -> {
+                vals[sp] = vals[fp + code[pc]] + vals[fp + code[pc + 1]];
+                sp = sp + 1;
+                pc = pc + 2
+            }
+            OP_LOAD64_ABSOLUTE -> {
+                address: int = code[pc];
+                pc = pc + 1;
+                if (address + 8 > limit) {
+                    wi_trap_access(inst, f, "load at ", address);
+                    break
+                } else {
+                    vals[sp] = (if ((address & 7) == 0) mem64[(address >> 3) - 1] else wi_mem_load64(mem8,
+                        mem64, address));
+                    sp = sp + 1
+                }
+            }
+            OP_LADDI_LOAD64 -> {
+                address: int = (vals[fp + code[pc]] + code[pc + 1] & M32) + code[pc + 2];
+                pc = pc + 3;
+                if (address + 8 > limit) {
+                    wi_trap_access(inst, f, "load at ", address);
+                    break
+                } else {
+                    vals[sp] = (if ((address & 7) == 0) mem64[(address >> 3) - 1] else wi_mem_load64(mem8,
+                        mem64, address));
+                    sp = sp + 1
+                }
+            }
+            OP_LSET_MOVE -> {
+                sp = sp - 1;
+                vals[fp + code[pc]] = vals[sp];
+                vals[fp + code[pc + 2]] = vals[fp + code[pc + 1]];
+                pc = pc + 3
+            }
             OP_LSET_LGET -> {
                 vals[fp + code[pc]] = vals[sp - 1];
                 vals[sp - 1] = vals[fp + code[pc + 1]];
@@ -1462,7 +1750,7 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                 pc = pc + 2;
                 if (la + 8 > limit) {
                     wi_trap_access(inst, f, "load at ", la);
-                    running = false
+                    break
                 } else {
                     vals[sp] = (if ((la & 7) == 0) mem64[(la >> 3) - 1] else wi_mem_load64(mem8,
                         mem64, la));
@@ -1521,7 +1809,7 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                 pc = pc + 2;
                 if (lb + 1 > limit) {
                     wi_trap_access(inst, f, "load at ", lb);
-                    running = false
+                    break
                 } else {
                     vals[sp] = mem8[lb] as int & 255;
                     sp = sp + 1
@@ -1537,7 +1825,7 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                 pc = pc + 1;
                 if (a + 8 > limit) {
                     wi_trap_access(inst, f, "load at ", a);
-                    running = false
+                    break
                 } else if ((a & 7) == 0) vals[sp - 1] = mem64[(a >> 3) - 1] else vals[sp - 1] = wi_mem_load64(mem8,
                     mem64, a)
             }
@@ -1572,7 +1860,7 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                 sp = sp - 2;
                 if (a2 + 8 > limit) {
                     wi_trap_access(inst, f, "store at ", a2);
-                    running = false
+                    break
                 } else if ((a2 & 7) == 0) mem64[(a2 >> 3) - 1] = vals[sp + 1] else wi_mem_store64(mem8,
                     mem64, a2, vals[sp + 1])
             }
@@ -1581,7 +1869,7 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                 pc = pc + 1;
                 if (a3 + 1 > limit) {
                     wi_trap_access(inst, f, "load at ", a3);
-                    running = false
+                    break
                 } else vals[sp - 1] = mem8[a3] as int & 255
             }
             OP_GGET -> {
@@ -1595,6 +1883,30 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                 pc = pc + 1
             }
             OP_JMP -> pc = code[pc];
+            OP_CALL_FUNC -> {
+                callee_fp: int = sp - code[pc + 1];
+                nlocals: int = code[pc + 2];
+                if (sp + nlocals + 4096 > len(vals)) wr_fail("the value stack is full");
+                for _local in 0..nlocals {
+                    vals[sp] = 0;
+                    sp = sp + 1
+                }
+                frames: []int = inst.frames;
+                nf = inst.nframes * WI_FRAME;
+                if (nf + WI_FRAME > len(frames)) wr_fail("too many frames");
+                frames[nf] = code[pc];
+                frames[nf + 1] = pc + 3;
+                frames[nf + 2] = callee_fp;
+                frames[nf + 3] = sp;
+                frames[nf + 4] = inst.nhandlers;
+                frames[nf + 5] = f;
+                inst.nframes = inst.nframes + 1;
+                f = code[pc];
+                code = m.funcs[f - ni].code;
+                pc = 0;
+                fp = callee_fp;
+                ob = sp
+            }
             OP_CALL -> {
                 inst.sp = sp;
                 if (wi_call(inst, code[pc], pc + 1, f)) {
@@ -1603,15 +1915,17 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                     pc = 0;
                     nf = (inst.nframes - 1) * WI_FRAME;
                     fp = inst.frames[nf + 2];
-                    ob = inst.frames[nf + 3]
+                    ob = inst.frames[nf + 3];
+                    sp = inst.sp
                 } else {
                     pc = pc + 1;
                     // (A host's: it may have grown the memory, run the
                     // module again, trapped or exited.)
                     limit = inst.pages * 65536;
-                    if (inst.trapped || inst.exiting) running = false
+                    sp = inst.sp;
+                    if (inst.trapped || inst.exiting)
+                        break
                 }
-                sp = inst.sp
             }
             OP_CALLI -> {
                 sp = sp - 1;
@@ -1621,44 +1935,47 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                     callee = inst.table[ti];
                     if (callee < 0) wi_trap(inst, "call_indirect of an empty table entry")
                 }
-                if (callee < 0) running = false else {
-                    inst.sp = sp;
-                    if (wi_call(inst, callee, pc + 1, f)) {
-                        f = callee;
-                        code = m.funcs[f - ni].code;
-                        pc = 0;
-                        nf = (inst.nframes - 1) * WI_FRAME;
-                        fp = inst.frames[nf + 2];
-                        ob = inst.frames[nf + 3]
-                    } else {
-                        pc = pc + 1;
-                        limit = inst.pages * 65536;
-                        if (inst.trapped || inst.exiting) running = false
-                    }
+                if (callee < 0)
+                    break;
+                inst.sp = sp;
+                if (wi_call(inst, callee, pc + 1, f)) {
+                    f = callee;
+                    code = m.funcs[f - ni].code;
+                    pc = 0;
+                    nf = (inst.nframes - 1) * WI_FRAME;
+                    fp = inst.frames[nf + 2];
+                    ob = inst.frames[nf + 3];
                     sp = inst.sp
+                } else {
+                    pc = pc + 1;
+                    limit = inst.pages * 65536;
+                    sp = inst.sp;
+                    if (inst.trapped || inst.exiting)
+                        break
                 }
             }
             OP_RET -> {
-                nres: int = code[pc];
+                if (code[pc + 3] >= 0) globals[code[pc + 3]] = vals[fp + code[pc + 2]];
+                return_frames: []int = inst.frames;
                 nf = (inst.nframes - 1) * WI_FRAME;
-                inst.nhandlers = inst.frames[nf + 4];
-                ret_pc: int = inst.frames[nf + 1];
-                caller: int = inst.frames[nf + 5];
-                result = (if (nres > 0) vals[sp - 1] else 0);
-                sp = fp;
-                if (nres > 0) {
-                    vals[sp] = result;
-                    sp = sp + 1
+                inst.nhandlers = return_frames[nf + 4];
+                if (code[pc] > 0) {
+                    result = (if (code[pc + 1] >= 0) vals[fp + code[pc + 1]] else vals[sp - 1]);
+                    vals[fp] = result;
+                    sp = fp + 1
+                } else {
+                    result = 0;
+                    sp = fp
                 }
                 inst.nframes = inst.nframes - 1;
-                if (inst.nframes <= base) running = false else {
-                    f = caller;
-                    code = m.funcs[f - ni].code;
-                    pc = ret_pc;
-                    nf = (inst.nframes - 1) * WI_FRAME;
-                    fp = inst.frames[nf + 2];
-                    ob = inst.frames[nf + 3]
-                }
+                if (inst.nframes <= base)
+                    break;
+                pc = return_frames[nf + 1];
+                f = return_frames[nf + 5];
+                code = m.funcs[f - ni].code;
+                nf = nf - WI_FRAME;
+                fp = return_frames[nf + 2];
+                ob = return_frames[nf + 3]
             }
             OP_DROP -> sp = sp - 1;
             OP_SELECT -> {
@@ -1694,7 +2011,7 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                 nhb: int = inst.frames[base * WI_FRAME + 4];
                 if (inst.nhandlers <= nhb) {
                     wi_trap_uncaught(inst, f);
-                    running = false
+                    break
                 } else {
                     nh2: int = (inst.nhandlers - 1) * WI_HANDLER;
                     hframe: int = inst.handlers[nh2];
@@ -1790,7 +2107,8 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                                 r2 = a2 >> s2 | a2 << 32 - s2
                             }
                             vals[sp - 1] = r2 & M32;
-                            if (k2 >= 3 && k2 <= 6 && inst.trapped) running = false
+                            if (k2 >= 3 && k2 <= 6 && inst.trapped)
+                                break
                         }
                     } else if (op < 112) {
                         // i64
@@ -1825,7 +2143,8 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                                 r4 = (if (s4 == 0) a4 else wi_shr_u(a4, s4) | a4 << 64 - s4)
                             }
                             vals[sp - 1] = r4;
-                            if (k4 >= 3 && k4 <= 6 && inst.trapped) running = false
+                            if (k4 >= 3 && k4 <= 6 && inst.trapped)
+                                break
                         }
                     } else if (op < 152) {
                         // floats
@@ -1887,7 +2206,7 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                         width: int = if (op == OP_LOAD32S || op == OP_LOAD32U) 4 else if (op == OP_LOAD8S || op == OP_LOAD8S32) 1 else 2;
                         if (a4 + width > limit) {
                             wi_trap_access(inst, f, "load at ", a4);
-                            running = false
+                            break
                         } else {
                             lv: int = 0;
                             if (op == OP_LOAD32U) lv = wi_mem_load32u(mem8, mem64,
@@ -1905,7 +2224,7 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                         width2: int = if (op == OP_STORE32) 4 else if (op == OP_STORE16) 2 else 1;
                         if (a5 + width2 > limit) {
                             wi_trap_access(inst, f, "store at ", a5);
-                            running = false
+                            break
                         } else if (op == OP_STORE8) mem8[a5] = sv2 trunc i8 else if (op == OP_STORE16) wi_mem_store16(mem8,
                             a5, sv2) else wi_mem_store32(mem8, mem64, a5, sv2)
                     }
@@ -1927,7 +2246,7 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                         sp = sp - 3;
                         if (src + n > limit || dst + n > limit) {
                             wi_trap(inst, "memory copy out of bounds");
-                            running = false
+                            break
                         } else memcpy(mem8, dst, mem8, src, n)
                     } else {
                         n2: int = vals[sp - 1] & M32;
@@ -1936,7 +2255,7 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                         sp = sp - 3;
                         if (dst2 + n2 > limit) {
                             wi_trap(inst, "memory fill out of bounds");
-                            running = false
+                            break
                         } else {
                             b8: i8 = byte trunc i8;
                             for i in dst2..dst2 + n2 mem8[i] = b8
@@ -1944,7 +2263,7 @@ wi_execute(inst: *WasmInstance, base: int) raises WasmFormat: int {
                     }
                 } else {
                     wi_trap(inst, "unreachable");
-                    running = false
+                    break
                 }
             }
         }

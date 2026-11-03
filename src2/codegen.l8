@@ -38,25 +38,31 @@ load_mem_at(
     }
 }
 
+// The bytes of rax that store_mem_at writes. A record smaller than 8 bytes
+// travels in a register: stored at its own width, so the bytes after it in
+// memory are left alone.
+store_width(ty: *Type): int {
+    if (is_struct_ty(ty) || is_exn_ty(ty)) {
+        size: int = type_size(ty);
+        if (size < 8) return size
+    }
+    esz: int = enum_mem_size(ty);
+    if (esz == 1 || is_byte_ty(ty)) 1 else if (esz == 4 || is_i32_ty(ty) || is_u32_ty(ty) || is_f32_ty(ty)) 4 else 8
+}
+
+stores_word(ty: *Type): bool {
+    store_width(ty) == 8
+}
+
 store_mem(ty: *Type) noregion raises Error {
     store_mem_at(ty, 7, 0)
 }
 
 store_mem_at(ty: *Type, base: int, offset: int) noregion raises Error {
-    // (A record smaller than 8 bytes travels in a register: stored at its
-    // own width, so the bytes after it in memory are left alone.)
-    if (is_struct_ty(ty) || is_exn_ty(ty)) {
-        size: int = type_size(ty);
-        if (size < 8) {
-            store_small_aggregate(size, base, offset);
-            return
-        }
-    }
-    esz: int = enum_mem_size(ty);
-    if (esz == 1 || is_byte_ty(ty)) cg_movb_rm(0, base, offset) else {
-        if (esz == 4 || is_i32_ty(ty) || is_u32_ty(ty) || is_f32_ty(ty)) cg_movl_rm(0,
-            base, offset) else cg_mov_rm(0, base, offset)
-    }
+    width: int = store_width(ty);
+    if ((is_struct_ty(ty) || is_exn_ty(ty)) && width < 8) store_small_aggregate(width,
+        base, offset) else if (width == 1) cg_movb_rm(0, base, offset) else if (width == 4) cg_movl_rm(0,
+        base, offset) else cg_mov_rm(0, base, offset)
 }
 
 // The low size bytes of %rax into (base + offset), %rax kept (r11 holds
@@ -300,19 +306,13 @@ emit_index_check(
             cg_mov_imm(n, 11);
             cg_alu_rr(57, 11, idx_reg)
         }
-    } else {
-        cg_mov_mr(base_reg, 0 - 8, 11);
-        cg_alu_rr(57, 11, idx_reg)
-    }
+    } else cg_cmp_mr(base_reg, 0 - 8, idx_reg);
     // Unsigned, so a negative index fails too.
     cg_jump_id(3, oob_lab)
 }
 
 emit_scale_offset(esz: int) noregion raises Error {
-    if (esz == 1) {
-        cg_alu_rr(1, 1, 6);
-        cg_mov_rr(6, 0)
-    } else {
+    if (esz == 1 || esz == 2 || esz == 4 || esz == 8) cg_lea_indexed(6, 1, esz, 0) else {
         cg_mov_rr(1, 0);
         if (esz != 0) cg_imul_imm(esz, 0);
         cg_alu_rr(1, 6, 0)
@@ -339,6 +339,64 @@ index_simple(n: *Expr): bool {
             }
         }
         _ -> false
+    }
+}
+
+// An element of a named slice read at a simple index, such as code[pc + 1].
+index_load(n: *Expr): bool {
+    match n.kind {
+        Index k -> {
+            ty: ?*Type = k.lhs.ty;
+            ty != null && is_slice(ty) && index_lhs_var(k.lhs) != null && is_int_ty(n.ty) && index_simple(k.idx)
+        }
+        _ -> false
+    }
+}
+
+// A simple index, or a variable or constant plus an element read, such as
+// fp + code[pc]: an interpreter's operand address.
+index_nested(n: *Expr): bool {
+    if (index_simple(n)) return true;
+    match n.kind {
+        Binary k -> k.op == BinOp.Add && (index_atom(k.lhs) && index_load(k.rhs) || index_load(k.lhs) && index_atom(k.rhs));
+        _ -> false
+    }
+}
+
+// Evaluate an index_nested index into reg, which is neither r10 nor r11,
+// using only reg, r10 and r11; rax and the other registers are preserved.
+gen_index_into(n: *Expr, reg: int) noregion raises Error {
+    if (reg == 0 || reg == 10 || reg == 11) error("internal: index register");
+    match n.kind {
+        Binary k -> {
+            if (index_atom(k.lhs) && index_atom(k.rhs)) {
+                if (!gen_simple_operand(k.lhs, reg)) error("internal: index operand");
+                term: int = cg_value_register(k.rhs);
+                if (term == 0) {
+                    if (!gen_simple_operand(k.rhs, 10)) error("internal: index operand");
+                    term = 10
+                }
+                if (k.op == BinOp.Sub) cg_alu_rr(41, term, reg) else cg_alu_rr(1,
+                    term, reg);
+                return
+            }
+            load: *Expr = if (index_load(k.rhs)) k.rhs else k.lhs;
+            atom: *Expr = if (index_load(k.rhs)) k.lhs else k.rhs;
+            if (!gen_simple_operand(load, reg)) error("internal: index element");
+            if (imm_operand(atom) && fits_imm32(imm_value(atom))) {
+                if (imm_value(atom) != 0) cg_alu_imm(0, imm_value(atom), reg);
+                return
+            }
+            term2: int = cg_value_register(atom);
+            if (term2 == 0) {
+                if (!gen_simple_operand(atom, 10)) error("internal: index operand");
+                term2 = 10
+            }
+            cg_alu_rr(1, term2, reg)
+        }
+        _ -> {
+            if (!gen_simple_operand(n, reg)) error("internal: index operand")
+        }
     }
 }
 
@@ -418,6 +476,26 @@ gen_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error {
         return
     }
     if (!is_array(raw) && !is_slice(raw) && !is_str(raw)) error("index requires str, []T, or [N]T");
+    // A named slice is read after an index that cannot change it, so it
+    // needs no stack copy while the index is evaluated.
+    if (lv != null && !is_array(raw) && cg_reads_only(idx)) {
+        if (index_nested(idx)) gen_index_into(idx, 1) else {
+            gen_expr(idx);
+            cg_mov_rr(0, 1)
+        }
+        base: int = cg_value_register(lhs);
+        if (base == 0) {
+            if (!gen_simple_operand(lhs, 6)) error("internal: index base is not a simple operand");
+            base = 6
+        }
+        emit_index_check(raw, idx, base, 1);
+        if (base != 6 && (esz == 1 || esz == 2 || esz == 4 || esz == 8)) cg_lea_indexed(base,
+            1, esz, 0) else {
+            cg_mov_rr(base, 6);
+            emit_scale_offset(esz)
+        }
+        return
+    }
     gen_expr(lhs);
     cg_mov_rr(0, 6);
     cg_push(6);
@@ -572,6 +650,43 @@ cg_value_register(n: *Expr): int {
     }
 }
 
+// Expressions that read memory and compute but neither assign nor call,
+// so evaluating them cannot change a variable.
+cg_reads_only(n: *Expr): bool {
+    match n.kind {
+        Num k -> k.str_label == 0;
+        Var _ -> true;
+        Binary k -> is_int_ty(k.lhs.ty) && cg_reads_only(k.lhs) && cg_reads_only(k.rhs);
+        Index k -> cg_reads_only(k.lhs) && cg_reads_only(k.idx);
+        MemberAccess k -> cg_reads_only(k.lhs);
+        Deref k -> cg_reads_only(k.lhs);
+        _ -> false
+    }
+}
+
+// A statement that adds a constant to an int in a register updates it in
+// place. As a statement its value is unused, so rax need not hold it.
+gen_register_step(n: *Expr) noregion raises Error: bool {
+    match n.kind {
+        Assign k -> {
+            reg: int = cg_value_register(k.lhs);
+            if (k.compound != null || reg == 0 || !is_int_ty(k.lhs.ty)) return false;
+            match k.rhs.kind {
+                Binary sum -> {
+                    if (sum.op != BinOp.Add && sum.op != BinOp.Sub || cg_value_register(sum.lhs) != reg) return false;
+                    if (!imm_operand(sum.rhs) || !fits_imm32(imm_value(sum.rhs))) return false;
+                    step: int = imm_value(sum.rhs);
+                    if (step != 0) cg_alu_imm(if (sum.op == BinOp.Add) 0 else 5, step,
+                        reg);
+                    true
+                }
+                _ -> false
+            }
+        }
+        _ -> false
+    }
+}
+
 gen_simple_pointer(n: *Expr, reg: int) noregion raises Error: bool {
     match n.kind {
         Var _ -> gen_simple_operand(n, reg);
@@ -585,6 +700,30 @@ gen_simple_member_base(lhs: *Expr, reg: int) noregion raises Error: bool {
     if (ty != null && is_any_pointer(ty) && (is_struct_ty(type_base(ty)) || is_exn_ty(type_base(ty)))) return gen_simple_pointer(lhs,
         reg);
     gen_simple_addr(lhs, reg)
+}
+
+// Store rax into a named slice's element at an index_nested index, such
+// as vals[fp + code[pc]], without saving rax on the stack.
+gen_nested_store(lhs: *Expr, ty: *Type) noregion raises Error: bool {
+    match lhs.kind {
+        Index k -> {
+            raw: ?*Type = k.lhs.ty;
+            if (raw == null || !is_slice(raw) || index_lhs_var(k.lhs) == null || !index_nested(k.idx)) return false;
+            esz: int = type_size(ty);
+            if (esz != 1 && esz != 2 && esz != 4 && esz != 8) return false;
+            gen_index_into(k.idx, 1);
+            base: int = cg_value_register(k.lhs);
+            if (base == 0) {
+                if (!gen_simple_operand(k.lhs, 7)) error("internal: index base is not a simple operand");
+                base = 7
+            }
+            emit_index_check(raw, k.idx, base, 1);
+            cg_lea_indexed(base, 1, esz, 7);
+            if (!stores_word(ty) || !cg_store_word_indexed(7)) store_mem(ty);
+            true
+        }
+        _ -> false
+    }
 }
 
 gen_simple_store(lhs: *Expr, ty: *Type) noregion raises Error: bool {
@@ -601,7 +740,7 @@ gen_simple_store(lhs: *Expr, ty: *Type) noregion raises Error: bool {
         }
         _ -> {
             if (!gen_simple_addr(lhs, 7)) return false;
-            store_mem(ty);
+            if (!stores_word(ty) || !cg_store_word_indexed(7)) store_mem(ty);
             true
         }
     }
@@ -625,34 +764,62 @@ gen_simple_addr(n: *Expr, reg: int) noregion raises Error: bool {
         Index k -> {
             if (!index_simple(k.idx)) return false;
             ty: *Type = k.lhs.ty or error("missing type");
+            // A slice or index already in a register is addressed in place.
+            base: int = reg;
             if (is_array(ty)) {
                 if (!gen_simple_addr(k.lhs, reg)) return false
-            } else if (!gen_simple_pointer(k.lhs, reg)) return false;
+            } else {
+                base = cg_value_register(k.lhs);
+                if (base == 0) {
+                    if (!gen_simple_pointer(k.lhs, reg)) return false;
+                    base = reg
+                }
+            }
             size: int = type_size(type_base(ty));
             if (imm_operand(k.idx) && (!check_index_mode || is_array(ty) && index_known_in(k.idx,
                 array_len(ty)))) {
                 offset: int = imm_value(k.idx) * size;
                 if (fits_imm32(offset)) {
-                    if (offset != 0) cg_lea_mr(reg, offset, reg);
+                    if (offset != 0 || base != reg) cg_lea_mr(base, offset, reg);
                     return true
                 }
             }
-            match k.idx.kind {
-                Binary sum -> {
-                    if (!gen_simple_operand(sum.lhs, 10)) return false;
-                    if (!gen_simple_operand(sum.rhs, 11)) return false;
-                    match sum.op {
-                        Sub -> cg_alu_rr(41, 11, 10);
-                        _ -> cg_alu_rr(1, 11, 10)
+            index: int = cg_value_register(k.idx);
+            if (index == 0) {
+                index = 10;
+                match k.idx.kind {
+                    Binary sum -> {
+                        step: int = if (sum.op == BinOp.Sub) 0 - imm_value(sum.rhs) else imm_value(sum.rhs);
+                        if (imm_operand(sum.rhs) && fits_imm32(step)) {
+                            // An index a constant away from a variable is one lea.
+                            left: int = cg_value_register(sum.lhs);
+                            if (left == 0) {
+                                if (!gen_simple_operand(sum.lhs, 10)) return false;
+                                left = 10
+                            }
+                            if (step != 0 || left != 10) cg_lea_mr(left, step, 10)
+                        } else {
+                            if (!gen_simple_operand(sum.lhs, 10)) return false;
+                            if (!gen_simple_operand(sum.rhs, 11)) return false;
+                            match sum.op {
+                                Sub -> cg_alu_rr(41, 11, 10);
+                                _ -> cg_alu_rr(1, 11, 10)
+                            }
+                        }
+                    }
+                    _ -> {
+                        if (!gen_simple_operand(k.idx, 10)) return false
                     }
                 }
-                _ -> {
-                    if (!gen_simple_operand(k.idx, 10)) return false
-                }
             }
-            emit_index_check(ty, k.idx, reg, 10);
-            if (size != 1) cg_imul_imm(size, 10);
-            cg_alu_rr(1, 10, reg);
+            emit_index_check(ty, k.idx, base, index);
+            if (size == 1 || size == 2 || size == 4 || size == 8) cg_lea_indexed(base,
+                index, size, reg) else {
+                cg_mov_rr(index, 10);
+                cg_imul_imm(size, 10);
+                if (base != reg) cg_mov_rr(base, reg);
+                cg_alu_rr(1, 10, reg)
+            }
             true
         }
         _ -> false
@@ -1117,6 +1284,14 @@ gen_cmp(lhs: *Expr, rhs: *Expr, setcc: []i8) noregion raises Error {
  * string comparisons on their existing value path; do not change their semantics. */
 gen_cond(n: *Expr, target: int, when_true: bool) noregion raises Error {
     match n.kind {
+        // A constant condition, such as while (true), either always jumps
+        // or never does.
+        Num k -> {
+            if (k.str_label == 0) {
+                if (k.val != 0 == when_true) cg_jump_id(0 - 1, target);
+                return
+            }
+        }
         Not k -> {
             gen_cond(k.lhs, target, !when_true);
             return
@@ -1468,14 +1643,19 @@ cg_foldable(n: *Expr): bool {
             match k.op {
                 Div -> return false;
                 Mod -> return false;
-                Shl -> return false;
-                Shr -> return false;
+                // Only counts within the width shift the same way at run time.
+                Shl -> return is_int_ty(ty) && cg_foldable(k.lhs) && cg_constant_shift(k.rhs);
+                Shr -> return is_int_ty(ty) && cg_foldable(k.lhs) && cg_constant_shift(k.rhs);
                 _ -> { }
             }
             cg_foldable(k.lhs) && cg_foldable(k.rhs)
         }
         _ -> false
     }
+}
+
+cg_constant_shift(count: *Expr): bool {
+    imm_operand(count) && 0 <= imm_value(count) && imm_value(count) < 64
 }
 
 cg_emit_constant(n: *Expr) noregion raises Error: bool {
@@ -1739,6 +1919,7 @@ gen_expr(n: *Expr) noregion raises Error {
                 return
             }
             if (!passes_by_ref(lhs_ty) && gen_simple_store(q.lhs, lhs_ty)) return;
+            if (!passes_by_ref(lhs_ty) && gen_nested_store(q.lhs, lhs_ty)) return;
             // Simple address formation preserves the evaluated source in rax.
             if (passes_by_ref(lhs_ty) && gen_simple_addr(q.lhs, 7)) {
                 cg_mov_rr(0, 6);
@@ -2206,10 +2387,66 @@ gen_enum_dispatch(
     gen_enum_dispatch(arms, first, middle, fallback)
 }
 
-// An integer match's dispatch, before its bodies, the value in rax: its
-// literal arms' values sorted (values[from..to), each arm's label beside
-// it), split at the middle one until a few are left, then compared
-// directly; any other value goes to fallback.
+// Dense integer matches use an indexed table of branch instructions. Keeping
+// targets in code avoids absolute pointers and loader relocations on iOS.
+// Entries are eight bytes on x86 (alignment also covers assembler relaxation)
+// and one four-byte instruction on arm64. Holes branch to the wildcard.
+gen_dense_dispatch_entry(
+    first: int,
+    last: int,
+    table: []i8,
+    fallback: int
+) noregion raises Error {
+    // Unsigned comparison after subtraction rejects both sides of the
+    // range, including values whose subtraction wraps around 64 bits.
+    start: int = dense_table_start(first);
+    if (start != 0) cg_alu_imm(5, start, 0);
+    cg_alu_imm(7, last - start, 0);
+    cg_jump_id(7, fallback);
+    cg_lea_rip(table, 0, 7);
+    cg_lea_indexed(7, 0, if (cg_arm) 4 else 8, 0);
+    cg_jump_register(0)
+}
+
+// A table for values starting just above zero also covers the values below
+// them, sparing the subtraction on every dispatch.
+dense_table_start(first: int): int {
+    if (0 < first && first <= 16) 0 else first
+}
+
+gen_dense_dispatch_table(
+    values: []int,
+    labels: []int,
+    from: int,
+    to: int,
+    table: []i8,
+    fallback: int
+) noregion raises Error {
+    last: int = values[to - 1];
+    stride: int = if (cg_arm) 4 else 8;
+    cg_align(stride);
+    cg_label(table);
+    arm: int = from;
+    for value in dense_table_start(values[from])..last + 1 {
+        target: int = fallback;
+        if (arm < to && values[arm] == value) {
+            target = labels[arm];
+            arm = arm + 1
+        }
+        cg_jump_id(0 - 1, target);
+        cg_align(stride)
+    }
+}
+
+literal_dispatch_dense(values: []int, from: int, to: int): bool {
+    if (to - from < 8 || values[from] < 0 - 2147483648 || values[to - 1] > 2147483647) return false;
+    width: int = values[to - 1] - values[from] + 1;
+    width <= 4096 && width <= (to - from) * 4
+}
+
+// Dispatch with the value in rax and sorted literal values beside their
+// labels. Dense ranges use a table; sparse ranges split at the middle until
+// a few comparisons remain. Every unmatched value goes to fallback.
 gen_literal_dispatch(
     values: []int,
     labels: []int,
@@ -2217,6 +2454,12 @@ gen_literal_dispatch(
     to: int,
     fallback: int
 ) noregion raises Error {
+    if (literal_dispatch_dense(values, from, to)) {
+        table: []i8 = cg_name_num(".L.dispatch", new_label());
+        gen_dense_dispatch_entry(values[from], values[to - 1], table, fallback);
+        gen_dense_dispatch_table(values, labels, from, to, table, fallback);
+        return
+    }
     if (to - from <= 3) {
         for i in from..to {
             gen_match_tag_compare(values[i]);
@@ -2247,6 +2490,36 @@ match_literal_arms(arms: ?*MatchArm): int {
     count
 }
 
+type LiteralDispatch = {
+    values: []int;
+    labels: []int;
+    fallback: int
+}
+
+// Assign each arm a label and keep literal values sorted beside their labels.
+prepare_literal_dispatch(arms: ?*MatchArm, missing: int): *LiteralDispatch@new {
+    count: int = match_literal_arms(arms);
+    dispatch: *LiteralDispatch = new LiteralDispatch { values: new int[count](0), labels: new int[count](0), fallback: missing };
+    used: int = 0;
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        arm.codegen_label = new_label();
+        if (arm.is_literal) {
+            index: int = used;
+            while (index > 0 && dispatch.values[index - 1] > arm.literal) {
+                dispatch.values[index] = dispatch.values[index - 1];
+                dispatch.labels[index] = dispatch.labels[index - 1];
+                index = index - 1
+            }
+            dispatch.values[index] = arm.literal;
+            dispatch.labels[index] = arm.codegen_label;
+            used = used + 1
+        } else if (dispatch.fallback == missing) dispatch.fallback = arm.codegen_label;
+        arm = arm.next
+    }
+    dispatch
+}
+
 gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error {
     lend: int = new_label();
     cty: ?*Type = cond.ty;
@@ -2270,42 +2543,23 @@ gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error {
         }
     } else gen_expr(cond);
     enum_dispatch: bool = cty != null && is_enum_ty(cty);
+    literals: int = if (enum_dispatch) 0 else match_literal_arms(arms);
+    literal_dispatch: bool = literals >= 4;
+    // Dispatch consumes an integer condition entirely before entering its
+    // arm. It needs neither a saved payload address nor a stack copy.
     if (cty != null && is_enum_ty(cty)) {
         // Dispatch only compares rax; rsi keeps the payload address until the
         // selected arm copies it. No value needs to survive the arm body.
         cg_mov_rr(0, 6);
         load_mem(enum_tag_type(cty))
-    } else {
+    } else if (!literal_dispatch) {
         cg_push(0);
         cg_push(0)
     }
     missing: int = new_label();
-    literals: int = if (enum_dispatch) 0 else match_literal_arms(arms);
-    literal_dispatch: bool = literals >= 4;
     if (literal_dispatch) {
-        fallback2: int = missing;
-        values: []int = new int[literals](0);
-        labels: []int = new int[literals](0);
-        n: int = 0;
-        scan2: ?*MatchArm = arms;
-        while (scan2 != null) {
-            scan2.codegen_label = new_label();
-            if (scan2.is_literal) {
-                // (Kept sorted as they are added.)
-                k: int = n;
-                while (k > 0 && values[k - 1] > scan2.literal) {
-                    values[k] = values[k - 1];
-                    labels[k] = labels[k - 1];
-                    k = k - 1
-                }
-                values[k] = scan2.literal;
-                labels[k] = scan2.codegen_label;
-                n = n + 1
-            } else if (fallback2 == missing) fallback2 = scan2.codegen_label;
-            scan2 = scan2.next
-        }
-        cg_mov_mr(4, 0, 0);
-        gen_literal_dispatch(values, labels, 0, n, fallback2)
+        dispatch: *LiteralDispatch = prepare_literal_dispatch(arms, missing);
+        gen_literal_dispatch(dispatch.values, dispatch.labels, 0, literals, dispatch.fallback)
     }
     if (enum_dispatch) {
         fallback: int = missing;
@@ -2357,7 +2611,7 @@ gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error {
     cg_mov_imm(1, 7);
     cg_call("exit");
     cg_label_id(lend);
-    if (!enum_dispatch || spilled) cg_alu_imm(0, 16, 4)
+    if (!enum_dispatch && !literal_dispatch || spilled) cg_alu_imm(0, 16, 4)
 }
 
 // For-loop bounds and counters are integer locals with no evaluation effects.
@@ -2398,6 +2652,154 @@ gen_loop_body(body: *Stmt, break_label: int, continue_label: int) noregion raise
     };
     gen_stmt(body);
     cg_loop = outer
+}
+
+// Bound the code duplicated at each dispatch site. Calls, allocations,
+// control flow and cleanup scopes retain the ordinary loop lowering.
+cg_dispatch_header_expr(expression: ?*Expr, depth: int): bool {
+    if (expression == null) return true;
+    if (depth == 0) return false;
+    match expression.kind {
+        Var _ -> true;
+        Num _ -> true;
+        Null -> true;
+        Binary k -> {
+            ty: ?*Type = k.lhs.ty;
+            ty != null && is_int_ty(ty) && cg_dispatch_header_expr(k.lhs, depth - 1) && cg_dispatch_header_expr(k.rhs,
+                depth - 1)
+        }
+        Assign k -> k.compound == null && cg_dispatch_header_expr(k.lhs, depth - 1) && cg_dispatch_header_expr(k.rhs,
+            depth - 1);
+        Index k -> cg_dispatch_header_expr(k.lhs, depth - 1) && cg_dispatch_header_expr(k.idx,
+            depth - 1);
+        MemberAccess k -> cg_dispatch_header_expr(k.lhs, depth - 1);
+        Not k -> cg_dispatch_header_expr(k.lhs, depth - 1);
+        _ -> false
+    }
+}
+
+type DispatchLoop = {
+    condition: *Expr;
+    prefix: *Stmt;
+    tail: *Stmt;
+    subject: *Expr;
+    dispatch: *LiteralDispatch;
+    table: []i8;
+    end_label: int
+}
+
+gen_dispatch_loop_header(loop: *DispatchLoop) noregion raises Error {
+    gen_cond(loop.condition, loop.end_label, false);
+    // A subject declared in the header stays in rax after its declaration
+    // stores it, while later steps only update other registers.
+    subject_in_rax: bool = false;
+    statement: *Stmt = loop.prefix;
+    while (statement != loop.tail) {
+        match statement.kind {
+            Decl k -> {
+                gen_stmt(statement);
+                subject_in_rax = k.init != null && declares_subject(k.var, loop.subject)
+            }
+            ExprStmt k -> {
+                if (!gen_register_step(k.lhs)) {
+                    gen_expr(k.lhs);
+                    subject_in_rax = false
+                }
+            }
+            _ -> {
+                gen_stmt(statement);
+                subject_in_rax = false
+            }
+        }
+        statement = statement.next or error("missing dispatch-loop tail")
+    }
+    if (!subject_in_rax) gen_expr(loop.subject);
+    dispatch: *LiteralDispatch = loop.dispatch;
+    gen_dense_dispatch_entry(dispatch.values[0], dispatch.values[len(dispatch.values) - 1],
+        loop.table, dispatch.fallback)
+}
+
+declares_subject(variable: ?*Obj, subject: *Expr): bool {
+    match subject.kind {
+        Var k -> variable != null && k.var == variable && is_int_ty(subject.ty);
+        _ -> false
+    }
+}
+
+// A loop ending in a dense integer match can dispatch from each arm instead
+// of returning to one shared indirect branch. Distinct branch sites expose
+// the preceding operation to the CPU's predictor. The table and arm bodies
+// stay shared; only the small loop header is replicated.
+try_gen_dispatch_loop(condition: *Expr@new, body: *Stmt) noregion raises Error: bool {
+    if (!cg_dispatch_header_expr(condition, 4)) return false;
+    prefix: ?*Stmt = null;
+    match body.kind {
+        Block k -> prefix = k.body;
+        _ -> return false
+    }
+    if (prefix == null) return false;
+    tail: *Stmt = prefix;
+    prefix_count: int = 0;
+    while (tail.next != null) {
+        prefix_count = prefix_count + 1;
+        if (prefix_count > 2) return false;
+        match tail.kind {
+            Decl k -> {
+                if (!cg_dispatch_header_expr(k.init, 4)) return false
+            }
+            ExprStmt k -> {
+                if (!cg_dispatch_header_expr(k.lhs, 4)) return false
+            }
+            _ -> return false
+        }
+        tail = tail.next or error("missing dispatch-loop statement")
+    }
+    match tail.kind {
+        Match k -> {
+            if (!cg_dispatch_header_expr(k.cond, 4) || match_literal_arms(k.arms) < 8) return false;
+            missing: int = new_label();
+            dispatch: *LiteralDispatch = prepare_literal_dispatch(k.arms, missing);
+            count: int = len(dispatch.values);
+            if (!literal_dispatch_dense(dispatch.values, 0, count)) return false;
+            first: int = new_label();
+            end: int = new_label();
+            loop: *DispatchLoop = new DispatchLoop {
+                condition: condition,
+                prefix: prefix,
+                tail: tail,
+                subject: k.cond,
+                dispatch: dispatch,
+                table: cg_name_num(".L.dispatch", new_label()),
+                end_label: end
+            };
+            outer: ?*CodegenLoop = cg_loop;
+            cg_loop = new CodegenLoop {
+                break_label: end,
+                continue_label: first,
+                region_depth: cg_region_depth,
+                try_depth: cg_try_depth,
+                push_count: cg_push_count
+            };
+            cg_label_id(first);
+            gen_dispatch_loop_header(loop);
+            gen_dense_dispatch_table(dispatch.values, dispatch.labels, 0, count, loop.table,
+                dispatch.fallback);
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                cg_label_id(arm.codegen_label);
+                gen_stmt(arm.body);
+                gen_dispatch_loop_header(loop);
+                arm = arm.next
+            }
+            cg_label_id(missing);
+            cg_mov_imm(1, 7);
+            cg_call("exit");
+            cg_label_id(end);
+            cg_loop = outer;
+            true
+        }
+        _ -> false
+    }
 }
 
 gen_loop_jump(stmt: *Stmt) noregion raises Error {
@@ -2471,7 +2873,7 @@ gen_stmt(n: *Stmt) noregion raises Error {
             return
         }
         ExprStmt k -> {
-            gen_expr(k.lhs);
+            if (!gen_register_step(k.lhs)) gen_expr(k.lhs);
             return
         }
         Block k -> {
@@ -2501,6 +2903,7 @@ gen_stmt(n: *Stmt) noregion raises Error {
             return
         }
         While k -> {
+            if (try_gen_dispatch_loop(k.cond, k.body)) return;
             // Test at the bottom: each iteration takes one branch, not two.
             lb: int = new_label();
             ltest: int = new_label();
@@ -3154,6 +3557,9 @@ cg_scalar_stmt(n: *Stmt): bool {
         While k -> cg_scalar_expr(k.cond) && cg_scalar_stmt(k.body);
         For k -> cg_scalar_expr(k.iter) && cg_scalar_expr(k.hi) && cg_scalar_stmt(k.body);
         Match k -> cg_scalar_expr(k.cond) && cg_scalar_arms(k.arms);
+        // Loop exits only unwind handlers and regions entered in the loop.
+        Break -> true;
+        Continue -> true;
         _ -> false
     }
 }
@@ -3220,6 +3626,9 @@ cg_leaf_stmt(n: *Stmt): bool {
         While k -> cg_leaf_expr(k.cond) && cg_leaf_stmt(k.body);
         For k -> cg_leaf_expr(k.iter) && cg_leaf_expr(k.hi) && cg_leaf_stmt(k.body);
         Match k -> cg_leaf_expr(k.cond) && cg_leaf_arms(k.arms);
+        // Leaf bodies have no try or region for a loop exit to unwind.
+        Break -> true;
+        Continue -> true;
         _ -> false
     }
 }
@@ -3346,6 +3755,11 @@ emit_text() noregion raises Error {
             }
             for extra in 0..if (save_regs) 2 else 4 {
                 candidates[ncandidates] = (if (extra < 2) 14 + extra else 10 + extra);
+                ncandidates = ncandidates + 1
+            }
+            // Scalar bodies never use rbx as scratch either.
+            if (!save_regs) {
+                candidates[ncandidates] = 3;
                 ncandidates = ncandidates + 1
             }
             allocated: int = cg_assign_registers(fn, candidates, ncandidates);

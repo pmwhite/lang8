@@ -23,7 +23,7 @@ cg_store_base: int = 0;
 
 cg_store_disp: int = 0;
 
-// The most recent lea that only formed base + disp in a register.
+// The most recent address computation, eligible to fold into a following load.
 cg_lea_start: int = -1;
 
 cg_lea_end: int = -1;
@@ -33,6 +33,11 @@ cg_lea_base: int = 0;
 cg_lea_disp: int = 0;
 
 cg_lea_dst: int = 0;
+
+// A negative index denotes the base + displacement form.
+cg_lea_index: int = -1;
+
+cg_lea_scale: int = 1;
 
 // Address chosen by cg_fold_lea for the load being emitted.
 cg_fold_base: int = 0;
@@ -53,6 +58,7 @@ cg_retract(start: int): bool {
 // A load that overwrites the register just formed by lea can address the
 // memory directly: lea d1(b), r; mov d2(r), r becomes mov d1+d2(b), r.
 cg_fold_lea(base: int, disp: int, dst: int): bool {
+    if (cg_lea_index >= 0) return false;
     if (cg_lea_end < 0 || cg_lea_end != cg_output_position() || base != cg_lea_dst || dst != cg_lea_dst) return false;
     total: int = cg_lea_disp + disp;
     if (total < -2147483648 || total > 2147483647) return false;
@@ -61,6 +67,29 @@ cg_fold_lea(base: int, disp: int, dst: int): bool {
     cg_fold_base = cg_lea_base;
     cg_fold_disp = total;
     true
+}
+
+cg_fold_indexed_lea(base: int, disp: int, dst: int): bool {
+    if (cg_arm || cg_lea_index < 0 || cg_lea_end < 0 || cg_lea_end != cg_output_position() || base != cg_lea_dst || dst != cg_lea_dst) return false;
+    if (disp < -2147483648 || disp > 2147483647 || !cg_retract(cg_lea_start)) return false;
+    cg_lea_end = -1;
+    true
+}
+
+cg_emit_indexed_mem(
+    base: int,
+    index: int,
+    scale: int,
+    displacement: int
+) noregion raises Error {
+    if (displacement != 0) emit_num(displacement);
+    emit("(");
+    emit(cg_reg_name(base));
+    emit(",");
+    emit(cg_reg_name(index));
+    emit(",");
+    emit_num(scale);
+    emit(")")
 }
 
 cg_output_position(): int {
@@ -445,6 +474,17 @@ cg_mov_imm(imm: int, dst: int) noregion raises Error {
 }
 
 cg_mov_mr(base: int, disp: int, dst: int) noregion raises Error {
+    if (cg_fold_indexed_lea(base, disp, dst)) {
+        if (cg_direct_mode) as_emit_load_indexed(dst, cg_lea_base, cg_lea_index, cg_lea_scale,
+            disp) else {
+            emit("  mov ");
+            cg_emit_indexed_mem(cg_lea_base, cg_lea_index, cg_lea_scale, disp);
+            emit(", ");
+            emit(cg_reg_name(dst));
+            emit("\n")
+        }
+        return
+    }
     if (cg_fold_lea(base, disp, dst)) {
         base = cg_fold_base;
         disp = cg_fold_disp
@@ -471,6 +511,17 @@ cg_mov_mr(base: int, disp: int, dst: int) noregion raises Error {
 }
 
 cg_movzb_mr(base: int, disp: int, dst: int) noregion raises Error {
+    if (cg_fold_indexed_lea(base, disp, dst)) {
+        if (cg_direct_mode) as_emit_load_byte_indexed(dst, cg_lea_base, cg_lea_index,
+            cg_lea_scale, disp) else {
+            emit("  movzb ");
+            cg_emit_indexed_mem(cg_lea_base, cg_lea_index, cg_lea_scale, disp);
+            emit(", ");
+            emit(cg_reg_name(dst));
+            emit("\n")
+        }
+        return
+    }
     if (cg_fold_lea(base, disp, dst)) {
         base = cg_fold_base;
         disp = cg_fold_disp
@@ -510,6 +561,41 @@ cg_mov_rm(src: int, base: int, disp: int) noregion raises Error {
     cg_store_src = src;
     cg_store_base = base;
     cg_store_disp = disp
+}
+
+// Store rax through the address an indexed lea has just formed in reg, when
+// nothing reads reg afterwards: the lea is retracted and the store indexed.
+cg_store_word_indexed(reg: int) noregion raises Error: bool {
+    if (!cg_fold_indexed_lea(reg, 0, reg)) return false;
+    if (cg_direct_mode) as_emit_store_indexed(0, cg_lea_base, cg_lea_index, cg_lea_scale,
+        0) else {
+        emit("  mov %rax, ");
+        cg_emit_indexed_mem(cg_lea_base, cg_lea_index, cg_lea_scale, 0);
+        emit("\n")
+    }
+    cg_store_end = -1;
+    true
+}
+
+// Compare reg with the word at base + disp: the flags of reg minus the word.
+// Clobbers r11 on arm64, which has no memory operand.
+cg_cmp_mr(base: int, disp: int, reg: int) noregion raises Error {
+    if (cg_arm) {
+        cg_mov_mr(base, disp, 11);
+        cg_alu_rr(57, 11, reg);
+        return
+    }
+    cg_note_register(base);
+    cg_note_register(reg);
+    if (cg_direct_mode) {
+        as_emit_cmp_mr(reg, base, disp);
+        return
+    }
+    emit("  cmp ");
+    cg_emit_mem(disp, base);
+    emit(", ");
+    emit(cg_reg_name(reg));
+    emit("\n")
 }
 
 cg_movb_rm(src: int, base: int, disp: int) noregion raises Error {
@@ -677,7 +763,50 @@ cg_lea_mr(base: int, disp: int, dst: int) noregion raises Error {
     cg_lea_end = cg_output_position();
     cg_lea_base = base;
     cg_lea_disp = disp;
-    cg_lea_dst = dst
+    cg_lea_dst = dst;
+    cg_lea_index = -1
+}
+
+// Form base + index * scale in dst, preserving flags and all other registers.
+cg_lea_indexed(
+    base: int,
+    index: int,
+    scale: int,
+    dst: int
+) noregion raises Error {
+    cg_note_register(base);
+    cg_note_register(index);
+    cg_note_register(dst);
+    start: int = cg_output_position();
+    if (cg_arm) {
+        shift: int = if (scale == 1) 0 else if (scale == 2) 1 else if (scale == 4) 2 else if (scale == 8) 3 else error("invalid address scale");
+        emit("  add ");
+        arm_x(arm_reg(dst));
+        emit(", ");
+        arm_x(arm_reg(base));
+        emit(", ");
+        arm_x(arm_reg(index));
+        emit(", lsl #");
+        emit_num(shift);
+        emit("\n")
+    } else if (cg_direct_mode) as_emit_lea_indexed(dst, base, index, scale, 0) else {
+        emit("  lea (");
+        emit(cg_reg_name(base));
+        emit(",");
+        emit(cg_reg_name(index));
+        emit(",");
+        emit_num(scale);
+        emit("), ");
+        emit(cg_reg_name(dst));
+        emit("\n")
+    }
+    cg_lea_start = start;
+    cg_lea_end = cg_output_position();
+    cg_lea_base = base;
+    cg_lea_disp = 0;
+    cg_lea_dst = dst;
+    cg_lea_index = index;
+    cg_lea_scale = scale
 }
 
 cg_lea_rip(name: []i8, extra: int, dst: int) noregion raises Error {
@@ -1080,6 +1209,25 @@ cg_rep_stosq() noregion raises Error {
         return
     }
     emit("  rep stosq\n")
+}
+
+// An intra-function computed branch; unlike a call, no ABI state changes.
+cg_jump_register(reg: int) noregion raises Error {
+    cg_store_end = -1;
+    cg_lea_end = -1;
+    if (cg_arm) {
+        emit("  br ");
+        arm_x(arm_reg(reg));
+        emit("\n")
+    } else if (cg_direct_mode) {
+        if (reg >= 8) as_emit_b(65);
+        as_emit_b(255);
+        as_emit_b(224 + reg % 8)
+    } else {
+        emit("  jmp *");
+        emit(cg_reg_name(reg));
+        emit("\n")
+    }
 }
 
 cg_jump_id(cc: int, id: int) noregion raises Error {

@@ -295,6 +295,8 @@ as_OP_XMM: int = 9;
 
 as_OP_INDREG: int = 8;
 
+const as_OP_MEMINDEX: int = 10;
+
 as_op_kind: int = 0;
 
 as_op_reg: int = 0;
@@ -304,6 +306,10 @@ as_op_is_al: bool = false;
 as_op_imm: int = 0;
 
 as_op_base: int = 0;
+
+as_op_index: int = 0;
+
+as_op_scale: int = 1;
 
 as_op_disp: int = 0;
 
@@ -322,6 +328,10 @@ as_op2_is_al: bool = false;
 as_op2_imm: int = 0;
 
 as_op2_base: int = 0;
+
+as_op2_index: int = 0;
+
+as_op2_scale: int = 1;
 
 as_op2_disp: int = 0;
 
@@ -995,6 +1005,8 @@ as_save_op1_to_op2() {
     as_op2_is_al = as_op_is_al;
     as_op2_imm = as_op_imm;
     as_op2_base = as_op_base;
+    as_op2_index = as_op_index;
+    as_op2_scale = as_op_scale;
     as_op2_disp = as_op_disp;
     as_op2_name = as_op_name;
     as_op2_extra = as_op_extra;
@@ -1078,6 +1090,22 @@ as_parse_operand(as_s: []i8@immortal) {
         if (as_s[as_k] == '(') as_paren = as_k
     }
     if (as_paren >= as_o0 && as_s[as_end - 1] == ')') {
+        comma: int = as_paren + 1;
+        while (comma < as_end - 1 && as_s[comma] != ',') comma = comma + 1;
+        if (comma < as_end - 1) {
+            second: int = comma + 1;
+            while (second < as_end - 1 && as_s[second] != ',') second = second + 1;
+            if (second == as_end - 1) as_fail("indexed address requires a scale");
+            as_op_base = as_reg_code(as_s, as_paren + 1, comma - as_paren - 1);
+            as_op_index = as_reg_code(as_s, comma + 1, second - comma - 1);
+            if (as_op_base < 0 || as_op_index < 0 || as_op_index == 4) as_fail("bad indexed address register");
+            as_op_scale = as_parse_expr_at(as_s, second + 1, as_end - 1);
+            if (as_op_scale != 1 && as_op_scale != 2 && as_op_scale != 4 && as_op_scale != 8) as_fail("address scale must be 1, 2, 4 or 8");
+            as_op_disp = (if (as_paren == as_o0) 0 else as_parse_expr_at(as_s, as_o0,
+                as_paren));
+            as_op_kind = as_OP_MEMINDEX;
+            return
+        }
         as_copy_to_buf(as_operand_buffers.base, as_s, as_paren + 1, as_end - as_paren - 2);
         as_copy_to_buf(as_operand_buffers.disp, as_s, as_o0, as_paren - as_o0);
         as_base_s: []i8 = as_operand_buffers.base;
@@ -1166,6 +1194,79 @@ as_emit_modrm_mem(
 }
 
 /* ---- instruction pieces ---- */
+as_emit_modrm_indexed(
+    dst: int,
+    base: int,
+    index: int,
+    scale: int,
+    displacement: int
+) noregion {
+    if (base < 0 || base > 15 || index < 0 || index > 15 || index == 4 || dst < 0 || dst > 15) as_fail("bad indexed address register");
+    if (displacement < 0 - 2147483648 || displacement > 2147483647) as_fail("address displacement out of range");
+    shift: int = if (scale == 1) 0 else if (scale == 2) 1 else if (scale == 4) 2 else if (scale == 8) 3 else 0 - 1;
+    if (shift < 0) as_fail("address scale must be 1, 2, 4 or 8");
+    mode: int = if (displacement == 0 && base % 8 != 5) 0 else if (as_fits_imm8(displacement)) 1 else 2;
+    as_emit_b(mode * 64 + dst % 8 * 8 + 4);
+    as_emit_b(shift * 64 + index % 8 * 8 + base % 8);
+    if (mode == 1) as_emit_b(displacement);
+    if (mode == 2) as_emit_i32(displacement)
+}
+
+as_emit_lea_indexed(
+    dst: int,
+    base: int,
+    index: int,
+    scale: int,
+    displacement: int
+) noregion {
+    as_emit_rex(1, dst / 8, index / 8, base / 8);
+    as_emit_b(141);
+    as_emit_modrm_indexed(dst, base, index, scale, displacement)
+}
+
+as_emit_load_indexed(
+    dst: int,
+    base: int,
+    index: int,
+    scale: int,
+    displacement: int
+) noregion {
+    as_emit_rex(1, dst / 8, index / 8, base / 8);
+    as_emit_b(139);
+    as_emit_modrm_indexed(dst, base, index, scale, displacement)
+}
+
+as_emit_store_indexed(
+    src: int,
+    base: int,
+    index: int,
+    scale: int,
+    displacement: int
+) noregion {
+    as_emit_rex(1, src / 8, index / 8, base / 8);
+    as_emit_b(137);
+    as_emit_modrm_indexed(src, base, index, scale, displacement)
+}
+
+// cmp disp(base), reg: the flags of reg minus the word.
+as_emit_cmp_mr(reg: int, base: int, displacement: int) noregion {
+    as_emit_rex(1, reg / 8 % 2, 0, base / 8 % 2);
+    as_emit_b(59);
+    as_emit_modrm_mem(reg, base, displacement, false)
+}
+
+as_emit_load_byte_indexed(
+    dst: int,
+    base: int,
+    index: int,
+    scale: int,
+    displacement: int
+) noregion {
+    as_emit_rex(1, dst / 8, index / 8, base / 8);
+    as_emit_b2(15, 182);
+    as_emit_modrm_indexed(dst, base, index, scale, displacement)
+}
+
 as_emit_mov_rm(
     as_src: int,
     as_base: int,
@@ -1604,6 +1705,11 @@ as_insn(as_mnem: []i8, as_args: []i8) noregion {
         return
     }
     if (as_streq(as_mnem, "movzb")) {
+        if (as_op2_kind == as_OP_MEMINDEX && as_op_kind == as_OP_REG) {
+            as_emit_load_byte_indexed(as_op_reg, as_op2_base, as_op2_index, as_op2_scale,
+                as_op2_disp);
+            return
+        }
         /* op2=src, op=dst */
         as_dst: int = as_op_reg;
         if (as_op2_kind == as_OP_REG) {
@@ -1657,6 +1763,16 @@ as_insn(as_mnem: []i8, as_args: []i8) noregion {
         return
     }
     if (as_streq(as_mnem, "mov")) {
+        if (as_op2_kind == as_OP_MEMINDEX && as_op_kind == as_OP_REG) {
+            as_emit_load_indexed(as_op_reg, as_op2_base, as_op2_index, as_op2_scale,
+                as_op2_disp);
+            return
+        }
+        if (as_op_kind == as_OP_MEMINDEX && as_op2_kind == as_OP_REG && !as_op2_is_al) {
+            as_emit_store_indexed(as_op2_reg, as_op_base, as_op_index, as_op_scale,
+                as_op_disp);
+            return
+        }
         /* op2=src, op=dst */
         if (as_op2_kind == as_OP_IMM && as_op_kind == as_OP_REG) {
             as_emit_mov_imm_r(as_op2_imm, as_op_reg);
@@ -1691,6 +1807,11 @@ as_insn(as_mnem: []i8, as_args: []i8) noregion {
         as_fail("mov form")
     }
     if (as_streq(as_mnem, "lea")) {
+        if (as_op2_kind == as_OP_MEMINDEX && as_op_kind == as_OP_REG) {
+            as_emit_lea_indexed(as_op_reg, as_op2_base, as_op2_index, as_op2_scale,
+                as_op2_disp);
+            return
+        }
         if (as_op2_kind == as_OP_MEM && as_op_kind == as_OP_REG) {
             as_emit_lea(as_op_reg, as_op2_base, as_op2_disp, false, "", 0);
             return
@@ -1790,6 +1911,10 @@ as_insn(as_mnem: []i8, as_args: []i8) noregion {
         }
         if (as_op2_kind == as_OP_REG && as_op_kind == as_OP_REG) {
             as_emit_alu_rr(57, as_op2_reg, as_op_reg);
+            return
+        }
+        if (as_op2_kind == as_OP_MEM && as_op_kind == as_OP_REG) {
+            as_emit_cmp_mr(as_op_reg, as_op2_base, as_op2_disp);
             return
         }
         if (as_op2_kind == as_OP_MEMRIP && as_op_kind == as_OP_REG) {
