@@ -35,9 +35,27 @@ type DocumentJob = {
     keeping: bool
 }
 
-// About how much a step of a commentary's making does: the records it
+// About how much a piece of a commentary's making does: the records it
 // adds to the folio (compressing them), or the large block it decodes.
 DOCUMENT_PIECE: int = 65536;
+
+// About how long a step of a module's making works, in milliseconds.
+DOCUMENT_STEP_MS: int = 40;
+
+// Milliseconds on a clock that only goes forward (each runtime's and Wasm
+// host's l8_clock_gettime: Linux's clocks, made the platform's).
+core_clock_ms(): int {
+    t: CoreClockTime = CoreClockTime { sec: 0, nsec: 0 };
+    _c: int = core_clock_gettime(1, &t);
+    t.sec * 1000 + t.nsec / 1000000
+}
+
+type CoreClockTime = {
+    sec: int;
+    nsec: int
+}
+
+extern core_clock_gettime(clock: int, ts: *CoreClockTime): int = l8_clock_gettime;
 
 // What is being made of it: nothing yet (its package being taken out), a
 // commentary's chapters, a dictionary's entries or a book's parts.
@@ -114,108 +132,118 @@ shelf_document_step() {
     failed: bool = false;
     finished: bool = false;
     unkept: bool = false;
-    try {
-        borrow shelf_document_job as job {
-            match job.making {
-                Opening -> {
-                    whole: bool = false;
+    // (Its pieces done one after another for about DOCUMENT_STEP_MS, then
+    // the skin given its turn: many pieces a step natively, one when it
+    // runs slowly, interpreted.)
+    began: int = core_clock_ms();
+    going: bool = true;
+    while (going) {
+        try {
+            borrow shelf_document_job as job {
+                match job.making {
+                    Opening -> {
+                        whole: bool = false;
+                        allocate job {
+                            whole = package_step(job.opening, SHELF_STEP_BYTES)
+                        }
+                        progress = package_progress(job.opening) * SHELF_PACKAGE_SHARE / 1000;
+                        if (whole) {
+                            allocate job {
+                                package: *ModulePackage = package_opened(job.opening);
+                                match package.info.storage {
+                                    ByVerse _ -> {
+                                        module_folio_meta(job.writer, &package.info);
+                                        job.making = DocumentMaking.Comments { making: commentary_import_new(verse_module_open(package)) }
+                                    }
+                                    ByKey _ -> {
+                                        module: *KeyModule = key_module_open(package);
+                                        dictionary_folio_meta(job.writer, module);
+                                        job.making = DocumentMaking.Entries { making: dictionary_import_new(module) }
+                                    }
+                                    ByTree -> {
+                                        module_folio_meta(job.writer, &package.info);
+                                        job.making = DocumentMaking.Parts { making: book_import_new(tree_module_open(package)) }
+                                    }
+                                    _ -> raise SwordError { failure: SwordFailure.NotSupported }
+                                }
+                            }
+                        }
+                    }
+                    Comments c -> {
+                        // (Each step one thing, brief however slowly the app runs:
+                        // a piece of the records made added to the folio; else a
+                        // piece of a book's large block decoded; else a chapter
+                        // made, its records kept for the steps after.)
+                        pending: *ByteBuilder = job.pending;
+                        if (job.pending_at < pending.size) {
+                            end: int = if (pending.size - job.pending_at > DOCUMENT_PIECE) job.pending_at + DOCUMENT_PIECE else pending.size;
+                            while (end < pending.size && pending.data[end - 1] != 10i8) end = end + 1;
+                            allocate job {
+                                folio::folio_append_records(job.writer, pending.data,
+                                    job.pending_at, end)
+                            }
+                            job.pending_at = end
+                        } else if (!job.made_all) {
+                            ready: bool = false;
+                            allocate job {
+                                ready = commentary_import_prepare(c.making, DOCUMENT_PIECE)
+                            }
+                            if (ready) {
+                                region {
+                                    out: *ByteBuilder = builder_new(4096);
+                                    job.made_all = !commentary_import_next(c.making,
+                                        out);
+                                    allocate job {
+                                        builder_clear(pending);
+                                        builder_bytes(pending, out.data, 0, out.size)
+                                    }
+                                    job.pending_at = 0
+                                }
+                            }
+                        }
+                        progress = commentary_import_progress(c.making);
+                        finished = job.made_all && job.pending_at >= pending.size
+                    }
+                    Entries e -> {
+                        region {
+                            chunk: *ImportChunk = import_chunk_new();
+                            finished = !dictionary_import_next(e.making, chunk);
+                            allocate job {
+                                import_chunk_append(job.writer, chunk)
+                            }
+                        }
+                        progress = dictionary_import_progress(e.making)
+                    }
+                    Parts b -> {
+                        region {
+                            chunk: *ImportChunk = import_chunk_new();
+                            finished = !book_import_next(b.making, chunk);
+                            allocate job {
+                                import_chunk_append(job.writer, chunk)
+                            }
+                        }
+                        progress = book_import_progress(b.making)
+                    }
+                }
+                match job.making {
+                    Opening -> { }
+                    _ -> progress = SHELF_PACKAGE_SHARE + (1000 - SHELF_PACKAGE_SHARE) * progress / 1000
+                }
+                if (finished) {
+                    job.keeping = true;
                     allocate job {
-                        whole = package_step(job.opening, SHELF_STEP_BYTES)
+                        packed: []i8 = folio::folio_finish(job.writer);
+                        if (shelf_kept_at(i, ".folio")) shelf_keep_named(i, packed,
+                            len(packed)) else unkept = true
                     }
-                    progress = package_progress(job.opening) * SHELF_PACKAGE_SHARE / 1000;
-                    if (whole) {
-                        allocate job {
-                            package: *ModulePackage = package_opened(job.opening);
-                            match package.info.storage {
-                                ByVerse _ -> {
-                                    module_folio_meta(job.writer, &package.info);
-                                    job.making = DocumentMaking.Comments { making: commentary_import_new(verse_module_open(package)) }
-                                }
-                                ByKey _ -> {
-                                    module: *KeyModule = key_module_open(package);
-                                    dictionary_folio_meta(job.writer, module);
-                                    job.making = DocumentMaking.Entries { making: dictionary_import_new(module) }
-                                }
-                                ByTree -> {
-                                    module_folio_meta(job.writer, &package.info);
-                                    job.making = DocumentMaking.Parts { making: book_import_new(tree_module_open(package)) }
-                                }
-                                _ -> raise SwordError { failure: SwordFailure.NotSupported }
-                            }
-                        }
-                    }
-                }
-                Comments c -> {
-                    // (Each step one thing, brief however slowly the app runs:
-                    // a piece of the records made added to the folio; else a
-                    // piece of a book's large block decoded; else a chapter
-                    // made, its records kept for the steps after.)
-                    pending: *ByteBuilder = job.pending;
-                    if (job.pending_at < pending.size) {
-                        end: int = if (pending.size - job.pending_at > DOCUMENT_PIECE) job.pending_at + DOCUMENT_PIECE else pending.size;
-                        while (end < pending.size && pending.data[end - 1] != 10i8) end = end + 1;
-                        allocate job {
-                            folio::folio_append_records(job.writer, pending.data,
-                                job.pending_at, end)
-                        }
-                        job.pending_at = end
-                    } else if (!job.made_all) {
-                        ready: bool = false;
-                        allocate job {
-                            ready = commentary_import_prepare(c.making, DOCUMENT_PIECE)
-                        }
-                        if (ready) {
-                            region {
-                                out: *ByteBuilder = builder_new(4096);
-                                job.made_all = !commentary_import_next(c.making, out);
-                                allocate job {
-                                    builder_clear(pending);
-                                    builder_bytes(pending, out.data, 0, out.size)
-                                }
-                                job.pending_at = 0
-                            }
-                        }
-                    }
-                    progress = commentary_import_progress(c.making);
-                    finished = job.made_all && job.pending_at >= pending.size
-                }
-                Entries e -> {
-                    region {
-                        chunk: *ImportChunk = import_chunk_new();
-                        finished = !dictionary_import_next(e.making, chunk);
-                        allocate job {
-                            import_chunk_append(job.writer, chunk)
-                        }
-                    }
-                    progress = dictionary_import_progress(e.making)
-                }
-                Parts b -> {
-                    region {
-                        chunk: *ImportChunk = import_chunk_new();
-                        finished = !book_import_next(b.making, chunk);
-                        allocate job {
-                            import_chunk_append(job.writer, chunk)
-                        }
-                    }
-                    progress = book_import_progress(b.making)
                 }
             }
-            match job.making {
-                Opening -> { }
-                _ -> progress = SHELF_PACKAGE_SHARE + (1000 - SHELF_PACKAGE_SHARE) * progress / 1000
-            }
-            if (finished) {
-                job.keeping = true;
-                allocate job {
-                    packed: []i8 = folio::folio_finish(job.writer);
-                    if (shelf_kept_at(i, ".folio")) shelf_keep_named(i, packed, len(packed)) else unkept = true
-                }
-            }
+        } with SwordError _error -> {
+            failed = true
+        } with folio::FolioError _error -> {
+            failed = true
         }
-    } with SwordError _error -> {
-        failed = true
-    } with folio::FolioError _error -> {
-        failed = true
+        going = !failed && !unkept && !finished && core_clock_ms() - began < DOCUMENT_STEP_MS
     }
     if (failed || unkept) {
         drop shelf_document_job;
