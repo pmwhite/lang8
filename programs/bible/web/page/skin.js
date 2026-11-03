@@ -489,6 +489,9 @@ const CUSTOM_HIT = 5;
 const CUSTOM_SWATCHES = 6;
 const CUSTOM_FONT = 4;
 const CUSTOM_CARD = 11;
+// (Something coming, a download or a module being opened: its value is its
+// progress in thousandths, drawn as a bar in its number's place.)
+const CUSTOM_DOWNLOAD = 7;
 
 function screenLine(w) {
   const word = w.word(0);
@@ -2048,9 +2051,16 @@ const panel = {
       line.appendChild(side);
     }
     if (r.flag("w")) line.appendChild(el("span", "spin"));
+    if (r.custom === CUSTOM_DOWNLOAD) {
+      const bar = el("progress", "coming");
+      bar.max = 1000;
+      bar.value = Math.max(0, Math.min(1000, r.value));
+      if (r.detail) bar.setAttribute("aria-valuetext", r.detail);
+      line.appendChild(bar);
+    }
     if (r.trailing) line.appendChild(el("span", "trailing" + (r.flag("a") ? " accent" : ""), r.trailing));
     if (tappable) {
-      if (r.detail && r.flag("v")) line.appendChild(el("span", "value", r.detail));
+      if (r.detail && r.flag("v") && r.custom !== CUSTOM_DOWNLOAD) line.appendChild(el("span", "value", r.detail));
       const mark = r.acc === "check" || r.acc === "done" ? "check" : r.acc === "more" ? "chevron-right" : r.acc === "link" ? "arrow-up-right" : "";
       if (mark) {
         const a = el("span", `acc acc-${r.acc}`);
