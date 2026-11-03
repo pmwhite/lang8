@@ -25,15 +25,22 @@
 //                          lines after N (Smooth Bible's ios/devwire.l8)
 //   POST /shot             a screenshot (PNG) from the device, saved under
 //                          .build/dev/shots/; GET /shots/latest says which
-//   GET /data              the data files under --data DIR changed since the
-//                          server started, a line each: PATH TAB SIZE (PATH
-//                          relative to DIR, as an app asks for it); a change
-//                          to one is a new build, so the apps reload and read
-//                          them again (Smooth Bible's ios/devwire.l8)
+//   POST /data             the data files under --data DIR that differ from
+//                          an app's bundle's, a line each: PATH TAB SIZE
+//                          (PATH relative to DIR, as the app asks for it);
+//                          the body is what its bundle holds, NAME TAB HASH
+//                          a line (tools/ios/hot.sh's dev-data.txt: NAME a
+//                          file's name, HASH the first 16 hex digits of its
+//                          SHA-256). A change to one is a new build, so the
+//                          apps reload and read them again (Smooth Bible's
+//                          ios/devwire.l8). GET /data, from an app that
+//                          doesn't say: those changed since the server
+//                          started
 //   GET /data/<path>       one of them
 //   GET /<path>            a file under --serve DIR, if given
 //
 // web/reload.js's watchBuilds() is the client.
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -180,8 +187,9 @@ setInterval(() => {
 }, 250);
 
 // ---- data files ----
-// Those under --data DIR, as they were when the server started; the ones
-// changed since are given to the apps in place of their bundles' copies.
+// Those under --data DIR that differ from an app's bundle's copies are
+// given to it in their place; those changed since the server started are a
+// new build.
 function dataFiles(dir, out = []) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const p = path.join(dir, e.name);
@@ -196,6 +204,34 @@ if (dataDir) for (const f of dataFiles(dataDir)) dataAtStart.set(f, mtime(f));
 function dataChanged() {
   if (!dataDir) return [];
   return dataFiles(dataDir).filter((f) => dataAtStart.get(f) !== mtime(f));
+}
+
+// A file's hash as tools/ios/hot.sh writes it, kept while the file is
+// unchanged.
+const dataHashes = new Map();
+function dataHash(f) {
+  const st = fs.statSync(f);
+  const key = `${st.size}:${st.mtimeMs}`;
+  const kept = dataHashes.get(f);
+  if (kept && kept.key === key) return kept.hash;
+  const hash = crypto.createHash("sha256").update(fs.readFileSync(f)).digest("hex").slice(0, 16);
+  dataHashes.set(f, { key, hash });
+  return hash;
+}
+
+// The data files that differ from those of a bundle (its lines NAME TAB
+// HASH): changed, or not in it.
+function dataDiffering(bundle) {
+  const held = new Map();
+  for (const line of bundle.split("\n")) {
+    const [name, hash] = line.trim().split("\t");
+    if (name && hash) held.set(name, hash);
+  }
+  return dataFiles(dataDir).filter((f) => held.get(path.basename(f)) !== dataHash(f));
+}
+
+function dataList(files) {
+  return files.map((f) => `${path.relative(dataDir, f)}\t${fs.statSync(f).size}\n`).join("");
 }
 
 // (Polled as the sources are: a changed data file, or one changed again,
@@ -382,9 +418,18 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { ...headers, "Content-Type": "application/wasm" });
     return res.end(state.wasm);
   }
+  if (dataDir && url.pathname === "/data" && req.method === "POST") {
+    const parts = [];
+    req.on("data", (d) => parts.push(d));
+    req.on("end", () => {
+      res.writeHead(200, { ...headers, "Content-Type": "text/plain; charset=utf-8" });
+      res.end(dataList(dataDiffering(Buffer.concat(parts).toString("utf8"))));
+    });
+    return;
+  }
   if (dataDir && url.pathname === "/data") {
     res.writeHead(200, { ...headers, "Content-Type": "text/plain; charset=utf-8" });
-    return res.end(dataChanged().map((f) => `${path.relative(dataDir, f)}\t${fs.statSync(f).size}\n`).join(""));
+    return res.end(dataList(dataChanged()));
   }
   if (dataDir && url.pathname.startsWith("/data/")) {
     const p = path.resolve(dataDir, decodeURIComponent(url.pathname.slice("/data/".length)));

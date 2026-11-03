@@ -2,8 +2,9 @@
 # Build an app for hot reload on an iPhone (RELOAD.md): the app's own bundle
 # (DIR's Info.plist, frameworks, resources, assets), but its executable is
 # the hot reload host (programs/wasm/ios/host.l8), and beside it app.wasm,
-# APP.l8 built as a module, and dev-server.txt naming the development
-# server (web/dev.mjs) the host fetches builds from:
+# APP.l8 built as a module, dev-server.txt naming the development server
+# (web/dev.mjs) the host fetches builds from, and dev-data.txt, what the
+# bundle's data files hold (for the server's --data):
 #   tools/ios/hot.sh device|sim APP.l8 DIR OUT [HOST:PORT]
 # The server can also be set on the phone, in the Settings app under the
 # app (Hot reload: Server), which wins over HOST:PORT.
@@ -38,7 +39,15 @@ for f in "$dir"/AppIcon*.png "$dir"/AppIcon.svg; do [ -e "$f" ] && cp "$f" "$wor
 printf '%s\n' "$server" > "$out/dev-server.txt"
 rel=$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$out" "$top")
 touch "$work/resources"
-printf '%s/app.wasm\n%s/dev-server.txt\ntools/ios/hot-settings/Settings.bundle\n' "$rel" "$rel" >> "$work/resources"
+# (What the bundle's data files hold, NAME TAB HASH a line: the app sends
+# it to the server, which gives it the files it has that differ.)
+: > "$out/dev-data.txt"
+while read -r f; do
+  if [ -n "$f" ] && [ -f "$top/$f" ]; then
+    printf '%s\t%s\n' "$(basename "$f")" "$(sha256sum "$top/$f" | cut -c1-16)" >> "$out/dev-data.txt"
+  fi
+done < "$work/resources"
+printf '%s/app.wasm\n%s/dev-server.txt\n%s/dev-data.txt\ntools/ios/hot-settings/Settings.bundle\n' "$rel" "$rel" "$rel" >> "$work/resources"
 python3 -I - "$work/Info.plist" <<'PY'
 import plistlib, sys
 p = sys.argv[1]
