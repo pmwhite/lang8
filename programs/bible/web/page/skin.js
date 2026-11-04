@@ -559,7 +559,7 @@ function screenLine(w) {
       s.page = true;
       break;
     case "reader":
-      s.reader = { c: w.num(1), v: w.num(2) };
+      s.reader = { linked: w.num(1) === 1 };
       break;
     case "grid":
       s.grid = true;
@@ -612,7 +612,7 @@ function line(w) {
   }
   if (chapter) {
     if (word === "end") {
-      chapter.into?.chapter(chapter.c, chapter.text, chapter.lines);
+      chapter.into?.part(chapter.c, chapter.k, chapter.n, chapter.text, chapter.lines);
       chapter = null;
     } else chapter.lines.push(w);
     return;
@@ -624,17 +624,23 @@ function line(w) {
     case "screen":
       building = newScreen(w);
       break;
-    case "chapter":
-      chapter = { c: w.num(1), text: w.field(1), lines: [], into: reader };
+    case "part":
+      chapter = { c: w.num(2), k: w.num(3), n: w.num(4), text: w.field(1), lines: [], into: panes[w.num(1)] };
       break;
-    case "besidechapter":
-      chapter = { c: w.num(1), text: w.field(1), lines: [], into: besideReader };
+    case "jump":
+      panes[w.num(1)]?.jump(w.num(2), w.num(3), w.num(4));
       break;
-    case "besidejump":
-      besideReader?.jump(w.num(1), w.num(2), 0);
+    case "scroll":
+      panes[w.num(1)]?.scrollToPart(w.num(2), w.num(3), w.num(4), w.num(5) === 1);
       break;
-    case "besiderelayout":
-      besideReader?.relayout();
+    case "halt":
+      panes[w.num(1)]?.halt();
+      break;
+    case "forget":
+      panes[w.num(1)]?.forget(w.num(2));
+      break;
+    case "line":
+      if (panes[w.num(1)]) panes[w.num(1)].line = w.num(2) / 1000;
       break;
     case "present":
       panel.present(w.num(1));
@@ -694,22 +700,12 @@ function line(w) {
       readLook(w);
       break;
     case "reader":
-      reader.setCount(w.num(1));
-      break;
-    case "jump":
-      reader.jump(w.num(1), w.num(2), 0);
+      for (const r of panes) r.setCount(w.num(1));
+      reader.tellView();
       break;
     case "goto":
       send("jumped 0");
       panel.dismiss();
-      reader.jump(w.num(1), w.num(2), 0);
-      break;
-    case "place":
-      panel.dismiss();
-      reader.jump(w.num(1), w.num(2), w.num(3));
-      break;
-    case "relayout":
-      reader.relayout();
       break;
     case "page":
       reader.page(w.num(1) === 1 ? 1 : -1);
@@ -931,33 +927,56 @@ $(".bar .shelf").addEventListener("click", () => send("tap shelf"));
 $(".bar .search").addEventListener("click", () => send("tap search"));
 $(".bar .aa").addEventListener("click", () => send("tap settings"));
 
-// ---- the reader ----
-// Every chapter in order, those near the place on the page (more added as
-// it is scrolled to either end), each asked of core when it is first
-// wanted; the place at the top told back as it changes, and the reader's
-// rests, as core counts reading.
+// ---- the panes ----
+// The page (pane 0) and the panel's reader (pane 1) are read the same way
+// (SKINS.md, Panes): a window of a document's parts, each asked of core as
+// it comes near (`want P C K`), laid out, and measured (`measured`), so
+// that core knows where everything shown is; where each is read (its
+// reading line, `line`) is told as it moves (`at`), with its rests and a
+// finger on it. Core says where either goes (`jump`, `scroll`, `halt`):
+// linked, it moves the one not led on each `at` of the other's.
 const barHeight = () => $(".bar").getBoundingClientRect().bottom;
 const emPx = () => parseFloat(getComputedStyle($("#reader")).fontSize) || 19;
 
-// A reader: its chapters in main, scrolled in view (the window, for the
-// page; the panel's list, for the version read beside it), its lines to
-// core begun with words (the page's `want`, `place`, `rest`, `moving`; the
-// panel's `besidewant`, `besideplace`, none, `besidemoving`).
-function makeReader(main, view, words) {
+// How a pane was moved, as `at` says.
+const MOVED_BY_APP = 0;
+const DRAGGED = 1;
+const GLIDING = 2;
+
+// The window: how far beyond the screen parts are kept laid out (screens
+// either way), and how far before they go.
+const AHEAD_SCREENS = 2;
+const FAR_SCREENS = 6;
+
+// A reader: pane p's parts in main, scrolled in view (the window, for the
+// page; the panel's list, for its reader); opts.tap: its verses tapped
+// select them; opts.address: its chapter kept in the address.
+function makeReader(p, main, view, opts) {
   return {
+  p,
   main,
   view,
-  words,
+  opts,
   count: 0,
-  lo: 0,
-  hi: -1,
+  // Its reading line, the fraction of the way down what is in sight.
+  line: p === 0 ? 0.333 : 0,
+  // Each chapter's parts as core said them: their count, anchors ([verse,
+  // part]) and, for a run of chapters without comments, the run.
+  chapters: new Map(),
   asked: new Set(),
-  loaded: new Set(),
+  // A jump or a scroll waiting for its part.
   pending: null,
-  said: { c: -1, v: -1, f: -1 },
+  said: { c: -1 },
+  told: null,
   selC: -1,
+  sel: new Set(),
+  // Scrolls of its own under way (not a finger's), and whether a finger is
+  // on it, or has just let it glide.
   self: 0,
+  finger: false,
+  gliding: false,
   moving: false,
+  frame: 0,
   restTimer: 0,
   wakeTimer: 0,
 
@@ -965,225 +984,436 @@ function makeReader(main, view, words) {
     this.count = n;
   },
 
-  section(c) {
-    let s = this.main.querySelector(`section[data-c="${c}"]`);
-    if (!s) {
-      s = el("section", "ch wait");
-      s.dataset.c = c;
-    }
-    return s;
+  // The reading line, in the viewport.
+  lineY() {
+    const top = this.view.inset();
+    return top + this.line * (this.view.bottom() - top);
   },
 
-  want(c) {
-    if (c < 0 || c >= this.count || this.asked.has(c)) return;
-    this.asked.add(c);
-    send(`${this.words.want} ${c}`);
+  // ---- parts ----
+  key: (c, k) => `${c}:${k}`,
+
+  sections() {
+    return this.main.children;
   },
 
-  // The reader to chapter c's verse v (0: its top), f thousandths of an em
-  // into it: there now if it is on the page, else the page made again
-  // around it.
-  jump(c, v, f) {
-    if (c < 0 || c >= this.count) return;
-    if (!(c >= this.lo && c <= this.hi && this.loaded.has(c))) {
-      this.main.textContent = "";
-      this.loaded.clear();
-      this.asked.clear();
-      this.lo = c;
-      this.hi = c;
-      this.main.appendChild(this.section(c));
-      this.want(c);
-    }
-    this.pending = { c, v, f };
-    if (this.loaded.has(c)) this.finishJump();
-  },
-
-  finishJump() {
-    const j = this.pending;
-    if (!j) return;
-    this.pending = null;
-    const s = this.section(j.c);
-    let y = s.getBoundingClientRect().top;
-    if (j.v > 0) {
-      // (The verse, else the latest of the chapter's at or before it: a
-      // commentary's comment on it.)
-      let t = s.querySelector(`[data-v="${j.v}"]`);
-      if (!t) for (const x of s.querySelectorAll("[data-vs]")) if (+x.dataset.v <= j.v) t = x;
-      if (t) y = t.getBoundingClientRect().top - (t.dataset.v == j.v ? (j.f * emPx()) / 1000 : 0);
-    }
-    this.scrollTo(this.view.top() + y - this.view.inset());
-    this.extend();
-    // (Told now: a jump to where the page already is scrolls nothing.)
-    requestAnimationFrame(() => {
-      this.tell();
-      clearTimeout(this.restTimer);
-      this.restTimer = setTimeout(() => this.rested(), 160);
-    });
-  },
-
-  scrollTo(y) {
-    this.self++;
-    this.view.scrollTo(Math.max(0, y));
-    requestAnimationFrame(() => this.self--);
-  },
-
-  // More chapters put on the page while either end is near; one above the
-  // place put in without moving what is read.
-  extend() {
-    const top = this.view.top();
-    const height = this.view.scrollHeight();
-    const seen = this.view.height();
-    if (this.hi < this.count - 1 && top + seen * 2.5 > height) {
-      this.hi++;
-      this.main.appendChild(this.section(this.hi));
-      this.want(this.hi);
-    }
-    if (this.lo > 0 && top < seen * 1.5) {
-      this.lo--;
-      this.keepPlace(() => this.main.insertBefore(this.section(this.lo), this.main.firstChild));
-      this.want(this.lo);
-    }
-  },
-
-  // A change above the place made without moving the place.
-  keepPlace(change) {
-    const anchor = this.anchor();
-    const before = anchor ? anchor.getBoundingClientRect().top : 0;
-    change();
-    if (anchor) {
-      const d = anchor.getBoundingClientRect().top - before;
-      if (Math.abs(d) > 0.5) this.scrollTo(this.view.top() + d);
-    }
-  },
-
-  // The first chapter on the screen (below the bar).
-  anchor() {
-    const y = this.view.inset() + 2;
-    for (const s of this.main.children) if (s.getBoundingClientRect().bottom > y) return s;
+  findPart(c, k) {
+    for (const s of this.sections()) if (+s.dataset.c === c && s.dataset.k === String(k)) return s;
     return null;
   },
 
-  // chapter C's lines: its text, then span, verse, link and mark lines.
-  chapter(c, text, lines) {
-    const s = this.section(c);
-    if (!s.isConnected) {
-      // (Not on the page any more: kept for when it is.)
-      return;
-    }
+  // A part's place held, its words asked for (k "last": the chapter's last
+  // part, whatever it is).
+  placeholder(c, k) {
+    const s = el("section", "part wait");
+    s.dataset.c = c;
+    s.dataset.k = k;
+    s.style.minHeight = `${this.view.height()}px`;
+    return s;
+  },
+
+  want(c, k) {
+    if (c < 0 || c >= this.count) return;
+    const key = this.key(c, k);
+    if (this.asked.has(key)) return;
+    this.asked.add(key);
+    send(`want ${this.p} ${c} ${k === "last" ? 999999 : k}`);
+  },
+
+  // The part after part k of chapter c, and the one before ([c, k]; k
+  // "last" for a chapter whose count isn't known; null: none).
+  after(c, k) {
+    const info = this.chapters.get(c);
+    if (!info) return null;
+    const end = info.gap ? info.gap[1] : c;
+    if (!info.gap && k + 1 < info.n) return [c, k + 1];
+    return end + 1 < this.count ? [end + 1, 0] : null;
+  },
+
+  before(c, k) {
+    if (k > 0) return [c, k - 1];
+    if (c <= 0) return null;
+    const info = this.chapters.get(c - 1);
+    if (!info) return [c - 1, "last"];
+    if (info.gap) return [info.gap[0], 0];
+    return [c - 1, Math.max(0, info.n - 1)];
+  },
+
+  // Part k of chapter c's lines (`part P C K N`): kept as what core knows
+  // of the chapter, and shown where its place is held.
+  part(c, k, n, text, lines) {
     const spans = [];
     const verses = [];
     const links = [];
     const marks = new Map();
+    const anchors = [];
+    let gap = null;
+    let coming = false;
     for (const w of lines) {
-      const k = w.word(0);
-      if (k === "span") spans.push([w.num(1), w.num(2), w.num(3), w.num(4)]);
-      else if (k === "verse") verses.push([w.num(1), w.num(2), w.num(3)]);
-      else if (k === "link") links.push([w.num(1), w.num(2), w.num(3), Number(w.word(4))]);
-      else if (k === "mark") marks.set(w.num(1), { hex: w.word(2), bm: w.num(3) === 1, note: w.num(4) === 1 });
+      const x = w.word(0);
+      if (x === "span") spans.push([w.num(1), w.num(2), w.num(3), w.num(4)]);
+      else if (x === "verse") verses.push([w.num(1), w.num(2), w.num(3)]);
+      else if (x === "link") links.push([w.num(1), w.num(2), w.num(3), Number(w.word(4))]);
+      else if (x === "mark") marks.set(w.num(1), { hex: w.word(2), bm: w.num(3) === 1, note: w.num(4) === 1 });
+      else if (x === "anchor") anchors.push([w.num(1), w.num(2)]);
+      else if (x === "gap") gap = [w.num(1), w.num(2)];
+      else if (x === "coming") coming = true;
     }
-    const body = layChapter(text, spans, verses, links, marks);
-    const above = s.getBoundingClientRect().bottom <= this.view.inset() + 1 && this.loaded.size > 0;
+    if (n > 0) this.chapters.set(c, { n, anchors, gap });
+    if (gap) for (let x = gap[0]; x <= gap[1]; x++) if (x !== c) this.chapters.set(x, { n: 1, anchors: [], gap });
+    // (Its place: held for it, or for its chapter's last part, or for a
+    // chapter of its run.)
+    let s = this.findPart(c, k);
+    if (!s) {
+      for (const t of this.sections()) {
+        const tc = +t.dataset.c;
+        if (t.dataset.k === "last" && (tc === c || (gap && tc >= gap[0] && tc <= gap[1]))) s = t;
+        else if (gap && t.dataset.k === "0" && tc >= gap[0] && tc <= gap[1]) s = t;
+        if (s) break;
+      }
+    }
+    this.asked.delete(this.key(c, k));
+    if (!s) {
+      if (this.pending) this.finishPending();
+      return;
+    }
+    const laid = layChapter(text, spans, verses, links, marks);
+    const above = s.getBoundingClientRect().bottom <= this.lineY();
     const put = () => {
-      s.replaceChildren(body);
-      // (A chapter still to come, its line alone, kept a page tall.)
-      s.classList.toggle("wait", !verses.length);
+      s.replaceChildren(laid.frag);
+      s.dataset.c = c;
+      s.dataset.k = k;
+      s.classList.toggle("k0", k === 0);
+      s.classList.toggle("wait", coming);
+      s.style.minHeight = gap ? `${this.view.height()}px` : "";
       s.links = links;
+      s.anchorEls = laid.anchors;
+      s.laid = true;
     };
     if (above) this.keepPlace(put);
     else put();
-    this.loaded.add(c);
+    this.measure(s);
+    if (this.settle) {
+      this.settleNow();
+      this.tell(MOVED_BY_APP);
+    }
     if (c === this.selC) this.paintSelection();
     if (this.heard && this.heard.c === c) this.paintHeard();
-    if (this.pending && this.pending.c === c) this.finishJump();
+    if (this.pending) this.finishPending();
     else this.extend();
   },
 
-  // Every chapter laid out again (the settings or the version changed), at
-  // the same place.
-  relayout() {
-    const p = this.said.c >= 0 ? { ...this.said } : null;
-    this.loaded.clear();
-    this.asked.clear();
-    this.main.textContent = "";
-    this.lo = 0;
-    this.hi = -1;
-    if (p) this.jump(p.c, p.v, p.f);
+  // A part's height and where each of its anchors begins, told to core
+  // (hundredths of a CSS pixel).
+  measure(s) {
+    if (!s.laid) return;
+    const top = s.getBoundingClientRect().top;
+    const ys = (s.anchorEls || []).map((a) => Math.round(((a ? a.getBoundingClientRect().top : top) - top) * 100));
+    s.measuredWidth = s.clientWidth;
+    send(`measured ${this.p} ${s.dataset.c} ${s.dataset.k} ${Math.round(s.getBoundingClientRect().height * 100)} ${ys.join(" ")}`.trimEnd());
   },
 
-  // The place at the top: chapter, verse and how far into it, told as it
-  // changes.
-  place() {
-    const y = this.view.inset() + 1;
-    const s = this.anchor();
-    if (!s || !this.loaded.has(+s.dataset.c)) return null;
-    const c = +s.dataset.c;
-    let v = 0;
-    let f = 0;
-    const x = Math.min(innerWidth - 1, Math.max(1, s.getBoundingClientRect().left + s.clientWidth / 2));
-    let at = document.elementFromPoint(x, y + 2);
-    at = at && at.closest ? at.closest("[data-v]") : null;
-    if (at && s.contains(at)) {
-      v = +at.dataset.v;
-      const first = s.querySelector(`[data-v="${v}"]`);
-      f = Math.max(0, Math.round(((y - first.getBoundingClientRect().top) * 1000) / emPx()));
+  // Every part measured again, its width changed: what was at the reading
+  // line kept there, as far through its part as it was.
+  remeasure() {
+    const spot = this.spot;
+    if (spot && spot.s.isConnected && spot.s.measuredWidth !== spot.s.clientWidth) {
+      const r = spot.s.getBoundingClientRect();
+      this.scrollBy(r.top + spot.frac * r.height - this.lineY());
+    }
+    for (const s of this.sections()) if (s.laid && s.measuredWidth !== s.clientWidth) this.measure(s);
+    this.tellView();
+    this.tell(MOVED_BY_APP);
+  },
+
+  // The part at the reading line as last told, and how far through it.
+  spot: null,
+
+  tellView() {
+    if (!this.main.isConnected) return;
+    send(`view ${this.p} ${Math.round((this.view.bottom() - this.view.inset()) * 100)} ${Math.round(emPx() * 100)}`);
+  },
+
+  // `forget P C`: its parts of chapter c (-1: all) asked for again, those
+  // shown kept until they come.
+  forget(c) {
+    if (c < 0) this.chapters.clear();
+    for (const s of [...this.sections()]) {
+      const sc = +s.dataset.c;
+      if (c >= 0 && sc !== c) continue;
+      this.asked.delete(this.key(sc, s.dataset.k));
+      this.want(sc, s.dataset.k === "last" ? "last" : +s.dataset.k);
+    }
+  },
+
+  // ---- the window ----
+  // Parts put in while either end is near (one above the reading line put
+  // in without moving what is read); those far away let go.
+  extend() {
+    if (!this.main.isConnected) return;
+    const seen = this.view.height();
+    for (let guard = 0; guard < 8; guard++) {
+      const last = this.main.lastElementChild;
+      if (!last || !last.laid) break;
+      if (last.getBoundingClientRect().bottom - this.view.bottom() > seen * AHEAD_SCREENS) break;
+      const next = this.after(+last.dataset.c, +last.dataset.k);
+      if (!next) break;
+      this.main.appendChild(this.placeholder(next[0], next[1]));
+      this.want(next[0], next[1]);
+    }
+    for (let guard = 0; guard < 8; guard++) {
+      const first = this.main.firstElementChild;
+      if (!first || !first.laid) break;
+      if (this.view.inset() - first.getBoundingClientRect().top > seen * AHEAD_SCREENS) break;
+      const prev = this.before(+first.dataset.c, +first.dataset.k);
+      if (!prev) break;
+      this.keepPlace(() => this.main.insertBefore(this.placeholder(prev[0], prev[1]), first));
+      this.want(prev[0], prev[1]);
+    }
+    const far = seen * FAR_SCREENS;
+    while (this.main.children.length > 1 && this.main.lastElementChild.getBoundingClientRect().top - this.view.bottom() > far) this.main.lastElementChild.remove();
+    while (this.main.children.length > 1 && this.view.inset() - this.main.firstElementChild.getBoundingClientRect().bottom > far) {
+      const gone = this.main.firstElementChild;
+      this.keepPlace(() => gone.remove());
+    }
+  },
+
+  // A change above the reading line made without moving what is read.
+  keepPlace(change) {
+    const y = this.lineY();
+    let hold = null;
+    for (const s of this.sections()) if (s.getBoundingClientRect().bottom > y) { hold = s; break; }
+    const before = hold ? hold.getBoundingClientRect().top : 0;
+    change();
+    if (hold && hold.isConnected) {
+      const d = hold.getBoundingClientRect().top - before;
+      if (Math.abs(d) > 0.5) this.scrollBy(d);
+    }
+  },
+
+  scrollBy(d) {
+    this.self++;
+    this.view.scrollTo(this.view.top() + d);
+    requestAnimationFrame(() => this.self--);
+  },
+
+  // ---- going somewhere ----
+  // `jump P C V FRAC`: verse v of chapter c (0: its top), frac thousandths
+  // through it, at the reading line; its part brought in first.
+  jump(c, v, f) {
+    if (c < 0 || c >= this.count) return;
+    this.settle = null;
+    this.stopGlide();
+    this.pending = { kind: "jump", c, v, f };
+    this.finishPending();
+  },
+
+  // `scroll P C K Y GLIDE`: y (hundredths) down part k of chapter c at the
+  // reading line, gliding there or at once.
+  scrollToPart(c, k, y, glide) {
+    this.settle = null;
+    const s = this.findPart(c, k);
+    if (!s || !s.laid) {
+      this.pending = { kind: "part", c, k, y };
+      this.finishPending();
+      return;
+    }
+    const d = s.getBoundingClientRect().top + y / 100 - this.lineY();
+    if (Math.abs(d) < 0.5) return;
+    if (glide && !reducedMotion()) {
+      this.gliding = false;
+      this.selfGlide(this.view.top() + d);
     } else {
-      // (Between verses, or above the first: the last verse begun.)
-      for (const t of s.querySelectorAll("[data-vs]")) {
-        if (t.getBoundingClientRect().top <= y) {
-          v = +t.dataset.v;
-          f = Math.max(0, Math.round(((y - t.getBoundingClientRect().top) * 1000) / emPx()));
-        }
+      this.stopGlide();
+      this.scrollBy(d);
+      this.extend();
+    }
+  },
+
+  // A glide of its own: its scrolls not a finger's until it ends.
+  glideTimer: 0,
+  selfGlide(to) {
+    clearTimeout(this.glideTimer);
+    if (!this.ownGlide) this.self++;
+    this.ownGlide = true;
+    this.view.glideTo(to);
+    this.glideTimer = setTimeout(() => this.stopGlide(), 450);
+  },
+
+  stopGlide() {
+    clearTimeout(this.glideTimer);
+    if (this.ownGlide) {
+      this.ownGlide = false;
+      this.self--;
+      this.view.scrollTo(this.view.top());
+      this.extend();
+      this.tell(MOVED_BY_APP);
+    }
+  },
+
+  // `halt P`: its glide stopped where it is.
+  halt() {
+    this.stopGlide();
+    if (this.gliding) {
+      this.gliding = false;
+      this.scrollBy(0);
+    }
+  },
+
+  // The jump or scroll waiting, done once its part is laid out (the window
+  // made again around it if it isn't in it).
+  finishPending() {
+    const j = this.pending;
+    if (!j || !this.main.isConnected) return;
+    let c = j.c;
+    let k = j.k;
+    if (j.kind === "jump") {
+      const info = this.chapters.get(c);
+      if (!info) {
+        this.restart(c, 0);
+        return;
+      }
+      if (info.gap) {
+        c = info.gap[0];
+        k = 0;
+      } else {
+        const a = info.anchors.find((x) => x[0] === j.v);
+        k = j.v > 0 && a ? a[1] : 0;
       }
     }
-    return { c, v, f };
+    const s = this.findPart(c, k);
+    if (!s) {
+      this.restart(c, k);
+      return;
+    }
+    if (!s.laid) return;
+    this.pending = null;
+    // (A chapter's top at the top of the view; anything else at the
+    // reading line.)
+    let y = j.kind === "jump" && j.v <= 0 && j.f <= 0 ? this.lineY() - this.view.inset() : 0;
+    if (j.kind === "part") y = j.y / 100;
+    else if (j.v > 0) {
+      const info = this.chapters.get(c);
+      const first = info && !info.gap ? info.anchors.findIndex((x) => x[1] === k) : -1;
+      const index = info && !info.gap ? info.anchors.findIndex((x) => x[0] === j.v) : -1;
+      const els = s.anchorEls || [];
+      const at = els[index - first];
+      if (at) {
+        const top = s.getBoundingClientRect().top;
+        const a = at.getBoundingClientRect().top - top;
+        const next = els[index - first + 1];
+        const b = next ? next.getBoundingClientRect().top - top : s.getBoundingClientRect().height;
+        y = a + (j.f / 1000) * Math.max(0, b - a);
+      }
+    }
+    // (Held there as parts come in above it, until a hand moves it: the
+    // window may not yet reach far enough above to scroll there.)
+    this.settle = { s, y };
+    this.settleNow();
+    this.extend();
+    // (Told now: a jump to where it already is scrolls nothing.)
+    requestAnimationFrame(() => {
+      this.tell(MOVED_BY_APP);
+      this.rested();
+    });
   },
 
-  tell() {
+  settle: null,
+  settleNow() {
+    const t = this.settle;
+    if (!t || !t.s.isConnected) {
+      this.settle = null;
+      return;
+    }
+    this.scrollBy(t.s.getBoundingClientRect().top + t.y - this.lineY());
+  },
+
+  // The window emptied and begun again at part k of chapter c.
+  restart(c, k) {
+    this.main.replaceChildren(this.placeholder(c, k));
+    this.asked.clear();
+    this.want(c, k);
+  },
+
+  // ---- where it is read ----
+  // The part at the reading line and how far down it (hundredths).
+  locate() {
+    const y = this.lineY();
+    for (const s of this.sections()) {
+      const r = s.getBoundingClientRect();
+      if (r.bottom > y) {
+        if (!s.laid || r.top > y) return null;
+        this.spot = { s, frac: (y - r.top) / Math.max(1, r.height) };
+        return { c: +s.dataset.c, k: +s.dataset.k, y: Math.round((y - r.top) * 100) };
+      }
+    }
+    return null;
+  },
+
+  // `at P C K Y HOW`, if it moved.
+  tell(how) {
     if (this.pending) return;
-    const p = this.place();
-    if (!p) return;
-    const s = this.said;
-    if (p.c !== s.c || p.v !== s.v || Math.abs(p.f - s.f) > 400) {
-      const chapterChanged = p.c !== s.c;
-      this.said = p;
-      send(`${this.words.place} ${p.c} ${p.v} ${p.f}`);
-      if (chapterChanged && this.words.address) address(p.c);
+    const at = this.locate();
+    if (!at) return;
+    const t = this.told;
+    if (t && t.c === at.c && t.k === at.k && Math.abs(t.y - at.y) < 50 && how === MOVED_BY_APP) return;
+    this.told = at;
+    send(`at ${this.p} ${at.c} ${at.k} ${at.y} ${how}`);
+    if (at.c !== this.said.c) {
+      this.said = { c: at.c };
+      if (this.opts.address) address(at.c);
     }
   },
 
-  // The reader at rest: where, whether that chapter's end is on the
-  // screen, and the last chapter whose end is.
+  // At rest: told, with the last chapter whose end is in sight.
   rested() {
     this.moving = false;
-    this.tell();
-    const p = this.said;
-    if (p.c < 0 || !this.words.rest) return;
+    this.gliding = false;
     const bottom = this.view.bottom();
-    let end = 0;
-    let endsHi = p.c - 1;
-    for (const s of this.main.children) {
+    let endsHi = -1;
+    for (const s of this.sections()) {
+      if (!s.laid) continue;
       const c = +s.dataset.c;
-      if (c < p.c || !this.loaded.has(c)) continue;
-      if (s.getBoundingClientRect().bottom <= bottom) {
-        endsHi = c;
-        if (c === p.c) end = 1;
-      }
+      const info = this.chapters.get(c);
+      const last = !info || info.gap || +s.dataset.k + 1 >= info.n;
+      const end = s.getBoundingClientRect().bottom;
+      if (last && end <= bottom && end >= this.view.inset()) endsHi = Math.max(endsHi, info && info.gap ? info.gap[1] : c);
     }
-    send(`rest ${p.c} ${p.v} ${p.f} ${end} ${endsHi} ${clock()}`);
+    send(`rest ${this.p} ${endsHi} ${clock()}`);
+  },
+
+  // A finger (or a wheel, a key) on it.
+  touched() {
+    this.finger = true;
+    this.settle = null;
+    this.stopGlide();
+    if (!this.moving) {
+      this.moving = true;
+      send(`moving ${this.p} ${clock()}`);
+    }
+  },
+
+  released() {
+    this.finger = false;
+    if (this.moving) this.gliding = true;
   },
 
   scrolled() {
-    if (!this.self && this.userMoving) {
-      this.userMoving = false;
-      if (!this.moving) {
-        this.moving = true;
-        send(this.words.rest ? `${this.words.moving} ${clock()}` : this.words.moving);
-      }
+    const how = this.self > 0 ? MOVED_BY_APP : this.finger ? DRAGGED : this.gliding ? GLIDING : this.moving ? DRAGGED : MOVED_BY_APP;
+    if (!this.frame) {
+      this.frame = requestAnimationFrame(() => {
+        this.frame = 0;
+        this.extend();
+        this.tell(how);
+      });
     }
-    this.extend();
-    this.tell();
     clearTimeout(this.restTimer);
-    this.restTimer = setTimeout(() => this.rested(), 160);
+    this.restTimer = setTimeout(() => {
+      if (this.finger) return;
+      this.extend();
+      this.tell(MOVED_BY_APP);
+      if (this.moving) this.rested();
+    }, 160);
   },
 
   // The time core asked for (ms on this clock): tick then.
@@ -1192,26 +1422,32 @@ function makeReader(main, view, words) {
     this.wakeTimer = setTimeout(() => send(`tick ${clock()}`), Math.max(50, at - clock()));
   },
 
-  // A page down (1) or up (-1), less three lines.
+  // A page down (1) or up (-1), less three lines: a hand's move.
   page(d) {
     const line = emPx() * look.spacing;
+    this.touched();
+    this.finger = false;
+    this.gliding = true;
     this.view.scrollBy(d * Math.max(line, this.view.height() - this.view.inset() - 3 * line));
   },
 
   // Listen's verse followed: moved to it if it isn't on the screen.
   follow(c, v) {
-    const s = this.main.querySelector(`section[data-c="${c}"]`);
-    const t = s && this.loaded.has(c) ? s.querySelector(`[data-v="${v}"]`) : null;
-    if (t) {
+    for (const s of this.sections()) {
+      if (+s.dataset.c !== c || !s.laid) continue;
+      const t = s.querySelector(`[data-v="${v}"]`);
+      if (!t) continue;
       const r = t.getBoundingClientRect();
       if (r.top >= this.view.inset() && r.top < this.view.bottom() * 0.7) return;
-      this.scrollTo(this.view.top() + r.top - this.view.inset() - this.view.height() / 4);
+      this.scrollBy(r.top - this.lineY());
+      this.extend();
+      this.tell(MOVED_BY_APP);
       return;
     }
     this.jump(c, v, 0);
   },
 
-  // The verse being heard, washed (v 0: none, the chapter's start).
+  // The verse being heard, washed (v 0: none).
   heard: null,
   hearing(c, v) {
     for (const t of this.main.querySelectorAll(".heard")) t.classList.remove("heard");
@@ -1222,8 +1458,7 @@ function makeReader(main, view, words) {
   paintHeard() {
     const h = this.heard;
     if (!h) return;
-    const s = this.main.querySelector(`section[data-c="${h.c}"]`);
-    if (s) for (const t of s.querySelectorAll(`[data-v="${h.v}"]`)) t.classList.add("heard");
+    for (const s of this.sections()) if (+s.dataset.c === h.c) for (const t of s.querySelectorAll(`[data-v="${h.v}"]`)) t.classList.add("heard");
   },
 
   // Core's selection (its chapter, -1 none, then its verses), painted.
@@ -1241,23 +1476,20 @@ function makeReader(main, view, words) {
   },
 
   paint(c, vs) {
-    const s = this.main.querySelector(`section[data-c="${c}"]`);
-    if (!s) return;
-    for (const t of s.querySelectorAll("[data-v]")) t.classList.toggle("sel", vs.has(+t.dataset.v));
+    for (const s of this.sections()) if (+s.dataset.c === c) for (const t of s.querySelectorAll("[data-v]")) t.classList.toggle("sel", vs.has(+t.dataset.v));
   },
 
-  // What is marked on the selected chapter changed: asked for again.
+  // What is marked on the selected chapter changed: its parts asked for
+  // again.
   reaskSelected() {
     const c = this.selC >= 0 ? this.selC : this.said.c;
-    if (c < 0) return;
-    this.asked.delete(c);
-    this.want(c);
+    if (c >= 0) this.forget(c);
   },
 
   tapped(e) {
     if (String(window.getSelection())) return;
     const s = e.target.closest("section[data-c]");
-    if (!s) return;
+    if (!s || !s.laid) return;
     const c = +s.dataset.c;
     const t = e.target.closest("[data-l]");
     if (t && s.links) {
@@ -1267,12 +1499,14 @@ function makeReader(main, view, words) {
         return;
       }
     }
-    if (!this.words.tap) return;
+    if (!this.opts.tap) return;
     const v = e.target.closest("[data-v]");
     send(v && +v.dataset.v > 0 ? `tapverse ${c} ${v.dataset.v}` : "tapnone");
   },
   };
 }
+
+const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 // The page's view: the window, under the bar.
 const windowView = {
@@ -1280,8 +1514,14 @@ const windowView = {
   height: () => innerHeight,
   scrollHeight: () => document.documentElement.scrollHeight,
   inset: () => barHeight(),
-  bottom: () => innerHeight,
-  scrollTo: (y) => window.scrollTo(0, y),
+  // (Above the panel, when it is under the page.)
+  bottom: () => {
+    const p = $(".panel");
+    const r = p && !p.hidden ? p.getBoundingClientRect() : null;
+    return r && r.left < 1 && r.top > barHeight() ? r.top : innerHeight;
+  },
+  scrollTo: (y) => window.scrollTo({ top: Math.max(0, y), behavior: "instant" }),
+  glideTo: (y) => window.scrollTo({ top: Math.max(0, y), behavior: "smooth" }),
   scrollBy: (dy) => window.scrollBy({ top: dy, behavior: "smooth" }),
 };
 
@@ -1293,23 +1533,29 @@ function elementView(box) {
     scrollHeight: () => box.scrollHeight,
     inset: () => box.getBoundingClientRect().top,
     bottom: () => box.getBoundingClientRect().bottom,
-    scrollTo: (y) => (box.scrollTop = y),
+    scrollTo: (y) => box.scrollTo({ top: Math.max(0, y), behavior: "instant" }),
+    glideTo: (y) => box.scrollTo({ top: Math.max(0, y), behavior: "smooth" }),
     scrollBy: (dy) => box.scrollBy({ top: dy, behavior: "smooth" }),
   };
 }
 
-const reader = makeReader($("#reader"), windowView, { want: "want", place: "place", rest: "rest", moving: "moving", tap: true, address: true });
+const reader = makeReader(0, $("#reader"), windowView, { tap: true, address: true });
 
-// The version read in the panel beside the page, as the page is (core's
-// screen with a `reader` line): its reader while that screen shows.
-let besideReader = null;
+// The panel's reader: its parts kept in a box of their own, put in the
+// panel's list while core's screen with a `reader` line shows (core may
+// say where it goes before that).
+const besideReader = makeReader(1, el("div", "preader"), elementView(document.body), { tap: false, address: false });
+const panes = [reader, besideReader];
 
-// A chapter laid out as the page's paragraphs: each line of its text a
+// A part laid out as the page's paragraphs: each line of its text a
 // paragraph (its kind from its runs), each run a span in its style, with
 // its verse (data-v; data-vs on a verse's first), its link (data-l) and
-// its highlight.
+// its highlight; and for each of its `verse` lines (its anchors, in order)
+// the span its words begin in.
 function layChapter(text, spans, verses, links, marks) {
   const frag = document.createDocumentFragment();
+  const anchors = new Array(verses.length).fill(null);
+  let nextAnchor = 0;
   const cuts = new Set([0, text.length]);
   for (const s of spans) {
     cuts.add(s[0]);
@@ -1331,13 +1577,12 @@ function layChapter(text, spans, verses, links, marks) {
   let si = 0;
   let p = el("p");
   let paraSet = false;
-  const firstOf = new Set();
   const seen = new Set();
   for (let i = 0; i + 1 < at.length; i++) {
     const a = at[i];
     const b = at[i + 1];
     if (text[a] === "\n") {
-      if (!p.childNodes.length) p.append(" ");
+      if (!p.childNodes.length) p.append(" ");
       frag.appendChild(p);
       p = el("p");
       paraSet = false;
@@ -1351,6 +1596,7 @@ function layChapter(text, spans, verses, links, marks) {
       paraSet = true;
     }
     const span = el("span", sp ? `s${sp[2]}` : "", text.slice(a, b));
+    while (nextAnchor < verses.length && verses[nextAnchor][1] <= a) anchors[nextAnchor++] = span;
     let v = null;
     for (const x of verses) if (x[1] <= a && a < x[2]) v = x[0];
     if (v != null) {
@@ -1358,7 +1604,6 @@ function layChapter(text, spans, verses, links, marks) {
       if (!seen.has(v)) {
         seen.add(v);
         span.dataset.vs = "1";
-        firstOf.add(v);
       }
       const m = marks.get(v);
       if (m && washes.has(m.hex)) span.style.backgroundColor = washes.get(m.hex);
@@ -1368,12 +1613,19 @@ function layChapter(text, spans, verses, links, marks) {
     p.appendChild(span);
   }
   if (p.childNodes.length) frag.appendChild(p);
-  return frag;
+  return { frag, anchors };
 }
 
 reader.main.addEventListener("click", (e) => reader.tapped(e));
-for (const t of ["wheel", "touchmove", "pointerdown"]) addEventListener(t, () => (reader.userMoving = true), { passive: true });
+for (const t of ["wheel", "touchstart", "pointerdown"]) addEventListener(t, (e) => {
+  if (!e.target.closest || !e.target.closest(".panel")) reader.touched();
+}, { passive: true });
+for (const t of ["touchend", "pointerup", "pointercancel"]) addEventListener(t, () => reader.released(), { passive: true });
+addEventListener("wheel", () => setTimeout(() => reader.released(), 0), { passive: true });
 addEventListener("scroll", () => reader.scrolled(), { passive: true });
+addEventListener("resize", () => {
+  for (const r of panes) r.remeasure();
+});
 
 // The address: the place's chapter, as the browser keeps it (no new entry).
 function address(c) {
@@ -1451,9 +1703,13 @@ const panel = {
     this.box = p;
     // (The panel's reader: told of its scrolling, and of a hand's.)
     const list = $(".plist", p);
-    list.addEventListener("scroll", () => besideReader?.scrolled(), { passive: true });
-    for (const t of ["wheel", "touchmove", "pointerdown"]) list.addEventListener(t, () => besideReader && (besideReader.userMoving = true), { passive: true });
-    list.addEventListener("click", (e) => besideReader?.tapped(e));
+    besideReader.view = elementView(list);
+    const inReader = () => list.contains(besideReader.main);
+    list.addEventListener("scroll", () => inReader() && besideReader.scrolled(), { passive: true });
+    for (const t of ["wheel", "touchstart", "pointerdown"]) list.addEventListener(t, () => inReader() && besideReader.touched(), { passive: true });
+    for (const t of ["touchend", "pointerup", "pointercancel"]) list.addEventListener(t, () => inReader() && besideReader.released(), { passive: true });
+    list.addEventListener("wheel", () => setTimeout(() => inReader() && besideReader.released(), 0), { passive: true });
+    list.addEventListener("click", (e) => inReader() && besideReader.tapped(e));
     $(".pback", p).addEventListener("click", () => {
       const s = this.top();
       if (s && s.left && s.leftAction) send(`act ${s.id} ${s.leftAction} 0 0`);
@@ -1785,18 +2041,17 @@ const panel = {
     this.showSegments(s);
     this.showFilter(s);
     this.showTools(s);
-    // (A version read as the page is: its reader kept while its screen
-    // shows, made again only as another screen comes.)
+    // (The panel's reader, pane 1: put in the list while its screen
+    // shows, kept as it is while the screen is made again; where it goes
+    // is core's.)
     const reading = !!s.reader;
     if (reading && this.readerFor !== s.id) {
-      const box = el("div", "preader");
-      list.replaceChildren(box);
-      besideReader = makeReader(box, elementView(list), { want: "besidewant", place: "besideplace", rest: null, moving: "besidemoving", tap: false, address: false });
-      besideReader.setCount(reader.count);
+      list.replaceChildren(besideReader.main);
       this.readerFor = s.id;
-      besideReader.jump(s.reader.c, s.reader.v, 0);
+      besideReader.tellView();
+      besideReader.remeasure();
+      besideReader.finishPending();
     } else if (!reading) {
-      besideReader = null;
       this.readerFor = -1;
       list.replaceChildren(this.rows(s));
     }
@@ -2920,9 +3175,6 @@ function begin() {
   // (The panel beside the page always fits: at its right on a wide
   // window, under it on a narrow one.)
   send("panelfits 1");
-  // (A reader drawn in the panel: a version beside the page is read there
-  // as the page is.)
-  send("panelreader 1");
   send(`start ${innerWidth} ${innerHeight} ${Math.round(devicePixelRatio * 100)} ${matchMedia("(prefers-color-scheme: dark)").matches ? 1 : 0} ${-new Date().getTimezoneOffset() * 60}`);
   tellNetwork();
   addEventListener("online", tellNetwork);
@@ -3005,11 +3257,14 @@ function resetSkin() {
   capsule.show("");
   player.hide();
   reminders.clear();
-  reader.main.textContent = "";
-  reader.loaded.clear();
-  reader.asked.clear();
-  reader.lo = 0;
-  reader.hi = -1;
+  for (const r of panes) {
+    r.main.textContent = "";
+    r.asked.clear();
+    r.chapters.clear();
+    r.pending = null;
+    r.told = null;
+    r.said = { c: -1 };
+  }
   send(`api ${API}`);
 }
 

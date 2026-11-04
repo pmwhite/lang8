@@ -546,6 +546,7 @@ From the skin:
 | `model ID [SECTION ROW]` | return the screen's current description without a presentation effect; with windowed rows, include the requested lazy row |
 | `windowrows 0/1` | choose full lazy sections (the default) or their counts with rows fetched on demand; available to every skin |
 | `editmenu COMMAND` | perform one of core's text-selection menu commands on the current selection |
+| `place C V FRAC` | the page's place as an address names it: where it opens, before `start`; Go To it, after |
 | `want P C K`, `measured P C K H Y...`, `at P C K Y HOW`, `view P HEIGHT EM`, `rest P ENDS_HI MS`, `moving P MS` | a pane's part wanted, laid out, where its reading line is, its size, at rest, a finger on it: see Panes above |
 | `dark 0/1` | the system's appearance changed |
 | `esvstatus STATUS ESV`, `esvact WHAT C` | whether the site's Worker gives the ESV (STATUS its answer's, 0 none); a tap on chapter C's ESV line (`link` KIND 3: ARG `ESV_TRY`, `ESV_BSB`, `ESV_SITE`). Core asks for the ESV's chapters near the place as a wire skin reads it (its host's `fetch`), draws one not here as its line, and ends each with "(ESV) · esv.org" |
@@ -727,10 +728,19 @@ keeps (`bw_fetch`, `bw_keep`) are in Cache Storage (`sb-held`, as
 blobs (`bw_read_kept`, `bw_read_kept_range`).
 
 The skin is JavaScript (`web/page/skin.js`), drawing core's wire the web's
-way rather than the iPhone's: the reader is the page itself (its chapters
-added as either end is scrolled to, the place in the address,
-`/read/bsb/john/3`), core's screens in a panel beside the reader on a wide
-window and over it on a narrow one, each screen an entry of the browser's
+way rather than the iPhone's: the page is the window itself, and both
+panes are one reader (`makeReader`) made twice, the panel's scrolled in
+the panel's list while core's `reader` screen shows: each a window of
+parts, a `section` each, put in as either end comes within two screens
+and let go six screens away (one above the reading line put in or let go
+without moving what is read), measured in hundredths of a CSS pixel as
+each is laid out and again as the width changes (the part at the reading
+line kept there, as far through it). A jump is held at its place as parts
+come in above it until a hand moves the pane. The page's chapter is in the
+address (`/read/bsb/john/3`, said to core as `place C 0 0` before
+`start`). Core's screens are in a panel beside the reader on a wide window
+and under it on a narrow one (the page's reading line then a third of the
+way down what is above the panel), each screen an entry of the browser's
 history (Back is the browser's), the selection's toolbar floating over the
 text, menus where a phone has sheets, the browser's voice for Listen and
 its wake lock for Keep Screen On. Core's words that named the phone are the
