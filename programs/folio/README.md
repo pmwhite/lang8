@@ -25,7 +25,7 @@ Every number is an unsigned 32-bit little-endian integer.
 
 | Offset | What |
 |---|---|
-| 0 | `FOLIO`, a zero byte, the format's version (1) and a zero byte |
+| 0 | `FOLIO`, a zero byte, the format's version (2) and a zero byte |
 | 8 | the head's size: the bytes before the first block |
 | 12 | how many blocks there are |
 | 16 | the content's size, decoded |
@@ -45,11 +45,26 @@ may run across blocks.
 The metadata is lines of `key`, a tab, and a value; the index is lines of
 a division's key, a tab, where it begins in the content and a tab and where
 it ends (the content's offsets, in decimal), and perhaps a tab and its
-title (what a reader shows of it in a list: a book's part's name). Divisions follow one another:
+title (what a reader shows of it in a list: a book's part's name), and
+after it a tab and its marks (below; the title may then be empty).
+Divisions follow one another:
 each runs to the next one's start, the last to the content's end, and the
 content before the first is the document's own (a heading, an
 introduction). Keys are unique, and hold no tabs or line ends; neither do
 values or titles.
+
+A commentary's divisions (those with a `K` record) say their marks: the
+places a reader may begin showing it at, so that it can show a part of a
+long division without decoding all of it. A mark is `VERSE@OFFSET`, marks
+separated by spaces, in order; OFFSET is from the division's start. A mark
+with a verse is where that verse begins: a comment's first verse (its `K`;
+verse 0, an introduction, is a mark without a verse) or a verse a `V` in it
+begins. One of verse 0 is where a paragraph (`P`), a heading (`S`, `s`) or
+a comment begins `FOLIO_MARK_SPAN` (1536) bytes or more after the mark
+before, so that marks are no further apart than that, but where one
+paragraph is longer. `folio_division_marks` reads them; a folio of the
+format's first version, which the library still reads, has none
+(`folio_marked` says).
 
 ## Metadata
 
@@ -105,7 +120,8 @@ Commentary:
     K<c>:<v>-<c2>:<v2>  a comment on those verses begins (verse 0: the
                         chapter's introduction); a V record in it begins
                         its part on that verse, where its author marked
-                        one ("Verse 3.")
+                        one ("Verse 3."), an earlier one too where its
+                        author goes through the verses again
     O<text>\t<v>[-<v2>] a line of a chapter's outline, and its verses
 
 In a Bible, words have no space at their end, and at their start only

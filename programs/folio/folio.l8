@@ -44,7 +44,9 @@ folio_failure_name(failure: FolioFailure): str {
     }
 }
 
-FOLIO_VERSION: int = 1;
+// The format's version this library writes; it reads this one and the
+// first (whose divisions say no marks).
+FOLIO_VERSION: int = 2;
 
 // The fixed part of the head, before the blocks' sizes.
 FOLIO_FIXED_HEAD: int = 40;
@@ -55,6 +57,22 @@ FOLIO_PREFIX: int = 12;
 
 // The content's bytes in a block, decoded.
 FOLIO_BLOCK_SIZE: int = 65536;
+
+// A commentary's division's marks are at most about this far apart (but
+// where one paragraph is longer): a reader showing a part of it at a time
+// lays out about this much (some 1,500 characters: a frame's work).
+tag folio
+FOLIO_MARK_SPAN: int = 1536;
+
+// A place in a commentary's division that a reader may begin at: where a
+// verse begins (a comment's first verse, or one its author marked), or,
+// verse 0, where a paragraph, a heading or a comment begins; offset is in
+// the content. A division's marks are in order.
+tag folio
+type FolioMark = {
+    verse: int;
+    offset: int
+}
 
 FOLIO_TAB: i8 = 9i8;
 
@@ -128,7 +146,13 @@ type FolioWriter = tag folio_internal {
     // folio_append_records's: the book its chapters are in, and a
     // chapter's key being made.
     book_code: *ByteBuilder;
-    chapter_key: *ByteBuilder
+    chapter_key: *ByteBuilder;
+    // The open division's marks (index text: verse@offset, separated by
+    // spaces), whether it has a comment (only then it says them), and
+    // where its last mark is (in the content).
+    open_marks: *ByteBuilder;
+    open_comments: bool;
+    open_last_mark: int
 }
 
 tag folio
@@ -149,7 +173,10 @@ folio_writer_new(): *FolioWriter@new {
         key_places: new int[1024](0),
         key_count: 0,
         book_code: builder_new(16),
-        chapter_key: builder_new(32)
+        chapter_key: builder_new(32),
+        open_marks: builder_new(256),
+        open_comments: false,
+        open_last_mark: 0
     }
 }
 
@@ -182,12 +209,53 @@ folio_close_division(writer: *FolioWriter@new) {
     builder_int(writer.index, writer.open_start);
     builder_byte(writer.index, FOLIO_TAB);
     builder_int(writer.index, writer.content_size);
-    if (writer.open_title.size > 0) {
+    marked: bool = writer.open_comments && writer.open_marks.size > 0;
+    if (writer.open_title.size > 0 || marked) {
         builder_byte(writer.index, FOLIO_TAB);
         builder_bytes(writer.index, writer.open_title.data, 0, writer.open_title.size)
     }
+    if (marked) {
+        builder_byte(writer.index, FOLIO_TAB);
+        builder_bytes(writer.index, writer.open_marks.data, 0, writer.open_marks.size)
+    }
     builder_byte(writer.index, FOLIO_LINE_END);
     writer.open = false
+}
+
+// A mark of the open division's at offset in the content (verse 0: a
+// break).
+folio_mark(writer: *FolioWriter@new, verse: int, offset: int) {
+    if (!writer.open) return;
+    if (writer.open_marks.size > 0) builder_byte(writer.open_marks, ' ' as i8);
+    builder_int(writer.open_marks, verse);
+    builder_byte(writer.open_marks, '@' as i8);
+    builder_int(writer.open_marks, offset - writer.open_start);
+    writer.open_last_mark = offset
+}
+
+// The number at data[from..to) after its letter (a K record's first verse:
+// K<c>:<v>-...; a V record's, as keyed: V<n> or V<n>><key>).
+folio_record_verse(
+    data: []i8,
+    from: int,
+    to: int,
+    kind: i8
+): int {
+    at: int = from + 1;
+    if (kind == 'K' as i8) {
+        while (at < to && data[at] != ':' as i8) at = at + 1;
+        at = at + 1
+    } else {
+        gt: int = at;
+        while (gt < to && data[gt] != '>' as i8) gt = gt + 1;
+        if (gt < to) at = gt + 1
+    }
+    n: int = 0;
+    while (at < to && data[at] as int >= 48 && data[at] as int <= 57) {
+        n = n * 10 + data[at] as int - 48;
+        at = at + 1
+    }
+    n
 }
 
 // Whether key[from..to) was begun before; if not, it is noted.
@@ -279,6 +347,9 @@ folio_division_titled(
     builder_clear(writer.open_title);
     builder_bytes(writer.open_title, title, title_from, title_to);
     writer.open_start = writer.content_size;
+    builder_clear(writer.open_marks);
+    writer.open_comments = false;
+    writer.open_last_mark = writer.content_size;
     writer.open = true
 }
 
@@ -323,7 +394,9 @@ folio_append(
 
 // Records added, a division begun at each book (B<CODE> ...: keyed CODE)
 // and each chapter (C<n>: keyed CODE.n). data[from..to) holds whole
-// records.
+// records. A division with comments (K records) is marked (FolioMark): at
+// each comment and each verse in one, and at a paragraph, a heading or a
+// comment FOLIO_MARK_SPAN after the mark before.
 tag folio
 folio_append_records(
     writer: *FolioWriter@new,
@@ -354,6 +427,15 @@ folio_append_records(
                 builder_bytes(key, data, line + 1, end);
                 folio_division(writer, key.data, 0, key.size)
             }
+        } else if (kind == 'K' as i8 || kind == 'V' as i8 && writer.open_comments) {
+            // (Where it is in the content: what is written, and what is
+            // still to be.)
+            if (kind == 'K' as i8) writer.open_comments = true;
+            folio_mark(writer, folio_record_verse(data, line, end, kind), writer.content_size + line - written)
+        } else if ((kind == 'P' as i8 || kind == 'S' as i8 || kind == 's' as i8) && writer.open_comments) {
+            offset: int = writer.content_size + line - written;
+            if (offset - writer.open_last_mark >= FOLIO_MARK_SPAN) folio_mark(writer,
+                0, offset)
         }
         line = end + 1
     }
@@ -399,6 +481,7 @@ folio_finish(writer: *FolioWriter@new): []i8@new {
 // an empty place).
 tag folio
 type Folio = tag folio_internal {
+    version: int;
     head_size: int;
     block_count: int;
     content_size: int;
@@ -412,6 +495,9 @@ type Folio = tag folio_internal {
     // Each one's title (a span of index; empty if it has none).
     title_from: []int;
     title_to: []int;
+    // Each one's marks (a span of index; empty if it has none).
+    marks_from: []int;
+    marks_to: []int;
     starts: []int;
     ends: []int;
     places: []int
@@ -421,7 +507,7 @@ type Folio = tag folio_internal {
 folio_check_prefix(source: []i8, count: int) raises FolioError {
     if (count < FOLIO_PREFIX) folio_fail(FolioFailure.Truncated);
     if (!folio_same_bytes(source, 0, bytes("FOLIO"), 0, 5) || source[5] != 0i8 || source[7] != 0i8) folio_fail(FolioFailure.NotFolio);
-    if (source[6] as int != FOLIO_VERSION) folio_fail(FolioFailure.UnsupportedVersion)
+    if (source[6] as int < 1 || source[6] as int > FOLIO_VERSION) folio_fail(FolioFailure.UnsupportedVersion)
 }
 
 tag folio
@@ -473,6 +559,7 @@ folio_open(head: []i8, count: int) raises FolioError: *Folio@new {
         if (byte == FOLIO_LINE_END) divisions = divisions + 1
     }
     folio: *Folio = new Folio {
+        version: head[6] as int,
         head_size: head_size,
         block_count: block_count,
         content_size: content_size,
@@ -485,12 +572,14 @@ folio_open(head: []i8, count: int) raises FolioError: *Folio@new {
         key_to: new int[divisions](0),
         title_from: new int[divisions](0),
         title_to: new int[divisions](0),
+        marks_from: new int[divisions](0),
+        marks_to: new int[divisions](0),
         starts: new int[divisions](0),
         ends: new int[divisions](0),
         places: new int[2 * divisions + 1](0)
     };
     // (Each line: a key, its start and its end, after the one before, and
-    // perhaps a title.)
+    // perhaps a title, and after it (from the second version) marks.)
     line: int = 0;
     previous_end: int = -1;
     for d in 0..divisions {
@@ -505,8 +594,13 @@ folio_open(head: []i8, count: int) raises FolioError: *Folio@new {
         if (first_tab == line || second_tab >= end) folio_fail(FolioFailure.BadHead);
         start: int = folio_decimal_at(index, first_tab + 1, second_tab);
         stop: int = folio_decimal_at(index, second_tab + 1, third_tab);
+        fourth_tab: int = third_tab + 1;
+        if (folio.version >= 2)
+            while (fourth_tab < end && index[fourth_tab] != FOLIO_TAB) fourth_tab = fourth_tab + 1 else fourth_tab = end;
         folio.title_from[d] = (if (third_tab < end) third_tab + 1 else end);
-        folio.title_to[d] = end;
+        folio.title_to[d] = (if (fourth_tab < end) fourth_tab else end);
+        folio.marks_from[d] = (if (fourth_tab < end) fourth_tab + 1 else end);
+        folio.marks_to[d] = end;
         if (start < 0 || stop < start || stop > content_size || previous_end >= 0 && start != previous_end) folio_fail(FolioFailure.BadHead);
         folio.key_from[d] = line;
         folio.key_to[d] = first_tab;
@@ -587,6 +681,45 @@ folio_division_title(folio: *Folio, division: int): []i8@new {
     title: []i8 = new i8[folio.title_to[division] - from](0i8);
     memcpy(title, 0, folio.index, from, len(title));
     title
+}
+
+// Whether the folio says its commentary's divisions' marks (one made in
+// the format's first version doesn't).
+tag folio
+folio_marked(folio: *Folio): bool {
+    folio.version >= 2
+}
+
+// A division's marks, in order (none for one without comments).
+tag folio
+folio_division_marks(folio: *Folio, division: int): []FolioMark@new {
+    index: []i8 = folio.index;
+    from: int = folio.marks_from[division];
+    to: int = folio.marks_to[division];
+    count: int = 0;
+    for k in from..to {
+        if (index[k] == '@' as i8) count = count + 1
+    }
+    marks: []FolioMark = new FolioMark[count](FolioMark { verse: 0, offset: 0 });
+    n: int = 0;
+    at: int = from;
+    while (at < to && n < count) {
+        verse: int = 0;
+        while (at < to && index[at] != '@' as i8) {
+            verse = verse * 10 + index[at] as int - 48;
+            at = at + 1
+        }
+        at = at + 1;
+        offset: int = 0;
+        while (at < to && index[at] != ' ' as i8) {
+            offset = offset * 10 + index[at] as int - 48;
+            at = at + 1
+        }
+        at = at + 1;
+        marks[n] = FolioMark { verse: verse, offset: folio.starts[division] + offset };
+        n = n + 1
+    }
+    marks
 }
 
 tag folio

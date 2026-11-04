@@ -42,9 +42,11 @@ The records are folio/README.md's.
   verse there, a `V`, as far as the next verse that has a comment of its
   own. A comment that labels its verses itself is followed by its labels
   alone (its references may be an outline's); a reference is taken only
-  after a sentence has ended (else a line break cut a sentence); and labels
-  only go forward (notes after an exposition that start again at verse 1
-  begin none). The `K` reaches as far as its labels do. Bare numbers ("3.")
+  after a sentence has ended (else a line break cut a sentence), and only
+  going forward. Labels may start again (notes after an exposition, each
+  "Verse 3." in turn, begin their verses again), but a label of the verse
+  just begun begins nothing (several notes on one verse). The `K` reaches
+  as far as its labels do. Bare numbers ("3.")
   are not labels: they number sections and points as often as verses.
 - **A dictionary**: an entry a division, keyed by the module's key (an
   introduction, the empty key, is the folio's own records); its metadata
