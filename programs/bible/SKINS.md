@@ -321,7 +321,10 @@ brought there as `go` MODE 1 is. While the page glides after a flick it
 waits, and settles when the page rests. Led by the commentary, the page
 goes to the first verse of the comment at the commentary's reading line as
 that comment changes (it stays while a verse that comment covers is at its
-reading line).
+reading line). A commentary leading from its run of chapters without
+comments leaves the page where it is in them; the page outside them goes
+to the run's chapter nearest it (the run's first coming from before it,
+its last coming back from after it).
 
 These rules are the skins' each, so each is checked against core's: core's
 `link_cases` tool writes cases (a map, both panes' anchor positions, the

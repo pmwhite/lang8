@@ -1,7 +1,7 @@
 // The web's following checked against core/follow.l8's cases:
 //   node programs/bible/web/page/follow_test.mjs .build/link-cases.txt
 import fs from "node:fs";
-import { followPairs, followByVerse, commentFromPage, pageFromComment } from "./follow.js";
+import { followPairs, followByVerse, commentFromPage, pageFromComment, runChapter } from "./follow.js";
 
 const lines = fs.readFileSync(process.argv[2], "utf8").split("\n");
 const nums = (l) => l.trim().split(/\s+/).slice(1);
@@ -47,6 +47,14 @@ for (let i = 0; i < lines.length; i++) {
     const got = step(commentFromPage(m, pi, pj, panel, line));
     if (got !== want) fail("frompage", got, want);
     i += 3;
+  } else if (l.startsWith("run ")) {
+    const [from, to, pageC] = nums(l).map(Number);
+    const want = lines[i + 1].slice(7);
+    n++;
+    const c = runChapter(from, to, pageC);
+    const got = c === null ? "stay" : `go ${c}`;
+    if (got !== want) fail("run", got, want);
+    i += 1;
   } else if (l.startsWith("map ") && lines[i + 1]?.startsWith("frompanel ")) {
     const m = map(l);
     const [pj, pi] = nums(lines[i + 1]).map(Number);

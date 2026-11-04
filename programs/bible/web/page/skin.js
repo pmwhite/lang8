@@ -7,7 +7,7 @@
 // (UTF-8, `\n`-ended, fields split by tabs), as Android's skin does.
 import { runResumable, pausing } from "../../../../web/l8-runtime.js";
 import { Reloader, watchBuilds } from "../../../../web/reload.js";
-import { BY_VERSE, followPairs, followByVerse, commentFromPage, pageFromComment } from "./follow.js";
+import { BY_VERSE, followPairs, followByVerse, commentFromPage, pageFromComment, runChapter } from "./follow.js";
 
 const meta = (n) => document.querySelector(`meta[name="${n}"]`)?.content || "";
 const DATA = "/read/data/" + meta("sb-data");
@@ -1585,10 +1585,20 @@ function follow(lead) {
   if (lead.p === 0 && lead.gliding) return;
   const there = other.placeAt();
   const otherI = there && there.c === at.c ? there.i : -2;
-  // (A chapter of a commentary's run without comments: its one part.)
-  if (map.j.length === 0) {
-    const info = other.chapters.get(at.c);
-    if (!(info && info.gap && there && there.c === info.gap[0])) other.go(at.c, -1, 0, 1);
+  // (A chapter of a commentary's run without comments: the page leading,
+  // its one part; the commentary leading, the run's chapter nearest the
+  // page.)
+  const run = (lead.p === 0 ? other : lead).chapters.get(at.c)?.gap;
+  if (run) {
+    if (lead.p === 0) {
+      if (!(there && there.c === run[0])) other.go(at.c, -1, 0, 1);
+    } else {
+      const to = runChapter(run[0], run[1], there ? there.c : run[0]);
+      if (to !== null && other.stepped !== `run:${to}`) {
+        other.stepped = `run:${to}`;
+        other.go(to, -1, 0, 1);
+      }
+    }
     return;
   }
   const step = lead.p === 0 ? commentFromPage(map, at.i, otherI, panel.shape(at.c), there ? there.line : 0) : pageFromComment(map, at.i, otherI);

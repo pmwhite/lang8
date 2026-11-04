@@ -132,13 +132,12 @@ final class Linking implements Reader.Moves {
     if (aim == null || aim.c != runFrom) panel.bring(runFrom, -1, true);
   }
 
-  // A commentary in its run leading the page: the page anywhere in the
-  // run's chapters stays; one outside goes to the run's nearest chapter
-  // (the one it comes into the run from, not the run's first).
+  // A commentary in its run leading the page: by Follow.runChapter (no
+  // place yet: the run's first).
   private void pageInRun(int runFrom, int runTo) {
     Reader.Place aim = page.aim();
-    if (aim == null || aim.c < runFrom) page.bring(runFrom, -1, true);
-    else if (aim.c > runTo) page.bring(runTo, -1, true);
+    int to = aim == null ? runFrom : Follow.runChapter(runFrom, runTo, aim.c);
+    if (to >= 0) page.bring(to, -1, true);
   }
 
   // The page leading a commentary: it waits while the page is flung; it

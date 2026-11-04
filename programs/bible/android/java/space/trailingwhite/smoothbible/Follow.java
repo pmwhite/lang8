@@ -237,4 +237,13 @@ final class Follow {
     for (int k = 0; k < map.j.length; k++) if (map.j[k] == panelJ) return CommentStep.goTo(map.i0[k]);
     return CommentStep.STAY;
   }
+
+  // A commentary leading the page from a run of chapters it says nothing
+  // on (runFrom to runTo): the page in one of them stays (-1); one outside
+  // goes to the run's chapter nearest it (core/follow.l8's
+  // follow_run_chapter).
+  static int runChapter(int runFrom, int runTo, int pageC) {
+    if (pageC >= runFrom && pageC <= runTo) return -1;
+    return pageC < runFrom ? runFrom : runTo;
+  }
 }

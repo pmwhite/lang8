@@ -113,6 +113,14 @@ export function commentFromPage(map, pageI, panelJ, panel, panelLine) {
   return best < 0 ? null : best;
 }
 
+// A commentary leading the page from a run of chapters it says nothing on
+// (runFrom to runTo): null to stay (the page in one of them), else the
+// run's chapter nearest the page.
+export function runChapter(runFrom, runTo, pageC) {
+  if (pageC >= runFrom && pageC <= runTo) return null;
+  return pageC < runFrom ? runFrom : runTo;
+}
+
 export function pageFromComment(map, panelJ, pageI) {
   if (panelJ < 0) return pageI < 0 ? null : -1;
   if (pageI >= 0 && covers(map, panelJ, pageI)) return null;

@@ -50,6 +50,7 @@ final class FollowCheck {
     boolean pageLeads;
     double leaderEm, followerEm, readingLine;
     int pageI, panelJ;
+    int runFrom, runTo, pageC;
     int checked, failed;
 
     void take(int lineNumber, String[] w) {
@@ -84,6 +85,13 @@ final class FollowCheck {
           panelJ = Integer.parseInt(w[1]);
           pageI = Integer.parseInt(w[2]);
           break;
+        case "run":
+          asks = "run";
+          asksLine = lineNumber;
+          runFrom = Integer.parseInt(w[1]);
+          runTo = Integer.parseInt(w[2]);
+          pageC = Integer.parseInt(w[3]);
+          break;
         case "expect":
           check(lineNumber, w);
           break;
@@ -113,6 +121,12 @@ final class FollowCheck {
           got = Follow.pageFromComment(map, panelJ, pageI).toString();
           same = got.equals(expected);
           break;
+        case "run": {
+          int to = Follow.runChapter(runFrom, runTo, pageC);
+          got = to < 0 ? "stay" : "go " + to;
+          same = got.equals(expected);
+          break;
+        }
         default:
           throw new IllegalArgumentException("line " + lineNumber + ": an expect with no case before it");
       }
