@@ -309,7 +309,24 @@ shelf_folio_got(
             new OpenModule { slot: shelf_slot_at(i), reader: OpenReader.Document { folio: folio::folio_open(data,
                 size) } }
         };
+        // (A commentary made before folios marked where its verses begin
+        // can't be read a part at a time: its folio let go, and it
+        // downloaded and made again.)
+        stale: bool = false;
+        borrow next as opened {
+            match opened.reader {
+                Document d -> stale = shelf_kind_at(i) == SHELF_KIND_COMMENTARY && !folio::folio_marked(d.folio);
+                _ -> { }
+            }
+        }
+        if (stale) {
+            drop next;
+            shelf_remove_kept(i);
+            shelf_file_gone(i);
+            return
+        }
         drop shelf_open[use];
+        shelf_decoded_forget();
         shelf_open[use] = move next;
         shelf_open_slots[use] = shelf_slot_at(i);
         shelf_set_broken(i, false)
@@ -383,6 +400,18 @@ shelf_folio_range(
     end: int
 ): FolioChapter@new {
     if (end <= start) return FolioChapter.ChapterRecords { data: new i8[0](0i8) };
+    // (A part of a few blocks: by the blocks decoded, kept; more, as a
+    // whole.)
+    if (folio::folio_block_last(folio, end) - folio::folio_block_first(folio, start) < SHELF_DECODED_MOST) shelf_folio_range_decoded(slot,
+        folio, start, end) else shelf_folio_range_whole(slot, folio, start, end)
+}
+
+shelf_folio_range_whole(
+    slot: int,
+    folio: *folio::Folio,
+    start: int,
+    end: int
+): FolioChapter@new {
     span: TextSpan = folio_range_span(folio, start, end);
     if (!shelf_span_ready(slot, span)) return FolioChapter.ChapterWaiting;
     at: int = shelf_holds(slot, span);
@@ -411,6 +440,109 @@ shelf_folio_range(
         }
     }
     if (damaged) FolioChapter.ChapterDamaged else FolioChapter.ChapterRecords { data: out }
+}
+
+// The blocks last decoded, a few: each one's slot and block (-1: none) and
+// its content. Parts of a chapter read one after another are mostly in one
+// block: decoded once.
+SHELF_DECODED_MOST: int = 4;
+
+SHELF_DECODED_ROOM: int = 65536;
+
+shelf_decoded_slot: []int = new int[SHELF_DECODED_MOST](-1);
+
+shelf_decoded_block: []int = new int[SHELF_DECODED_MOST](-1);
+
+shelf_decoded_size: []int = new int[SHELF_DECODED_MOST](0);
+
+shelf_decoded_used: []int = new int[SHELF_DECODED_MOST](0);
+
+shelf_decoded_clock: int = 0;
+
+shelf_decoded_bytes: []i8 = new i8[SHELF_DECODED_MOST * SHELF_DECODED_ROOM](0i8);
+
+// (A folio opened: what was decoded may be another's.)
+shelf_decoded_forget() {
+    for k in 0..SHELF_DECODED_MOST shelf_decoded_slot[k] = -1
+}
+
+shelf_decoded_at(slot: int, block: int): int {
+    for k in 0..SHELF_DECODED_MOST {
+        if (shelf_decoded_slot[k] == slot && shelf_decoded_block[k] == block) {
+            shelf_decoded_clock = shelf_decoded_clock + 1;
+            shelf_decoded_used[k] = shelf_decoded_clock;
+            return k
+        }
+    }
+    -1
+}
+
+// A block decoded kept, in place of the one used longest ago (not if it is
+// larger than a place: then not kept).
+shelf_decoded_keep(slot: int, block: int, decoded: []i8) {
+    if (len(decoded) > SHELF_DECODED_ROOM) return;
+    at: int = 0;
+    for k in 0..SHELF_DECODED_MOST
+        if (shelf_decoded_used[k] < shelf_decoded_used[at]) at = k;
+    memcpy(shelf_decoded_bytes, at * SHELF_DECODED_ROOM, decoded, 0, len(decoded));
+    shelf_decoded_slot[at] = slot;
+    shelf_decoded_block[at] = block;
+    shelf_decoded_size[at] = len(decoded);
+    shelf_decoded_clock = shelf_decoded_clock + 1;
+    shelf_decoded_used[at] = shelf_decoded_clock
+}
+
+// shelf_folio_range for a part of a few blocks: from the blocks decoded,
+// those not yet decoded from the span held (else asked for, as there).
+shelf_folio_range_decoded(
+    slot: int,
+    folio: *folio::Folio,
+    start: int,
+    end: int
+): FolioChapter@new {
+    first: int = folio::folio_block_first(folio, start);
+    last: int = folio::folio_block_last(folio, end);
+    missing: bool = false;
+    for block in first..last + 1
+        if (shelf_decoded_at(slot, block) < 0) missing = true;
+    if (missing) {
+        span: TextSpan = folio_range_span(folio, start, end);
+        if (!shelf_span_ready(slot, span)) return FolioChapter.ChapterWaiting;
+        at: int = shelf_holds(slot, span);
+        if (at < 0) return FolioChapter.ChapterWaiting;
+        damaged: bool = false;
+        borrow shelf_held[at] as held {
+            if (held.failed) damaged = true else {
+                try {
+                    for block in first..last + 1 {
+                        if (shelf_decoded_at(slot, block) < 0) {
+                            region {
+                                shelf_decoded_keep(slot, block, folio::folio_decode_block(folio,
+                                    block, held.bytes, folio::folio_block_offset(folio,
+                                    block) - held.offset))
+                            }
+                        }
+                    }
+                } with folio::FolioError _error -> {
+                    damaged = true
+                }
+            }
+        }
+        if (damaged) return FolioChapter.ChapterDamaged
+    }
+    out: []i8 = new i8[end - start](0i8);
+    for block in first..last + 1 {
+        k: int = shelf_decoded_at(slot, block);
+        // (Not kept (a block larger than a place): decoded as a range is.)
+        if (k < 0) return shelf_folio_range_whole(slot, folio, start, end);
+        block_start: int = folio::folio_block_start(folio, block);
+        take_from: int = if (start > block_start) start else block_start;
+        block_end: int = block_start + shelf_decoded_size[k];
+        take_to: int = if (end < block_end) end else block_end;
+        memcpy(out, take_from - start, shelf_decoded_bytes, k * SHELF_DECODED_ROOM + take_from - block_start,
+            take_to - take_from)
+    }
+    FolioChapter.ChapterRecords { data: out }
 }
 
 // ---- a chapter's comments ----
@@ -507,31 +639,47 @@ comment_has_sections(data: []i8, comment: CommentSpan): bool {
 
 // ---- as a reader's chapter ----
 // A chapter's comments laid out as a reader's chapter, into ctx: its
-// number (and a line saying it has none, if none), then each comment,
-// headed by its verses ("Verses 14-16") unless it heads its parts itself,
-// its words in the reader's styles (a note's in brackets); each comment a
-// verse of its own, keyed by its first verse, from its heading to its
-// end, and each verse its labels turn to too. A comment that doesn't fit
-// whole is taken out again, and a line says the rest isn't shown: never
-// cut in its words.
+// number (and a line saying it has none, if none), then its comments
+// (lay_comments).
 lay_comment_records(data: []i8, c: int, ctx: *ChapterLayout) {
-    layout_begin(ctx);
-    lay_begin(ctx, STYLE_NUMERAL, PARA_CENTER, 0);
-    ctx.opener_at = ctx.out_n;
-    lay_int(ctx, ch_num[c]);
-    lay_byte(ctx, 10);
-    comment: CommentSpan = first_comment(data);
+    lay_comment_opener(c, ctx);
     // (A chapter it says nothing on: so, not its numeral alone.)
-    if (comment.from < 0) {
+    if (first_comment(data).from < 0) {
         lay_begin(ctx, STYLE_REF, PARA_CENTER, 0);
         lay_str(ctx, "No comments on this chapter.");
         lay_byte(ctx, 10)
     }
-    while (comment.from >= 0) {
+    lay_comments(data, ctx)
+}
+
+// A chapter's layout begun with its number.
+lay_comment_opener(c: int, ctx: *ChapterLayout) {
+    layout_begin(ctx);
+    lay_begin(ctx, STYLE_NUMERAL, PARA_CENTER, 0);
+    ctx.opener_at = ctx.out_n;
+    lay_int(ctx, ch_num[c]);
+    lay_byte(ctx, 10)
+}
+
+// Comments' records laid out into ctx: those before the first comment's K
+// (a part of a chapter that begins within a comment) going on with that
+// comment, then each comment, headed by its verses ("Verses 14-16") unless
+// it heads its parts itself, its words in the reader's styles (a note's in
+// brackets). Each comment is a verse of its own, keyed by its first verse,
+// from its heading to its end, and each verse a V record in it begins is
+// too (one its author labelled again later, as Spurgeon's notes after his
+// exposition, again where it is). A comment that doesn't fit whole is
+// taken out again, and a line says the rest isn't shown: never cut in its
+// words.
+lay_comments(data: []i8, ctx: *ChapterLayout) {
+    comment: CommentSpan = first_comment(data);
+    first: int = if (comment.from >= 0) comment.start else len(data);
+    cut: bool = first > 0 && lay_comment_lines(data, 0, first, ctx);
+    while (!cut && comment.from >= 0) {
         out_n: int = ctx.out_n;
         runs: int = ctx.runs;
         verses: int = ctx.verse_count;
-        cut: bool = lay_comment(data, comment, ctx);
+        cut = lay_comment(data, comment, ctx);
         if (shelf_layout_full(ctx)) {
             ctx.out_n = out_n;
             ctx.runs = runs;
@@ -539,30 +687,18 @@ lay_comment_records(data: []i8, c: int, ctx: *ChapterLayout) {
             if (runs > 0) ctx.run_end[runs - 1] = out_n;
             cut = true
         }
-        if (cut) {
-            lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
-            lay_str(ctx, "The rest of this chapter\â\€\™s commentary is too long to show here.");
-            lay_byte(ctx, 10);
-            return
-        }
         comment = (if (comment.end < len(data)) comment_at(data, comment.end) else no_comment)
+    }
+    if (cut) {
+        lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
+        lay_str(ctx, "The rest of this chapter\â\€\™s commentary is too long to show here.");
+        lay_byte(ctx, 10)
     }
 }
 
-// Whether it was cut short: at a paragraph's end, nearly too long for the
-// chapter (a comment as long as a book, as on Psalm 119).
-//
-// Its verses (`V` records) go on through it; a commentator may go through
-// them again after (Spurgeon's explanatory notes and hints after his
-// exposition, each "Verse 3." in turn), which the folio's records don't
-// mark: a paragraph labelled with a verse the comment has passed is a verse
-// of its own too, again (not the same one twice in a row: several notes on
-// one verse). So a chapter's verses can be numbered 1 to 29 and then from 1
-// again, each where it is.
+// A comment laid out (lay_comments); whether it was cut short: at a
+// paragraph's end, nearly too long for the chapter.
 lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout): bool {
-    // (The furthest verse marked, and the one last begun.)
-    furthest: int = comment.from;
-    last: int = comment.from;
     if (comment.from > 0) {
         verse_open(ctx, comment.from, comment.from);
         verse_here(ctx)
@@ -574,10 +710,21 @@ lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout): bool {
         for k in 0..fbuf_n lay_byte(ctx, fbuf[k] as int);
         lay_byte(ctx, 10)
     }
+    lay_comment_lines(data, record_line(data, comment.start).next, comment.end, ctx)
+}
+
+// A comment's records from from to to laid out (its K's after); whether
+// they were cut short. The verse open at their end ends there.
+lay_comment_lines(
+    data: []i8,
+    from: int,
+    to: int,
+    ctx: *ChapterLayout
+): bool {
     line_open: bool = false;
     cut: bool = false;
-    at: int = record_line(data, comment.start).next;
-    while (at < comment.end) {
+    at: int = from;
+    while (at < to) {
         line: RecordLine = record_line(data, at);
         kind: i8 = data[line.from];
         if ((kind == 'P' || kind == 'S' || kind == 's') && shelf_layout_nearly_full(ctx)) {
@@ -593,9 +740,7 @@ lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout): bool {
             n: int = record_number(data, line.from + 1, line.to);
             verse_on(ctx);
             verse_open(ctx, n, n);
-            verse_here(ctx);
-            if (n > furthest) furthest = n;
-            last = n
+            verse_here(ctx)
         } else if (kind == 'F') {
             lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
             lay_str(ctx, " [");
@@ -609,16 +754,6 @@ lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout): bool {
             for k in tab + 1..line.to lay_byte(ctx, data[k] as int);
             line_open = true
         } else if (kind == 'T' || kind == 'I' || kind == 'G' || kind == 'U' || kind == 'W' || kind == 'J') {
-            // (A paragraph's first words labelling a verse passed: again.)
-            if (!line_open && comment.from > 0) {
-                label: int = verse_label_at(data, line.from + 1, line.to);
-                if (label >= comment.from && label <= furthest && label <= comment.through && label != last) {
-                    verse_on(ctx);
-                    verse_open(ctx, label, label);
-                    verse_here(ctx);
-                    last = label
-                }
-            }
             lay_begin(ctx, record_style(kind), PARA_PROSE, 0);
             for k in line.from + 1..line.to lay_byte(ctx, data[k] as int);
             line_open = true
@@ -626,9 +761,183 @@ lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout): bool {
         at = line.next
     }
     _closed: bool = shelf_lay_line_end(ctx, line_open);
-    // (Cut short, the verse open ends here too: a verse must end.)
-    if (comment.from > 0 || cut && ctx.verse_count > 0 && ctx.verse_end[ctx.verse_count - 1] < 0) verse_on(ctx);
+    if (ctx.verse_count > 0 && ctx.verse_end[ctx.verse_count - 1] < 0) verse_on(ctx);
     cut
+}
+
+// ---- a chapter in parts ----
+// Read beside the page, a commentary's chapter is laid out a part at a
+// time, each a row of the panel's reader: from one of its folio's marks
+// (folio::FolioMark) to the next part's, a part beginning at the first
+// mark COMMENT_PART_BYTES or more past its own start. So showing a
+// part of a chapter as long as a book (Spurgeon's on Psalm 119) costs no
+// more than one of any other. A folio made before marks has one part a
+// chapter: the chapter whole.
+
+// A part's records, at least (but where marks are further apart: the
+// folio's are no more than folio::FOLIO_MARK_SPAN apart, but where one
+// paragraph is longer). About 2,000 characters a part, which a reader lays
+// out in a frame or two.
+COMMENT_PART_BYTES: int = 1536;
+
+// The open commentary's chapter c read in parts: its division (-1: no
+// comment on it, one part; -2: the commentary isn't open yet, its parts
+// not known), where each part begins in the content and
+// where the last ends, and each verse its marks begin with the part it is
+// in.
+type CommentParts = {
+    division: int;
+    starts: []int;
+    end: int;
+    verses: []int;
+    verse_parts: []int
+}
+
+comment_parts(folio: *folio::Folio, c: int): CommentParts@new {
+    d: int = folio_chapter_division(folio, c);
+    if (d < 0) return CommentParts {
+        division: -1,
+        starts: new int[1](0),
+        end: 0,
+        verses: new int[0](0),
+        verse_parts: new int[0](0)
+    };
+    start: int = folio::folio_division_start(folio, d);
+    marks: []folio::FolioMark = folio::folio_division_marks(folio, d);
+    // (Counted, then placed.)
+    parts: int = 1;
+    verses: int = 0;
+    last: int = start;
+    for m in marks {
+        if (m.offset > start && m.offset - last >= COMMENT_PART_BYTES) {
+            parts = parts + 1;
+            last = m.offset
+        }
+        if (m.verse > 0) verses = verses + 1
+    }
+    made: CommentParts = CommentParts {
+        division: d,
+        starts: new int[parts](start),
+        end: folio::folio_division_end(folio, d),
+        verses: new int[verses](0),
+        verse_parts: new int[verses](0)
+    };
+    part: int = 0;
+    verse: int = 0;
+    last = start;
+    for m in marks {
+        if (m.offset > start && m.offset - last >= COMMENT_PART_BYTES) {
+            part = part + 1;
+            made.starts[part] = m.offset;
+            last = m.offset
+        }
+        if (m.verse > 0) {
+            made.verses[verse] = m.verse;
+            made.verse_parts[verse] = part;
+            verse = verse + 1
+        }
+    }
+    made
+}
+
+// Where part p of parts ends in the content.
+comment_part_end(parts: *CommentParts, p: int): int {
+    if (p + 1 < len(parts.starts)) parts.starts[p + 1] else parts.end
+}
+
+// Chapter c of the commentary open in slot read in parts (not open yet:
+// one, not known).
+shelf_comment_parts(slot: int, c: int): CommentParts@new {
+    if (shelf_open_is(SHELF_USE_STUDY, slot)) {
+        borrow shelf_open[SHELF_USE_STUDY] as open {
+            match open.reader {
+                Document d -> return comment_parts(d.folio, c);
+                _ -> { }
+            }
+        }
+    }
+    CommentParts {
+        division: -2,
+        starts: new int[1](0),
+        end: 0,
+        verses: new int[0](0),
+        verse_parts: new int[0](0)
+    }
+}
+
+// Part p of chapter c of the commentary open in slot laid out into ctx
+// (its first, after the chapter's number); whether it could be (else its
+// blocks are coming, or the module is opening).
+shelf_lay_comment_part(
+    slot: int,
+    c: int,
+    p: int,
+    ctx: *ChapterLayout
+): bool {
+    if (c < 0 || c >= chapters || !shelf_ensure_open(slot)) return false;
+    ready: bool = false;
+    borrow shelf_open[SHELF_USE_STUDY] as open {
+        match open.reader {
+            Document d -> {
+                region {
+                    parts: CommentParts = comment_parts(d.folio, c);
+                    if (parts.division < 0) {
+                        lay_comment_records(new i8[0](0i8), c, ctx);
+                        ready = true
+                    } else {
+                        part: int = if (p < 0) 0 else if (p >= len(parts.starts)) len(parts.starts) - 1 else p;
+                        match shelf_folio_range(slot, d.folio, parts.starts[part],
+                            comment_part_end(&parts, part)) {
+                            ChapterWaiting -> { }
+                            ChapterRecords r -> {
+                                if (part == 0) lay_comment_opener(c, ctx) else layout_begin(ctx);
+                                lay_comments(r.data, ctx);
+                                ready = true
+                            }
+                            ChapterNone -> {
+                                lay_comment_records(new i8[0](0i8), c, ctx);
+                                ready = true
+                            }
+                            ChapterDamaged -> {
+                                if (part == 0) lay_comment_opener(c, ctx) else layout_begin(ctx);
+                                lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
+                                lay_str(ctx, "This part of the commentary is damaged.");
+                                lay_byte(ctx, 10);
+                                ready = true
+                            }
+                        }
+                    }
+                }
+            }
+            _ -> { }
+        }
+    }
+    ready
+}
+
+// The blocks of the parts beside part p of chapter c read ahead (the next
+// first), if the commentary in slot is open; whether they are held.
+shelf_comment_part_ahead(slot: int, c: int, p: int): bool {
+    if (!shelf_open_is(SHELF_USE_STUDY, slot)) return true;
+    held: bool = true;
+    borrow shelf_open[SHELF_USE_STUDY] as open {
+        match open.reader {
+            Document d -> {
+                region {
+                    parts: CommentParts = comment_parts(d.folio, c);
+                    if (parts.division >= 0) {
+                        for q in [p + 1, p - 1] {
+                            if (held && q >= 0 && q < len(parts.starts)) held = shelf_span_ready(slot,
+                                folio_range_span(d.folio, parts.starts[q], comment_part_end(&parts,
+                                q)))
+                        }
+                    }
+                }
+            }
+            _ -> { }
+        }
+    }
+    held
 }
 
 // The reader's style for a record of words.

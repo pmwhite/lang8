@@ -26,15 +26,26 @@ it was left. Its document is a version or a Bookshelf module; a version or a
 commentary there follows the page. Where the skin draws a reader in the
 panel, a version or a commentary is read there as the page is, every
 chapter in turn (a commentary's comments laid out as a chapter, each a
-verse of its own, by core/shelf_screens.l8). The iPhone's is a table of
-pieces (each chapter's text cut where paragraphs end), so UIKit lays out
-only those near the screen; a chapter core hasn't made yet is asked for
-when the page and panel rest, never while they move, and the chapters
-either side are asked for ahead.
+verse of its own, by core/shelf_folio.l8). The iPhone reads a commentary
+a part at a time: about 2 KB of its records from one of its folio's marks
+(where a comment, a verse or a paragraph begins), so that core lays out
+only the parts near the screen, whatever a chapter's length; the folio's
+marks say which part each verse is in without decoding the others. The
+panel shows a window of parts, each measured as it comes in (its height,
+and where each of its verses begins), so that where anything shown is is
+known, never estimated; parts come in ahead of the screen and go far
+behind it, one coming in above moving the panel by its height at once.
 Linked with the page (a button at its foot), the two move together,
 whichever a hand moves leading; unlinked, neither moves the other, and
 linked again it comes to the page's place (elsewhere, a version is a page
-of paragraphs, a chapter at a time).
+of paragraphs, a chapter at a time). Each side is read at one line: the
+page's a third of the way down (where Go To leaves a verse), the panel's
+at its top. A version follows verse by verse, as far through each as the
+leader is. A commentary follows by comment: the follower moves only when
+the leader comes to a verse its comment isn't on, to the nearest comment
+on it (a jump goes to its first); near, it glides, far, it is there at
+once. While the page glides after a flick, no one reads it: the
+commentary waits, and settles at the page's verse when the page stops.
 `core/shelf.l8` keeps the Bookshelf: SWORD modules downloaded on request
 rather than bundled. A module is made as part of its download: a Bible
 becomes a version in a text slot of its own, and a commentary, dictionary
