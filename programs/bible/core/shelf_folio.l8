@@ -309,13 +309,14 @@ shelf_folio_got(
             new OpenModule { slot: shelf_slot_at(i), reader: OpenReader.Document { folio: folio::folio_open(data,
                 size) } }
         };
-        // (A commentary made before folios marked where its verses begin
-        // can't be read a part at a time: its folio let go, and it
-        // downloaded and made again.)
+        // (A folio made by an older making of the library's (a
+        // commentary made before folios marked where its verses begin,
+        // which can't be read a part at a time; a table's cells run
+        // together): its folio let go, and it downloaded and made again.)
         stale: bool = false;
         borrow next as opened {
             match opened.reader {
-                Document d -> stale = shelf_kind_at(i) == SHELF_KIND_COMMENTARY && !folio::folio_marked(d.folio);
+                Document d -> stale = shelf_kind_at(i) == SHELF_KIND_COMMENTARY && !folio::folio_marked(d.folio) || sword_folio::folio_importer(d.folio) < sword_folio::SWORD_FOLIO_IMPORTER;
                 _ -> { }
             }
         }
@@ -649,7 +650,35 @@ lay_comment_records(data: []i8, c: int, ctx: *ChapterLayout) {
         lay_str(ctx, "No comments on this chapter.");
         lay_byte(ctx, 10)
     }
-    lay_comments(data, ctx)
+    lay_comments(data, c, ctx)
+}
+
+// Whether the heading data[from..to] only names chapter c, as a reader's
+// number does: "Chapter 3" (in any case), or a psalm's "Psalm 3".
+heading_names_chapter(
+    data: []i8,
+    from: int,
+    to: int,
+    c: int
+): bool {
+    for word in ["chapter", "psalm"] {
+        if (word == "psalm" && book_code(ch_book[c]) != "PSA")
+            continue;
+        fbuf_n = 0;
+        fput_str(word);
+        fput(32);
+        fput_int(ch_num[c]);
+        if (to - from == fbuf_n) {
+            same: bool = true;
+            for k in 0..fbuf_n {
+                a: int = data[from + k] as int;
+                if (a >= 65 && a <= 90) a = a + 32;
+                if (a != fbuf[k] as int) same = false
+            }
+            if (same) return true
+        }
+    }
+    false
 }
 
 // A chapter's layout begun with its number.
@@ -671,15 +700,19 @@ lay_comment_opener(c: int, ctx: *ChapterLayout) {
 // exposition, again where it is). A comment that doesn't fit whole is
 // taken out again, and a line says the rest isn't shown: never cut in its
 // words.
-lay_comments(data: []i8, ctx: *ChapterLayout) {
+// (Opened at chapter c's number (-1: a part after its first): a heading of
+// the commentary's own before its first comment that only names the
+// chapter, as "Chapter 3" does, is the number again, and left out.)
+lay_comments(data: []i8, c: int, ctx: *ChapterLayout) {
     comment: CommentSpan = first_comment(data);
     first: int = if (comment.from >= 0) comment.start else len(data);
-    cut: bool = first > 0 && lay_comment_lines(data, 0, first, ctx);
+    cut: bool = first > 0 && lay_comment_lines(data, 0, first, c, ctx);
     while (!cut && comment.from >= 0) {
         out_n: int = ctx.out_n;
         runs: int = ctx.runs;
         verses: int = ctx.verse_count;
-        cut = lay_comment(data, comment, ctx);
+        // (The chapter's first comment may hold the heading too.)
+        cut = lay_comment(data, comment, if (comment.start == first) c else -1, ctx);
         if (shelf_layout_full(ctx)) {
             ctx.out_n = out_n;
             ctx.runs = runs;
@@ -698,7 +731,12 @@ lay_comments(data: []i8, ctx: *ChapterLayout) {
 
 // A comment laid out (lay_comments); whether it was cut short: at a
 // paragraph's end, nearly too long for the chapter.
-lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout): bool {
+lay_comment(
+    data: []i8,
+    comment: CommentSpan,
+    named: int,
+    ctx: *ChapterLayout
+): bool {
     if (comment.from > 0) {
         verse_open(ctx, comment.from, comment.from);
         verse_here(ctx)
@@ -710,7 +748,8 @@ lay_comment(data: []i8, comment: CommentSpan, ctx: *ChapterLayout): bool {
         for k in 0..fbuf_n lay_byte(ctx, fbuf[k] as int);
         lay_byte(ctx, 10)
     }
-    lay_comment_lines(data, record_line(data, comment.start).next, comment.end, ctx)
+    lay_comment_lines(data, record_line(data, comment.start).next, comment.end, named,
+        ctx)
 }
 
 // A comment's records from from to to laid out (its K's after); whether
@@ -719,6 +758,7 @@ lay_comment_lines(
     data: []i8,
     from: int,
     to: int,
+    named: int,
     ctx: *ChapterLayout
 ): bool {
     line_open: bool = false;
@@ -730,6 +770,11 @@ lay_comment_lines(
         if ((kind == 'P' || kind == 'S' || kind == 's') && shelf_layout_nearly_full(ctx)) {
             cut = true;
             break
+        }
+        if ((kind == 'S' || kind == 's') && named >= 0 && heading_names_chapter(data,
+            line.from + 1, line.to, named)) {
+            at = line.next;
+            continue
         }
         if (kind == 'P') line_open = shelf_lay_line_end(ctx, line_open) else if (kind == 'S' || kind == 's') {
             line_open = shelf_lay_line_end(ctx, line_open);
@@ -908,7 +953,7 @@ shelf_lay_comment_part(
                             ChapterWaiting -> { }
                             ChapterRecords r -> {
                                 if (part == 0) lay_comment_opener(c, ctx) else layout_begin(ctx);
-                                lay_comments(r.data, ctx);
+                                lay_comments(r.data, if (part == 0) c else -1, ctx);
                                 ready = true
                             }
                             ChapterNone -> {

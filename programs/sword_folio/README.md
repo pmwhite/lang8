@@ -62,7 +62,11 @@ The records are folio/README.md's.
 `module_folio_meta` writes what every folio of a module says: `kind`
 (`commentary`, `dictionary`, `book`: how a reader reads it), `what` (SWORD's
 kind: a glossary, a devotional), `name`, `title`, `language`,
-`versification`, `license`, `copyright`, `version`, `source`;
+`versification`, `license`, `copyright`, `version`, `source`, and
+`importer`: which making of this library's it is (`SWORD_FOLIO_IMPORTER`,
+counted up as what it makes of a module changes; `folio_importer` reads
+it, 1 for a folio that doesn't say), so that a reader can make a folio
+again from its module once this library makes it better;
 `dictionary_folio_meta` adds a dictionary's keys'.
 
 ## Making
