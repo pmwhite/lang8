@@ -529,7 +529,10 @@ final class Panel extends FrameLayout {
     // (The panel's reader in place of its rows.)
     boolean reading = s.reader && reader != null;
     list.setVisibility(showEmpty || reading ? GONE : VISIBLE);
-    if (reader != null) reader.setVisibility(reading ? VISIBLE : GONE);
+    if (reader != null) {
+      reader.setVisibility(reading ? VISIBLE : GONE);
+      reader.setLinkedShown(reading && s.readerLinked);
+    }
     subtitle.setText(s.subtitle);
     subtitle.setVisibility(s.subtitle.isEmpty() ? GONE : VISIBLE);
     back.setText(!s.left.isEmpty() ? s.left : stack.size() > 1 ? "‹" : "✕");

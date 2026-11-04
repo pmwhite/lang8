@@ -25,8 +25,10 @@ import java.util.ArrayList;
 // and core's sheet over them (a Panel of group 0).
 public final class Bible extends Activity {
   final Look look = new Look();
-  // The two panes: the page, and the panel's reader.
+  // The two panes: the page, and the panel's reader; and what moves them
+  // together, linked.
   Reader reader, besideReader;
+  Linking linking;
   // Every screen core has built, by id; the sheet's and the panel's.
   final java.util.HashMap<Integer, Screen> screens = new java.util.HashMap<>();
   Panel sheet, beside;
@@ -61,6 +63,9 @@ public final class Bible extends Activity {
   int partC, partK, partN;
   String partText;
   final ArrayList<Wire> partLines = new ArrayList<>();
+  // A chapter's link map being said (`link C MODE`, its `match` lines, to
+  // `end`).
+  boolean gatheringLink;
 
   // (The versions bundled, as assets, copied to the app's files once.)
   static final String[] VERSIONS = {"bsb.folio", "kjv.folio", "web.folio", "asv.folio", "ylt.folio",
@@ -75,6 +80,7 @@ public final class Bible extends Activity {
     reader = new Reader(this, look, Reader.PAGE);
     root.addView(reader, new FrameLayout.LayoutParams(-1, -1));
     besideReader = new Reader(this, look, Reader.PANEL);
+    linking = new Linking(reader, besideReader);
     bar = new LinearLayout(this);
     bar.setGravity(Gravity.CENTER_VERTICAL);
     bar.setPadding(dp(16), 0, dp(8), 0);
@@ -492,7 +498,7 @@ public final class Bible extends Activity {
     Native.send("start " + (int) (m.widthPixels / m.density) + " " + (int) (m.heightPixels / m.density)
         + " " + (int) (m.density * 100) + " " + (saidDark ? 1 : 0) + " "
         + java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000);
-    // (The panes' lines to core from now on: their sizes first.)
+    // (The panes' lines to core from now on.)
     reader.begin();
     besideReader.begin();
     reminded(getIntent());
@@ -878,7 +884,10 @@ public final class Bible extends Activity {
         building.scopes = w.field(2).split("\\|");
         building.scopeLabels = w.field(3).split("\\|");
       } else if (word.equals("plain")) building.plain = true;
-      else if (word.equals("reader")) building.reader = true;
+      else if (word.equals("reader")) {
+        building.reader = true;
+        building.readerLinked = w.num(1) == 1;
+      }
       else if (word.equals("subtitle")) building.subtitle = w.field(1);
       else if (word.equals("grid")) building.grid = true;
       else if (word.equals("button")) building.button = w.field(1);
@@ -900,6 +909,13 @@ public final class Bible extends Activity {
         building = null;
         section = null;
       }
+      return;
+    }
+    if (gatheringLink) {
+      if (word.equals("end")) {
+        linking.linkEnd();
+        gatheringLink = false;
+      } else if (word.equals("match")) linking.match(w.num(1), w.num(2), w.num(3));
       return;
     }
     if (gatheringPart) {
@@ -1186,18 +1202,17 @@ public final class Bible extends Activity {
         if (r != null) r.setReadingLine(w.num(2));
         break;
       }
-      case "jump": {
-        // (jump P C V FRAC)
+      case "go": {
+        // (go P C I FRAC MODE)
         Reader r = pane(w.num(1));
-        if (r != null) r.jump(w.num(2), w.num(3), w.num(4));
+        if (r != null) r.go(w.num(2), w.num(3), w.num(4), w.num(5));
         break;
       }
-      case "scroll": {
-        // (scroll P C K Y GLIDE)
-        Reader r = pane(w.num(1));
-        if (r != null) r.scrollTo(w.num(2), w.num(3), w.num(4), w.num(5) == 1);
+      case "link":
+        // (link C MODE, its match lines, end: a chapter's link map.)
+        linking.linkBegin(w.num(1), w.num(2));
+        gatheringLink = true;
         break;
-      }
       case "halt": {
         Reader r = pane(w.num(1));
         if (r != null) r.halt();
@@ -1206,6 +1221,7 @@ public final class Bible extends Activity {
       case "forget": {
         Reader r = pane(w.num(1));
         if (r != null) r.forget(w.num(2));
+        linking.forgetMaps();
         break;
       }
       case "awake": {

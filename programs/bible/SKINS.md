@@ -337,8 +337,9 @@ measure exactly:
 - The web: a `section` a part in the document's flow; the browser's own
   scroll anchoring (`overflow-anchor`, done by hand where a browser lacks
   it); `content-visibility: auto` on parts far from sight.
-- Android: a `RecyclerView` of `TextView`s, one a part, measured as each is
-  bound, so TalkBack and selection are the platform's.
+- Android: the framework's recycling list (a `ListView`: the app uses no
+  AndroidX) of `TextView`s, one a part, each measured exactly as it comes
+  into the window, so TalkBack and selection are the platform's.
 - The terminal: its own reader of lines, a part's lines measured in rows.
 
 ## Views a skin makes itself
@@ -692,26 +693,48 @@ days, core's day's reader (`SCR_DAY`: its passages, Mark Read, the day's
 end), Day Done.
 
 Its two panes are one reader made twice (`Reader.java`, pane 0 the page,
-pane 1 the panel's reader), its units hundredths of a pixel. Each shows a
-window of parts, each part a `TextView` laid out and measured as it comes
-in (`measured`, again as the width changes), each at a place in the
-window's own coordinates; parts are asked for (`want`) two and a half
-windows ahead and a window and a half behind, and let go further away; a
-part that comes in above, or one above the screen sent again taller or
-shorter, moves those above it, never what is in sight. Its scrolling is
-its own (the parts moved, not laid out again: core's `scroll` on every
-frame is cheap), a fling the platform's `OverScroller`, a glide (`scroll
-... 1`, a key's page) 0.3 s, at once where the system's animations are
-off. It says `moving` as a finger starts to drag it (or stops its glide),
-`at` once a frame as it moves, `rest` as the finger lets go, a fling or a
-glide ends, a jump arrives, or a moment after core last moved it; a line
-of core's moving a pane a finger is on is let go. A chapter's first part
-has room above it and its last below; a part that only holds a place (a
-commentary's coming, a run without comments, the ESV's waiting line) is
-as tall as the pane. The page's taps are core's (`footnote`, `word`,
-`esvact`, `preview`, `tapverse`, `tapnone`, each with its part's chapter),
-and the selection, the verse heard and highlights are washed on its
-parts; the panel's reader previews a reference tapped.
+pane 1 the panel's reader): the platform's list (a `ListView`) of
+`TextView`s, one a part, so that the fling, TalkBack's reading and
+scrolling, and the text's selection and its menu (Copy, Share, Select
+All) are Android's. Each holds a window of parts, asked for (`want`) two
+and a half screens ahead and a screen and a half behind and let go three
+and four away, each measured as it comes in by a `TextView` set up as the
+list's are (selectable too: a selectable one lays its words out as an
+editable one does), so that where every anchor in the window begins is
+known to the pixel, in sight or not; a part the list lays out taller or
+shorter than it was measured is measured again. A part coming in above,
+or one sent again, never moves what is at the reading line: the list is
+put back where it was with `setSelectionFromTop`, given as the list lays
+itself out (its padding, which that counts from, is only then up to
+date); a layout of the list's own (a selection brought back as a key
+leaves touch mode) is undone the same way, and keys are core's (`key`),
+not the list's. It says `at` as the anchor at its reading line changes and
+at rest, `moving` as a finger starts to drag it (or catches it moving, or
+TalkBack scrolls it), and `rest` as it stops. `go` 0 puts it there at
+once; `go` 1 glides 0.3 s from within a screen and a half, at once from
+farther or where the system's animations are off; where it goes is held
+as parts come in about it, until a hand moves it. A line of core's moving
+a pane a finger is on is let go, and `halt` stops a glide or a fling but
+not one that following chose.
+
+Linked, `Linking.java` places the follower on each frame the leader (the
+pane a finger, a fling or a key last moved) moves, by core's rules ported
+to `Follow.java` and checked against `link_cases` (`make
+bible-follow-test`, with a JDK: `android/follow_test.sh`): a version a
+pixel at a time (`scrollListBy`), brought to the leader's verse at once
+where it hasn't the leader's chapter; a commentary at a comment's border,
+gliding, waiting while the page is flung. A commentary's run of chapters
+without comments needs no map: it is the commentary's place wherever the
+page is in them, and leading from it, the page stays in them or goes to
+the run's nearest chapter (the one it came into the run from, not the
+run's first). A chapter's first part has room above it and its last
+below; a part that only holds a place (a commentary's coming, a run
+without comments, the ESV's waiting line) is as tall as the pane. The
+page's taps are core's (`footnote`, `word`, `esvact`, `preview`,
+`tapverse`, `tapnone`, each with its part's chapter), a tap that lets the
+text's own selection go doing only that; the selection, the verse heard
+and highlights are washed on its parts; the panel's reader previews a
+reference tapped.
 
 The panel beside the page is a second stack of core's screens (group 1),
 said to fit always (`panelfits 1`): at the page's right, 390 dp wide after
@@ -725,12 +748,16 @@ screen closes it (`tap shelf`); the system's Back closes a sheet, then
 puts a full panel beside the page, then goes back in the panel. A screen
 that says `reader` shows pane 1 in place of its rows, under its title and
 subtitle, with its link button at its foot. Checked on the emulator
-(2026-11-04): the page scrolled and flung, Go To, a version (KJV) read
-beside the page under it, the two moving together as either is dragged,
-unlinked and linked again, a commentary downloaded from the Bookshelf
-(Burkitt's) following comment by comment and leading the page, its run of
-chapters without comments, Study in the panel, the panel at the right on a
-phone on its side, filling the screen, and turned back.
+(2026-11-04, the panes as lists): the page dragged and flung, Go To and
+the way back, a key's page; the KJV beside the page under it following
+verse by verse with either leading, dragged and flung both ways (each
+frame's follower within half a pixel of the rules, never moving against
+its leader), unlinked and linked again; Burkitt's from the Bookshelf
+following comment by comment and leading the page, waiting through the
+page's fling, its run of chapters without comments both ways; the panel
+filling the screen and back; the panel at the right on a phone on its
+side, each pane's place kept through the turn; the text selected in both
+panes; TalkBack's focus on a part, each part a node with its words.
 
 Since 2026-10-22 its host is core's (`core/host.l8`), as the web's is: its
 L8 (`android/main.l8`) is only the platform's primitives, read from the

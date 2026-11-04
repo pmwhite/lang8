@@ -229,12 +229,14 @@ bible-tui: $(BUILD)/smooth-bible
 
 # Following's cases (programs/bible/tools/link_cases.l8, SKINS.md: Panes),
 # from core/follow.l8's rules, which a skin not in L8 checks its own
-# against; bible-follow-test runs the rules' own tests and the web's check.
+# against; bible-follow-test runs the rules' own tests, Android's check and
+# the web's.
 $(BUILD)/link-cases.txt: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'bible link cases' sh -c './l8c3 build programs/bible/tools/link_cases.l8 -o $(BUILD)/link-cases && $(BUILD)/link-cases > $@.tmp && mv -f $@.tmp $@'
 
 bible-follow-test: $(BUILD)/link-cases.txt
 	+@$(STEP) 'bible following rules' ./l8c3 test programs/bible/tools/link_cases.l8
+	@$(STEP) 'bible following on Android' programs/bible/android/follow_test.sh $(BUILD)/link-cases.txt
 	+@$(STEP) 'bible following on the web' node programs/bible/web/page/follow_test.mjs $(BUILD)/link-cases.txt
 
 $(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s $(ARM_ARENA_RUNTIME) | $(OK)

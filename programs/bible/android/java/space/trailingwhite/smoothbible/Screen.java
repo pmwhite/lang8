@@ -10,7 +10,7 @@ final class Screen {
   // Whether it is the panel's reader (`reader LINKED`: pane 1 in place of
   // its rows; its link button says whether it is linked); what its reading
   // is of, under its title.
-  boolean reader;
+  boolean reader, readerLinked;
   String subtitle = "";
   // The action each typed letter is (Practice's typing: keys ACTION; 0 none).
   int keys;

@@ -2,55 +2,53 @@ package space.trailingwhite.smoothbible;
 
 import android.animation.ValueAnimator;
 import android.content.Context;
+import android.graphics.Rect;
+import android.graphics.drawable.ColorDrawable;
 import android.os.SystemClock;
 import android.text.Layout;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.BackgroundColorSpan;
+import android.util.Log;
 import android.util.TypedValue;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
-import android.view.VelocityTracker;
 import android.view.View;
-import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.animation.DecelerateInterpolator;
-import android.widget.OverScroller;
+import android.widget.AbsListView;
+import android.widget.BaseAdapter;
+import android.widget.ListView;
 import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalDouble;
 import java.util.TreeSet;
 
-// One of the two panes a document is read in (SKINS.md, "Panes"): the page
-// (pane 0) or the panel's reader (pane 1), the same reader made twice. Core
-// decides where each goes; this lays out what it is sent and says where it
-// is read.
+// One of the two panes a document is read in (SKINS.md, Panes): the page
+// (pane 0) or the panel's reader (pane 1), the same reader made twice.
 //
-// Its document comes a part at a time (`part P C K N` and its lines), as it
-// asks for the parts near what it shows (`want P C K`). It shows a window
-// of them: each part a TextView of its own, laid out and measured as it
-// comes in (`measured`: its height and where each of its anchors begins),
-// one after another, each at a place in the window's own coordinates that
-// doesn't change while it is there. Parts come in ahead of the screen at
-// either end and go far behind it; one coming in above, or one above the
-// screen sent again taller or shorter, moves those above it, never what is
-// in sight. Scrolling is the view's own (its children moved, not laid out
-// again), so that core's `scroll` on every frame is cheap.
+// It is the platform's list (a ListView: its fling, its scrolling for
+// TalkBack, a TextView a part, so that TalkBack reads each part and its
+// words can be selected) of a window of parts: those near what it shows,
+// asked for (`want P C K`) as either end comes near and let go far away.
+// Each part in the window is measured as it comes in, by a TextView set up
+// as the list's are, so that where each of its anchors begins is known
+// exactly in the window's own coordinates (its content: pixels down from
+// the window's first part) whether it is on the screen or not. A part
+// coming in above, or sent again, never moves what is at the reading line.
 //
-// Its units for core are hundredths of a pixel. Where it is read is its
-// reading line (`line P THOUSANDTHS` of the way down what of it is in
-// sight), told as it moves (`at P C K Y HOW`, at most once a frame), with
-// a finger's first move (`moving`) and its rests (`rest`).
-final class Reader extends ViewGroup {
+// It speaks to core in places, never in pixels: where its reading line is
+// (`at P C I FRAC`, as the anchor there changes and at rest), a finger's
+// first move (`moving`), its rests (`rest`); and it goes where core says
+// (`go P C I FRAC MODE`). Linked, Linking moves it frame by frame by
+// core's rules (Follow) when the other pane leads.
+final class Reader extends ListView {
   // The panes, as core numbers them.
   static final int PAGE = 0, PANEL = 1;
-
-  // How a pane was moved, as an `at` says it (core/panes.l8's PANE_).
-  private static final int MOVED_BY_APP = 0, DRAGGED = 1, GLIDING_AFTER_FINGER = 2;
 
   // A part key's places past every part a chapter has: none (the document's
   // end or start), or the chapter before not known yet.
@@ -63,19 +61,42 @@ final class Reader extends ViewGroup {
   // How many parts it keeps out of the window, by when each was used.
   private static final int STORE_MOST = 48;
 
-  // A glide core asks for (`scroll ... 1`), and a key's page.
+  // A glide (`go ... 1`, a key's page, following by comment): its time,
+  // and how far it may go (in screens; farther, it is there at once).
   private static final long GLIDE_MS = 300;
+  private static final float GLIDE_REACH_SCREENS = 1.5f;
+
+  // How long after it was last moved by following it is at rest.
+  private static final long REST_AFTER_MS = 250;
+
+  // The window kept about the reading line: parts brought in a screen and
+  // a half behind and two and a half ahead, let go three and four away.
+  private static final float BEHIND_SCREENS = 1.5f, AHEAD_SCREENS = 2.5f, LET_GO_BEHIND = 3,
+      LET_GO_AHEAD = 4;
+
+  // What moves the panes together (Linking): told as this one moves.
+  interface Moves {
+    // A finger (or a key) began to move it: it leads.
+    void moving(Reader r);
+
+    // It moved (each frame it moves).
+    void moved(Reader r);
+
+    // A finger, a fling or a key's page let it rest.
+    void rested(Reader r);
+  }
 
   final int pane;
   final Look look;
+  private Moves moves;
   private int chapters;
   // Its reading line, a fraction of what of it is in sight.
   private float readingLine;
-  // What of the view is out of sight: under the bar above it, under the
-  // system's bar below.
-  private int insetTop, insetBottom;
+  // Whether core's screen says it is linked with the page (the panel's
+  // reader's `reader 1`, while it shows).
+  private boolean linkedShown;
 
-  // A part as core sent it, and, while it is in the window, laid out.
+  // A part as core sent it, and, while it is in the window, measured.
   static final class Part {
     // Its chapter (in a run of chapters a commentary says nothing on, the
     // run's first), its index, and how many parts its chapter has (0: not
@@ -90,20 +111,23 @@ final class Reader extends ViewGroup {
     // Its anchors (its verse lines), in order: each one's verse, and where
     // its words begin and end (UTF-16).
     final int[] verses;
+    // The chapter's index of its first anchor (anchors are in their parts'
+    // order).
+    final int firstAnchor;
     // Its links: A, B, KIND, ARG each (KIND 0 a footnote's mark, 1 a
     // reference, 2 a word of the original's, 3 the ESV's line).
     final long[] links;
     // What core has said since (`forget`): shown until it is sent again.
     boolean stale;
-    // Laid out: its view, the width it was laid out for, its height and
-    // where each anchor begins, and its top in the window's coordinates.
-    TextView view;
-    int laidWidth = -1, height;
+    // Measured: for what (the width, the height a part that holds a place
+    // is given, the look), its height and where each anchor begins, and its
+    // top in the window's coordinates.
+    int laidWidth = -1, laidHolding = -1, laidLook = -1, height;
     int[] anchorY = new int[0];
     double top;
 
     Part(int c, int k, int parts, int runTo, boolean coming, boolean rtl,
-        SpannableStringBuilder text, int[] verses, long[] links) {
+        SpannableStringBuilder text, int[] verses, int firstAnchor, long[] links) {
       this.c = c;
       this.k = k;
       this.parts = parts;
@@ -112,6 +136,7 @@ final class Reader extends ViewGroup {
       this.rtl = rtl;
       this.text = text;
       this.verses = verses;
+      this.firstAnchor = firstAnchor;
       this.links = links;
     }
 
@@ -145,95 +170,71 @@ final class Reader extends ViewGroup {
     int[] verses = new int[0], verseParts = new int[0];
   }
 
-  // Where a jump or a scroll puts the reading line, waiting until its part
-  // is here and laid out.
-  private abstract static class Target {
-    // The part it is in, and how far down it (pixels); null if it isn't
-    // here yet (what is wanted asked for).
-    abstract Part part(Reader r);
+  // A place in the document (SKINS.md, Panes: Places): a chapter, an
+  // anchor of it (-1: above its first) and thousandths through its span.
+  static final class Place {
+    final int c, i, frac;
 
-    abstract double y(Reader r, Part p);
-  }
-
-  // A verse (0: the chapter's top), frac thousandths of the way through it
-  // (`jump`).
-  private static final class VerseTarget extends Target {
-    final int c, verse, frac;
-
-    VerseTarget(int c, int verse, int frac) {
+    Place(int c, int i, int frac) {
       this.c = c;
-      this.verse = verse;
+      this.i = i;
       this.frac = frac;
     }
-
-    @Override
-    Part part(Reader r) {
-      Chapter ch = r.chapterInfo.get(c);
-      if (ch == null) {
-        r.want(c, 0);
-        return null;
-      }
-      if (ch.runFrom >= 0) return r.fresh(ch.runFrom, 0, true);
-      int i = verse > 0 ? anchorFor(ch, verse) : -1;
-      return r.fresh(c, i >= 0 ? ch.verseParts[i] : 0, true);
-    }
-
-    @Override
-    double y(Reader r, Part p) {
-      if (verse <= 0 || p.runTo >= 0) return 0;
-      // (The verse, or the last before it the part has.)
-      int j = -1;
-      for (int i = 0; i < p.verses.length; i += 3) {
-        if (p.verses[i] == verse) {
-          j = i / 3;
-          break;
-        }
-        if (p.verses[i] < verse) j = i / 3;
-      }
-      if (j < 0 || j >= p.anchorY.length) return 0;
-      double a = p.anchorY[j], b = j + 1 < p.anchorY.length ? p.anchorY[j + 1] : p.height;
-      return a + (b - a) * frac / 1000.0;
-    }
-
-    // The first anchor of the verse in the chapter, or the last before it
-    // (-1: none).
-    private static int anchorFor(Chapter ch, int v) {
-      int best = -1;
-      for (int i = 0; i < ch.verses.length; i++) {
-        if (ch.verses[i] == v) return i;
-        if (ch.verses[i] < v) best = i;
-      }
-      return best;
-    }
   }
 
-  // A place y pixels down part k of chapter c (`scroll`, its part gone from
-  // the window).
-  private static final class SpotTarget extends Target {
-    final int c, k;
-    final double y;
+  // Where it is going and stays until a hand moves it: a place core said
+  // (`go`), Listen's verse, or one following by comment chose. Held, it is
+  // put there again as parts come in about it (until they have, the list's
+  // ends would hold it short). Until it has arrived (its part here, laid
+  // out and not still coming) it says nothing of where it is.
+  private static final class Target {
+    final int c, frac;
+    // Its anchor (-1: the chapter's top); or, for Listen's (verse > 0),
+    // the verse's first anchor, known once the chapter's anchors are.
+    final int anchor, verse;
+    // Brought there: a glide if it is near.
+    final boolean glides;
+    // Chosen by following (the skin's own), not by core.
+    final boolean following;
+    boolean arrived;
 
-    SpotTarget(int c, int k, double y) {
+    Target(int c, int anchor, int verse, int frac, boolean glides, boolean following) {
       this.c = c;
-      this.k = k;
-      this.y = y;
-    }
-
-    @Override
-    Part part(Reader r) {
-      return r.fresh(c, k, true);
-    }
-
-    @Override
-    double y(Reader r, Part p) {
-      return y;
+      this.anchor = anchor;
+      this.verse = verse;
+      this.frac = frac;
+      this.glides = glides;
+      this.following = following;
     }
   }
 
-  // The window, in the document's order, and where the view's top is in its
-  // coordinates (pixels).
+  // A spot in the window that stays as parts come and go about it: a part
+  // and how far down it (pixels).
+  private static final class Spot {
+    final long key;
+    final double into;
+
+    Spot(long key, double into) {
+      this.key = key;
+      this.into = into;
+    }
+  }
+
+  // A glide of its own (the list's own is a fling's): from a spot to a
+  // spot, eased, over GLIDE_MS.
+  private static final class Glide {
+    final Spot from, to;
+    final long start;
+
+    Glide(Spot from, Spot to, long start) {
+      this.from = from;
+      this.to = to;
+      this.start = start;
+    }
+  }
+
+  // The window, in the document's order.
   private final ArrayList<Part> window = new ArrayList<>();
-  private double scroll;
   // Parts core sent, by their key (the window's among them), the one used
   // longest ago let go first.
   private final LinkedHashMap<Long, Part> store = new LinkedHashMap<Long, Part>(64, 0.75f, true) {
@@ -245,45 +246,51 @@ final class Reader extends ViewGroup {
   private final HashMap<Integer, Chapter> chapterInfo = new HashMap<>();
   // Parts asked for and not answered yet, and when.
   private final HashMap<Long, Long> asked = new HashMap<>();
-  // A jump or scroll waiting for its part (null: none), and the part it was
-  // last put at (a part still coming: put there again once it has come).
-  private Target pending;
-  private Part pendingShown;
-  // Views of parts let go, to be used again.
-  private final ArrayList<TextView> pool = new ArrayList<>();
+  private Target held;
+  private Glide glide;
+  // The list's views and the one that measures parts as they would be.
+  private final Parts adapter = new Parts();
+  private final TextView measurer;
+  // The look's layout as last measured by (a part measured for an older
+  // one is measured again).
+  private int lookGeneration;
+  private String lookLaid = "", lookColored = "";
+  // Between asking the list to put a part somewhere and its laying itself
+  // out, the window's coordinate at the view's top as asked; after, as it
+  // is.
+  // The part asked for and its top in the view, given to the list as it
+  // lays itself out (its padding, which placing is measured from, is
+  // brought up to date only as it is measured).
+  private boolean placing;
+  private double placedViewTop;
+  // Inside its own layout (what the list says of where it is waits until
+  // the layout is done).
+  private boolean laying;
+  private int placeIndex = -1, placeChildTop;
 
   // ---- how it is moving ----
   private enum Motion {
-    STILL(MOVED_BY_APP),
-    DRAGGED_BY_FINGER(DRAGGED),
-    FLUNG(GLIDING_AFTER_FINGER),
-    // A glide core asked for (`scroll ... 1`).
-    GLIDING(MOVED_BY_APP),
-    // A page down or up, a key's.
-    PAGED(DRAGGED);
-
-    final int how;
-
-    Motion(int how) {
-      this.how = how;
-    }
+    STILL,
+    // A finger on it, dragging; flung (or scrolled by TalkBack); a key's
+    // page: it leads.
+    DRAGGED,
+    FLUNG,
+    PAGED,
+    // A glide to where it is going (core's `go`, or following by comment).
+    GLIDING,
+    // Moved frame by frame following the other pane.
+    FOLLOWING
   }
 
   private Motion motion = Motion.STILL;
-  private final OverScroller scroller;
-  private final int touchSlop, minFling, maxFling;
-  private VelocityTracker velocity;
-  private float downY, lastY;
+  private int scrollState = OnScrollListener.SCROLL_STATE_IDLE;
   // A finger on it now; whether `moving` was said for it (a rest is said
-  // when it lets go); whether its touch stopped a glide (not a tap).
-  private boolean touching, saidMoving, caughtGlide;
-  private double glideFrom, glideTo;
-  private long glideStart;
+  // when it stops); whether its touch caught it moving (not a tap).
+  private boolean touching, saidMoving, caught;
   private final DecelerateInterpolator ease = new DecelerateInterpolator(1.6f);
   private final GestureDetector taps;
-  // The reading line last told (`at`), as its part and hundredths down it.
-  private int atC = -1, atK, atY;
-  private boolean framePosted;
+  // The anchor at the reading line last told (`at`).
+  private int atC = -1, atI;
 
   // ---- what is shown on its verses (the page's) ----
   // The verses selected (of chapter selC, -1 none), core's; the verse
@@ -297,18 +304,40 @@ final class Reader extends ViewGroup {
     this.look = look;
     this.pane = pane;
     readingLine = pane == PAGE ? 0.333f : 0;
-    ViewConfiguration vc = ViewConfiguration.get(context);
-    touchSlop = vc.getScaledTouchSlop();
-    minFling = vc.getScaledMinimumFlingVelocity();
-    maxFling = vc.getScaledMaximumFlingVelocity();
-    scroller = new OverScroller(context);
+    // (Selectable, as the list's are: a selectable TextView lays its words
+    // out as editable ones are, to the same pixel.)
+    measurer = new PartView(context);
+    setAdapter(adapter);
+    setDivider(null);
+    setDividerHeight(0);
+    setSelector(new ColorDrawable(0));
+    setCacheColorHint(0);
+    setItemsCanFocus(true);
+    setClipToPadding(false);
+    setVerticalScrollBarEnabled(false);
+    setOverScrollMode(OVER_SCROLL_NEVER);
+    setOnScrollListener(new OnScrollListener() {
+      @Override
+      public void onScrollStateChanged(AbsListView view, int state) {
+        scrollStateChanged(state);
+      }
+
+      @Override
+      public void onScroll(AbsListView view, int first, int count, int total) {
+        moved();
+      }
+    });
     taps = new GestureDetector(context, new GestureDetector.SimpleOnGestureListener() {
       @Override
       public boolean onSingleTapUp(MotionEvent e) {
-        if (!caughtGlide) tapped(e.getX(), e.getY());
-        return true;
+        if (!caught) tapped(e.getX(), e.getY());
+        return false;
       }
     });
+  }
+
+  void setMoves(Moves m) {
+    moves = m;
   }
 
   // ---- core's lines ----
@@ -320,28 +349,22 @@ final class Reader extends ViewGroup {
 
   // `line P THOUSANDTHS`.
   void setReadingLine(int thousandths) {
-    double at = lineAt();
+    double at = lineY();
     readingLine = thousandths / 1000f;
-    scroll = at - lineOffset();
-    position();
+    placeLine(at);
   }
 
   // What of it is out of sight above and below (the page's bar, the
   // system's): what is at the reading line kept there.
   void setInsets(int top, int bottom) {
-    if (top == insetTop && bottom == insetBottom) return;
-    double at = lineAt();
-    insetTop = top;
-    insetBottom = bottom;
-    scroll = at - lineOffset();
-    clamp();
-    position();
-    sayView();
-    frameNeeded();
+    if (top == getPaddingTop() && bottom == getPaddingBottom()) return;
+    Spot keep = spotAtLine();
+    setPadding(0, top, 0, bottom);
+    remeasureAndKeep(keep, null);
   }
 
   // `part P C K N` and its lines (to `end`): kept, in the window in place of
-  // the one shown, and a jump waiting for it made.
+  // the one shown, and where it is going made.
   void part(int c, int k, int parts, String words, List<Wire> lines) {
     Part p = read(c, k, parts, words, lines);
     long key = key(p.c, p.k);
@@ -349,47 +372,41 @@ final class Reader extends ViewGroup {
     if (p.runTo >= 0) for (int x = p.c; x <= p.runTo; x++) asked.remove(key(x, 0));
     store.put(key, p);
     int at = indexOf(p.c, p.k);
-    if (at >= 0) replace(at, p);
-    resolvePending();
+    if (at >= 0) {
+      // (Measured now, or as the pane is shown.)
+      Spot keep = spotAtLine();
+      measure(p);
+      window.set(at, p);
+      keepInOrder(keep);
+      commit(keep);
+    }
+    resolveHeld();
     fill();
-    frameNeeded();
   }
 
-  // `jump P C V FRAC`.
-  void jump(int c, int v, int frac) {
-    if (c < 0 || c >= chapters) return;
-    stopMotion();
-    pending = new VerseTarget(c, v, frac);
-    pendingShown = null;
-    resolvePending();
+  // `go P C I FRAC MODE`: the reading line to anchor i of chapter c (-1:
+  // its top), frac thousandths through its span; MODE 1 brought there
+  // (a glide if it is near). Not while a finger holds it: core's line
+  // from before the finger came.
+  void go(int c, int i, int frac, int mode) {
+    if (touching || c < 0 || c >= chapters) return;
+    goTo(new Target(c, i, 0, Math.max(0, Math.min(999, frac)), mode == 1, false));
   }
 
-  // `scroll P C K Y GLIDE`: the reading line to y hundredths down part k of
-  // chapter c, at once or gliding. (Not while a finger holds it: core's
-  // lines from before the finger came.)
-  void scrollTo(int c, int k, int y, boolean glide) {
-    if (touching) return;
-    Part p = inWindow(c, k);
-    if (p == null) {
-      stopMotion();
-      pending = new SpotTarget(c, k, y / 100.0);
-      pendingShown = null;
-      resolvePending();
+  // `halt P`: its glide (or fling) stopped where it is, as the other pane
+  // is taken by a finger. (Not a glide following chose: that came after
+  // the finger, and core's halt from before it.)
+  void halt() {
+    if (held != null && held.following) return;
+    if (motion == Motion.FLUNG) {
+      // (Its rest is said as the list stops.)
+      stopMoving();
       return;
     }
-    double to = p.top + y / 100.0 - lineOffset();
-    stopMotion();
-    if (glide && ValueAnimator.areAnimatorsEnabled()) glide(to, Motion.GLIDING);
-    else {
-      moveTo(to);
-      restSoon();
-    }
-  }
-
-  // `halt P`: its glide stopped where it is.
-  void halt() {
-    if (motion == Motion.STILL || motion == Motion.DRAGGED_BY_FINGER) return;
-    stopMotion();
+    if (glide == null) return;
+    stopMoving();
+    held = null;
+    motion = Motion.STILL;
     sayRest();
   }
 
@@ -425,17 +442,18 @@ final class Reader extends ViewGroup {
   // finger is on it).
   void follow(int c, int v) {
     if (touching || c < 0 || c >= chapters) return;
-    for (Part p : window) {
-      if (p.c != c || p.view == null) continue;
+    for (int n = 0; n < getChildCount(); n++) {
+      View child = getChildAt(n);
+      Part p = (Part) child.getTag();
+      if (p == null || p.c != c || !(child instanceof TextView)) continue;
       int[] r = p.range(v);
-      if (r == null) continue;
-      Layout l = p.view.getLayout();
-      if (l == null) break;
-      double y = p.top + p.view.getTotalPaddingTop() + l.getLineTop(l.getLineForOffset(r[0])) - scroll;
-      if (y > insetTop && y < getHeight() - insetBottom - dp(80)) return;
-      break;
+      Layout l = ((TextView) child).getLayout();
+      if (r == null || l == null) continue;
+      int y = child.getTop() + ((TextView) child).getTotalPaddingTop()
+          + l.getLineTop(l.getLineForOffset(r[0]));
+      if (y > getPaddingTop() && y < getHeight() - getPaddingBottom() - dp(80)) return;
     }
-    jump(c, v, 0);
+    goTo(new Target(c, -1, v, 0, false, false));
   }
 
   // A page down (d 1) or up (-1), less three lines: a key's, leading.
@@ -443,31 +461,48 @@ final class Reader extends ViewGroup {
     if (window.isEmpty()) return;
     double line = textPx() * look.spacing;
     double seen = Math.max(line, visibleHeight() - 3 * line);
-    stopMotion();
+    stopMoving();
+    held = null;
     sayMoving();
-    if (ValueAnimator.areAnimatorsEnabled()) glide(scroll + d * seen, Motion.PAGED);
+    motion = Motion.PAGED;
+    double from = lineY();
+    double to = Math.max(window.get(0).top,
+        Math.min(window.get(window.size() - 1).bottom() - 1, from + d * seen));
+    if (animatorsOn()) startGlide(spotAt(from), spotAt(to));
     else {
-      moveTo(scroll + d * seen);
-      sendAt();
+      placeLine(to);
+      motion = Motion.STILL;
       sayRest();
+      if (moves != null) moves.rested(this);
     }
   }
 
-  // `view P HEIGHT EM`, said as they change (and at `start`).
-  void sayView() {
-    if (getHeight() <= 0 || !live) return;
-    String view = "view " + pane + " " + hundredths(visibleHeight()) + " " + hundredths(textPx());
-    if (view.equals(saidView)) return;
-    saidView = view;
-    say(view);
-  }
-
-  private String saidView = "";
-
-  // The look changed: its em told (core lays every part out again).
+  // The look as it may have changed (its screen shown, the look line):
+  // what it is laid out by measured again if that changed (core sends its
+  // parts again too), its colors shown if they did.
   void restyle() {
     setBackgroundColor(look.bg);
-    sayView();
+    String laid = look.textSp() + " " + look.spacing + " " + look.font + " " + look.margin + " "
+        + look.column;
+    String colored = look.ink + " " + look.accent;
+    if (!laid.equals(lookLaid)) {
+      lookLaid = laid;
+      lookColored = colored;
+      lookGeneration++;
+      remeasureAndKeep(spotAtLine(), placeAtLine());
+    } else if (!colored.equals(lookColored)) {
+      lookColored = colored;
+      adapter.notifyDataSetChanged();
+    }
+  }
+
+  // Whether core's screen says it is linked (pane 1's, while it shows).
+  void setLinkedShown(boolean linked) {
+    linkedShown = linked;
+  }
+
+  boolean linkedShown() {
+    return linkedShown;
   }
 
   // ---- a part read ----
@@ -538,22 +573,25 @@ final class Reader extends ViewGroup {
     }
     long[] lk = new long[links.size() * 4];
     for (int i = 0; i < links.size(); i++) System.arraycopy(links.get(i), 0, lk, i * 4, 4);
-    Part p = new Part(c, k, parts, runTo, coming, rtl, s, java.util.Arrays.copyOf(vs, nv * 3), lk);
+    // (Its chapter's parts and anchors; a run's every chapter.)
+    Chapter ch = new Chapter();
+    ch.parts = parts;
+    ch.verses = new int[anchorVerses.size()];
+    ch.verseParts = new int[anchorParts.size()];
+    int first = 0;
+    for (int i = 0; i < ch.verses.length; i++) {
+      ch.verses[i] = anchorVerses.get(i);
+      ch.verseParts[i] = anchorParts.get(i);
+      if (ch.verseParts[i] < k) first = i + 1;
+    }
+    Part p = new Part(c, k, parts, runTo, coming, rtl, s, java.util.Arrays.copyOf(vs, nv * 3),
+        runFrom >= 0 ? 0 : first, lk);
     // (What is marked: a highlight's color behind its verse.)
     for (Wire w : lines) {
       if (!w.word(0).equals("mark") || look.wash(w.word(2)) == 0) continue;
       int[] r = p.range(w.num(1));
       if (r != null) s.setSpan(new BackgroundColorSpan(look.wash(w.word(2))), r[0], r[1],
           Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-    }
-    // (Its chapter's parts and anchors; a run's every chapter.)
-    Chapter ch = new Chapter();
-    ch.parts = parts;
-    ch.verses = new int[anchorVerses.size()];
-    ch.verseParts = new int[anchorParts.size()];
-    for (int i = 0; i < ch.verses.length; i++) {
-      ch.verses[i] = anchorVerses.get(i);
-      ch.verseParts[i] = anchorParts.get(i);
     }
     chapterInfo.put(c, ch);
     if (runFrom >= 0) {
@@ -579,6 +617,10 @@ final class Reader extends ViewGroup {
       if (p.c == c && p.k == k) return i;
     }
     return -1;
+  }
+
+  private int indexOf(long key) {
+    return indexOf((int) (key >> 32), (int) key);
   }
 
   private Part inWindow(int c, int k) {
@@ -629,30 +671,33 @@ final class Reader extends ViewGroup {
     return key(before, Math.max(ch.parts, 1) - 1);
   }
 
-  // The window kept around what is in sight: parts brought in (from those
-  // kept, or asked for) two and a half screens ahead and a screen and a
-  // half behind, and let go three and four screens away; parts forgotten
-  // asked for again. (A screen, for a pane shorter than the window, the
-  // window's height: a commentary's next comments are laid out, and so
-  // measured, before the page comes to their verses.)
+  // The window kept about the reading line: parts brought in (from those
+  // kept, or asked for) ahead and behind, and let go far away; parts
+  // forgotten asked for again. (A screen, for a pane shorter than the
+  // window, the window's height: a commentary's next comments are
+  // measured before the page comes to their verses.)
   private void fill() {
-    if (window.isEmpty() || getWidth() <= 0) return;
-    int h = Math.max(getHeight(), getRootView().getHeight());
+    if (window.isEmpty() || contentWidth() <= 0) return;
+    double h = Math.max(visibleHeight(), getRootView().getHeight());
     for (Part p : window) if (p.stale) want(p.c, p.k);
+    Spot keep = spotAtLine();
+    double line = lineY();
+    boolean changed = false;
     for (int guard = 0; guard < 24; guard++) {
       Part last = window.get(window.size() - 1);
-      if (last.bottom() > scroll + h * 2.5) break;
+      if (last.bottom() > line + h * AHEAD_SCREENS) break;
       long next = nextKey(last);
       if (next == NONE) break;
       Part p = fresh((int) (next >> 32), (int) next, true);
       if (p == null) break;
-      layOut(p);
+      measure(p);
       p.top = last.bottom();
-      attach(p, window.size());
+      window.add(p);
+      changed = true;
     }
     for (int guard = 0; guard < 24; guard++) {
       Part first = window.get(0);
-      if (first.top < scroll - h * 1.5) break;
+      if (first.top < line - h * BEHIND_SCREENS) break;
       long before = prevKey(first);
       if (before == NONE) break;
       if (before == CHAPTER_BEFORE_UNKNOWN) {
@@ -661,119 +706,86 @@ final class Reader extends ViewGroup {
       }
       Part p = fresh((int) (before >> 32), (int) before, true);
       if (p == null) break;
-      layOut(p);
+      measure(p);
       p.top = first.top - p.height;
-      attach(p, 0);
+      window.add(0, p);
+      changed = true;
     }
-    Part reading = window.get(lineIndex());
-    while (window.size() > 1 && window.get(0) != reading && window.get(0).bottom() < scroll - h * 3) detach(0);
+    Part reading = keep == null ? null : window.get(Math.max(0, indexOf(keep.key)));
+    Part going = heldPart();
+    while (window.size() > 1 && window.get(0) != reading && window.get(0) != going
+        && window.get(0).bottom() < line - h * LET_GO_BEHIND) {
+      window.remove(0);
+      changed = true;
+    }
     while (window.size() > 1 && window.get(window.size() - 1) != reading
-        && window.get(window.size() - 1).top > scroll + h * 4) detach(window.size() - 1);
-  }
-
-  private void attach(Part p, int at) {
-    window.add(at, p);
-    addViewInLayout(p.view, -1, p.view.getLayoutParams(), true);
-    p.view.setTranslationY((float) Math.round(p.top - scroll));
-    sayMeasured(p);
-  }
-
-  private void detach(int at) {
-    Part p = window.remove(at);
-    if (p.view == null) return;
-    removeViewInLayout(p.view);
-    pool.add(p.view);
-    p.view = null;
-    p.laidWidth = -1;
-    invalidate();
-  }
-
-  private void clearWindow() {
-    while (!window.isEmpty()) detach(window.size() - 1);
-  }
-
-  // Part at of the window sent again as p: in its place, those above it
-  // moved by the change in its height if it is above what is in sight, else
-  // those below it.
-  private void replace(int at, Part p) {
-    Part old = window.get(at);
-    layOut(p);
-    double change = p.height - old.height;
-    boolean above = old.bottom() <= scroll + insetTop;
-    p.top = above ? old.top - change : old.top;
-    if (above) for (int i = 0; i < at; i++) window.get(i).top -= change;
-    else for (int i = at + 1; i < window.size(); i++) window.get(i).top += change;
-    // (Its view given to the new one.)
-    TextView v = old.view;
-    old.view = null;
-    old.laidWidth = -1;
-    window.set(at, p);
-    if (v != null) {
-      removeViewInLayout(v);
-      pool.add(v);
+        && window.get(window.size() - 1) != going
+        && window.get(window.size() - 1).top > line + h * LET_GO_AHEAD) {
+      window.remove(window.size() - 1);
+      changed = true;
     }
-    addViewInLayout(p.view, -1, p.view.getLayoutParams(), true);
-    sayMeasured(p);
-    keepInOrder();
-    position();
+    if (changed) commit(keep);
+  }
+
+  private final Runnable fillLater = this::fill;
+
+  private void fillSoon() {
+    removeCallbacks(fillLater);
+    post(fillLater);
   }
 
   // The window kept one part after another (a part sent again may say its
   // chapter has more parts or fewer): those out of order let go, from the
   // part at the reading line out.
-  private void keepInOrder() {
-    int r = lineIndex();
+  private void keepInOrder(Spot keep) {
+    int r = keep == null ? 0 : Math.max(0, indexOf(keep.key));
     for (int i = r; i + 1 < window.size(); i++) {
       Part a = window.get(i), b = window.get(i + 1);
       if (nextKey(a) != key(b.c, b.k)) {
-        while (window.size() > i + 1) detach(window.size() - 1);
+        while (window.size() > i + 1) window.remove(window.size() - 1);
         break;
       }
     }
     for (int i = Math.min(r, window.size() - 1); i > 0; i--) {
       Part a = window.get(i - 1), b = window.get(i);
       if (nextKey(a) != key(b.c, b.k)) {
-        for (int j = 0; j < i; j++) detach(0);
+        for (int j = 0; j < i; j++) window.remove(0);
         break;
       }
     }
   }
 
-  // A jump or scroll waiting made, once its part is here and the view has
-  // its size: the reading line there (the window begun again at it if it
-  // isn't in it), told, and at rest. A part still coming is shown, and the
-  // jump made again once it has come.
-  private void resolvePending() {
-    if (pending == null || getWidth() <= 0) return;
-    Part p = pending.part(this);
-    if (p == null || p == pendingShown) return;
-    layOut(p);
-    if (window.indexOf(p) < 0) {
-      clearWindow();
-      p.top = 0;
-      attach(p, 0);
+  // The window changed (parts in, out, or sent again): each part's top
+  // from the first's, the list told, and the reading line where it was
+  // (at the spot keep), or where it is going.
+  private void commit(Spot keep) {
+    double y = 0;
+    for (Part p : window) {
+      p.top = y;
+      y += p.height;
     }
-    moveTo(p.top + pending.y(this, p) - lineOffset());
-    fill();
-    if (p.coming) {
-      pendingShown = p;
-      return;
-    }
-    pending = null;
-    pendingShown = null;
-    sendAt(true);
-    sayRest();
+    adapter.notifyDataSetChanged();
+    OptionalDouble at = held != null && glide == null ? heldY() : OptionalDouble.empty();
+    if (!at.isPresent()) at = spotY(keep);
+    if (at.isPresent()) placeLine(at.getAsDouble());
+    else if (!window.isEmpty()) placeLine(lineOffset());
   }
 
-  // The index of the part at the reading line (the nearest, if it is
-  // outside the window).
-  private int lineIndex() {
-    double y = lineAt();
-    for (int i = 0; i < window.size(); i++) if (window.get(i).bottom() > y) return i;
-    return Math.max(0, window.size() - 1);
+  // Every part of the window measured again (a width, a height or the look
+  // changed): the place at the reading line kept (as far through its
+  // anchor's span, if place is given; else at the same spot).
+  private void remeasureAndKeep(Spot keep, Place place) {
+    if (contentWidth() <= 0) return;
+    for (Part p : window) measure(p);
+    commit(keep);
+    if (place != null && held == null) {
+      OptionalDouble y = placeY(place.c, place.i, place.frac);
+      if (y.isPresent()) placeLine(y.getAsDouble());
+    }
+    fillSoon();
   }
 
-  // ---- laying a part out ----
+  // ---- measuring a part ----
   private float textPx() {
     return TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, look.textSp(),
         getResources().getDisplayMetrics());
@@ -784,18 +796,20 @@ final class Reader extends ViewGroup {
         getResources().getDisplayMetrics());
   }
 
-  // Part p laid out for the view's width (if it isn't): its view, height
-  // and anchors' places. A chapter's first part has room above it and its
-  // last below; one that only holds a place (coming, a run, the ESV's
-  // waiting line) is as tall as what is in sight.
-  private void layOut(Part p) {
-    int w = getWidth();
-    if (w <= 0 || (p.view != null && p.laidWidth == w)) return;
-    TextView tv = p.view;
-    if (tv == null) {
-      tv = pool.isEmpty() ? new TextView(getContext()) : pool.remove(pool.size() - 1);
-      p.view = tv;
-    }
+  private int contentWidth() {
+    return getWidth() - getPaddingLeft() - getPaddingRight();
+  }
+
+  // Whether part p only holds a place (coming, a run, the ESV's waiting
+  // line): as tall as what of the pane is in sight.
+  private boolean holding(Part p) {
+    return p.coming || p.runTo >= 0 || (pane == PAGE && p.verses.length == 0);
+  }
+
+  // A view set up to show part p: the list's, or the one that measures. A
+  // chapter's first part has room above it and its last below.
+  private void dress(TextView tv, Part p) {
+    int w = contentWidth();
     int m = dp(look.margin);
     float em = textPx();
     // (The text's column never wider than the look's: wider margins on a
@@ -806,224 +820,546 @@ final class Reader extends ViewGroup {
     tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, look.textSp());
     tv.setLineSpacing(0, look.spacing);
     tv.setTextColor(look.ink);
+    tv.setHighlightColor(Look.alpha(look.accent, 0.3f));
     tv.setTypeface(look.face());
-    tv.setTextIsSelectable(false);
     tv.setTextDirection(p.rtl ? View.TEXT_DIRECTION_RTL : View.TEXT_DIRECTION_FIRST_STRONG);
-    boolean holding = p.coming || p.runTo >= 0 || (pane == PAGE && p.verses.length == 0);
-    tv.setMinHeight(holding ? visibleHeight() : 0);
+    tv.setMinHeight(holding(p) ? visibleHeight() : 0);
     markSelection(p);
     markHeard(p);
     tv.setText(p.text);
-    tv.measure(MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY),
+  }
+
+  // Part p measured for the list's width (if it isn't): its height and
+  // where each anchor begins, exactly as the list will lay it out.
+  private void measure(Part p) {
+    int w = contentWidth();
+    int holdingHeight = holding(p) ? visibleHeight() : 0;
+    if (w <= 0 || (p.laidWidth == w && p.laidHolding == holdingHeight && p.laidLook == lookGeneration))
+      return;
+    dress(measurer, p);
+    measurer.measure(MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY),
         MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED));
-    int h = tv.getMeasuredHeight();
-    // (Its size set without asking for a layout: it is laid out here.)
-    ViewGroup.LayoutParams lp = tv.getLayoutParams();
-    if (lp == null) tv.setLayoutParams(new LayoutParams(w, h));
-    else {
-      lp.width = w;
-      lp.height = h;
-    }
-    tv.layout(0, 0, w, h);
-    p.height = h;
+    p.height = measurer.getMeasuredHeight();
     p.laidWidth = w;
+    p.laidHolding = holdingHeight;
+    p.laidLook = lookGeneration;
+    p.anchorY = anchorsOf(measurer, p);
+  }
+
+  private static int[] anchorsOf(TextView tv, Part p) {
     Layout l = tv.getLayout();
-    p.anchorY = new int[p.verses.length / 3];
-    for (int i = 0; i < p.anchorY.length && l != null; i++)
-      p.anchorY[i] = tv.getTotalPaddingTop() + l.getLineTop(l.getLineForOffset(
+    int[] ys = new int[p.verses.length / 3];
+    for (int i = 0; i < ys.length && l != null; i++)
+      ys[i] = tv.getTotalPaddingTop() + l.getLineTop(l.getLineForOffset(
           Math.min(p.verses[i * 3 + 1], p.text.length())));
+    return ys;
   }
 
-  // `measured P C K H Y...`.
-  private void sayMeasured(Part p) {
-    StringBuilder b = new StringBuilder("measured ").append(pane).append(' ').append(p.c).append(' ')
-        .append(p.k).append(' ').append(hundredths(p.height));
-    for (int y : p.anchorY) b.append(' ').append(hundredths(y));
-    say(b.toString());
+  // The list's views: a part each.
+  private final class Parts extends BaseAdapter {
+    @Override
+    public int getCount() {
+      return window.size();
+    }
+
+    @Override
+    public Object getItem(int i) {
+      return window.get(i);
+    }
+
+    @Override
+    public long getItemId(int i) {
+      Part p = window.get(i);
+      return key(p.c, p.k);
+    }
+
+    @Override
+    public boolean hasStableIds() {
+      return true;
+    }
+
+    @Override
+    public View getView(int i, View convert, ViewGroup parent) {
+      TextView tv = convert instanceof PartView ? (TextView) convert : new PartView(getContext());
+      Part p = window.get(i);
+      dress(tv, p);
+      tv.setTag(p);
+      return tv;
+    }
   }
 
-  // Part p's words shown again (what is washed on them changed): its
-  // height is the same.
-  private void redraw(Part p) {
-    if (p.view == null) return;
-    markSelection(p);
-    markHeard(p);
-    p.view.setText(p.text);
-    int w = p.view.getWidth();
-    p.view.measure(MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY),
-        MeasureSpec.makeMeasureSpec(p.height, MeasureSpec.EXACTLY));
-    p.view.layout(0, 0, w, p.height);
+  // A part's view: its words selectable (the platform's selection, its
+  // menu), read by TalkBack.
+  private static final class PartView extends TextView {
+    PartView(Context c) {
+      super(c);
+      setLayoutParams(new AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+          ViewGroup.LayoutParams.WRAP_CONTENT));
+      setTextIsSelectable(true);
+    }
   }
 
-  // Every part laid out again for a new width: the part at the reading line
-  // kept there, as far through the span of its anchor there as it was (from
-  // where that anchor begins to where the next does), and the others around
-  // it.
-  private void relayAll(double lineBefore) {
-    if (window.isEmpty()) return;
-    int r = window.size() - 1;
-    for (int i = 0; i < window.size(); i++) if (window.get(i).bottom() > lineBefore) {
-      r = i;
+  // (A selection's handle, or a view taking the focus, asks the list to
+  // bring its words into sight: what is read is the reader's to move, not
+  // theirs. TalkBack's asking to show a part is let through.)
+  @Override
+  public boolean requestChildRectangleOnScreen(View child, Rect r, boolean immediate) {
+    android.view.accessibility.AccessibilityManager a = (android.view.accessibility.AccessibilityManager)
+        getContext().getSystemService(Context.ACCESSIBILITY_SERVICE);
+    if (a != null && a.isTouchExplorationEnabled())
+      return super.requestChildRectangleOnScreen(child, r, immediate);
+    return false;
+  }
+
+  // The list laid out: where it was asked to be put, there; else (the
+  // list's own ideas in a layout: a selection brought back as keys come,
+  // focus given to a part) what was at the reading line kept there.
+  @Override
+  protected void layoutChildren() {
+    Spot keep = placing || getChildCount() == 0 ? null : spotAtLine();
+    laying = true;
+    try {
+      applyPlace();
+      super.layoutChildren();
+      placing = false;
+      if (getChildCount() > 0) placedViewTop = viewTop();
+      if (keep != null) {
+        OptionalDouble y = spotY(keep);
+        if (y.isPresent() && Math.abs(y.getAsDouble() - lineY()) >= 1) {
+          placeLine(y.getAsDouble());
+          applyPlace();
+          super.layoutChildren();
+          placing = false;
+          if (getChildCount() > 0) placedViewTop = viewTop();
+        }
+      }
+    } finally {
+      laying = false;
+    }
+    moved();
+    // (Each part's view as tall as it was measured: if one isn't, its
+    // measure is the one laid out, and what is read kept where it is.)
+    for (int n = 0; n < getChildCount(); n++) {
+      View child = getChildAt(n);
+      Part p = (Part) child.getTag();
+      if (p == null || child.getHeight() == p.height || !(child instanceof TextView)) continue;
+      Log.w("SmoothBible", "pane " + pane + ": part " + p.c + ":" + p.k + " measured " + p.height
+          + ", laid out " + child.getHeight());
+      Spot at = spotAtLine();
+      p.height = child.getHeight();
+      p.anchorY = anchorsOf((TextView) child, p);
+      post(() -> commit(at));
       break;
     }
-    Part at = window.get(r);
-    double y = lineBefore - at.top;
-    int span = spanAt(at, y);
-    double through = (y - spanTop(at, span)) / Math.max(1, spanBottom(at, span) - spanTop(at, span));
-    for (Part p : window) {
-      layOut(p);
-      sayMeasured(p);
-    }
-    for (int i = r + 1; i < window.size(); i++) window.get(i).top = window.get(i - 1).bottom();
-    for (int i = r - 1; i >= 0; i--) window.get(i).top = window.get(i + 1).top - window.get(i).height;
-    double top = spanTop(at, span);
-    scroll = at.top + top + through * (spanBottom(at, span) - top) - lineOffset();
-    clamp();
-    position();
   }
 
-  // The span of part p y down it: the index of the anchor it is after (-1:
-  // before the first), and where that span begins and ends.
-  private static int spanAt(Part p, double y) {
-    int j = -1;
-    while (j + 1 < p.anchorY.length && p.anchorY[j + 1] <= y) j++;
-    return j;
+  // The place asked for given to the list, now that its padding is
+  // measured.
+  private void applyPlace() {
+    if (placeIndex >= 0 && placeIndex < window.size())
+      setSelectionFromTop(placeIndex, placeChildTop - getPaddingTop());
+    placeIndex = -1;
   }
 
-  private static double spanTop(Part p, int j) {
-    return j < 0 ? 0 : p.anchorY[j];
+  // (Keys are core's, the activity's to send it (`key`): the list's own,
+  // moving a selection, would move what is read.)
+  @Override
+  public boolean onKeyDown(int keyCode, android.view.KeyEvent e) {
+    return false;
   }
 
-  private static double spanBottom(Part p, int j) {
-    return j + 1 < p.anchorY.length ? p.anchorY[j + 1] : p.height;
+  @Override
+  public boolean onKeyUp(int keyCode, android.view.KeyEvent e) {
+    return false;
+  }
+
+  @Override
+  public boolean onKeyMultiple(int keyCode, int count, android.view.KeyEvent e) {
+    return false;
   }
 
   // ---- where it is ----
   private int visibleHeight() {
-    return Math.max(1, getHeight() - insetTop - insetBottom);
+    return Math.max(1, getHeight() - getPaddingTop() - getPaddingBottom());
   }
 
-  // The reading line, down from the view's top; and in the window's
-  // coordinates.
+  // The reading line, down from the view's top.
   private double lineOffset() {
-    return insetTop + readingLine * visibleHeight();
+    return getPaddingTop() + readingLine * visibleHeight();
   }
 
-  private double lineAt() {
-    return scroll + lineOffset();
+  // The window's coordinate at the view's top.
+  private double viewTop() {
+    if (placing || getChildCount() == 0) return placedViewTop;
+    int first = getFirstVisiblePosition();
+    if (first < 0 || first >= window.size()) return placedViewTop;
+    return window.get(first).top - getChildAt(0).getTop();
   }
 
-  static int hundredths(double px) {
-    return (int) Math.round(px * 100);
+  // The reading line in the window's coordinates.
+  double lineY() {
+    return viewTop() + lineOffset();
   }
 
-  // Its parts placed for the scroll (moved, not laid out again).
-  private void position() {
-    for (Part p : window) if (p.view != null) p.view.setTranslationY((float) Math.round(p.top - scroll));
+  // The text's em (pixels).
+  double em() {
+    return textPx();
   }
 
-  // The scroll kept within the document's ends where the window reaches
-  // them (whether it had to be).
-  private boolean clamp() {
-    if (window.isEmpty()) return false;
-    Part first = window.get(0), last = window.get(window.size() - 1);
-    boolean atStart = first.c == 0 && first.k == 0;
-    boolean atEnd = nextKey(last) == NONE;
-    double least = first.top - insetTop;
-    double most = last.bottom() - (getHeight() - insetBottom);
-    if (atStart && most < least) most = least;
-    if (atEnd && scroll > most) {
-      scroll = most;
-      return true;
+  // The index of the part at y (the nearest, if it is outside the window;
+  // -1: no window).
+  private int indexAt(double y) {
+    for (int i = 0; i < window.size(); i++) if (window.get(i).bottom() > y) return i;
+    return window.size() - 1;
+  }
+
+  private Spot spotAt(double y) {
+    int i = indexAt(y);
+    if (i < 0) return null;
+    Part p = window.get(i);
+    return new Spot(key(p.c, p.k), y - p.top);
+  }
+
+  private Spot spotAtLine() {
+    return spotAt(lineY());
+  }
+
+  private OptionalDouble spotY(Spot s) {
+    if (s == null) return OptionalDouble.empty();
+    int i = indexOf(s.key);
+    if (i < 0) return OptionalDouble.empty();
+    Part p = window.get(i);
+    return OptionalDouble.of(p.top + Math.max(0, Math.min(p.height, s.into)));
+  }
+
+  // The reading line put at y (the window's coordinates), the list asked
+  // to lay itself out there.
+  private void placeLine(double y) {
+    int i = indexAt(y);
+    if (i < 0 || contentWidth() <= 0) return;
+    Part p = window.get(i);
+    int childTop = (int) Math.round(p.top - (y - lineOffset()));
+    placing = true;
+    placedViewTop = p.top - childTop;
+    placeIndex = i;
+    placeChildTop = childTop;
+    requestLayout();
+  }
+
+  // The reading line moved to y by a little, as the list moves itself (a
+  // frame of a glide, or of following).
+  private void nudgeLine(double y) {
+    if (placing || getChildCount() == 0) {
+      placeLine(y);
+      return;
     }
-    if (atStart && scroll < least) {
-      scroll = least;
-      return true;
+    double by = y - lineY();
+    if (Math.abs(by) > visibleHeight() / 2.0) placeLine(y);
+    else {
+      int px = (int) Math.round(by);
+      if (px != 0) scrollListBy(px);
     }
+  }
+
+  // ---- places ----
+  // Where anchor i of chapter c begins (-1: the chapter's top; its count:
+  // its end), if its part is here and measured.
+  private OptionalDouble anchorStart(int c, int i) {
+    Chapter ch = chapterInfo.get(c);
+    if (ch == null) return OptionalDouble.empty();
+    if (i < 0) return chapterTop(c);
+    if (i >= ch.verses.length) return chapterEnd(c);
+    Part p = inWindow(c, ch.verseParts[i]);
+    if (p == null || p.stale || p.laidWidth < 0) return OptionalDouble.empty();
+    int j = i - p.firstAnchor;
+    if (j < 0 || j >= p.anchorY.length) return OptionalDouble.empty();
+    return OptionalDouble.of(p.top + p.anchorY[j]);
+  }
+
+  private OptionalDouble chapterTop(int c) {
+    Chapter ch = chapterInfo.get(c);
+    if (ch == null) return OptionalDouble.empty();
+    Part p = inWindow(ch.runFrom >= 0 ? ch.runFrom : c, 0);
+    return p == null ? OptionalDouble.empty() : OptionalDouble.of(p.top);
+  }
+
+  private OptionalDouble chapterEnd(int c) {
+    Chapter ch = chapterInfo.get(c);
+    if (ch == null) return OptionalDouble.empty();
+    Part p = ch.runFrom >= 0 ? inWindow(ch.runFrom, 0) : inWindow(c, Math.max(ch.parts, 1) - 1);
+    return p == null ? OptionalDouble.empty() : OptionalDouble.of(p.bottom());
+  }
+
+  // Where a place is in the window (empty: its part isn't here). Its span's
+  // end not here (the next part not come yet), its part's end stands for
+  // it.
+  private OptionalDouble placeY(int c, int i, int frac) {
+    OptionalDouble a = anchorStart(c, i);
+    if (!a.isPresent()) return a;
+    OptionalDouble b = anchorStart(c, i + 1);
+    double end = b.isPresent() ? b.getAsDouble() : window.get(indexAt(a.getAsDouble())).bottom();
+    return OptionalDouble.of(a.getAsDouble() + (end - a.getAsDouble()) * frac / 1000.0);
+  }
+
+  // The place at y (null: not here, or forgotten).
+  private Place placeAt(double y) {
+    int at = indexAt(y);
+    if (at < 0) return null;
+    Part p = window.get(at);
+    Chapter ch = chapterInfo.get(p.c);
+    if (p.stale || ch == null) return null;
+    int j = -1;
+    while (j + 1 < p.anchorY.length && p.top + p.anchorY[j + 1] <= y) j++;
+    int i = p.firstAnchor + j;
+    // (Its span: from where its anchor begins, or the part's top for one
+    // in a part before it not here; to where the next begins, or the
+    // part's bottom.)
+    OptionalDouble a = anchorStart(p.c, i), b = anchorStart(p.c, i + 1);
+    double from = a.isPresent() ? a.getAsDouble() : p.top;
+    double to = b.isPresent() ? b.getAsDouble() : p.bottom();
+    int frac = to > from ? (int) Math.round(1000 * (y - from) / (to - from)) : 0;
+    return new Place(p.c, i, Math.max(0, Math.min(999, frac)));
+  }
+
+  // Where its reading line is (null: not known yet).
+  Place placeAtLine() {
+    if (window.isEmpty()) return null;
+    return placeAt(lineY());
+  }
+
+  // Where it is going, if it is (else where it is read): what following
+  // by comment takes as its place.
+  Place aim() {
+    if (held != null && held.verse == 0) return new Place(held.c, held.anchor, held.frac);
+    return placeAtLine();
+  }
+
+  // A chapter's run of chapters without comments, its first and last (-1:
+  // not in one, or not known).
+  int runFrom(int c) {
+    Chapter ch = chapterInfo.get(c);
+    return ch == null ? -1 : ch.runFrom;
+  }
+
+  int runTo(int c) {
+    Chapter ch = chapterInfo.get(c);
+    return ch == null ? -1 : ch.runTo;
+  }
+
+  // Whether any of chapter c's parts is here.
+  boolean hasChapter(int c) {
+    for (Part p : window) if (!p.stale && (p.c == c || p.runTo >= 0 && c >= p.c && c <= p.runTo)) return true;
     return false;
   }
 
-  private void moveTo(double to) {
-    scroll = to;
-    clamp();
-    position();
-    fill();
-    frameNeeded();
+  // Chapter c as it is laid out here, for following.
+  Follow.ChapterShape shape(int c) {
+    Chapter ch = chapterInfo.get(c);
+    int n = ch == null ? 0 : ch.verses.length;
+    double[] starts = new double[n];
+    boolean[] known = new boolean[n];
+    for (int i = 0; i < n; i++) {
+      OptionalDouble y = anchorStart(c, i);
+      known[i] = y.isPresent();
+      if (known[i]) starts[i] = y.getAsDouble();
+    }
+    OptionalDouble top = chapterTop(c), end = chapterEnd(c);
+    return new Follow.ChapterShape(starts, known, top.orElse(0), top.isPresent(), end.orElse(0),
+        end.isPresent(), em());
+  }
+
+  // ---- going somewhere ----
+  private static boolean animatorsOn() {
+    return ValueAnimator.areAnimatorsEnabled();
+  }
+
+  private void goTo(Target t) {
+    stopMoving();
+    motion = Motion.STILL;
+    held = t;
+    resolveHeld();
+  }
+
+  // The part where it is going (null: none, or not here).
+  private Part heldPart() {
+    if (held == null) return null;
+    Chapter ch = chapterInfo.get(held.c);
+    if (ch == null) return null;
+    if (ch.runFrom >= 0) return inWindow(ch.runFrom, 0);
+    int i = heldAnchor(ch);
+    return inWindow(held.c, i < 0 || i >= ch.verseParts.length ? 0 : ch.verseParts[i]);
+  }
+
+  // Where it is going's anchor (Listen's verse's first, or the last before
+  // it).
+  private int heldAnchor(Chapter ch) {
+    if (held.verse <= 0) return held.anchor;
+    int best = -1;
+    for (int i = 0; i < ch.verses.length; i++) {
+      if (ch.verses[i] == held.verse) return i;
+      if (ch.verses[i] < held.verse) best = i;
+    }
+    return best;
+  }
+
+  // Where it is going made, as far as it can be: its chapter's parts and
+  // its own asked for; the window begun again at its part if it isn't
+  // there; the reading line there (gliding, brought there from near); and,
+  // once its part is here and has come, its place told and at rest.
+  private void resolveHeld() {
+    Target t = held;
+    if (t == null || contentWidth() <= 0 || getHeight() <= 0) return;
+    Chapter ch = chapterInfo.get(t.c);
+    if (ch == null) {
+      want(t.c, 0);
+      return;
+    }
+    int anchor = ch.runFrom >= 0 ? -1 : heldAnchor(ch);
+    Part p = ch.runFrom >= 0 ? fresh(ch.runFrom, 0, true)
+        : fresh(t.c, anchor < 0 || anchor >= ch.verseParts.length ? 0 : ch.verseParts[anchor], true);
+    if (p == null) return;
+    boolean here = window.contains(p);
+    if (!here) {
+      measure(p);
+      window.clear();
+      window.add(p);
+      commitWindowOnly();
+    }
+    OptionalDouble y = placeY(ch.runFrom >= 0 ? ch.runFrom : t.c, anchor, ch.runFrom >= 0 ? 0 : t.frac);
+    if (!y.isPresent()) return;
+    if (!t.arrived && t.glides && here && animatorsOn()
+        && Math.abs(y.getAsDouble() - lineY()) <= GLIDE_REACH_SCREENS * visibleHeight()) {
+      motion = Motion.GLIDING;
+      startGlide(spotAtLine(), spotAt(y.getAsDouble()));
+    } else if (glide == null) placeLine(y.getAsDouble());
+    fillSoon();
+    if (p.coming || t.arrived) return;
+    t.arrived = true;
+    if (glide == null) arrived();
+  }
+
+  // The window's tops and the list told, without placing anything.
+  private void commitWindowOnly() {
+    double y = 0;
+    for (Part p : window) {
+      p.top = y;
+      y += p.height;
+    }
+    adapter.notifyDataSetChanged();
+  }
+
+  // Where it is going in the window (empty: not here yet).
+  private OptionalDouble heldY() {
+    Target t = held;
+    Chapter ch = t == null ? null : chapterInfo.get(t.c);
+    if (ch == null) return OptionalDouble.empty();
+    return ch.runFrom >= 0 ? placeY(ch.runFrom, -1, 0) : placeY(t.c, heldAnchor(ch), t.frac);
+  }
+
+  // There: its place told, and at rest.
+  private void arrived() {
+    motion = Motion.STILL;
+    sendAt(true);
+    sayRest();
+  }
+
+  // ---- following (Linking's) ----
+  // Whether it is moved by a finger, a fling or a key: it leads.
+  boolean leads() {
+    return motion == Motion.DRAGGED || motion == Motion.FLUNG || motion == Motion.PAGED;
+  }
+
+  // Whether it is flung (gliding after a finger): a commentary waits.
+  boolean flung() {
+    return motion == Motion.FLUNG;
+  }
+
+  // Its reading line to y, following, at once.
+  void followTo(double y) {
+    if (touching) return;
+    if (glide != null) stopMoving();
+    held = null;
+    motion = Motion.FOLLOWING;
+    nudgeLine(y);
+    restSoon();
+  }
+
+  // Brought to anchor i of chapter c (-1: its top), following by comment
+  // (or a version not laid out there yet): a glide if it is near, at once
+  // if not (or if glides is false); nothing if it is going there already.
+  void bring(int c, int i, boolean glides) {
+    if (touching) return;
+    if (held != null && held.verse == 0 && held.c == c && held.anchor == i) return;
+    stopMoving();
+    motion = Motion.STILL;
+    held = new Target(c, i, 0, 0, glides, true);
+    resolveHeld();
+  }
+
+  // ---- gliding ----
+  private void startGlide(Spot from, Spot to) {
+    if (from == null || to == null) return;
+    glide = new Glide(from, to, SystemClock.uptimeMillis());
+    postOnAnimation(glideFrame);
+  }
+
+  private final Runnable glideFrame = this::glideStep;
+
+  private void glideStep() {
+    Glide g = glide;
+    if (g == null) return;
+    OptionalDouble from = spotY(g.from), to = spotY(g.to);
+    float t = (SystemClock.uptimeMillis() - g.start) / (float) GLIDE_MS;
+    if (!from.isPresent() || !to.isPresent() || t >= 1) {
+      glide = null;
+      OptionalDouble end = held != null ? heldY() : to;
+      if (end.isPresent()) nudgeLine(end.getAsDouble());
+      Motion was = motion;
+      motion = Motion.STILL;
+      if (held != null && held.arrived || was == Motion.PAGED) arrived();
+      if (was == Motion.PAGED && moves != null) moves.rested(this);
+      return;
+    }
+    nudgeLine(from.getAsDouble() + (to.getAsDouble() - from.getAsDouble()) * ease.getInterpolation(t));
+    postOnAnimation(glideFrame);
+  }
+
+  // Its glide, or the list's fling, stopped.
+  private void stopMoving() {
+    glide = null;
+    removeCallbacks(glideFrame);
+    if (scrollState == OnScrollListener.SCROLL_STATE_FLING) smoothScrollBy(0, 0);
   }
 
   // ---- telling core ----
-  private void frameNeeded() {
-    if (framePosted) return;
-    framePosted = true;
-    postOnAnimation(frame);
-  }
-
-  private final Runnable frame = () -> {
-    framePosted = false;
-    step();
-  };
-
-  // A frame: a fling or a glide moved on, the window kept, and the reading
-  // line told if it moved.
-  private void step() {
-    boolean more = false, ended = false;
-    Motion was = motion;
-    if (motion == Motion.FLUNG) {
-      if (scroller.computeScrollOffset()) {
-        scroll = scroller.getCurrY();
-        if (clamp()) {
-          scroller.forceFinished(true);
-          ended = true;
-        } else more = true;
-      } else ended = true;
-      position();
-    } else if (motion == Motion.GLIDING || motion == Motion.PAGED) {
-      float t = (SystemClock.uptimeMillis() - glideStart) / (float) GLIDE_MS;
-      if (t >= 1) {
-        scroll = glideTo;
-        ended = true;
-      } else {
-        scroll = glideFrom + (glideTo - glideFrom) * ease.getInterpolation(t);
-        more = true;
-      }
-      if (clamp()) {
-        ended = true;
-        more = false;
-      }
-      position();
-    }
-    fill();
-    sendAt();
-    if (ended) {
-      motion = Motion.STILL;
-      if (was == Motion.GLIDING) restSoon();
-      else sayRest();
-    }
-    if (more) frameNeeded();
-  }
-
-  // `at P C K Y HOW`, if the reading line moved since it was told (or,
-  // after a jump, always: core waits for it).
-  private void sendAt() {
+  // It moved (the list scrolled, or laid itself out): the window kept, the
+  // anchor at the reading line told if it changed, and what follows it
+  // told.
+  private void moved() {
+    if (laying || contentWidth() <= 0 || window.isEmpty()) return;
+    fillSoon();
     sendAt(false);
+    if (moves != null) moves.moved(this);
   }
 
+  // `at P C I FRAC`, if the anchor at the reading line changed since it was
+  // told (or always: at rest). Not while it is going somewhere it hasn't
+  // come to.
   private void sendAt(boolean always) {
-    if (window.isEmpty() || pending != null) return;
-    Part p = window.get(lineIndex());
-    if (p.stale) return;
-    int y = hundredths(Math.max(0, Math.min(p.height - 1, lineAt() - p.top)));
-    if (!always && p.c == atC && p.k == atK && y == atY) return;
+    if (held != null && !held.arrived) return;
+    Place p = placeAtLine();
+    if (p == null) return;
+    if (!always && p.c == atC && p.i == atI) return;
     atC = p.c;
-    atK = p.k;
-    atY = y;
-    say("at " + pane + " " + p.c + " " + p.k + " " + y + " " + motion.how);
+    atI = p.i;
+    say("at " + pane + " " + p.c + " " + p.i + " " + p.frac);
   }
 
   private void sayMoving() {
     saidMoving = true;
     cancelRest();
     say("moving " + pane + " " + now());
+    if (moves != null) moves.moving(this);
   }
 
   // `rest P ENDS_HI MS`: the last chapter whose end is in sight (-1 none).
@@ -1031,8 +1367,8 @@ final class Reader extends ViewGroup {
     saidMoving = false;
     cancelRest();
     if (window.isEmpty()) return;
-    sendAt();
-    double top = scroll + insetTop, bottom = scroll + getHeight() - insetBottom;
+    sendAt(true);
+    double top = viewTop() + getPaddingTop(), bottom = viewTop() + getHeight() - getPaddingBottom();
     int endsHi = -1;
     for (Part p : window) {
       if (p.endsChapter() && p.bottom() >= top && p.bottom() <= bottom + 1)
@@ -1041,12 +1377,15 @@ final class Reader extends ViewGroup {
     say("rest " + pane + " " + endsHi + " " + now());
   }
 
-  // Moved by core at once: at rest once it has stayed still a moment.
-  private final Runnable restLater = this::sayRest;
+  // Moved by following: at rest once it has stayed still a moment.
+  private final Runnable restLater = () -> {
+    if (motion == Motion.FOLLOWING) motion = Motion.STILL;
+    sayRest();
+  };
 
   private void restSoon() {
     removeCallbacks(restLater);
-    postDelayed(restLater, 250);
+    postDelayed(restLater, REST_AFTER_MS);
   }
 
   private void cancelRest() {
@@ -1064,7 +1403,6 @@ final class Reader extends ViewGroup {
   // The app begun (`start` said): its lines to core from now on.
   void begin() {
     live = true;
-    sayView();
   }
 
   // The skin's clock for core (ms).
@@ -1072,105 +1410,81 @@ final class Reader extends ViewGroup {
     return SystemClock.uptimeMillis();
   }
 
-  // ---- moving ----
-  private void stopMotion() {
-    scroller.forceFinished(true);
-    motion = Motion.STILL;
-  }
-
-  private void glide(double to, Motion how) {
-    glideFrom = scroll;
-    glideTo = to;
-    glideStart = SystemClock.uptimeMillis();
-    motion = how;
-    frameNeeded();
-  }
-
-  @Override
-  public boolean onInterceptTouchEvent(MotionEvent e) {
-    return true;
-  }
-
-  @Override
-  public boolean onTouchEvent(MotionEvent e) {
-    if (velocity == null) velocity = VelocityTracker.obtain();
-    velocity.addMovement(e);
-    taps.onTouchEvent(e);
-    switch (e.getActionMasked()) {
-      case MotionEvent.ACTION_DOWN:
-        touching = true;
-        downY = lastY = e.getY();
-        // (A finger on a glide stops it, and holds the pane: not a tap.)
-        caughtGlide = motion != Motion.STILL;
-        stopMotion();
-        if (caughtGlide) sayMoving();
-        return true;
-      case MotionEvent.ACTION_MOVE: {
-        float y = e.getY();
-        if (motion != Motion.DRAGGED_BY_FINGER) {
-          if (Math.abs(y - downY) < touchSlop) return true;
-          motion = Motion.DRAGGED_BY_FINGER;
-          lastY = y;
-          getParent().requestDisallowInterceptTouchEvent(true);
-          if (!saidMoving) sayMoving();
-        }
-        moveTo(scroll + (lastY - y));
-        lastY = y;
-        return true;
-      }
-      case MotionEvent.ACTION_UP:
-      case MotionEvent.ACTION_CANCEL: {
-        touching = false;
-        boolean flung = false;
-        if (motion == Motion.DRAGGED_BY_FINGER && e.getActionMasked() == MotionEvent.ACTION_UP) {
-          velocity.computeCurrentVelocity(1000, maxFling);
-          float vy = velocity.getYVelocity();
-          if (Math.abs(vy) > minFling) {
-            scroller.fling(0, (int) Math.round(scroll), 0, (int) -vy, 0, 0,
-                Integer.MIN_VALUE / 2, Integer.MAX_VALUE / 2);
-            motion = Motion.FLUNG;
-            flung = true;
-            frameNeeded();
-          }
-        }
-        if (!flung) {
-          motion = Motion.STILL;
-          if (saidMoving) {
-            sendAt();
-            sayRest();
-          }
-        }
-        velocity.recycle();
-        velocity = null;
-        return true;
-      }
-      default:
-        return true;
+  // ---- a finger ----
+  private void scrollStateChanged(int state) {
+    scrollState = state;
+    if (state == OnScrollListener.SCROLL_STATE_TOUCH_SCROLL) {
+      takenByHand();
+      motion = Motion.DRAGGED;
+    } else if (state == OnScrollListener.SCROLL_STATE_FLING) {
+      // (After a finger, a fling; without one, TalkBack's scroll: either
+      // leads.)
+      if (motion != Motion.DRAGGED) takenByHand();
+      motion = Motion.FLUNG;
+    } else if (motion == Motion.DRAGGED || motion == Motion.FLUNG) {
+      motion = Motion.STILL;
+      if (!touching) rested();
     }
+  }
+
+  // A hand moves it: where it was going let go, and it leads.
+  private void takenByHand() {
+    held = null;
+    glide = null;
+    removeCallbacks(glideFrame);
+    if (!saidMoving) sayMoving();
+  }
+
+  private void rested() {
+    sayRest();
+    if (moves != null) moves.rested(this);
+  }
+
+  @Override
+  public boolean dispatchTouchEvent(MotionEvent e) {
+    int action = e.getActionMasked();
+    if (action == MotionEvent.ACTION_DOWN) {
+      touching = true;
+      // (A finger on it moving stops it, and holds it: it leads, and it is
+      // not a tap.)
+      caught = glide != null || motion == Motion.FLUNG || motion == Motion.PAGED;
+      held = null;
+      if (caught) {
+        glide = null;
+        removeCallbacks(glideFrame);
+        motion = Motion.DRAGGED;
+        sayMoving();
+      } else if (motion == Motion.FOLLOWING) motion = Motion.STILL;
+    } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) touching = false;
+    taps.onTouchEvent(e);
+    boolean took = super.dispatchTouchEvent(e);
+    if ((action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL)
+        && scrollState == OnScrollListener.SCROLL_STATE_IDLE && saidMoving) {
+      motion = Motion.STILL;
+      rested();
+    }
+    return took;
   }
 
   // ---- taps ----
-  // The part at y down the view, and the place in its words at x (null:
-  // none).
-  private Part partAt(float y) {
-    double at = scroll + y;
-    for (Part p : window) if (p.view != null && at >= p.top && at < p.bottom()) return p;
-    return null;
-  }
-
   // A tap: on the page, a footnote's mark, a word of the original, the
   // ESV's line or a reference (core's, give or take a letter), else the
   // verse there (core toggles it and says the selection) or nothing; in the
-  // panel's reader, a reference, previewed.
+  // panel's reader, a reference, previewed. (A tap that lets the text's
+  // own selection go does only that.)
   private void tapped(float x, float y) {
-    Part p = partAt(y);
-    Layout l = p == null ? null : p.view.getLayout();
-    if (l == null) {
+    TextView tv = null;
+    for (int n = 0; n < getChildCount(); n++) {
+      View child = getChildAt(n);
+      if (child instanceof TextView && y >= child.getTop() && y < child.getBottom()) tv = (TextView) child;
+    }
+    Part p = tv == null ? null : (Part) tv.getTag();
+    if (p == null || tv.getLayout() == null) {
       if (pane == PAGE) say("tapnone");
       return;
     }
-    int line = l.getLineForVertical((int) (scroll + y - p.top) - p.view.getTotalPaddingTop());
-    int off = l.getOffsetForHorizontal(line, x - p.view.getTotalPaddingLeft());
+    if (tv.hasSelection()) return;
+    int off = tv.getOffsetForPosition(x - tv.getLeft(), y - tv.getTop());
     for (int i = 0; i + 3 < p.links.length; i += 4) {
       if (off < p.links[i] - 1 || off > p.links[i + 1]) continue;
       long kind = p.links[i + 2], arg = p.links[i + 3];
@@ -1184,7 +1498,8 @@ final class Reader extends ViewGroup {
     }
     if (pane != PAGE) return;
     int v = 0;
-    for (int i = 0; i < p.verses.length; i += 3) if (off >= p.verses[i + 1] && off < p.verses[i + 2]) v = p.verses[i];
+    for (int i = 0; i < p.verses.length; i += 3)
+      if (off >= p.verses[i + 1] && off < p.verses[i + 2]) v = p.verses[i];
     say(v > 0 ? "tapverse " + p.c + " " + v : "tapnone");
   }
 
@@ -1208,14 +1523,27 @@ final class Reader extends ViewGroup {
         // (Not a verse.)
       }
     }
-    for (Part p : window) if (p.c == c || p.c == was) redraw(p);
+    redrawChapters(c, was);
   }
 
   void clearSelection() {
     int c = selC;
     sel.clear();
     selC = -1;
-    for (Part p : window) if (p.c == c) redraw(p);
+    redrawChapters(c, c);
+  }
+
+  // The parts in sight of chapters a and b shown again (what is washed on
+  // them changed; their heights are the same).
+  private void redrawChapters(int a, int b) {
+    for (int n = 0; n < getChildCount(); n++) {
+      View child = getChildAt(n);
+      Part p = (Part) child.getTag();
+      if (p == null || (p.c != a && p.c != b) || !(child instanceof TextView)) continue;
+      markSelection(p);
+      markHeard(p);
+      ((TextView) child).setText(p.text);
+    }
   }
 
   // The selection washed in the accent.
@@ -1246,7 +1574,7 @@ final class Reader extends ViewGroup {
     int was = heardC;
     heardC = c;
     heardV = v;
-    for (Part p : window) if (p.c == c || p.c == was) redraw(p);
+    redrawChapters(c, was);
   }
 
   private void markHeard(Part p) {
@@ -1259,32 +1587,16 @@ final class Reader extends ViewGroup {
 
   // ---- its size ----
   @Override
-  protected void onMeasure(int wSpec, int hSpec) {
-    setMeasuredDimension(getDefaultSize(0, wSpec), getDefaultSize(0, hSpec));
-  }
-
-  @Override
-  protected void onLayout(boolean changed, int l, int t, int r, int b) {
-    for (Part p : window) if (p.view != null) p.view.layout(0, 0, p.view.getMeasuredWidth(), p.height);
-  }
-
-  @Override
   protected void onSizeChanged(int w, int h, int oldW, int oldH) {
+    // (What was at the reading line kept there: as far through its
+    // anchor's span, for a new width.)
+    double before = viewTop() + getPaddingTop() + readingLine
+        * Math.max(1, oldH - getPaddingTop() - getPaddingBottom());
+    Spot keep = window.isEmpty() ? null : spotAt(before);
+    Place place = w != oldW && !window.isEmpty() ? placeAt(before) : null;
     super.onSizeChanged(w, h, oldW, oldH);
-    // (What was at the reading line kept there.)
-    double before = scroll + insetTop + readingLine * Math.max(1, oldH - insetTop - insetBottom);
-    scroll = before - lineOffset();
-    clamp();
-    position();
-    // (A new width: every part laid out again after this layout pass, which
-    // would lay their views out again.)
-    post(() -> {
-      if (getWidth() != w || getHeight() != h) return;
-      if (w != oldW) relayAll(lineAt());
-      sayView();
-      resolvePending();
-      fill();
-      frameNeeded();
-    });
+    if (w <= 0 || h <= 0) return;
+    remeasureAndKeep(keep, place);
+    resolveHeld();
   }
 }
