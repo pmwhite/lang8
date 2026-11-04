@@ -727,20 +727,45 @@ names), a GET (curl, its answer a file) and the lines to the skin, which
 reads them exactly as the web's and Android's do: nothing of core's is
 called but through the wire. Its own parts:
 
-- The reader (`tui/reader.l8`): chapters laid out for the column (its width
-  core's margins; Relaxed spacing a line between paragraphs), poetry
-  indented, the book and number centered, verse numbers and footnote marks
-  raised, highlights, the selection, the verse heard and the keys' cursor
-  washed, in the theme's 24-bit colors; a chapter still waiting kept a
-  screen tall. The place and rests told as on the web.
-- Core's screens (`tui/panel.l8`): a panel beside the reader (110 columns
-  and wider) or over it, each screen's lines kept as they came and read
-  when shown; what can be done is a ring of focus items (rows, a grid's
-  squares, a page's links, tiles, swatches, segments, sort, filter,
-  scopes, the bar's buttons, those at the foot) the arrows move through;
-  Return acts, ←/→ change a setting or open a row's menu (its ⓘ, actions,
-  Delete), typing goes to the screen's field (or a field row: a note's
-  Return a new line), Esc is Back (`closed ID`), a click acts at once.
+- The reader (`tui/reader.l8`), made twice (Panes, above): a `ReaderPane`
+  for the page and one for the panel's reader, each a window of the parts
+  near what it shows (48 at most: those a screen above it and two below
+  asked for as it is drawn, those used longest ago let go). Each part is
+  laid out for the pane's column (its width core's margins; Relaxed
+  spacing a line between paragraphs), poetry indented, a chapter's number
+  centered, verse numbers and footnote marks raised; on the page,
+  highlights, the selection, the verse heard and the keys' cursor washed,
+  in the theme's 24-bit colors. Its unit is a line: `measured`, `view` and
+  `at` are in hundredths of one. A pane's place is its reading line (the
+  page's a third of the way down, the panel's at its top); a part coming
+  above it doesn't move it, and at the document's start the rows above
+  its first line are blank. A key or the wheel moves a pane a line or a
+  page (`moving`, then `at ... 1`). Core's `jump` and `scroll` move it at
+  once (a terminal has no glide; `halt` has nothing to stop) when the part
+  is here and laid out, answered `at ... 0`; a part still to be read
+  (`coming`) or an ESV chapter still to come is shown until it is. 250 ms
+  after a pane last moved it is at rest (`rest`), whether a key, the wheel
+  or core moved it. A pane out of sight (the page under the panel filling
+  the screen) still goes where core says. In the panel's reader a
+  reference or a word of the original opens as on the page; a footnote
+  and the ESV's line are the page's alone (core reads them in the page's
+  version).
+- Core's screens (`tui/panel.l8`): a sheet's beside the reader (110 columns
+  and wider) or over it; the panel beside the page at its right (110
+  columns and wider) or under it, the rows split, so that it always fits
+  (`panelfits 1`), or filling the screen (`f`). The panel's reader (a
+  screen with a `reader` line) is the reader's pane 1, drawn in place of
+  rows under the screen's title, its link button at its foot. Each
+  screen's lines are kept as they came and read when shown; what can be
+  done is a ring of focus items (rows, a grid's squares, a page's links,
+  tiles, swatches, segments, sort, filter, scopes, the bar's buttons, those
+  at the foot) the arrows move through; Return acts, ←/→ change a setting
+  or open a row's menu (its ⓘ, actions, Delete), typing goes to the
+  screen's field (or a field row: a note's Return a new line), Esc is Back
+  (`closed ID`), a click acts at once. The keys go to the page or to the
+  panel beside it, `o` (or a click) giving them to the other: in the
+  panel's reader the arrows, j and k move it a line, Space and b a page,
+  Tab and Return its buttons.
 - The tray, the title's menu (a popup), toasts, Listen's player and the
   way back in the line below, a help (`?`).
 - Recordings through ffplay (its position read from its errors' file,

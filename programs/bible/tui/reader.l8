@@ -2,15 +2,24 @@ tag bible_tui;
 
 use_tag std, bible;
 
-// The reader (SKINS.md: a view a skin makes itself): every chapter one
-// after another, scrolled a line at a time. Each chapter's text and runs
-// come from core (chapter C TEXT, then span, verse, link and mark lines,
-// to end) when it is first wanted (want C); this lays it out for the
-// terminal's width (paragraphs wrapped, poetry indented, headings and the
-// chapter's number centered, verse numbers and footnote marks raised),
-// draws it in the theme's colors (highlights, the selection, the verse
-// being heard washed over their verses), and tells core where the top is
-// (place, rest).
+// The reader (SKINS.md, "Panes"), made twice: the page (pane 0) and the
+// panel's reader (pane 1, drawn in the panel where core's screen says
+// `reader`). Each is a ReaderPane: a window of the parts near what it
+// shows, as core sent them (`part P C K N` and its lines to `end`), each
+// laid out for the pane's column (paragraphs wrapped, poetry indented,
+// headings and a chapter's number centered, verse numbers and footnote
+// marks raised) and drawn in the theme's colors (on the page: highlights,
+// the selection, the verse heard and the keys' cursor washed over their
+// verses). It asks for the parts near what it shows (`want`) as it draws.
+//
+// Its unit is a terminal line: what it tells core is in hundredths of one
+// (`measured`, `view`, `at`). A pane's place is its reading line, the row
+// core's `line P THOUSANDTHS` names: the part and line shown there. A part
+// coming above it doesn't move it. It moves by a key or the mouse (a
+// hand: `moving`, then `at ... 1`) or where core says (`jump`, `scroll`:
+// `at ... 0`, once the part is here and laid out); RP_REST_MS after it last
+// moved it is at rest (`rest`): a terminal has no glide, and a key held
+// down repeats faster than that.
 import "term.l8";
 
 import "wire.l8";
@@ -40,78 +49,302 @@ lk_margin: int = 28;
 
 lk_spacing: int = 1320;
 
-// The chapters held: a slot each (RS_SLOTS, the least used let go), its
-// text (unescaped) and its other lines (as they came).
-RS_SLOTS: int = 16;
+// How many chapters the Bible has (core's `reader N`): each pane's.
+rp_chapters: int = 1189;
 
-rs_c: []int = new int[16](-1);
+// ---- a part, as core sent it ----
+// Part k of chapter c of a pane's document, of parts (0: not known yet, a
+// commentary still opening); for a commentary's run of chapters it says
+// nothing on, the run's last (c to gap_to; -1: not one), all shown as this
+// one part. Whether it only holds its place until it has been read
+// (`coming`: sent again then), and whether it is to be asked for again
+// (`forget`: shown until it comes). Its words (UTF-8) and, in UTF-16
+// places of them: its spans' styles and paragraph kinds; its anchors (its
+// `verse` lines, in order); its links; the highlights on its verses
+// (marks); and every anchor of its chapter with the part it is in.
+type ReaderPart = {
+    c: int;
+    k: int;
+    parts: int;
+    gap_to: int;
+    coming: bool;
+    stale: bool;
+    text: []i8;
+    span_from: []int;
+    span_to: []int;
+    span_style: []int;
+    span_para: []int;
+    verse_number: []int;
+    verse_from: []int;
+    verse_to: []int;
+    link_from: []int;
+    link_to: []int;
+    link_kind: []int;
+    link_arg: []int;
+    mark_verse: []int;
+    mark_color: []int;
+    anchor_verse: []int;
+    anchor_part: []int
+}
 
-rs_used: []int = new int[16](0);
+// A link's kinds (core's `link A B KIND ARG`).
+LINK_FOOTNOTE: int = 0;
 
-rs_clock: int = 0;
+LINK_REFERENCE: int = 1;
 
-rs_text: [][]i8 = new []i8[16](new i8[0](0i8));
+LINK_WORD: int = 2;
 
-rs_text_n: []int = new int[16](0);
+LINK_ESV: int = 3;
 
-rs_meta: [][]i8 = new []i8[16](new i8[0](0i8));
+// The lines of the part being gathered (its `part` line first), until its
+// `end`: a buffer of its own, made larger when a longer part comes.
+type PartLines = {
+    bytes: []i8;
+    count: int
+}
 
-rs_meta_n: []int = new int[16](0);
+RP_GATHER_ROOM: int = 65536;
 
-// Laid out: for which width (-1: not yet), its cells (a code point each,
-// and its attributes: RA_), its lines (their cells, indent, the verse at
-// their start, whether centered), each verse's first line, its links and
-// its marks.
-rs_w: []int = new int[16](-1);
-
-rs_cp: [][]int = new []int[16](new int[0](0));
-
-rs_at: [][]int = new []int[16](new int[0](0));
-
-rs_cells: []int = new int[16](0);
-
-RS_LINES: int = 8192;
-
-rs_l0: [][]int = new []int[16](new int[0](0));
-
-rs_l1: [][]int = new []int[16](new int[0](0));
-
-rs_lx: [][]int = new []int[16](new int[0](0));
-
-rs_lv: [][]int = new []int[16](new int[0](0));
-
-rs_lines: []int = new int[16](0);
-
-rs_vline: [][]int = new []int[16](new int[0](0));
-
-rs_lk_kind: [][]int = new []int[16](new int[0](0));
-
-rs_lk_arg: [][]int = new []int[16](new int[0](0));
-
-rs_links: []int = new int[16](0);
-
-rs_mark: [][]int = new []int[16](new int[0](0));
-
-// (Whether its verses are none: the ESV's line while it waits, kept a
-// screen tall.)
-rs_wait: []bool = new bool[16](false);
-
-rd_alloc() noregion {
-    for s in 0..RS_SLOTS {
-        rs_text[s] = new i8[262144](0i8);
-        rs_meta[s] = new i8[262144](0i8);
-        rs_cp[s] = new int[65536](0);
-        rs_at[s] = new int[65536](0);
-        rs_l0[s] = new int[8192](0);
-        rs_l1[s] = new int[8192](0);
-        rs_lx[s] = new int[8192](0);
-        rs_lv[s] = new int[8192](0);
-        rs_vline[s] = new int[256](-1);
-        rs_lk_kind[s] = new int[2048](0);
-        rs_lk_arg[s] = new int[2048](0);
-        rs_mark[s] = new int[256](-1)
+rp_part_lines_made(room: int): owned *PartLines {
+    own {
+        new PartLines { bytes: new i8[room](0i8), count: 0 }
     }
 }
+
+rp_gathered: ?owned *PartLines = rp_part_lines_made(RP_GATHER_ROOM);
+
+// Whether a part is being gathered (core's lines are its until `end`).
+rp_gathering: bool = false;
+
+// `part P C K N` TEXT: a part begun.
+rp_part_begin(buf: []i8, b: int, e: int) {
+    borrow rp_gathered as lines {
+        lines.count = 0
+    }
+    rp_gathering = true;
+    rp_gather_add(buf, b, e)
+}
+
+// A line of the part being gathered; at its `end`, the part made and given
+// to its pane.
+rp_part_line(buf: []i8, b: int, e: int) {
+    if (!wl_is(buf, b, e, "end")) {
+        rp_gather_add(buf, b, e);
+        return
+    }
+    rp_gathering = false;
+    p: int = -1;
+    borrow rp_gathered as lines {
+        p = wl_num(lines.bytes, 0, rp_first_line_end(lines), 1)
+    }
+    if (p >= 0 && p < PANES) rp_take_part(reader_pane(p), rp_gathered_part())
+}
+
+rp_first_line_end(lines: *PartLines): int {
+    e: int = 0;
+    while (e < lines.count && lines.bytes[e] as int != 10) e = e + 1;
+    e
+}
+
+rp_gather_add(buf: []i8, b: int, e: int) {
+    need: int = e - b + 1;
+    fits: bool = true;
+    borrow rp_gathered as lines {
+        fits = lines.count + need <= len(lines.bytes)
+    }
+    if (!fits) {
+        grown: owned *PartLines = rp_part_lines_grown(need);
+        drop rp_gathered;
+        rp_gathered = move grown
+    }
+    borrow rp_gathered as lines {
+        n: int = lines.count;
+        for i in b..e lines.bytes[n + i - b] = buf[i];
+        lines.bytes[n + e - b] = 10i8;
+        lines.count = n + need
+    }
+}
+
+// A larger buffer, with room for need more, holding what is gathered so
+// far.
+rp_part_lines_grown(need: int): owned *PartLines {
+    own {
+        count: int = 0;
+        borrow rp_gathered as old {
+            count = old.count
+        }
+        room: int = RP_GATHER_ROOM;
+        while (room < count + need) room = room * 2;
+        grown: *PartLines = new PartLines { bytes: new i8[room](0i8), count: count };
+        borrow rp_gathered as old {
+            for i in 0..count grown.bytes[i] = old.bytes[i]
+        }
+        grown
+    }
+}
+
+// The part gathered (rp_gathered) as a part of its own.
+rp_gathered_part(): owned *ReaderPart {
+    own {
+        part: *ReaderPart = new ReaderPart {
+            c: 0,
+            k: 0,
+            parts: 0,
+            gap_to: -1,
+            coming: false,
+            stale: false,
+            text: new i8[0](0i8),
+            span_from: new int[0](0),
+            span_to: new int[0](0),
+            span_style: new int[0](0),
+            span_para: new int[0](0),
+            verse_number: new int[0](0),
+            verse_from: new int[0](0),
+            verse_to: new int[0](0),
+            link_from: new int[0](0),
+            link_to: new int[0](0),
+            link_kind: new int[0](0),
+            link_arg: new int[0](0),
+            mark_verse: new int[0](0),
+            mark_color: new int[0](0),
+            anchor_verse: new int[0](0),
+            anchor_part: new int[0](0)
+        };
+        borrow rp_gathered as lines {
+            rp_part_read(part, lines)
+        }
+        part
+    }
+}
+
+// A part read from its lines: its `part` line's numbers and words, then
+// its other lines (span A B STYLE PARA, verse V A B, link A B KIND ARG,
+// mark V HEX BOOKMARK NOTE, anchor V K, gap C0 C1, coming), counted, then
+// read into lists made for them.
+rp_part_read(part: *ReaderPart@new, lines: *PartLines) {
+    raw: []i8 = lines.bytes;
+    n: int = lines.count;
+    first: int = rp_first_line_end(lines);
+    spans: int = 0;
+    verses: int = 0;
+    links: int = 0;
+    marks: int = 0;
+    anchors: int = 0;
+    p: int = first + 1;
+    while (p < n) {
+        e: int = p;
+        while (e < n && raw[e] as int != 10) e = e + 1;
+        if (wl_is(raw, p, e, "span")) spans = spans + 1 else if (wl_is(raw, p, e,
+            "verse")) verses = verses + 1 else if (wl_is(raw, p, e, "link")) links = links + 1 else if (wl_is(raw,
+            p, e, "mark")) marks = marks + 1 else if (wl_is(raw, p, e, "anchor")) anchors = anchors + 1;
+        p = e + 1
+    }
+    k: int = wl_num(raw, 0, first, 3);
+    part.c = wl_num(raw, 0, first, 2);
+    part.k = (if (k < 0) 0 else k);
+    part.parts = wl_num(raw, 0, first, 4);
+    if (wl_field(raw, 0, first, 1)) {
+        part.text = new i8[rp_unescaped_length(raw, wl_b, wl_e)](0i8);
+        _t: int = wl_unescape(raw, wl_b, wl_e, part.text, 0)
+    }
+    part.span_from = new int[spans](0);
+    part.span_to = new int[spans](0);
+    part.span_style = new int[spans](0);
+    part.span_para = new int[spans](0);
+    part.verse_number = new int[verses](0);
+    part.verse_from = new int[verses](0);
+    part.verse_to = new int[verses](0);
+    part.link_from = new int[links](0);
+    part.link_to = new int[links](0);
+    part.link_kind = new int[links](0);
+    part.link_arg = new int[links](0);
+    part.mark_verse = new int[marks](0);
+    part.mark_color = new int[marks](-1);
+    part.anchor_verse = new int[anchors](0);
+    part.anchor_part = new int[anchors](0);
+    spans = 0;
+    verses = 0;
+    links = 0;
+    marks = 0;
+    anchors = 0;
+    p = first + 1;
+    while (p < n) {
+        e: int = p;
+        while (e < n && raw[e] as int != 10) e = e + 1;
+        if (wl_is(raw, p, e, "span")) {
+            part.span_from[spans] = wl_num(raw, p, e, 1);
+            part.span_to[spans] = wl_num(raw, p, e, 2);
+            part.span_style[spans] = wl_num(raw, p, e, 3);
+            part.span_para[spans] = wl_num(raw, p, e, 4);
+            spans = spans + 1
+        } else if (wl_is(raw, p, e, "verse")) {
+            part.verse_number[verses] = wl_num(raw, p, e, 1);
+            part.verse_from[verses] = wl_num(raw, p, e, 2);
+            part.verse_to[verses] = wl_num(raw, p, e, 3);
+            verses = verses + 1
+        } else if (wl_is(raw, p, e, "link")) {
+            part.link_from[links] = wl_num(raw, p, e, 1);
+            part.link_to[links] = wl_num(raw, p, e, 2);
+            part.link_kind[links] = wl_num(raw, p, e, 3);
+            part.link_arg[links] = wl_num(raw, p, e, 4);
+            links = links + 1
+        } else if (wl_is(raw, p, e, "mark")) {
+            part.mark_verse[marks] = wl_num(raw, p, e, 1);
+            if (wl_word(raw, p, e, 2)) part.mark_color[marks] = tm_hex(raw, wl_b,
+                wl_e);
+            marks = marks + 1
+        } else if (wl_is(raw, p, e, "anchor")) {
+            part.anchor_verse[anchors] = wl_num(raw, p, e, 1);
+            part.anchor_part[anchors] = wl_num(raw, p, e, 2);
+            anchors = anchors + 1
+        } else if (wl_is(raw, p, e, "gap")) part.gap_to = wl_num(raw, p, e, 2) else if (wl_is(raw,
+            p, e, "coming")) part.coming = true;
+        p = e + 1
+    }
+}
+
+// How many bytes the escaped field b to e is, its escapes undone.
+rp_unescaped_length(buf: []i8, b: int, e: int): int {
+    n: int = 0;
+    p: int = b;
+    while (p < e) {
+        p = p + (if (buf[p] as int == 92 && p + 1 < e) 2 else 1);
+        n = n + 1
+    }
+    n
+}
+
+// Whether a part is the last of its chapter (or of the run it stands for):
+// a chapter's end is after it.
+rp_ends_chapter(part: *ReaderPart): bool {
+    part.gap_to >= 0 || part.parts <= 0 || part.k + 1 >= part.parts
+}
+
+// ---- a part laid out ----
+// A part laid out for a column width wide: its cells (a code point each,
+// and its attributes: ra), its lines (their cells from to to, at column
+// x), each anchor's first line, and how many of its lines are its words
+// (a chapter's last part has RP_CHAPTER_GAP blank lines after them); for
+// a part still waiting (rp_part_waiting), the rows it is kept as tall as
+// (at least 1; 0: not one). Its height is its line count.
+type PartLayout = {
+    width: int;
+    padded_rows: int;
+    cell_count: int;
+    cell_cp: []int;
+    cell_attr: []int;
+    line_count: int;
+    line_from: []int;
+    line_to: []int;
+    line_x: []int;
+    anchor_line: []int;
+    text_lines: int
+}
+
+RP_CHAPTER_GAP: int = 2;
+
+// The rule's mark is drawn as this many cells.
+RP_RULE_CELLS: int = 9;
 
 // A cell's attributes: its style (core's STYLE_, 0 to 127), its verse, its
 // link (plus 1; 0 none).
@@ -131,175 +364,84 @@ ra(style: int, verse: int, link: int): int {
     style + verse * 128 + (link + 1) * 65536
 }
 
-rd_slot(c: int): int {
-    for s in 0..RS_SLOTS
-        if (rs_c[s] == c) return s;
-    -1
-}
-
-// ---- what core says ----
-rd_chapters: int = 1189;
-
-// The chapter being gathered (its slot; -1 none).
-rd_taking: int = -1;
-
-// chapter C TEXT: its slot (the least used, not one on the screen).
-rd_chapter(buf: []i8, b: int, e: int) {
-    c: int = wl_num(buf, b, e, 1);
-    s: int = rd_slot(c);
-    if (s < 0) {
-        best: int = 0;
-        for k in 0..RS_SLOTS {
-            if (rs_c[k] < 0) {
-                if (rs_c[best] >= 0) best = k
-            } else if (rs_c[best] >= 0 && rs_used[k] < rs_used[best] && !rd_on_screen(rs_c[k])) best = k
+// The part in slot s of pane `index`'s window laid out for width, as
+// tall as rows if it is waiting.
+rp_layout_made(
+    index: int,
+    s: int,
+    width: int,
+    rows: int
+): owned *PartLayout {
+    own {
+        lay: *PartLayout = new PartLayout {
+            width: width,
+            padded_rows: 0,
+            cell_count: 0,
+            cell_cp: new int[0](0),
+            cell_attr: new int[0](0),
+            line_count: 0,
+            line_from: new int[0](0),
+            line_to: new int[0](0),
+            line_x: new int[0](0),
+            anchor_line: new int[0](0),
+            text_lines: 0
+        };
+        borrow reader_panes[index].parts[s] as part {
+            rp_lay_part(part, lay, rows)
         }
-        s = best
+        lay
     }
-    rs_c[s] = c;
-    rs_clock = rs_clock + 1;
-    rs_used[s] = rs_clock;
-    rs_w[s] = -1;
-    rs_meta_n[s] = 0;
-    rs_text_n[s] = 0;
-    if (wl_field(buf, b, e, 1)) rs_text_n[s] = wl_unescape(buf, wl_b, wl_e, rs_text[s],
-        0);
-    rd_taking = s
 }
 
-// A line of the chapter being gathered (end: it is whole).
-rd_take(buf: []i8, b: int, e: int): bool {
-    s: int = rd_taking;
-    if (wl_is(buf, b, e, "end")) {
-        rd_taking = -1;
-        if (s >= 0) rd_came(s);
-        return true
-    }
-    if (s < 0) return false;
-    m: []i8 = rs_meta[s];
-    n: int = rs_meta_n[s];
-    if (n + e - b + 1 < len(m)) {
-        for i in b..e m[n + i - b] = buf[i];
-        m[n + e - b] = 10i8;
-        rs_meta_n[s] = n + e - b + 1
-    }
-    false
+// Whether a part is a chapter still to come (the ESV's, a commentary's
+// still opening): no verses, no anchors, not a run. It is kept as tall as
+// its pane, so that the chapters after it are asked for only as it is
+// scrolled past.
+rp_part_waiting(part: *ReaderPart): bool {
+    len(part.verse_number) == 0 && len(part.anchor_verse) == 0 && part.gap_to < 0
 }
 
-// A chapter whole: laid out when drawn; the place kept if it was waiting
-// at the top, and a jump to it made.
-rd_came(s: int) {
-    c: int = rs_c[s];
-    rd_asked_clear(c);
-    was: int = rd_lines_of(c);
-    old_l: int = rd_l;
-    rs_w[s] = -1;
-    if (c == rd_topc && rd_was_placeholder) {
-        // (Its place as it was from its end, now its own lines.)
-        now: int = rd_lines_of(c);
-        rd_l = now - (was - old_l);
-        if (rd_l < 0) rd_l = 0
-    }
-    if (c == rd_jump_c) rd_finish_jump();
-    rd_dirty = true
+// Part laid out into lay (waiting, as tall as rows). Its cells are at most
+// its words' code points and a rule's marks; its lines at most a line a
+// cell and three a paragraph more, and the chapter's gap, or the rows it
+// is kept as tall as: room for all of them is made first.
+rp_lay_part(part: *ReaderPart, lay: *PartLayout@new, rows: int) {
+    paragraphs: int = 1;
+    for i in 0..len(part.text)
+        if (part.text[i] as int == 10) paragraphs = paragraphs + 1;
+    cell_room: int = len(part.text) + RP_RULE_CELLS * paragraphs;
+    if (rp_part_waiting(part)) lay.padded_rows = (if (rows > 0) rows else 1);
+    line_room: int = cell_room + 3 * paragraphs + RP_CHAPTER_GAP + lay.padded_rows;
+    lay.cell_cp = new int[cell_room](0);
+    lay.cell_attr = new int[cell_room](0);
+    lay.line_from = new int[line_room](0);
+    lay.line_to = new int[line_room](0);
+    lay.line_x = new int[line_room](0);
+    lay.anchor_line = new int[len(part.verse_number)](0);
+    rp_lay_words(part, lay)
 }
 
-// ---- laying a chapter out ----
-// The column's width it is laid out for.
-rd_width: int = 72;
-
-// Scratch: the spans, verses and links of the chapter being laid out (UTF-16
-// places, as core counts).
-sp_a: []int = new int[16384](0);
-
-sp_end: []int = new int[16384](0);
-
-sp_st: []int = new int[16384](0);
-
-sp_pa: []int = new int[16384](0);
-
-sp_n: int = 0;
-
-vr_v: []int = new int[512](0);
-
-vr_a: []int = new int[512](0);
-
-vr_b: []int = new int[512](0);
-
-vr_n: int = 0;
-
-ln_a: []int = new int[2048](0);
-
-ln_b: []int = new int[2048](0);
-
-// The paragraph being wrapped: its cells (code points, attributes), kind.
-pc_cp: []int = new int[65536](0);
-
-pc_at: []int = new int[65536](0);
-
-pc_n: int = 0;
-
-rd_lay(s: int) {
-    w: int = rd_width;
-    rs_w[s] = w;
-    rs_cells[s] = 0;
-    rs_lines[s] = 0;
-    rs_links[s] = 0;
-    for v in 0..256 {
-        rs_vline[s][v] = -1;
-        rs_mark[s][v] = -1
-    }
-    // Its lines (span A B STYLE PARA, verse V A B, link A B KIND ARG,
-    // mark V HEX BOOKMARK NOTE).
-    sp_n = 0;
-    vr_n = 0;
-    m: []i8 = rs_meta[s];
-    mn: int = rs_meta_n[s];
-    p: int = 0;
-    while (p < mn) {
-        e: int = p;
-        while (e < mn && m[e] as int != 10) e = e + 1;
-        if (wl_is(m, p, e, "span") && sp_n < len(sp_a)) {
-            sp_a[sp_n] = wl_num(m, p, e, 1);
-            sp_end[sp_n] = wl_num(m, p, e, 2);
-            sp_st[sp_n] = wl_num(m, p, e, 3);
-            sp_pa[sp_n] = wl_num(m, p, e, 4);
-            sp_n = sp_n + 1
-        } else if (wl_is(m, p, e, "verse") && vr_n < len(vr_v)) {
-            vr_v[vr_n] = wl_num(m, p, e, 1);
-            vr_a[vr_n] = wl_num(m, p, e, 2);
-            vr_b[vr_n] = wl_num(m, p, e, 3);
-            vr_n = vr_n + 1
-        } else if (wl_is(m, p, e, "link") && rs_links[s] < len(ln_a)) {
-            k: int = rs_links[s];
-            ln_a[k] = wl_num(m, p, e, 1);
-            ln_b[k] = wl_num(m, p, e, 2);
-            rs_lk_kind[s][k] = wl_num(m, p, e, 3);
-            rs_lk_arg[s][k] = wl_num(m, p, e, 4);
-            rs_links[s] = k + 1
-        } else if (wl_is(m, p, e, "mark")) {
-            v: int = wl_num(m, p, e, 1);
-            if (wl_word(m, p, e, 2) && v >= 0 && v < 256) rs_mark[s][v] = tm_hex(m,
-                wl_b, wl_e)
-        }
-        p = e + 1
-    }
-    rs_wait[s] = vr_n == 0;
-    // The text, a code point at a time: each paragraph's cells, wrapped.
-    t: []i8 = rs_text[s];
-    tn: int = rs_text_n[s];
+// The part's words into lay: a code point at a time, each with its span's
+// style, its verse and its link, each paragraph wrapped at its end; then
+// each anchor's first line.
+rp_lay_words(part: *ReaderPart, lay: *PartLayout) {
+    t: []i8 = part.text;
+    tn: int = len(t);
+    anchors: int = len(part.verse_number);
+    // (Each anchor's first cell, until its line is known.)
+    next_anchor: int = 0;
     u: int = 0;
     si: int = 0;
     vi: int = 0;
     li: int = 0;
-    pc_n = 0;
     para: int = 0;
     first: int = -1;
+    from: int = 0;
     q: int = 0;
     while (q <= tn) {
         if (q == tn || t[q] as int == 10) {
-            rd_wrap(s, para, first);
-            pc_n = 0;
+            rp_wrap(lay, from, para, first);
+            from = lay.cell_count;
             first = -1;
             para = 0;
             u = u + 1;
@@ -307,32 +449,66 @@ rd_lay(s: int) {
         } else {
             cp: int = tm_cp_at(t, q, tn);
             q = q + tm_cp_len;
-            while (si < sp_n && sp_end[si] <= u) si = si + 1;
-            while (vi < vr_n && vr_b[vi] <= u) vi = vi + 1;
-            while (li < rs_links[s] && ln_b[li] <= u) li = li + 1;
-            st: int = if (si < sp_n && sp_a[si] <= u) sp_st[si] else 0;
+            while (si < len(part.span_to) && part.span_to[si] <= u) si = si + 1;
+            while (vi < anchors && part.verse_to[vi] <= u) vi = vi + 1;
+            while (li < len(part.link_to) && part.link_to[li] <= u) li = li + 1;
+            in_span: bool = si < len(part.span_to) && part.span_from[si] <= u;
+            st: int = if (in_span) part.span_style[si] else 0;
             if (first < 0) {
                 first = st;
-                para = (if (si < sp_n && sp_a[si] <= u) sp_pa[si] else 0)
+                para = (if (in_span) part.span_para[si] else 0)
             }
-            v: int = if (vi < vr_n && vr_a[vi] <= u) vr_v[vi] else 0;
-            l: int = if (li < rs_links[s] && ln_a[li] <= u) li else -1;
-            rd_cell(rd_show(cp, st), ra(st, v, l));
+            v: int = if (vi < anchors && part.verse_from[vi] <= u) part.verse_number[vi] else 0;
+            l: int = if (li < len(part.link_to) && part.link_from[li] <= u) li else -1;
+            while (next_anchor < anchors && part.verse_from[next_anchor] <= u) {
+                lay.anchor_line[next_anchor] = lay.cell_count;
+                next_anchor = next_anchor + 1
+            }
+            rp_cell(lay, rp_shown_as(cp, st), ra(st, v, l));
             u = u + (if (cp >= 65536) 2 else 1)
         }
     }
-    // (A chapter still to come, its line alone: kept a screen tall.)
-    if (rs_wait[s]) {
-        while (rs_lines[s] < tm_rows) rd_line(s, rs_cells[s], rs_cells[s], 0, 0)
+    while (next_anchor < anchors) {
+        lay.anchor_line[next_anchor] = lay.cell_count;
+        next_anchor = next_anchor + 1
     }
-    rd_line(s, rs_cells[s], rs_cells[s], 0, 0)
+    lay.text_lines = lay.line_count;
+    while (lay.line_count < lay.padded_rows) rp_line(lay, lay.cell_count, lay.cell_count,
+        0);
+    if (rp_ends_chapter(part)) {
+        for _g in 0..RP_CHAPTER_GAP rp_line(lay, lay.cell_count, lay.cell_count, 0)
+    }
+    // (An anchor's line: the first with a cell at or after its first.)
+    for j in 0..anchors {
+        cell: int = lay.anchor_line[j];
+        line: int = 0;
+        while (line + 1 < lay.text_lines && lay.line_to[line] <= cell) line = line + 1;
+        lay.anchor_line[j] = line
+    }
 }
 
-rd_cell(cp: int, at: int) {
-    if (pc_n < len(pc_cp)) {
-        pc_cp[pc_n] = cp;
-        pc_at[pc_n] = at;
-        pc_n = pc_n + 1
+rp_cell(lay: *PartLayout, cp: int, attr: int) {
+    n: int = lay.cell_count;
+    if (n < len(lay.cell_cp)) {
+        lay.cell_cp[n] = cp;
+        lay.cell_attr[n] = attr;
+        lay.cell_count = n + 1
+    }
+}
+
+// A line of lay: its cells from to to, at column x.
+rp_line(
+    lay: *PartLayout,
+    from: int,
+    to: int,
+    x: int
+) {
+    k: int = lay.line_count;
+    if (k < len(lay.line_from)) {
+        lay.line_from[k] = from;
+        lay.line_to[k] = to;
+        lay.line_x[k] = x;
+        lay.line_count = k + 1
     }
 }
 
@@ -343,7 +519,7 @@ sup_digits: []int = [8304, 185, 178, 179, 8308, 8309, 8310, 8311, 8312, 8313];
 sup_letters: []int = [7491, 7495, 7580, 7496, 7497, 7584, 7501, 688, 8305, 690, 7503,
     737, 7504, 8319, 7506, 7510, 113, 691, 738, 7511, 7512, 7515, 695, 739, 696, 7611];
 
-rd_show(cp: int, st: int): int {
+rp_shown_as(cp: int, st: int): int {
     if (st == 1 && cp >= 48 && cp <= 57) return sup_digits[cp - 48];
     if (st == 1 && cp == 8239) return 32;
     if (st == 11 && cp >= 97 && cp <= 122) return sup_letters[cp - 97];
@@ -352,60 +528,37 @@ rd_show(cp: int, st: int): int {
     cp
 }
 
-// A line of slot s: cells a to b, at column x.
-rd_line(
-    s: int,
-    a: int,
-    b: int,
-    x: int,
-    v: int
+// The paragraph whose cells are from `from` to lay's last, wrapped into
+// its lines: its kind's indent (poetry's 2 and 4, a verse a line's
+// hanging), centered (the book, the number, the rule, PARA_CENTER) or at
+// the right; a heading with a line before it; an empty paragraph a line of
+// its own.
+rp_wrap(
+    lay: *PartLayout,
+    from: int,
+    para: int,
+    first: int
 ) {
-    k: int = rs_lines[s];
-    if (k >= RS_LINES) return;
-    rs_l0[s][k] = a;
-    rs_l1[s][k] = b;
-    rs_lx[s][k] = x;
-    rs_lv[s][k] = v;
-    rs_lines[s] = k + 1
-}
-
-// The paragraph's cells wrapped into lines of slot s: its kind's indent
-// (poetry's 2 and 4, a verse a line's hanging), centered (the book, the
-// number, the rule, PARA_CENTER) or at the right; a heading with a line
-// before it; an empty paragraph a line of its own.
-rd_wrap(s: int, para: int, first: int) {
-    w: int = rd_width;
+    w: int = lay.width;
     kind: int = para % 16;
     base: int = if (kind == 1 || kind == 3) 2 else if (kind == 2 || kind == 4) 4 else 0;
     hang: int = if (kind == 7) 2 else if (kind >= 1 && kind <= 4) 2 else 0;
     centered: bool = kind == 5 || first == 2 || first == 3 || first == 15 || first == 12 || first == 14;
     right: bool = kind == 6;
     heading: bool = first == 4 || first == 10 || first == 21 || first == 8 || first == 5;
-    lastv: int = if (rs_lines[s] > 0) rs_lv[s][rs_lines[s] - 1] else 0;
-    if (heading && rs_lines[s] > 0) rd_line(s, rs_cells[s], rs_cells[s], 0, lastv);
-    if (pc_n == 0) {
-        rd_line(s, rs_cells[s], rs_cells[s], 0, lastv);
+    if (heading && lay.line_count > 0) rp_line(lay, from, from, 0);
+    if (lay.cell_count == from) {
+        rp_line(lay, from, from, 0);
         return
     }
     // (The rule's mark: a short line.)
-    if (first == 14 && pc_n == 1) {
-        pc_n = 0;
-        for _k in 0..9 rd_cell(9472, ra(14, 0, -1))
+    if (first == 14 && lay.cell_count == from + 1) {
+        lay.cell_count = from;
+        for _k in 0..RP_RULE_CELLS rp_cell(lay, 9472, ra(14, 0, -1))
     }
-    // Into the slot's cells, then broken at spaces.
-    c0: int = rs_cells[s];
-    cp: []int = rs_cp[s];
-    at: []int = rs_at[s];
-    for i in 0..pc_n {
-        if (c0 + i < len(cp)) {
-            cp[c0 + i] = pc_cp[i];
-            at[c0 + i] = pc_at[i]
-        }
-    }
-    n: int = if (c0 + pc_n <= len(cp)) pc_n else len(cp) - c0;
-    rs_cells[s] = c0 + n;
-    start: int = c0;
-    end: int = c0 + n;
+    cp: []int = lay.cell_cp;
+    start: int = from;
+    end: int = lay.cell_count;
     indent: int = base;
     while (start < end) {
         room: int = w - indent;
@@ -425,230 +578,968 @@ rd_wrap(s: int, para: int, first: int) {
         }
         stop: int = if (fits || brk <= start) i else brk;
         if (stop <= start) stop = start + 1;
-        // (Its trailing space left off; its verse, the first on it.)
+        // (Its trailing space left off.)
         e2: int = stop;
         while (e2 > start && cp[e2 - 1] == 32) e2 = e2 - 1;
-        v: int = lastv;
-        found: bool = false;
-        for j in start..e2 {
-            if (!found && ra_verse(at[j]) > 0) {
-                v = ra_verse(at[j]);
-                found = true
-            }
-        }
         lw: int = 0;
         for j in start..e2 lw = lw + tm_width(cp[j]);
         lx: int = if (centered) (w - lw) / 2 else if (right) w - lw else indent;
-        k: int = rs_lines[s];
-        rd_line(s, start, e2, if (lx < 0) 0 else lx, v);
-        // (Each verse's first line.)
-        for j in start..e2 {
-            vv: int = ra_verse(at[j]);
-            if (vv > 0 && vv < 256 && rs_vline[s][vv] < 0) rs_vline[s][vv] = k
-        }
-        lastv = v;
+        rp_line(lay, start, e2, if (lx < 0) 0 else lx);
         start = stop;
         while (start < end && cp[start] == 32) start = start + 1;
         indent = base + hang
     }
     // (Relaxed: a line after each paragraph of prose.)
-    if (lk_spacing >= 1400 && kind == 0 && !heading && !centered) rd_line(s, rs_cells[s],
-        rs_cells[s], 0, lastv)
+    if (lk_spacing >= 1400 && kind == 0 && !heading && !centered) rp_line(lay, end,
+        end, 0)
 }
 
-// ---- the place ----
-// The top of the reader: chapter rd_topc, its line rd_l.
-rd_topc: int = 0;
+// ---- a pane ----
+// Where a pane's reading line is: nowhere yet, or line `line` of part k of
+// chapter c, a part in its window.
+type ReadingPlace =
+    | Unplaced
+    | At { c: int, k: int, line: int }
 
-rd_l: int = 0;
+// Where core has told a pane to go, until the part is here and laid out:
+// a verse (frac thousandths of the way through it; verse 0, the chapter's
+// top), or y hundredths of a line down a part.
+type PendingMove =
+    | Settled
+    | ToVerse { c: int, v: int, frac: int }
+    | ToPart { c: int, k: int, y: int }
 
-rd_dirty: bool = true;
+// Whether a pane has rested since it last moved (at a time; by a hand:
+// `moving` told).
+type PaneMotion =
+    | Resting
+    | Moved { at: int, by_hand: bool }
 
-// Whether the top chapter was not here yet when the place was set.
-rd_was_placeholder: bool = false;
+// What the keys are on in a pane: nothing, a verse (anchor `anchor` of
+// part k of chapter c) or a link (of part k of chapter c).
+type KeysOn =
+    | NoKeys
+    | OnVerse { c: int, k: int, anchor: int }
+    | OnLink { c: int, k: int, link: int }
 
-// A jump waiting for its chapter (-1: none), to verse rd_jump_v.
-rd_jump_c: int = -1;
-
-rd_jump_v: int = 0;
-
-// The lines chapter c takes (laid out if held; else a placeholder's 3).
-// After each, a line between it and the next.
-rd_lines_of(c: int): int {
-    s: int = rd_slot(c);
-    if (s < 0) return 3;
-    if (rs_w[s] != rd_width) rd_lay(s);
-    rs_lines[s]
+// A pane (core's PANE_PAGE or PANE_PANEL) and what it reads:
+// - its reading line (thousandths down its rows, core's `line`);
+// - its window: the parts near what it shows (RP_WINDOW at most, those
+//   used longest ago let go), each with its layout for the pane's column,
+//   and when each was last wanted;
+// - where it was last drawn: its rows from r0 (0 rows: never drawn), its
+//   words' column (text_x, text_width wide), its background; whether it
+//   was drawn this frame;
+// - its place, where core has told it to go, whether it rests;
+// - what it last told core: how its place last moved (PANE_MOVED_BY_APP
+//   or PANE_DRAGGED), whether an `at` is owed though its place is as told
+//   (a jump arrived where it was), its place as told, its rows as told
+//   (`view`; 0: not yet);
+// - what the keys are on;
+// - the parts asked for lately (chapter, part, when), so that one isn't
+//   asked for again while core answers;
+// - whether it is to be drawn again.
+type ReaderPane = {
+    index: int;
+    reading_line: int;
+    parts: []?owned *ReaderPart;
+    layouts: []?owned *PartLayout;
+    used: []int;
+    clock: int;
+    r0: int;
+    rows: int;
+    text_x: int;
+    text_width: int;
+    background: int;
+    shown: bool;
+    place: ReadingPlace;
+    pending: PendingMove;
+    motion: PaneMotion;
+    moved_how: int;
+    answer_owed: bool;
+    told: ReadingPlace;
+    told_rows: int;
+    keys: KeysOn;
+    asked_c: []int;
+    asked_k: []int;
+    asked_at: []int;
+    asked_next: int;
+    dirty: bool
 }
 
-rd_jump_to(c: int, v: int) {
-    if (c < 0 || c >= rd_chapters) return;
-    rd_topc = c;
-    rd_l = 0;
-    rd_jump_c = c;
-    rd_jump_v = v;
-    rd_want(c);
-    if (rd_slot(c) >= 0) rd_finish_jump();
-    rd_moved()
+RP_WINDOW: int = 48;
+
+// How many parts either way of its place a pane keeps (fewer than its
+// window holds, so that those wanted are never let go for each other).
+RP_WANT_PARTS: int = 20;
+
+RP_ASKED_MOST: int = 32;
+
+// A part asked for and not come is asked for again after this long (ms).
+RP_ASK_AGAIN_MS: int = 5000;
+
+// How long after a pane last moved it is at rest (ms).
+RP_REST_MS: int = 250;
+
+rp_pane_made(index: int): ReaderPane@new {
+    ReaderPane {
+        index: index,
+        reading_line: 0,
+        parts: new ?owned *ReaderPart[RP_WINDOW](null),
+        layouts: new ?owned *PartLayout[RP_WINDOW](null),
+        used: new int[RP_WINDOW](0),
+        clock: 0,
+        r0: 0,
+        rows: 0,
+        text_x: 0,
+        text_width: 0,
+        background: lk_bg,
+        shown: false,
+        place: ReadingPlace.Unplaced,
+        pending: PendingMove.Settled,
+        motion: PaneMotion.Resting,
+        moved_how: PANE_MOVED_BY_APP,
+        answer_owed: false,
+        told: ReadingPlace.Unplaced,
+        told_rows: 0,
+        keys: KeysOn.NoKeys,
+        asked_c: new int[RP_ASKED_MOST](-1),
+        asked_k: new int[RP_ASKED_MOST](0),
+        asked_at: new int[RP_ASKED_MOST](0),
+        asked_next: 0,
+        dirty: true
+    }
 }
 
-rd_finish_jump() {
-    c: int = rd_jump_c;
-    s: int = rd_slot(c);
-    if (s < 0) return;
-    rd_jump_c = -1;
-    if (rs_w[s] != rd_width) rd_lay(s);
-    l: int = 0;
-    if (rd_jump_v > 0 && rd_jump_v < 256 && rs_vline[s][rd_jump_v] >= 0) l = rs_vline[s][rd_jump_v];
-    rd_topc = c;
-    rd_l = l;
-    rd_moved()
+reader_panes: []ReaderPane = [rp_pane_made(PANE_PAGE), rp_pane_made(PANE_PANEL)];
+
+reader_pane(index: int): *ReaderPane {
+    &reader_panes[index]
 }
 
-// Down by n lines (n < 0: up), as far as chapters go.
-rd_scroll_by(n: int) {
-    k: int = n;
-    while (k > 0) {
-        if (rd_l + 1 < rd_lines_of(rd_topc)) rd_l = rd_l + 1 else if (rd_topc + 1 < rd_chapters) {
-            rd_topc = rd_topc + 1;
-            rd_l = 0
+// ---- what a slot holds ----
+// A slot's part, as its numbers (c -1: the slot is empty): whether it is
+// waiting (a chapter not here yet, the ESV's: no verses, no anchors), and
+// whether its chapter ends after it.
+type SlotPart = {
+    c: int;
+    k: int;
+    parts: int;
+    gap_to: int;
+    coming: bool;
+    stale: bool;
+    waiting: bool;
+    ends_chapter: bool
+}
+
+rp_slot_part(pane: *ReaderPane, s: int): SlotPart {
+    if (s < 0 || pane.parts[s] == null) return SlotPart {
+        c: -1,
+        k: 0,
+        parts: 0,
+        gap_to: -1,
+        coming: false,
+        stale: false,
+        waiting: false,
+        ends_chapter: false
+    };
+    borrow pane.parts[s] as part {
+        SlotPart {
+            c: part.c,
+            k: part.k,
+            parts: part.parts,
+            gap_to: part.gap_to,
+            coming: part.coming,
+            stale: part.stale,
+            waiting: rp_part_waiting(part),
+            ends_chapter: rp_ends_chapter(part)
         }
-        k = k - 1
     }
-    while (k < 0) {
-        if (rd_l > 0) rd_l = rd_l - 1 else if (rd_topc > 0) {
-            rd_topc = rd_topc - 1;
-            rd_l = rd_lines_of(rd_topc) - 1
+}
+
+// The slot holding part k of chapter c (-1: none).
+rp_slot(pane: *ReaderPane, c: int, k: int): int {
+    for s in 0..RP_WINDOW {
+        info: SlotPart = rp_slot_part(pane, s);
+        if (info.c == c && info.k == k) return s
+    }
+    -1
+}
+
+// A slot holding a part of chapter c, or the run it is in (-1: none): if
+// fresh, one not to be asked for again; one that has been read, if there
+// is one.
+rp_slot_holding(pane: *ReaderPane, c: int, fresh: bool): int {
+    best: int = -1;
+    for s in 0..RP_WINDOW {
+        info: SlotPart = rp_slot_part(pane, s);
+        holds: bool = info.c == c || info.gap_to >= 0 && info.c <= c && c <= info.gap_to;
+        if (holds && (!fresh || !info.stale)) {
+            if (best < 0 || !info.coming && rp_slot_part(pane, best).coming) best = s
         }
-        k = k + 1
     }
-    rd_moved()
+    best
 }
 
-rd_moved() {
-    rd_was_placeholder = rd_slot(rd_topc) < 0;
-    rd_dirty = true;
-    rd_moved_at = tm_now();
-    rd_resting = false
-}
-
-// When the reader last moved, and whether it has told core it rests.
-rd_moved_at: int = 0;
-
-rd_resting: bool = true;
-
-// The place told (place C V FRAC: the verse at the top, how far into it, in
-// thousandths of a line), once it changes.
-rd_said_c: int = -1;
-
-rd_said_v: int = -1;
-
-rd_said_f: int = -1;
-
-rd_top_v: int = 0;
-
-rd_top_f: int = 0;
-
-rd_place() {
-    s: int = rd_slot(rd_topc);
-    v: int = 0;
-    f: int = 0;
-    if (s >= 0 && rd_l < rs_lines[s]) {
-        v = rs_lv[s][rd_l];
-        if (v > 0 && v < 256 && rs_vline[s][v] >= 0) f = (rd_l - rs_vline[s][v]) * 1000
-    }
-    rd_top_v = v;
-    rd_top_f = f;
-    if (rd_topc != rd_said_c || v != rd_said_v || f != rd_said_f) {
-        rd_said_c = rd_topc;
-        rd_said_v = v;
-        rd_said_f = f;
-        tc_str("place ");
-        tc_int(rd_topc);
-        tc_byte(32);
-        tc_int(v);
-        tc_byte(32);
-        tc_int(f);
-        tc_end()
+rp_place_slot(pane: *ReaderPane): int {
+    match pane.place {
+        Unplaced -> -1;
+        At p -> rp_slot(pane, p.c, p.k)
     }
 }
 
-// At rest (a third of a second after the last move): rest C V FRAC END
-// ENDS_HI MS, its end on the screen or not, the last chapter whose end is.
-rd_rest_check(rows: int) {
-    if (rd_resting || tm_now() - rd_moved_at < 350) return;
-    rd_resting = true;
-    rd_place();
-    // (Which chapters' ends show.)
-    c: int = rd_topc;
-    l: int = rd_l;
-    shown: int = 0;
-    ends_hi: int = rd_topc - 1;
-    while (shown < rows && c < rd_chapters) {
-        left: int = rd_lines_of(c) - l + 1;
-        if (shown + left - 1 <= rows && rd_slot(c) >= 0) ends_hi = c;
-        shown = shown + left;
-        c = c + 1;
-        l = 0
+// Slot s laid out for the pane's column (laid out again if it isn't, and
+// measured): its height in lines.
+rp_height(pane: *ReaderPane, s: int): int {
+    rp_ensure_laid(pane, s);
+    borrow pane.layouts[s] as lay {
+        lay.line_count
     }
-    tc_str("rest ");
-    tc_int(rd_topc);
-    tc_byte(32);
-    tc_int(rd_top_v);
-    tc_byte(32);
-    tc_int(rd_top_f);
-    tc_byte(32);
-    tc_int(if (ends_hi >= rd_topc) 1 else 0);
-    tc_byte(32);
-    tc_int(ends_hi);
-    tc_byte(32);
-    tc_int(tm_now());
-    tc_end()
 }
 
-// ---- chapters asked for ----
-rd_asked: []int = new int[1200](0);
+rp_text_lines(pane: *ReaderPane, s: int): int {
+    rp_ensure_laid(pane, s);
+    borrow pane.layouts[s] as lay {
+        lay.text_lines
+    }
+}
 
-rd_want(c: int) {
-    if (c < 0 || c >= rd_chapters || c >= len(rd_asked)) return;
-    if (rd_slot(c) >= 0) return;
+rp_ensure_laid(pane: *ReaderPane, s: int) {
+    if (pane.layouts[s] != null) {
+        laid: bool = false;
+        borrow pane.layouts[s] as lay {
+            laid = lay.width == pane.text_width && (lay.padded_rows == 0 || lay.padded_rows == pane.rows)
+        }
+        if (laid) return;
+        drop pane.layouts[s]
+    }
+    pane.layouts[s] = rp_layout_made(pane.index, s, pane.text_width, pane.rows);
+    rp_tell_measured(pane, s)
+}
+
+// `measured P C K H Y...`: the part's height and where each of its anchors
+// begins, in hundredths of a line (not for a part to be asked for again:
+// core has let its shape go).
+rp_tell_measured(pane: *ReaderPane, s: int) {
+    borrow pane.parts[s] as part {
+        if (part.stale) return;
+        borrow pane.layouts[s] as lay {
+            tc_str("measured ");
+            tc_int(pane.index);
+            tc_byte(32);
+            tc_int(part.c);
+            tc_byte(32);
+            tc_int(part.k);
+            tc_byte(32);
+            tc_int(lay.line_count * 100);
+            for j in 0..len(lay.anchor_line) {
+                tc_byte(32);
+                tc_int(lay.anchor_line[j] * 100)
+            }
+            tc_end()
+        }
+    }
+}
+
+rp_touch(pane: *ReaderPane, s: int) {
+    pane.clock = pane.clock + 1;
+    pane.used[s] = pane.clock
+}
+
+// ---- parts come and go ----
+// A part come: in place of the one it is sent again for, else in an empty
+// slot, else in the one used longest ago (not the place's); parts it
+// stands in for let go.
+rp_take_part(pane: *ReaderPane, part: owned *ReaderPart) {
+    c: int = 0;
+    k: int = 0;
+    coming: bool = false;
+    borrow part {
+        c = part.c;
+        k = part.k;
+        coming = part.coming
+    }
+    s: int = rp_slot(pane, c, k);
+    if (s < 0) s = rp_free_slot(pane);
+    drop pane.parts[s];
+    drop pane.layouts[s];
+    pane.parts[s] = move part;
+    rp_touch(pane, s);
+    rp_asked_clear(pane, c, k);
+    if (!coming) rp_drop_superseded(pane, s);
+    pane.dirty = true
+}
+
+rp_free_slot(pane: *ReaderPane): int {
+    keep: int = rp_place_slot(pane);
+    oldest: int = -1;
+    for s in 0..RP_WINDOW {
+        if (pane.parts[s] == null) return s;
+        if (s != keep && (oldest < 0 || pane.used[s] < pane.used[oldest])) oldest = s
+    }
+    oldest
+}
+
+// The parts a fresh part in slot s makes wrong (its chapter in fewer parts
+// now; chapters its run of chapters stands for, or a run its chapter was
+// in): let go, the place in one moved to it.
+rp_drop_superseded(pane: *ReaderPane, s: int) {
+    came: SlotPart = rp_slot_part(pane, s);
+    for t in 0..RP_WINDOW {
+        info: SlotPart = rp_slot_part(pane, t);
+        if (t != s && info.c >= 0) {
+            fewer: bool = info.c == came.c && came.parts > 0 && info.k >= came.parts;
+            in_run: bool = came.gap_to >= 0 && info.c >= came.c && info.c <= came.gap_to;
+            run_held: bool = info.gap_to >= 0 && came.c >= info.c && came.c <= info.gap_to;
+            if (fewer || in_run || run_held) {
+                if (rp_place_slot(pane) == t) pane.place = ReadingPlace.At { c: came.c, k: came.k, line: 0 };
+                drop pane.parts[t];
+                drop pane.layouts[t]
+            }
+        }
+    }
+}
+
+// `forget P C`: the pane's parts of chapter c (-1: every chapter) to be
+// asked for again, shown until they come.
+rp_forget(pane: *ReaderPane, c: int) {
+    for s in 0..RP_WINDOW {
+        info: SlotPart = rp_slot_part(pane, s);
+        if (info.c >= 0 && (c < 0 || info.c == c || info.gap_to >= 0 && info.c <= c && c <= info.gap_to)) {
+            borrow pane.parts[s] as part {
+                part.stale = true
+            }
+        }
+    }
+    pane.dirty = true
+}
+
+// `want P C K`, unless it was asked for lately.
+rp_want(pane: *ReaderPane, c: int, k: int) {
+    if (c < 0 || c >= rp_chapters) return;
     now: int = tm_now();
-    if (rd_asked[c] > 0 && now - rd_asked[c] < 5000) return;
-    rd_asked[c] = now;
+    for i in 0..RP_ASKED_MOST {
+        if (pane.asked_c[i] == c && pane.asked_k[i] == k && now - pane.asked_at[i] < RP_ASK_AGAIN_MS) return
+    }
+    i: int = pane.asked_next;
+    pane.asked_c[i] = c;
+    pane.asked_k[i] = k;
+    pane.asked_at[i] = now;
+    pane.asked_next = (i + 1) % RP_ASKED_MOST;
     tc_str("want ");
+    tc_int(pane.index);
+    tc_byte(32);
     tc_int(c);
+    tc_byte(32);
+    tc_int(k);
     tc_end()
 }
 
-rd_asked_clear(c: int) {
-    if (c >= 0 && c < len(rd_asked)) rd_asked[c] = 0
+rp_asked_clear(pane: *ReaderPane, c: int, k: int) {
+    for i in 0..RP_ASKED_MOST {
+        if (pane.asked_c[i] == c && pane.asked_k[i] == k) pane.asked_c[i] = -1
+    }
 }
 
-// Every chapter let go (the look, the version, what is marked changed:
-// core's relayout), asked for again as drawn.
-rd_forget() {
-    for s in 0..RS_SLOTS rs_c[s] = -1;
-    for c in 0..len(rd_asked) rd_asked[c] = 0;
-    rd_dirty = true
+rp_want_if_stale(pane: *ReaderPane, s: int) {
+    info: SlotPart = rp_slot_part(pane, s);
+    if (info.stale) rp_want(pane, info.c, info.k)
 }
 
-// Chapter c asked for again (what is marked on it changed).
-rd_reask(c: int) {
-    s: int = rd_slot(c);
-    if (s >= 0) rs_c[s] = -1;
-    rd_asked_clear(c);
-    rd_want(c)
+// ---- from part to part ----
+// The part after or before one in the window: here (its slot), to be
+// asked for (chapter c's part k; before a chapter whose parts aren't known,
+// its first, which says how many), or none (the document's end or start).
+type PartStep =
+    | Found { slot: int }
+    | Wanted { c: int, k: int }
+    | Edge
+
+rp_found_or_wanted(pane: *ReaderPane, c: int, k: int): PartStep {
+    s: int = rp_slot(pane, c, k);
+    if (s >= 0) PartStep.Found { slot: s } else PartStep.Wanted { c: c, k: k }
 }
 
-rd_on_screen(c: int): bool {
-    c >= rd_topc && c <= rd_last_c
+rp_step_after(pane: *ReaderPane, s: int): PartStep {
+    info: SlotPart = rp_slot_part(pane, s);
+    if (info.k + 1 < info.parts) return rp_found_or_wanted(pane, info.c, info.k + 1);
+    next: int = (if (info.gap_to >= 0) info.gap_to else info.c) + 1;
+    if (next >= rp_chapters) return PartStep.Edge;
+    rp_found_or_wanted(pane, next, 0)
 }
 
-rd_last_c: int = 0;
+rp_step_before(pane: *ReaderPane, s: int): PartStep {
+    info: SlotPart = rp_slot_part(pane, s);
+    if (info.k > 0) return rp_found_or_wanted(pane, info.c, info.k - 1);
+    if (info.c <= 0) return PartStep.Edge;
+    t: int = rp_slot_holding(pane, info.c - 1, false);
+    if (t < 0) return PartStep.Wanted { c: info.c - 1, k: 0 };
+    held: SlotPart = rp_slot_part(pane, t);
+    if (held.gap_to >= 0 || held.parts <= 0) return PartStep.Found { slot: t };
+    rp_found_or_wanted(pane, held.c, held.parts - 1)
+}
 
-// ---- what is washed ----
-// The selection (its chapter, -1 none; its verses), the verse heard, the
-// verse the keys are on (the cursor), the link the keys are on.
+// A line of the window: shown (line `line` of slot's part), in a part to
+// be asked for, or beyond the document's start or end.
+type LineAt =
+    | Shown { slot: int, line: int }
+    | Missing { c: int, k: int }
+    | Beyond
+
+rp_line_after(pane: *ReaderPane, at: LineAt): LineAt {
+    match at {
+        Shown a -> rp_line_after_shown(pane, a.slot, a.line);
+        _ -> at
+    }
+}
+
+rp_line_after_shown(pane: *ReaderPane, s: int, line: int): LineAt {
+    if (line + 1 < rp_height(pane, s)) return LineAt.Shown { slot: s, line: line + 1 };
+    match rp_step_after(pane, s) {
+        Found f -> LineAt.Shown { slot: f.slot, line: 0 };
+        Wanted w -> LineAt.Missing { c: w.c, k: w.k };
+        Edge -> LineAt.Beyond
+    }
+}
+
+rp_line_before(pane: *ReaderPane, at: LineAt): LineAt {
+    match at {
+        Shown a -> rp_line_before_shown(pane, a.slot, a.line);
+        _ -> at
+    }
+}
+
+rp_line_before_shown(pane: *ReaderPane, s: int, line: int): LineAt {
+    if (line > 0) return LineAt.Shown { slot: s, line: line - 1 };
+    match rp_step_before(pane, s) {
+        Found f -> LineAt.Shown { slot: f.slot, line: rp_height(pane, f.slot) - 1 };
+        Wanted w -> LineAt.Missing { c: w.c, k: w.k };
+        Edge -> LineAt.Beyond
+    }
+}
+
+// n lines on from a line (n < 0: back), what is there.
+rp_lines_on(pane: *ReaderPane, from: LineAt, n: int): LineAt {
+    at: LineAt = from;
+    for _i in 0..if (n < 0) -n else n at = (if (n < 0) rp_line_before(pane, at) else rp_line_after(pane,
+        at));
+    at
+}
+
+// n lines on from a shown line (n < 0: back), as far as the window goes.
+rp_lines_on_within(pane: *ReaderPane, from: LineAt, n: int): LineAt {
+    here: LineAt = from;
+    going: bool = true;
+    for _i in 0..if (n < 0) -n else n {
+        if (going) {
+            next: LineAt = if (n < 0) rp_line_before(pane, here) else rp_line_after(pane,
+                here);
+            match next {
+                Shown _s -> here = next;
+                _ -> going = false
+            }
+        }
+    }
+    here
+}
+
+// The pane's place as a line of its window (Missing: its part isn't here).
+rp_place_line(pane: *ReaderPane): LineAt {
+    match pane.place {
+        Unplaced -> LineAt.Beyond;
+        At p -> rp_place_line_at(pane, p.c, p.k, p.line)
+    }
+}
+
+rp_place_line_at(
+    pane: *ReaderPane,
+    c: int,
+    k: int,
+    line: int
+): LineAt {
+    s: int = rp_slot(pane, c, k);
+    if (s < 0) return LineAt.Missing { c: c, k: k };
+    h: int = rp_height(pane, s);
+    LineAt.Shown { slot: s, line: if (line >= h) h - 1 else if (line < 0) 0 else line }
+}
+
+// The row (of the pane's) its reading line is on.
+rp_reading_row(pane: *ReaderPane): int {
+    pane.reading_line * pane.rows / 1000
+}
+
+// What is on row r of the pane (from its first).
+rp_row_line(pane: *ReaderPane, r: int): LineAt {
+    rp_lines_on(pane, rp_place_line(pane), r - rp_reading_row(pane))
+}
+
+// The pane's place put at a shown line of its window.
+rp_place_at_line(pane: *ReaderPane, at: LineAt) {
+    match at {
+        Shown a -> {
+            info: SlotPart = rp_slot_part(pane, a.slot);
+            pane.place = ReadingPlace.At { c: info.c, k: info.k, line: a.line }
+        }
+        _ -> { }
+    }
+}
+
+// ---- where it is put ----
+// `line P THOUSANDTHS`: the pane's reading line.
+rp_set_reading_line(pane: *ReaderPane, thousandths: int) {
+    pane.reading_line = (if (thousandths < 0) 0 else if (thousandths > 1000) 1000 else thousandths);
+    pane.dirty = true
+}
+
+// `jump P C V FRAC`: the pane to verse v of chapter c, frac thousandths
+// through it, once its part is here.
+rp_jump(
+    pane: *ReaderPane,
+    c: int,
+    v: int,
+    frac: int
+) {
+    if (c < 0 || c >= rp_chapters) return;
+    pane.pending = PendingMove.ToVerse { c: c, v: v, frac: frac };
+    pane.dirty = true
+}
+
+// `scroll P C K Y GLIDE`: the pane to y hundredths of a line down part k
+// of chapter c, at once (a terminal has no glide).
+rp_scroll_to(
+    pane: *ReaderPane,
+    c: int,
+    k: int,
+    y: int
+) {
+    pane.pending = PendingMove.ToPart { c: c, k: k, y: y };
+    pane.dirty = true
+}
+
+// Where core said the pane is to go, gone to if its part is here (asked
+// for, if it isn't); answered (`at`) once the part has been read and laid
+// out. The place kept within its part, laid out again shorter.
+rp_settle(pane: *ReaderPane) {
+    if (pane.text_width == 0) return;
+    match pane.pending {
+        Settled -> { }
+        ToVerse j -> rp_arrive_at_verse(pane, j.c, j.v, j.frac);
+        ToPart t -> rp_arrive_in_part(pane, t.c, t.k, t.y)
+    }
+    match pane.place {
+        At p -> rp_place_at_line(pane, rp_place_line_at(pane, p.c, p.k, p.line));
+        Unplaced -> { }
+    }
+}
+
+rp_arrive_at_verse(
+    pane: *ReaderPane,
+    c: int,
+    v: int,
+    frac: int
+) {
+    held: int = rp_slot_holding(pane, c, true);
+    if (held < 0) {
+        // (Which part holds it, as a part of its chapter kept says; else
+        // its first, which says.)
+        kept: int = rp_slot_holding(pane, c, false);
+        rp_want(pane, c, if (kept >= 0) rp_part_of_verse(pane, kept, v) else 0);
+        return
+    }
+    target: int = held;
+    info: SlotPart = rp_slot_part(pane, held);
+    if (info.gap_to < 0) {
+        k: int = rp_part_of_verse(pane, held, v);
+        target = rp_slot(pane, info.c, k);
+        if (target < 0 || rp_slot_part(pane, target).stale) {
+            rp_want(pane, info.c, k);
+            return
+        }
+    }
+    there: SlotPart = rp_slot_part(pane, target);
+    line: int = if (there.gap_to >= 0) 0 else rp_verse_line(pane, target, v, frac);
+    pane.place = ReadingPlace.At { c: there.c, k: there.k, line: line };
+    pane.dirty = true;
+    // (A part still to be read, or a chapter still to come: shown, and
+    // gone to again as it comes.)
+    if (there.coming || there.waiting) return;
+    rp_arrived(pane)
+}
+
+rp_arrive_in_part(
+    pane: *ReaderPane,
+    c: int,
+    k: int,
+    y: int
+) {
+    s: int = rp_slot(pane, c, k);
+    if (s < 0) {
+        rp_want(pane, c, k);
+        return
+    }
+    // (Past its end: on into those after it that are here.)
+    rp_place_at_line(pane, rp_lines_on_within(pane, LineAt.Shown { slot: s, line: 0 },
+        (y + 50) / 100));
+    rp_arrived(pane)
+}
+
+// Where core said: there, and answered.
+rp_arrived(pane: *ReaderPane) {
+    pane.pending = PendingMove.Settled;
+    pane.answer_owed = true;
+    rp_moved(pane, PANE_MOVED_BY_APP)
+}
+
+// The part of chapter c holding verse v, as slot s's part says (its first
+// anchor of v; else the last before v; verse 0, the first part).
+rp_part_of_verse(pane: *ReaderPane, s: int, v: int): int {
+    borrow pane.parts[s] as part {
+        if (v <= 0) return 0;
+        k: int = 0;
+        for j in 0..len(part.anchor_verse) {
+            if (part.anchor_verse[j] == v) return part.anchor_part[j];
+            if (part.anchor_verse[j] < v) k = part.anchor_part[j]
+        }
+        k
+    }
+}
+
+// The line frac thousandths of the way through verse v's span in slot s's
+// part (from its anchor's line to the next's): its first anchor of v,
+// else the last before it (verse 0: the part's top).
+rp_verse_line(
+    pane: *ReaderPane,
+    s: int,
+    v: int,
+    frac: int
+): int {
+    rp_ensure_laid(pane, s);
+    borrow pane.parts[s] as part {
+        borrow pane.layouts[s] as lay {
+            if (v <= 0) return 0;
+            j: int = -1;
+            exact: bool = false;
+            for i in 0..len(part.verse_number) {
+                if (!exact && part.verse_number[i] == v) {
+                    j = i;
+                    exact = true
+                } else if (!exact && part.verse_number[i] < v) j = i
+            }
+            if (j < 0) return 0;
+            from: int = lay.anchor_line[j];
+            to: int = if (j + 1 < len(lay.anchor_line)) lay.anchor_line[j + 1] else lay.text_lines;
+            line: int = from + (if (exact && to > from) (to - from) * frac / 1000 else 0);
+            if (line >= lay.line_count) lay.line_count - 1 else line
+        }
+    }
+}
+
+// The pane's place moved (how: core's PANE_MOVED_BY_APP or PANE_DRAGGED):
+// a hand's first move told (`moving`), and its rest timed from now.
+rp_moved(pane: *ReaderPane, how: int) {
+    now: int = tm_now();
+    by_hand: bool = match pane.motion {
+        Resting -> false;
+        Moved m -> m.by_hand
+    };
+    if (how == PANE_DRAGGED && !by_hand) {
+        tc_str("moving ");
+        tc_int(pane.index);
+        tc_byte(32);
+        tc_int(now);
+        tc_end();
+        by_hand = true
+    }
+    pane.moved_how = how;
+    pane.motion = PaneMotion.Moved { at: now, by_hand: by_hand };
+    pane.dirty = true
+}
+
+// ---- moved by a hand ----
+// Down n lines (n < 0: up), as far as its parts here go (the document's
+// first line at its reading line at most, the rows above it blank).
+rp_scroll_by(pane: *ReaderPane, n: int) {
+    at: LineAt = rp_place_line(pane);
+    match at {
+        Shown _s -> { }
+        _ -> return
+    }
+    was: ReadingPlace = pane.place;
+    rp_place_at_line(pane, rp_lines_on_within(pane, at, n));
+    rp_hand_moved(pane, was)
+}
+
+// Moved by a hand from where it was (if it moved): where core said it is
+// to go given up.
+rp_hand_moved(pane: *ReaderPane, was: ReadingPlace) {
+    if (rp_same_place(was, pane.place)) return;
+    pane.pending = PendingMove.Settled;
+    rp_moved(pane, PANE_DRAGGED)
+}
+
+rp_same_place(a: ReadingPlace, b: ReadingPlace): bool {
+    match a {
+        Unplaced -> match b {
+            Unplaced -> true;
+            At _q -> false
+        }
+        At p -> match b {
+            Unplaced -> false;
+            At q -> p.c == q.c && p.k == q.k && p.line == q.line
+        }
+    }
+}
+
+// A page down (1) or up (-1): its rows less three.
+rp_page_by(pane: *ReaderPane, direction: int) {
+    page: int = pane.rows - 3;
+    rp_scroll_by(pane, direction * (if (page < 1) 1 else page))
+}
+
+// ---- telling core ----
+// Each pane's place as it moved (`at`), and its rest (`rest`). A pane not
+// drawn (the page under the panel filling the screen, the panel's reader
+// under another screen) still goes where core says.
+rp_report_panes() {
+    for p in 0..PANES rp_report(reader_pane(p))
+}
+
+rp_report(pane: *ReaderPane) {
+    if (pane.text_width == 0) return;
+    if (!pane.shown) rp_settle(pane);
+    match pane.pending {
+        Settled -> { }
+        _ -> return
+    }
+    match pane.place {
+        At p -> {
+            s: int = rp_slot(pane, p.c, p.k);
+            if (s >= 0 && (pane.answer_owed || !rp_same_place(pane.told, pane.place))) {
+                rp_ensure_laid(pane, s);
+                tc_str("at ");
+                tc_int(pane.index);
+                tc_byte(32);
+                tc_int(p.c);
+                tc_byte(32);
+                tc_int(p.k);
+                tc_byte(32);
+                tc_int(p.line * 100);
+                tc_byte(32);
+                tc_int(pane.moved_how);
+                tc_end();
+                pane.told = pane.place;
+                pane.answer_owed = false
+            }
+        }
+        Unplaced -> { }
+    }
+    match pane.motion {
+        Moved m -> {
+            now: int = tm_now();
+            if (now - m.at >= RP_REST_MS) {
+                tc_str("rest ");
+                tc_int(pane.index);
+                tc_byte(32);
+                tc_int(rp_ends_in_sight(pane));
+                tc_byte(32);
+                tc_int(now);
+                tc_end();
+                pane.motion = PaneMotion.Resting
+            }
+        }
+        Resting -> { }
+    }
+}
+
+// How long until a pane is due to rest (ms; RP_REST_MS at most).
+rp_rest_wait(): int {
+    wait: int = RP_REST_MS;
+    now: int = tm_now();
+    for p in 0..PANES {
+        match reader_pane(p).motion {
+            Moved m -> {
+                left: int = m.at + RP_REST_MS - now;
+                if (left < wait) wait = left
+            }
+            Resting -> { }
+        }
+    }
+    if (wait < 0) 0 else wait
+}
+
+// The last chapter whose end is on the pane's rows (-1: none).
+rp_ends_in_sight(pane: *ReaderPane): int {
+    hi: int = -1;
+    at: LineAt = rp_row_line(pane, 0);
+    for _r in 0..pane.rows {
+        match at {
+            Shown a -> {
+                info: SlotPart = rp_slot_part(pane, a.slot);
+                if (info.ends_chapter && a.line + 1 == rp_text_lines(pane, a.slot)) {
+                    last: int = if (info.gap_to >= 0) info.gap_to else info.c;
+                    if (last > hi) hi = last
+                }
+            }
+            _ -> { }
+        }
+        at = rp_line_after(pane, at)
+    }
+    hi
+}
+
+// `view P HEIGHT EM`: its rows in sight, as they change.
+rp_tell_view(pane: *ReaderPane) {
+    if (pane.rows == pane.told_rows) return;
+    pane.told_rows = pane.rows;
+    tc_str("view ");
+    tc_int(pane.index);
+    tc_byte(32);
+    tc_int(pane.rows * 100);
+    tc_str(" 100");
+    tc_end()
+}
+
+// The parts near the place asked for: those a screen and its rows above
+// it and two screens below it, and those to be asked for again among them;
+// each kept from being let go.
+rp_want_near(pane: *ReaderPane) {
+    if (pane.text_width == 0) return;
+    match pane.place {
+        Unplaced -> { }
+        At p -> rp_want_around(pane, p.c, p.k, p.line)
+    }
+}
+
+rp_want_around(
+    pane: *ReaderPane,
+    c: int,
+    k: int,
+    line: int
+) {
+    s: int = rp_slot(pane, c, k);
+    if (s < 0) {
+        rp_want(pane, c, k);
+        return
+    }
+    reading: int = rp_reading_row(pane);
+    rp_touch(pane, s);
+    rp_want_if_stale(pane, s);
+    // (Below.)
+    slot: int = s;
+    lines: int = rp_height(pane, s) - line;
+    going: bool = true;
+    for _i in 0..RP_WANT_PARTS {
+        if (going && lines < pane.rows - reading + 2 * pane.rows) {
+            match rp_step_after(pane, slot) {
+                Found f -> {
+                    slot = f.slot;
+                    rp_touch(pane, slot);
+                    rp_want_if_stale(pane, slot);
+                    lines = lines + rp_height(pane, slot)
+                }
+                Wanted w -> {
+                    rp_want(pane, w.c, w.k);
+                    going = false
+                }
+                Edge -> going = false
+            }
+        }
+    }
+    // (Above.)
+    slot = s;
+    lines = line;
+    going = true;
+    for _i in 0..RP_WANT_PARTS {
+        if (going && lines < reading + pane.rows) {
+            match rp_step_before(pane, slot) {
+                Found f -> {
+                    slot = f.slot;
+                    rp_touch(pane, slot);
+                    rp_want_if_stale(pane, slot);
+                    lines = lines + rp_height(pane, slot)
+                }
+                Wanted w -> {
+                    rp_want(pane, w.c, w.k);
+                    going = false
+                }
+                Edge -> going = false
+            }
+        }
+    }
+}
+
+// ---- laid out again ----
+// The pane's column now text_width wide: its parts laid out again for it
+// as they are drawn (and measured again), its place kept at the same
+// anchor, as many lines past it as it was.
+rp_set_text_width(pane: *ReaderPane, text_width: int) {
+    if (text_width == pane.text_width) return;
+    if (pane.text_width == 0) {
+        pane.text_width = text_width;
+        return
+    }
+    rp_lay_out_again(pane, text_width)
+}
+
+rp_lay_out_again(pane: *ReaderPane, text_width: int) {
+    s: int = rp_place_slot(pane);
+    was_line: int = match pane.place {
+        At p -> p.line;
+        Unplaced -> 0
+    };
+    anchor: int = -1;
+    past: int = was_line;
+    if (s >= 0 && pane.layouts[s] != null) {
+        borrow pane.layouts[s] as lay {
+            for j in 0..len(lay.anchor_line)
+                if (lay.anchor_line[j] <= was_line) anchor = j;
+            if (anchor >= 0) past = was_line - lay.anchor_line[anchor]
+        }
+    }
+    for t in 0..RP_WINDOW {
+        drop pane.layouts[t]
+    }
+    pane.text_width = text_width;
+    pane.dirty = true;
+    if (s < 0) return;
+    h: int = rp_height(pane, s);
+    line: int = past;
+    if (anchor >= 0) {
+        borrow pane.layouts[s] as lay {
+            line = lay.anchor_line[anchor] + past
+        }
+    }
+    info: SlotPart = rp_slot_part(pane, s);
+    pane.place = ReadingPlace.At { c: info.c, k: info.k, line: if (line >= h) h - 1 else line };
+    rp_moved(pane, PANE_MOVED_BY_APP)
+}
+
+// Every pane's parts laid out again (the look's spacing changed).
+rp_lay_out_all_again() {
+    for p in 0..PANES {
+        pane: *ReaderPane = reader_pane(p);
+        if (pane.text_width > 0) rp_lay_out_again(pane, pane.text_width)
+    }
+}
+
+// ---- drawing ----
+// Every pane not drawn yet this frame.
+rp_frame_begin() {
+    for p in 0..PANES {
+        pane: *ReaderPane = reader_pane(p);
+        pane.shown = false;
+        pane.dirty = false
+    }
+}
+
+rp_any_dirty(): bool {
+    for p in 0..PANES
+        if (reader_pane(p).dirty) return true;
+    false
+}
+
+// The selection (its chapter, -1 none; its verses), the verse heard: the
+// page's, as core says them.
 sel_c: int = -1;
 
 sel_v: []bool = new bool[256](false);
@@ -657,120 +1548,132 @@ heard_c: int = -1;
 
 heard_v: int = 0;
 
-cur_c: int = -1;
-
-cur_v: int = 0;
-
-cur_link_c: int = -1;
-
-cur_link: int = -1;
-
-// ---- drawing ----
-// Where each row drawn is: its chapter (-1 a gap), its line.
-row_c: []int = new int[512](-1);
-
-row_l: []int = new int[512](0);
-
-// The reader's column: rows r0 to r1, columns x0 to x0 + w; the text's
-// width in it, centered.
-rd_x0: int = 0;
-
-rd_tx: int = 0;
-
-rd_r0: int = 1;
-
-rd_draw(
+// The pane drawn on rows r0 to r1, columns x0 to x0 + w, on background:
+// its words' column centered in them (as wide as core's margins allow).
+// Where core said it is to go gone to, the parts near it asked for.
+rp_draw(
+    pane: *ReaderPane,
     r0: int,
     r1: int,
     x0: int,
-    w: int
+    w: int,
+    background: int
 ) {
+    rows: int = r1 - r0;
+    if (rows < 1) return;
     tw: int = w - 4;
     most: int = if (lk_margin <= 20) 84 else if (lk_margin <= 28) 72 else 60;
     if (tw > most) tw = most;
     if (tw < 20) tw = w;
-    if (tw != rd_width) {
-        rd_width = tw;
-        // (Laid out again for it, the place kept by its verse.)
-        s: int = rd_slot(rd_topc);
-        v: int = if (s >= 0 && rd_l < rs_lines[s]) rs_lv[s][rd_l] else 0;
-        if (v > 0) {
-            rd_jump_c = rd_topc;
-            rd_jump_v = v;
-            rd_finish_jump()
+    rp_set_text_width(pane, tw);
+    pane.r0 = r0;
+    pane.rows = rows;
+    pane.text_x = x0 + (w - tw) / 2;
+    pane.background = background;
+    pane.shown = true;
+    rp_settle(pane);
+    rp_want_near(pane);
+    rp_tell_view(pane);
+    reading: int = rp_reading_row(pane);
+    // (From the reading row down, then up from it: a part not here yet
+    // as dots where it begins.)
+    at: LineAt = rp_place_line(pane);
+    dotted: bool = false;
+    for r in reading..rows {
+        dotted = rp_draw_row(pane, r0 + r, at, dotted);
+        at = rp_line_after(pane, at)
+    }
+    at = rp_place_line(pane);
+    dotted = false;
+    for i in 0..reading {
+        at = rp_line_before(pane, at);
+        dotted = rp_draw_row(pane, r0 + reading - 1 - i, at, dotted)
+    }
+    pane.dirty = false
+}
+
+// A row of the pane: a line of a part, or dots for one not here (the
+// first row of those): whether dots are drawn now.
+rp_draw_row(
+    pane: *ReaderPane,
+    row: int,
+    at: LineAt,
+    dotted: bool
+): bool {
+    match at {
+        Shown a -> {
+            rp_draw_line(pane, row, a.slot, a.line);
+            dotted
+        }
+        Missing _m -> {
+            if (!dotted) _w: int = tm_text(row, pane.text_x + pane.text_width / 2 - 1,
+                "\Â\·\Â\·\Â\·", lk_faint, pane.background, 0);
+            true
+        }
+        Beyond -> dotted
+    }
+}
+
+rp_draw_line(
+    pane: *ReaderPane,
+    row: int,
+    s: int,
+    line: int
+) {
+    rp_ensure_laid(pane, s);
+    cursor_c: int = -1;
+    cursor_v: int = 0;
+    link_c: int = -1;
+    link_k: int = -1;
+    focused_link: int = -1;
+    match pane.keys {
+        OnVerse o -> {
+            cursor_c = o.c;
+            cursor_v = rp_anchor_verse(pane, o.c, o.k, o.anchor)
+        }
+        OnLink l -> {
+            link_c = l.c;
+            link_k = l.k;
+            focused_link = l.link
+        }
+        NoKeys -> { }
+    }
+    borrow pane.parts[s] as part {
+        borrow pane.layouts[s] as lay {
+            x: int = pane.text_x + lay.line_x[line];
+            for j in lay.line_from[line]..lay.line_to[line] {
+                a: int = lay.cell_attr[j];
+                st: int = ra_style(a);
+                bg: int = rp_wash(pane, part, ra_verse(a), cursor_c, cursor_v);
+                attr: int = rd_attr(st);
+                lk: int = ra_link(a);
+                if (lk >= 0 && part.c == link_c && part.k == link_k && lk == focused_link) attr = attr | TA_REVERSE;
+                x = x + tm_put(row, x, lay.cell_cp[j], rd_fg(st), bg, attr)
+            }
         }
     }
-    tx: int = x0 + (w - tw) / 2;
-    rd_x0 = x0;
-    rd_tx = tx;
-    rd_r0 = r0;
-    c: int = rd_topc;
-    l: int = rd_l;
-    rd_want(c);
-    rd_want(c - 1);
-    for r in r0..r1 {
-        i: int = r - r0;
-        if (c < rd_chapters) {
-            n: int = rd_lines_of(c);
-            if (l >= n) {
-                // (The line between chapters.)
-                if (i < len(row_c)) row_c[i] = -1;
-                c = c + 1;
-                l = 0;
-                rd_want(c)
-            } else {
-                if (i < len(row_c)) {
-                    row_c[i] = c;
-                    row_l[i] = l
-                }
-                rd_draw_line(r, tx, c, l);
-                l = l + 1
-            }
-        } else if (i < len(row_c)) row_c[i] = -1
-    }
-    rd_last_c = c;
-    rd_want(c + 1);
-    rd_want(c + 2);
-    rd_dirty = false
 }
 
-rd_draw_line(
-    r: int,
-    tx: int,
-    c: int,
-    l: int
-) {
-    s: int = rd_slot(c);
-    if (s < 0) {
-        if (l == 1) _w: int = tm_text(r, tx + rd_width / 2 - 1, "\Â\·\Â\·\Â\·", lk_faint,
-            lk_bg, 0);
-        return
+// A verse's background, on the page: the selection, the keys' cursor, the
+// verse heard, its highlight.
+rp_wash(
+    pane: *ReaderPane,
+    part: *ReaderPart,
+    v: int,
+    cursor_c: int,
+    cursor_v: int
+): int {
+    bg: int = pane.background;
+    if (v <= 0 || pane.index != PANE_PAGE) return bg;
+    c: int = part.c;
+    if (c == sel_c && v < len(sel_v) && sel_v[v]) return tm_mix(lk_accent, bg, if (lk_dark) 300 else 200);
+    if (c == cursor_c && v == cursor_v) return tm_mix(lk_ink, bg, 90);
+    if (c == heard_c && v == heard_v) return tm_mix(lk_accent, bg, 140);
+    for i in 0..len(part.mark_verse) {
+        if (part.mark_verse[i] == v && part.mark_color[i] >= 0) return tm_mix(part.mark_color[i],
+            bg, if (lk_dark) 320 else 400)
     }
-    cp: []int = rs_cp[s];
-    at: []int = rs_at[s];
-    x: int = tx + rs_lx[s][l];
-    for j in rs_l0[s][l]..rs_l1[s][l] {
-        a: int = at[j];
-        st: int = ra_style(a);
-        v: int = ra_verse(a);
-        fg: int = rd_fg(st);
-        bg: int = rd_wash(s, c, v);
-        attr: int = rd_attr(st);
-        lk: int = ra_link(a);
-        if (lk >= 0 && c == cur_link_c && lk == cur_link) attr = attr | TA_REVERSE;
-        x = x + tm_put(r, x, cp[j], fg, bg, attr)
-    }
-}
-
-// A verse's background: the selection, the verse heard, its highlight.
-rd_wash(s: int, c: int, v: int): int {
-    if (v <= 0 || v >= 256) return lk_bg;
-    if (c == sel_c && sel_v[v]) return tm_mix(lk_accent, lk_bg, if (lk_dark) 300 else 200);
-    if (c == cur_c && v == cur_v) return tm_mix(lk_ink, lk_bg, 90);
-    if (c == heard_c && v == heard_v) return tm_mix(lk_accent, lk_bg, 140);
-    m: int = rs_mark[s][v];
-    if (m >= 0) return tm_mix(m, lk_bg, if (lk_dark) 320 else 400);
-    lk_bg
+    bg
 }
 
 // A style's color (core's STYLE_, then core's own RUN_).
@@ -790,82 +1693,103 @@ rd_attr(st: int): int {
 }
 
 // ---- where a click falls ----
-// The chapter and cell at screen row r, column x (rd_hit_c, rd_hit_cell;
-// -1 none).
-rd_hit_c: int = -1;
-
-rd_hit_s: int = -1;
-
-rd_hit_cell: int = -1;
-
-rd_hit(r: int, x: int): bool {
-    rd_hit_c = -1;
-    rd_hit_cell = -1;
-    i: int = r - rd_r0;
-    if (i < 0 || i >= len(row_c) || row_c[i] < 0) return false;
-    c: int = row_c[i];
-    l: int = row_l[i];
-    s: int = rd_slot(c);
-    if (s < 0 || l >= rs_lines[s]) return false;
-    rd_hit_c = c;
-    rd_hit_s = s;
-    cx: int = rd_tx + rs_lx[s][l];
-    best: int = -1;
-    for j in rs_l0[s][l]..rs_l1[s][l] {
-        cw: int = tm_width(rs_cp[s][j]);
-        if (x >= cx && x < cx + cw) best = j;
-        cx = cx + cw
-    }
-    rd_hit_cell = best;
-    best >= 0
+// The cell at a row and column of a pane: its slot and cell (slot -1:
+// none).
+type CellHit = {
+    slot: int;
+    cell: int
 }
 
-// A click at r, x: a link's (a footnote, a reference, a word of the
-// original, the ESV's line), else a verse's (selected, or let go), else
-// elsewhere.
-rd_click(r: int, x: int) {
-    if (!rd_hit(r, x)) {
-        tc_str("tapnone");
-        tc_end();
+rp_hit(pane: *ReaderPane, row: int, x: int): CellHit {
+    none: CellHit = CellHit { slot: -1, cell: -1 };
+    if (!pane.shown || row < pane.r0 || row >= pane.r0 + pane.rows) return none;
+    match rp_row_line(pane, row - pane.r0) {
+        Shown a -> {
+            borrow pane.layouts[a.slot] as lay {
+                cx: int = pane.text_x + lay.line_x[a.line];
+                for j in lay.line_from[a.line]..lay.line_to[a.line] {
+                    cw: int = tm_width(lay.cell_cp[j]);
+                    if (x >= cx && x < cx + cw) return CellHit { slot: a.slot, cell: j };
+                    cx = cx + cw
+                }
+            }
+            none
+        }
+        _ -> none
+    }
+}
+
+// A click at a row and column of a pane: a link's (a footnote, a
+// reference, a word of the original, the ESV's line), else, on the page, a
+// verse's (selected, or let go), else elsewhere.
+rp_click(pane: *ReaderPane, row: int, x: int) {
+    page: bool = pane.index == PANE_PAGE;
+    hit: CellHit = rp_hit(pane, row, x);
+    if (hit.slot < 0) {
+        if (page) rp_tap_none();
         return
     }
-    s: int = rd_hit_s;
-    a: int = rs_at[s][rd_hit_cell];
-    lk: int = ra_link(a);
-    // (A footnote's mark is small: the cell before it counts too.)
-    if (lk < 0 && rd_hit_cell + 1 < rs_cells[s]) {
-        b2: int = rs_at[s][rd_hit_cell + 1];
-        if (ra_link(b2) >= 0 && rs_lk_kind[s][ra_link(b2)] == 0) lk = ra_link(b2)
+    link: int = -1;
+    v: int = 0;
+    borrow pane.parts[hit.slot] as part {
+        borrow pane.layouts[hit.slot] as lay {
+            a: int = lay.cell_attr[hit.cell];
+            link = ra_link(a);
+            v = ra_verse(a);
+            // (A footnote's mark is small: the cell before it counts too.)
+            if (link < 0 && hit.cell + 1 < lay.cell_count) {
+                after: int = ra_link(lay.cell_attr[hit.cell + 1]);
+                if (after >= 0 && part.link_kind[after] == LINK_FOOTNOTE) link = after
+            }
+        }
     }
-    if (lk >= 0) {
-        rd_open_link(rd_hit_c, s, lk);
+    info: SlotPart = rp_slot_part(pane, hit.slot);
+    if (link >= 0) {
+        rp_open_link(pane, info.c, info.k, link);
         return
     }
-    v: int = ra_verse(a);
+    if (!page) return;
     if (v > 0) {
         tc_str("tapverse ");
-        tc_int(rd_hit_c);
+        tc_int(info.c);
         tc_byte(32);
         tc_int(v);
         tc_end()
-    } else {
-        tc_str("tapnone");
-        tc_end()
-    }
+    } else rp_tap_none()
 }
 
-rd_open_link(c: int, s: int, lk: int) {
-    k: int = rs_lk_kind[s][lk];
-    arg: int = rs_lk_arg[s][lk];
-    if (k == 0) {
+rp_tap_none() {
+    tc_str("tapnone");
+    tc_end()
+}
+
+// Link `link` of part k of chapter c opened. A footnote and the ESV's line
+// are the page's alone (core reads them in the version the page reads).
+rp_open_link(
+    pane: *ReaderPane,
+    c: int,
+    k: int,
+    link: int
+) {
+    s: int = rp_slot(pane, c, k);
+    if (s < 0) return;
+    kind: int = 0;
+    arg: int = 0;
+    borrow pane.parts[s] as part {
+        if (link >= len(part.link_kind)) return;
+        kind = part.link_kind[link];
+        arg = part.link_arg[link]
+    }
+    if (pane.index != PANE_PAGE && (kind == LINK_FOOTNOTE || kind == LINK_ESV)) return;
+    if (kind == LINK_FOOTNOTE) {
         tc_str("footnote ");
         tc_int(c);
         tc_byte(32);
         tc_int(arg)
-    } else if (k == 2) {
+    } else if (kind == LINK_WORD) {
         tc_str("word ");
         tc_int(arg)
-    } else if (k == 3) {
+    } else if (kind == LINK_ESV) {
         tc_str("esvact ");
         tc_int(arg);
         tc_byte(32);
@@ -877,133 +1801,295 @@ rd_open_link(c: int, s: int, lk: int) {
     tc_end()
 }
 
-// ---- the keys' cursor: a verse, and the links on the screen ----
-// The cursor to the next (d 1) or previous (-1) verse, from the top's if
-// it is not on the screen.
-rd_cursor(d: int) {
-    // (The keys on verses now, not links.)
-    cur_link_c = -1;
-    cur_link = -1;
-    if (cur_c < 0 || !rd_on_screen(cur_c)) {
-        cur_c = rd_topc;
-        cur_v = (if (rd_top_v > 0) rd_top_v else 1);
-        if (d < 0) d = 0
+// ---- the keys: a verse, and the links in sight ----
+// Anchor `anchor` of part k of chapter c's verse (0: not here).
+rp_anchor_verse(
+    pane: *ReaderPane,
+    c: int,
+    k: int,
+    anchor: int
+): int {
+    s: int = rp_slot(pane, c, k);
+    if (s < 0) return 0;
+    borrow pane.parts[s] as part {
+        if (anchor < 0 || anchor >= len(part.verse_number)) 0 else part.verse_number[anchor]
     }
-    s: int = rd_slot(cur_c);
+}
+
+// An anchor's first line (Missing: its part isn't here).
+rp_anchor_at(
+    pane: *ReaderPane,
+    c: int,
+    k: int,
+    anchor: int
+): LineAt {
+    s: int = rp_slot(pane, c, k);
+    if (s < 0) return LineAt.Missing { c: c, k: k };
+    rp_ensure_laid(pane, s);
+    borrow pane.layouts[s] as lay {
+        if (anchor < 0 || anchor >= len(lay.anchor_line)) LineAt.Missing { c: c, k: k } else LineAt.Shown { slot: s, line: lay.anchor_line[anchor] }
+    }
+}
+
+// The row a line is on (-1: not on the pane's rows).
+rp_row_of(pane: *ReaderPane, s: int, line: int): int {
+    at: LineAt = rp_row_line(pane, 0);
+    for r in 0..pane.rows {
+        match at {
+            Shown a -> if (a.slot == s && a.line == line) return r;
+            _ -> { }
+        }
+        at = rp_line_after(pane, at)
+    }
+    -1
+}
+
+// The first verse beginning on the pane's rows.
+rp_first_verse_shown(pane: *ReaderPane): KeysOn {
+    at: LineAt = rp_row_line(pane, 0);
+    for _r in 0..pane.rows {
+        match at {
+            Shown a -> {
+                info: SlotPart = rp_slot_part(pane, a.slot);
+                borrow pane.layouts[a.slot] as lay {
+                    for j in 0..len(lay.anchor_line)
+                        if (lay.anchor_line[j] == a.line) return KeysOn.OnVerse { c: info.c, k: info.k, anchor: j }
+                }
+            }
+            _ -> { }
+        }
+        at = rp_line_after(pane, at)
+    }
+    KeysOn.NoKeys
+}
+
+// The keys' cursor to the next verse (d 1) or the one before (-1); from
+// the first in sight if it isn't in sight. Its verse brought into sight.
+rp_cursor(pane: *ReaderPane, d: int) {
+    from: KeysOn = pane.keys;
+    in_sight: bool = match from {
+        OnVerse o -> rp_anchor_row(pane, o.c, o.k, o.anchor) >= 0;
+        _ -> false
+    };
+    step: int = d;
+    if (!in_sight) {
+        from = rp_first_verse_shown(pane);
+        if (step < 0) step = 0
+    }
+    match from {
+        OnVerse o -> rp_cursor_from(pane, o.c, o.k, o.anchor, step);
+        _ -> { }
+    }
+    pane.dirty = true
+}
+
+// The row an anchor's first line is on (-1: not on the pane's rows).
+rp_anchor_row(
+    pane: *ReaderPane,
+    c: int,
+    k: int,
+    anchor: int
+): int {
+    match rp_anchor_at(pane, c, k, anchor) {
+        Shown a -> rp_row_of(pane, a.slot, a.line);
+        _ -> -1
+    }
+}
+
+rp_cursor_from(
+    pane: *ReaderPane,
+    c: int,
+    k: int,
+    anchor: int,
+    d: int
+) {
+    s: int = rp_slot(pane, c, k);
     if (s < 0) return;
-    nv: int = cur_v + d;
-    if (nv >= 1 && nv < 256 && rs_vline[s][nv] >= 0) cur_v = nv else if (d > 0 && cur_c + 1 < rd_chapters && rd_slot(cur_c + 1) >= 0) {
-        cur_c = cur_c + 1;
-        cur_v = 1
-    } else if (d < 0 && cur_v <= 1 && cur_c > 0 && rd_slot(cur_c - 1) >= 0) {
-        cur_c = cur_c - 1;
-        s2: int = rd_slot(cur_c);
-        last: int = 1;
-        for v in 1..256
-            if (rs_vline[s2][v] >= 0) last = v;
-        cur_v = last
+    to_c: int = c;
+    to_k: int = k;
+    to_anchor: int = anchor + d;
+    if (to_anchor < 0 || to_anchor >= rp_anchor_count(pane, s)) {
+        // (Into the part after or before it, past parts without anchors.)
+        slot: int = s;
+        to_anchor = -1;
+        going: bool = true;
+        for _i in 0..RP_WANT_PARTS {
+            if (going) {
+                step: PartStep = if (d > 0) rp_step_after(pane, slot) else rp_step_before(pane,
+                    slot);
+                match step {
+                    Found f -> {
+                        slot = f.slot;
+                        n: int = rp_anchor_count(pane, slot);
+                        if (n > 0) {
+                            info: SlotPart = rp_slot_part(pane, slot);
+                            to_c = info.c;
+                            to_k = info.k;
+                            to_anchor = (if (d > 0) 0 else n - 1);
+                            going = false
+                        }
+                    }
+                    _ -> going = false
+                }
+            }
+        }
+        if (to_anchor < 0) return
     }
-    rd_show_cursor();
-    rd_dirty = true
+    pane.keys = KeysOn.OnVerse { c: to_c, k: to_k, anchor: to_anchor };
+    rp_show_anchor(pane, to_c, to_k, to_anchor, d)
 }
 
-// The cursor's verse brought onto the screen.
-rd_show_cursor() {
-    s: int = rd_slot(cur_c);
-    if (s < 0 || cur_v <= 0 || cur_v >= 256) return;
-    if (rs_w[s] != rd_width) rd_lay(s);
-    vl: int = rs_vline[s][cur_v];
-    if (vl < 0) return;
-    // (Above the top: up to it; below the bottom: down till it shows.)
-    if (cur_c < rd_topc || cur_c == rd_topc && vl < rd_l) {
-        rd_topc = cur_c;
-        rd_l = vl;
-        rd_moved();
-        return
-    }
-    rows: int = rd_rows_shown;
-    guard: int = 0;
-    while (!rd_line_visible(cur_c, vl + 1, rows) && guard < 2000) {
-        rd_scroll_by(1);
-        guard = guard + 1
+rp_anchor_count(pane: *ReaderPane, s: int): int {
+    borrow pane.parts[s] as part {
+        len(part.verse_number)
     }
 }
 
-rd_rows_shown: int = 20;
-
-// Whether line l of chapter c is within rows of the top.
-rd_line_visible(c: int, l: int, rows: int): bool {
-    cc: int = rd_topc;
-    ll: int = rd_l;
-    k: int = 0;
-    while (k < rows) {
-        if (cc == c && ll >= l) return true;
-        if (cc > c) return true;
-        n: int = rd_lines_of(cc);
-        if (ll + 1 >= n + 1) {
-            cc = cc + 1;
-            ll = 0
-        } else ll = ll + 1;
-        k = k + 1
-    }
-    false
+// An anchor's line brought onto the pane's rows (by a hand): at its first
+// row going up (d < 0), its last going down.
+rp_show_anchor(
+    pane: *ReaderPane,
+    c: int,
+    k: int,
+    anchor: int,
+    d: int
+) {
+    if (rp_anchor_row(pane, c, k, anchor) >= 0) return;
+    at: LineAt = rp_anchor_at(pane, c, k, anchor);
+    reading: int = rp_reading_row(pane);
+    was: ReadingPlace = pane.place;
+    rp_place_at_line(pane, rp_lines_on_within(pane, at, if (d < 0) reading else reading - (pane.rows - 1)));
+    rp_hand_moved(pane, was)
 }
 
-// The next link on the screen (d 1) or the previous (-1), for the keys.
-rd_next_link(d: int) {
-    // The links shown, in order: (chapter, slot, link).
-    cs: int = -1;
-    found_c: int = -1;
-    found_l: int = -1;
-    take_next: bool = cur_link_c < 0;
-    prev_c: int = -1;
-    prev_l: int = -1;
-    for i in 0..rd_rows_shown {
-        if (i < len(row_c) && row_c[i] >= 0) {
-            c: int = row_c[i];
-            s: int = rd_slot(c);
-            l: int = row_l[i];
-            if (s >= 0 && l < rs_lines[s]) {
+// The keys' verse tapped (`tapverse`): whether they were on one.
+rp_tap_keys_verse(pane: *ReaderPane): bool {
+    match pane.keys {
+        OnVerse o -> {
+            tc_str("tapverse ");
+            tc_int(o.c);
+            tc_byte(32);
+            tc_int(rp_anchor_verse(pane, o.c, o.k, o.anchor));
+            tc_end();
+            true
+        }
+        _ -> false
+    }
+}
+
+// The link the keys are on opened: whether they were on one.
+rp_open_keys_link(pane: *ReaderPane): bool {
+    match pane.keys {
+        OnLink l -> {
+            rp_open_link(pane, l.c, l.k, l.link);
+            true
+        }
+        _ -> false
+    }
+}
+
+// The keys let go of what they are on: whether they were on something.
+rp_keys_clear(pane: *ReaderPane): bool {
+    on: bool = match pane.keys {
+        NoKeys -> false;
+        _ -> true
+    };
+    pane.keys = KeysOn.NoKeys;
+    pane.dirty = true;
+    on
+}
+
+// The keys off a link (a click elsewhere).
+rp_keys_off_link(pane: *ReaderPane) {
+    match pane.keys {
+        OnLink _l -> pane.keys = KeysOn.NoKeys;
+        _ -> { }
+    }
+}
+
+// The next link in sight (d 1) or the one before (-1), for the keys; the
+// first (or last) if they aren't on one.
+rp_next_link(pane: *ReaderPane, d: int) {
+    on_c: int = -1;
+    on_k: int = 0;
+    on_link: int = -1;
+    match pane.keys {
+        OnLink l -> {
+            on_c = l.c;
+            on_k = l.k;
+            on_link = l.link
+        }
+        _ -> { }
+    }
+    take_next: bool = on_c < 0;
+    found: KeysOn = KeysOn.NoKeys;
+    found_any: bool = false;
+    prev: KeysOn = KeysOn.NoKeys;
+    at: LineAt = rp_row_line(pane, 0);
+    for _r in 0..pane.rows {
+        match at {
+            Shown a -> {
+                info: SlotPart = rp_slot_part(pane, a.slot);
                 last: int = -1;
-                for j in rs_l0[s][l]..rs_l1[s][l] {
-                    lk: int = ra_link(rs_at[s][j]);
-                    if (lk >= 0 && lk != last) {
-                        last = lk;
-                        if (found_c < 0) {
+                borrow pane.layouts[a.slot] as lay {
+                    for j in lay.line_from[a.line]..lay.line_to[a.line] {
+                        lk: int = ra_link(lay.cell_attr[j]);
+                        if (lk >= 0 && lk != last && !found_any) {
+                            last = lk;
+                            here: KeysOn = KeysOn.OnLink { c: info.c, k: info.k, link: lk };
+                            on: bool = info.c == on_c && info.k == on_k && lk == on_link;
                             if (d > 0) {
                                 if (take_next) {
-                                    found_c = c;
-                                    found_l = lk
-                                } else if (c == cur_link_c && lk == cur_link) take_next = true
+                                    found = here;
+                                    found_any = true
+                                } else if (on) take_next = true
                             } else {
-                                if (c == cur_link_c && lk == cur_link && prev_c >= 0) {
-                                    found_c = prev_c;
-                                    found_l = prev_l
+                                if (on) {
+                                    found = prev;
+                                    found_any = true
                                 }
-                                prev_c = c;
-                                prev_l = lk
+                                prev = here
                             }
                         }
                     }
                 }
             }
+            _ -> { }
         }
+        at = rp_line_after(pane, at)
     }
-    _cs: int = cs;
-    if (d < 0 && found_c < 0 && cur_link_c < 0) {
-        found_c = prev_c;
-        found_l = prev_l
-    }
-    cur_link_c = found_c;
-    cur_link = found_l;
-    rd_dirty = true
+    if (d < 0 && !found_any && on_c < 0) found = prev;
+    pane.keys = found;
+    pane.dirty = true
 }
 
-// The link the keys are on, opened.
-rd_open_cur_link(): bool {
-    if (cur_link_c < 0) return false;
-    s: int = rd_slot(cur_link_c);
-    if (s < 0 || cur_link >= rs_links[s]) return false;
-    rd_open_link(cur_link_c, s, cur_link);
-    true
+// ---- moved by the app ----
+// Listen's verse followed (`follow C V`): the page to it if it isn't on
+// its rows (above the last two).
+rp_follow(pane: *ReaderPane, c: int, v: int) {
+    at: LineAt = rp_row_line(pane, 0);
+    for _r in 0..pane.rows - 2 {
+        match at {
+            Shown a -> {
+                if (rp_slot_part(pane, a.slot).c == c && rp_line_has_verse(pane, a.slot,
+                    a.line, v)) return
+            }
+            _ -> { }
+        }
+        at = rp_line_after(pane, at)
+    }
+    rp_jump(pane, c, v, 0)
+}
+
+rp_line_has_verse(
+    pane: *ReaderPane,
+    s: int,
+    line: int,
+    v: int
+): bool {
+    borrow pane.layouts[s] as lay {
+        for j in lay.line_from[line]..lay.line_to[line]
+            if (ra_verse(lay.cell_attr[j]) == v) return true;
+        false
+    }
 }
