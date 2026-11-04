@@ -1,0 +1,1334 @@
+tag bible_ios;
+
+use_tag std, ios, bible, bible_wire;
+
+// The two panes (SKINS.md, Panes; core/panes.l8): the page (PANE_PAGE, the
+// reader's table) and the panel's reader (PANE_PANEL, the table of core's
+// screen that says `reader`), read the same way. Each is a window of its
+// document's parts, asked of core as they come near (`want P C K`), each a
+// text view of its own, one after another in a view that is its table's
+// header (the table has no rows). A part comes into the window measured:
+// its height, and where each of its anchors (its `verse` lines) begins,
+// told to core (`measured`), so that where anything shown is is known,
+// never estimated, and never changes while it is there. Parts come into the
+// window ahead of the screen at either end, those far behind it go, and one
+// coming in above the screen moves the table's offset by its height at
+// once, so that nothing on the screen moves.
+//
+// Where each is read is its reading line (core's `line`), told to core in
+// places (`at P C I FRAC`: a chapter, an anchor, how far through its span)
+// as its anchor changes and at rest, with a finger on it (`moving`) and its
+// rests (`rest`). Core says where a jump takes either (`go`) and which of
+// the page's anchors go with which of the panel's (`link`): linked, the
+// pane a finger last moved leads, and the other is moved here each frame by
+// core/follow.l8's rules.
+import "../../ios/objc.l8";
+
+// ---- the panes' tables ----
+// Each pane's table (0: none yet), the view that is its header, and the
+// width its parts were measured at.
+win_table: []int = new int[PANES](0);
+
+win_box: []int = new int[PANES](0);
+
+win_width: []f64 = new f64[PANES](0.0f64);
+
+// Each pane's reading line, the fraction of the way down what of it is in
+// sight (core's `line`).
+win_line: []f64 = [0.333f64, 0.0f64];
+
+// Scrolls of its own under way (a jump's, the window's, core's): told as
+// moved by the app.
+win_self: []int = new int[PANES](0);
+
+// The pane of table t (-1: neither).
+win_pane_of(t: int): int {
+    if (t == 0) return -1;
+    for p in 0..PANES
+        if (win_table[p] == t) return p;
+    -1
+}
+
+is_panel_reader(t: int): bool {
+    t != 0 && t == win_table[PANE_PANEL]
+}
+
+// Table t made pane p's: rows none, its header the window's view.
+win_attach(p: int, t: int) {
+    if (win_table[p] != 0 && win_table[p] != t) win_detach(p, win_table[p]);
+    // (Its place carried to its new table (another screen's, as what the
+    // panel reads changes), unless a `go` waits already.)
+    if (win_go_c[p] < 0 && win_said_c[p] >= 0) {
+        win_go_c[p] = win_said_c[p];
+        win_go_i[p] = win_said_i[p];
+        win_go_f[p] = 0;
+        win_go_mode[p] = PANE_GO_AT_ONCE
+    }
+    win_table[p] = t;
+    win_said_c[p] = -1;
+    msg1(t, sel("setSeparatorStyle:"), 0);
+    msg1(t, sel("setAllowsSelection:"), 0);
+    msg1(t, sel("setBackgroundColor:"), c_bg);
+    if (win_box[p] == 0) {
+        win_box[p] = msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+            0.0f64, 0.0f64, view_width(t), 1.0f64);
+        msg1(win_box[p], sel("setBackgroundColor:"), msg(cls("UIColor"), sel("clearColor")))
+    }
+    win_clear(p);
+    msg(t, sel("reloadData"))
+}
+
+// Table t let go (its screen gone): the window emptied.
+win_detach(p: int, t: int) {
+    if (t != win_table[p] || t == 0) return;
+    win_clear(p);
+    win_table[p] = 0
+}
+
+// The text's side margins in a pane's width: the setting's, or wider, a
+// column of 34 em centred. (The page's within its safe area.)
+win_margin(p: int): f64 {
+    t: int = win_table[p];
+    l8_msg_hfa(hfa, t, sel("bounds"), 0, 0, 0);
+    w: f64 = hfa[2];
+    l8_msg_hfa(hfa, t, sel("safeAreaInsets"), 0, 0, 0);
+    w = w - hfa[1] - hfa[3];
+    m: f64 = margin_for(w);
+    cw: f64 = column_width(w, m);
+    if (cw < w - 2.0f64 * m) m = (w - cw) / 2.0f64;
+    m
+}
+
+// ---- what core said of each chapter ----
+// How many parts each chapter has, in each pane, as core last said (1
+// until it has; 0, a commentary still opening).
+WIN_CHAPTERS_MOST: int = 2048;
+
+win_parts: []int = new int[PANES * WIN_CHAPTERS_MOST](1);
+
+win_part_count(p: int, c: int): int {
+    if (c < 0 || c >= WIN_CHAPTERS_MOST) 1 else win_parts[p * WIN_CHAPTERS_MOST + c]
+}
+
+// The chapters a commentary has no comment on, in runs (core's `gap C0
+// C1`): each one's run's first and last (-1: not one, or not known yet).
+// A run is one part, chapter C0's.
+win_gap_first: []int = new int[PANES * WIN_CHAPTERS_MOST](-1);
+
+win_gap_last: []int = new int[PANES * WIN_CHAPTERS_MOST](-1);
+
+win_gap_noted(p: int, from: int, to: int) {
+    for c in from..to + 1 {
+        if (c >= 0 && c < WIN_CHAPTERS_MOST) {
+            win_gap_first[p * WIN_CHAPTERS_MOST + c] = from;
+            win_gap_last[p * WIN_CHAPTERS_MOST + c] = to
+        }
+    }
+}
+
+// The chapter whose part holds chapter c's place (a run's first, in one;
+// its first part asked for if that isn't known), and the last it stands
+// for.
+win_row_chapter(p: int, c: int): int {
+    if (c < 0 || c >= WIN_CHAPTERS_MOST) return c;
+    if (win_gap_first[p * WIN_CHAPTERS_MOST + c] < 0 && !win_known(p, c)) _first: int = rs_need(rs_key(p,
+        c, 0));
+    if (win_gap_first[p * WIN_CHAPTERS_MOST + c] >= 0) win_gap_first[p * WIN_CHAPTERS_MOST + c] else c
+}
+
+win_row_last(p: int, c: int): int {
+    if (c < 0 || c >= WIN_CHAPTERS_MOST || win_gap_first[p * WIN_CHAPTERS_MOST + c] < 0) c else win_gap_last[p * WIN_CHAPTERS_MOST + c]
+}
+
+// Pane p's chapters' parts let go: chapter c's (-1: every chapter's, and
+// what core said of them).
+win_forget_parts(p: int, c: int) {
+    if (c < 0) {
+        for x in 0..WIN_CHAPTERS_MOST {
+            win_parts[p * WIN_CHAPTERS_MOST + x] = 1;
+            win_gap_first[p * WIN_CHAPTERS_MOST + x] = -1;
+            win_gap_last[p * WIN_CHAPTERS_MOST + x] = -1
+        }
+        for k in 0..WIN_ANCHORED_MOST win_an_c[p * WIN_ANCHORED_MOST + k] = -1
+    }
+    for s in 0..RS_SLOTS {
+        if (rs_c[s] >= 0 && part_key_pane(rs_c[s]) == p && (c < 0 || part_key_chapter(rs_c[s]) == c)) {
+            rs_c[s] = -1;
+            rs_text[s] = held(rs_text[s], 0)
+        }
+    }
+}
+
+// ---- a chapter's anchors ----
+// Every anchor of a few chapters of each pane, as core says them with each
+// part (`anchor V K`): its verse and the part it is in, in order. A jump
+// to a verse finds its part by them.
+WIN_ANCHORED_MOST: int = 8;
+
+WIN_ANCHORS_MOST: int = 2048;
+
+win_an_c: []int = new int[PANES * WIN_ANCHORED_MOST](-1);
+
+win_an_n: []int = new int[PANES * WIN_ANCHORED_MOST](0);
+
+win_an_used: []int = new int[PANES * WIN_ANCHORED_MOST](0);
+
+win_an_verse: []int = new int[PANES * WIN_ANCHORED_MOST * WIN_ANCHORS_MOST](0);
+
+win_an_part: []int = new int[PANES * WIN_ANCHORED_MOST * WIN_ANCHORS_MOST](0);
+
+win_an_clock: int = 0;
+
+// Chapter c's anchors' place in pane p's (-1: not known).
+win_anchored(p: int, c: int): int {
+    for k in p * WIN_ANCHORED_MOST..(p + 1) * WIN_ANCHORED_MOST {
+        if (win_an_c[k] == c) {
+            win_an_clock = win_an_clock + 1;
+            win_an_used[k] = win_an_clock;
+            return k
+        }
+    }
+    -1
+}
+
+win_known(p: int, c: int): bool {
+    win_anchored(p, c) >= 0
+}
+
+// Chapter c's anchors begun again (none yet), in its place or the one used
+// longest ago.
+win_anchors_begin(p: int, c: int) {
+    at: int = win_anchored(p, c);
+    if (at < 0) {
+        at = p * WIN_ANCHORED_MOST;
+        for k in p * WIN_ANCHORED_MOST..(p + 1) * WIN_ANCHORED_MOST
+            if (win_an_used[k] < win_an_used[at]) at = k
+    }
+    win_an_c[at] = c;
+    win_an_n[at] = 0;
+    win_an_clock = win_an_clock + 1;
+    win_an_used[at] = win_an_clock
+}
+
+win_anchor_add(
+    p: int,
+    c: int,
+    verse: int,
+    part: int
+) {
+    at: int = win_anchored(p, c);
+    if (at < 0 || win_an_n[at] >= WIN_ANCHORS_MOST) return;
+    k: int = at * WIN_ANCHORS_MOST + win_an_n[at];
+    win_an_verse[k] = verse;
+    win_an_part[k] = part;
+    win_an_n[at] = win_an_n[at] + 1
+}
+
+// The part of chapter c holding verse v's first anchor (0: none known).
+win_part_of_verse(p: int, c: int, v: int): int {
+    win_anchor_part(p, c, win_anchor_of_verse(p, c, v))
+}
+
+// Anchor i of chapter c's verse (0: none, the chapter's top).
+win_anchor_verse(p: int, c: int, i: int): int {
+    at: int = win_anchored(p, c);
+    if (at < 0 || i < 0 || i >= win_an_n[at]) 0 else win_an_verse[at * WIN_ANCHORS_MOST + i]
+}
+
+// Chapter c's first anchor of verse v (-1: none known).
+win_anchor_of_verse(p: int, c: int, v: int): int {
+    at: int = win_anchored(p, c);
+    if (at < 0 || v <= 0) return -1;
+    for i in 0..win_an_n[at]
+        if (win_an_verse[at * WIN_ANCHORS_MOST + i] == v) return i;
+    -1
+}
+
+// The part anchor i of chapter c is in (0: none known).
+win_anchor_part(p: int, c: int, i: int): int {
+    at: int = win_anchored(p, c);
+    if (at < 0 || i < 0 || i >= win_an_n[at]) 0 else win_an_part[at * WIN_ANCHORS_MOST + i]
+}
+
+// How many anchors chapter c has (0: not known).
+win_anchor_count(p: int, c: int): int {
+    at: int = win_anchored(p, c);
+    if (at < 0) 0 else win_an_n[at]
+}
+
+// The index of chapter c's first anchor in part k (its anchors are in
+// their parts' order).
+win_first_anchor(p: int, c: int, k: int): int {
+    at: int = win_anchored(p, c);
+    if (at < 0) return 0;
+    i: int = 0;
+    while (i < win_an_n[at] && win_an_part[at * WIN_ANCHORS_MOST + i] < k) i = i + 1;
+    i
+}
+
+// Part k of chapter c kept, its chapter in n parts (0: not known yet).
+win_part_stored(p: int, c: int, n: int) {
+    if (c >= 0 && c < WIN_CHAPTERS_MOST && n > 0) win_parts[p * WIN_CHAPTERS_MOST + c] = n
+}
+
+// ---- the window ----
+// The parts shown, in order, at most WIN_MOST a pane: each one's chapter
+// and part, its text view (kept), where it begins down the window's view
+// and how tall it is, the last chapter it stands for (a run's), and where
+// each of its anchors begins (down from its own top).
+WIN_MOST: int = 48;
+
+WIN_VERSES_MOST: int = 200;
+
+win_n: []int = new int[PANES](0);
+
+win_c: []int = new int[PANES * WIN_MOST](-1);
+
+win_k: []int = new int[PANES * WIN_MOST](0);
+
+win_view: []int = new int[PANES * WIN_MOST](0);
+
+win_y: []f64 = new f64[PANES * WIN_MOST](0.0f64);
+
+win_h: []f64 = new f64[PANES * WIN_MOST](0.0f64);
+
+win_last: []int = new int[PANES * WIN_MOST](-1);
+
+win_vn: []int = new int[PANES * WIN_MOST](0);
+
+win_vy: []f64 = new f64[PANES * WIN_MOST * WIN_VERSES_MOST](0.0f64);
+
+// Row i of pane p's window, as an index of the arrays above.
+wr(p: int, i: int): int {
+    p * WIN_MOST + i
+}
+
+// How tall the window is.
+win_height(p: int): f64 {
+    n: int = win_n[p];
+    if (n == 0) 0.0f64 else win_y[wr(p, n - 1)] + win_h[wr(p, n - 1)]
+}
+
+// The window's view as tall as its parts (the table told again: its
+// header's height is its content's).
+win_box_fit(p: int) {
+    msg_rect(win_box[p], sel("setFrame:"), 0.0f64, 0.0f64, win_width[p], if (win_n[p] == 0) 1.0f64 else win_height(p));
+    msg1(win_table[p], sel("setTableHeaderView:"), win_box[p])
+}
+
+win_clear(p: int) {
+    for i in 0..win_n[p] {
+        msg(win_view[wr(p, i)], sel("removeFromSuperview"));
+        release(win_view[wr(p, i)]);
+        win_view[wr(p, i)] = 0
+    }
+    win_n[p] = 0;
+    win_fit_due[p] = false;
+    win_shift_due[p] = 0.0f64;
+    if (win_table[p] != 0 && win_box[p] != 0) {
+        win_width[p] = view_width(win_table[p]);
+        win_box_fit(p)
+    }
+}
+
+// The row of pane p's window showing part k of chapter c (-1: none).
+win_row_of(p: int, c: int, k: int): int {
+    for i in 0..win_n[p] {
+        x: int = wr(p, i);
+        if (win_c[x] <= c && c <= win_last[x] && win_k[x] == k) return i
+    }
+    -1
+}
+
+// The row holding y, down the window's view (-1: none; the last for one
+// past its end).
+win_row_at(p: int, y: f64): int {
+    if (win_n[p] == 0) return -1;
+    i: int = 0;
+    while (i + 1 < win_n[p] && win_y[wr(p, i + 1)] <= y) i = i + 1;
+    i
+}
+
+// Part k of chapter c's words, attributed and washed as chapter_text makes
+// them (asked for, if it is not kept).
+win_part_text(p: int, c: int, k: int): int {
+    key: int = rs_key(p, c, k);
+    if (rs_need(key) < 0) return msg(make("NSMutableAttributedString"), sel("autorelease"));
+    chapter_text(key)
+}
+
+// Part k of chapter c made a text view (kept) at the window's width, its
+// height and its anchors' places measured (into row i's).
+win_made(
+    p: int,
+    i: int,
+    c: int,
+    k: int
+): int {
+    tv: int = msg_rect(msg(cls("UITextView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, win_width[p], 100.0f64);
+    msg1(tv, sel("setScrollEnabled:"), 0);
+    msg1(tv, sel("setEditable:"), 0);
+    msg1(tv, sel("setBackgroundColor:"), msg(cls("UIColor"), sel("clearColor")));
+    msg_set_f(msg(tv, sel("textContainer")), sel("setLineFragmentPadding:"), 0.0f64);
+    msg1(tv, sel("setTintColor:"), c_accent);
+    // (Its taps core's to make something of; the page's words selected
+    // offer its menu.)
+    msg1(tv, sel("setDelegate:"), app_obj);
+    tap: int = msg2(msg(cls("UITapGestureRecognizer"), sel("alloc")), sel("initWithTarget:action:"),
+        app_obj, sel("tapped:"));
+    msg1(tap, sel("setDelegate:"), app_obj);
+    msg1(tv, sel("addGestureRecognizer:"), tap);
+    release(tap);
+    win_dress(p, i, tv, c, k);
+    tv
+}
+
+// Row i's text view tv given part k of chapter c's words, and measured. (A chapter's first part below the space
+// between chapters; another, below a paragraph's; the Bible's last, room
+// after it. A run's placeholder as tall as the pane in sight, so that it
+// shows wherever the page is in its chapters.)
+win_dress(
+    p: int,
+    i: int,
+    tv: int,
+    c: int,
+    k: int
+) {
+    x: int = wr(p, i);
+    m: f64 = win_margin(p);
+    top: f64 = if (k > 0) em * 0.55f64 else if (c == 0) top_gap() else em * 2.4f64;
+    last: bool = c + 1 == chapters_n && k + 1 >= win_part_count(p, c);
+    msg_rect(tv, sel("setTextContainerInset:"), top, m, if (last) 120.0f64 else 0.0f64,
+        m);
+    msg1(tv, sel("setAttributedText:"), win_part_text(p, c, k));
+    msg1(tv, sel("setTag:"), rs_key(p, c, k) + 1);
+    // (Its height laid out whole, in a frame taller than any part: a text
+    // view by itself lays out only near what it shows, and its words no
+    // further down than its frame.)
+    msg_rect(tv, sel("setFrame:"), 0.0f64, 0.0f64, win_width[p], 1000000.0f64);
+    h: f64 = top + (if (last) 120.0f64 else 0.0f64) + win_text_height(tv);
+    if (h < 1.0f64) h = 1.0f64;
+    gap: bool = c >= 0 && c < WIN_CHAPTERS_MOST && win_gap_first[p * WIN_CHAPTERS_MOST + c] >= 0;
+    shown: f64 = win_seen(p);
+    if ((gap || win_coming(p, c, k)) && h < shown) h = shown;
+    msg_rect(tv, sel("setFrame:"), 0.0f64, 0.0f64, win_width[p], h);
+    win_h[x] = h;
+    win_c[x] = c;
+    win_last[x] = win_row_last(p, c);
+    win_k[x] = k;
+    s: int = rs_slot(rs_key(p, c, k));
+    n: int = if (s < 0) 0 else rs_v_n[s];
+    if (n > WIN_VERSES_MOST) n = WIN_VERSES_MOST;
+    win_vn[x] = n;
+    for j in 0..n win_vy[x * WIN_VERSES_MOST + j] = (if (range_rect(tv, rs_vb2[s * VS_MOST + j],
+        1)) hfa[1] else 0.0f64)
+}
+
+// Whether part k of chapter c only holds its place while core reads it.
+win_coming(p: int, c: int, k: int): bool {
+    s: int = rs_slot(rs_key(p, c, k));
+    s >= 0 && rs_coming[s]
+}
+
+// How tall text view tv's words are at its width, laid out whole (its
+// insets apart): TextKit 2's, laid out first (a text view's own
+// intrinsicContentSize and contentSize are only near).
+win_text_height(tv: int): f64 {
+    layout: int = msg(tv, sel("textLayoutManager"));
+    if (layout == 0) return 0.0f64;
+    msg1(layout, sel("ensureLayoutForRange:"), msg(layout, sel("documentRange")));
+    l8_msg_hfa(hfa, layout, sel("usageBoundsForTextContainer"), 0, 0, 0);
+    hfa[1] + hfa[3]
+}
+
+// Each row's place from row i0's, its view put there.
+win_place_from(p: int, i0: int) {
+    for i in i0..win_n[p] {
+        x: int = wr(p, i);
+        win_y[x] = (if (i == 0) 0.0f64 else win_y[x - 1] + win_h[x - 1]);
+        msg_rect(win_view[x], sel("setFrame:"), 0.0f64, win_y[x], win_width[p], win_h[x])
+    }
+}
+
+// Rows added or let go: the window's view to be made as tall as they are,
+// and the table moved by as much as those above the screen came to, once,
+// when they all have been (win_commit; the table's header set again for
+// each would lay it out each time).
+win_fit_due: []bool = new bool[PANES](false);
+
+win_shift_due: []f64 = new f64[PANES](0.0f64);
+
+win_commit(p: int) {
+    if (win_fit_due[p]) {
+        win_fit_due[p] = false;
+        win_box_fit(p)
+    }
+    if (win_shift_due[p] != 0.0f64) {
+        dy: f64 = win_shift_due[p];
+        win_shift_due[p] = 0.0f64;
+        win_set_offset(p, offset_y(win_table[p]) + dy)
+    }
+}
+
+// What of a pane is in sight: its top and bottom down the window's view (as
+// they will be once what is due is done), and how tall it is.
+win_top(p: int): f64 {
+    offset_y(win_table[p]) + top_inset(win_table[p]) + win_shift_due[p]
+}
+
+win_bottom(p: int): f64 {
+    offset_y(win_table[p]) + view_height(win_table[p]) - bottom_inset(win_table[p]) + win_shift_due[p]
+}
+
+win_seen(p: int): f64 {
+    t: int = win_table[p];
+    view_height(t) - top_inset(t) - bottom_inset(t)
+}
+
+// The reading line, below the table's offset.
+win_line_below(p: int): f64 {
+    top_inset(win_table[p]) + win_line[p] * win_seen(p)
+}
+
+// The table at offset y, as its own scroll (a glide goes on), within what
+// it can scroll to.
+win_set_offset(p: int, y: f64) {
+    t: int = win_table[p];
+    least: f64 = -top_inset(t);
+    win_self[p] = win_self[p] + 1;
+    _o: int = msg_ff(t, sel("setContentOffset:"), 0.0f64, if (y < least) least else y);
+    win_self[p] = win_self[p] - 1
+}
+
+// Part k of chapter c added after the window's last.
+win_add_below(p: int, c: int, k: int) {
+    if (win_n[p] >= WIN_MOST) win_drop_above(p);
+    i: int = win_n[p];
+    win_n[p] = i + 1;
+    win_view[wr(p, i)] = win_made(p, i, c, k);
+    msg1(win_box[p], sel("addSubview:"), win_view[wr(p, i)]);
+    win_place_from(p, i);
+    win_fit_due[p] = true
+}
+
+// Part k of chapter c added before the window's first: the rows below
+// moved down by its height, and the table with them.
+win_add_above(p: int, c: int, k: int) {
+    if (win_n[p] >= WIN_MOST) win_drop_below(p);
+    for j in 0..win_n[p] win_move_row(p, win_n[p] - j - 1, win_n[p] - j);
+    win_n[p] = win_n[p] + 1;
+    win_view[wr(p, 0)] = win_made(p, 0, c, k);
+    msg1(win_box[p], sel("addSubview:"), win_view[wr(p, 0)]);
+    win_place_from(p, 0);
+    win_fit_due[p] = true;
+    win_shift_due[p] = win_shift_due[p] + win_h[wr(p, 0)]
+}
+
+win_move_row(p: int, from: int, to: int) {
+    a: int = wr(p, from);
+    b: int = wr(p, to);
+    win_c[b] = win_c[a];
+    win_k[b] = win_k[a];
+    win_view[b] = win_view[a];
+    win_y[b] = win_y[a];
+    win_h[b] = win_h[a];
+    win_last[b] = win_last[a];
+    win_vn[b] = win_vn[a];
+    for j in 0..win_vn[a] win_vy[b * WIN_VERSES_MOST + j] = win_vy[a * WIN_VERSES_MOST + j]
+}
+
+// The window's first row let go: the rows below moved up, and the table.
+win_drop_above(p: int) {
+    if (win_n[p] == 0) return;
+    h: f64 = win_h[wr(p, 0)];
+    msg(win_view[wr(p, 0)], sel("removeFromSuperview"));
+    release(win_view[wr(p, 0)]);
+    for i in 0..win_n[p] - 1 win_move_row(p, i + 1, i);
+    win_n[p] = win_n[p] - 1;
+    win_view[wr(p, win_n[p])] = 0;
+    win_place_from(p, 0);
+    win_fit_due[p] = true;
+    win_shift_due[p] = win_shift_due[p] - h
+}
+
+win_drop_below(p: int) {
+    if (win_n[p] == 0) return;
+    win_n[p] = win_n[p] - 1;
+    x: int = wr(p, win_n[p]);
+    msg(win_view[x], sel("removeFromSuperview"));
+    release(win_view[x]);
+    win_view[x] = 0;
+    win_fit_due[p] = true
+}
+
+// Row i's words made again as its part is now (come, after holding its
+// place; marked anew; forgotten): it and those below moved by how much
+// taller it is, and the table with them if it is above the screen's top.
+win_redress(p: int, i: int) {
+    x: int = wr(p, i);
+    was: f64 = win_h[x];
+    win_dress(p, i, win_view[x], win_c[x], win_k[x]);
+    win_place_from(p, i);
+    win_fit_due[p] = true;
+    if (win_y[x] + was <= win_top(p)) win_shift_due[p] = win_shift_due[p] + win_h[x] - was;
+    win_commit(p)
+}
+
+// The part after part k of chapter c, and the one before it (c -1: none;
+// a chapter's last part known once its first has said how many).
+win_next_c: int = -1;
+
+win_next_k: int = 0;
+
+win_after(p: int, c: int, k: int) {
+    last: int = win_row_last(p, c);
+    if (last == c && k + 1 < win_part_count(p, c)) {
+        win_next_c = c;
+        win_next_k = k + 1
+    } else if (last + 1 < chapters_n) {
+        win_next_c = win_row_chapter(p, last + 1);
+        win_next_k = 0
+    } else win_next_c = -1
+}
+
+win_before(p: int, c: int, k: int) {
+    if (k > 0) {
+        win_next_c = c;
+        win_next_k = k - 1;
+        return
+    }
+    if (c <= 0) {
+        win_next_c = -1;
+        return
+    }
+    // (Its chapter's parts counted, and whether it is in a run: its first
+    // asked for, which says.)
+    first: int = win_row_chapter(p, c - 1);
+    win_next_c = first;
+    win_next_k = (if (first != c - 1) 0 else win_part_count(p, c - 1) - 1)
+}
+
+// The window made to reach margin beyond what is in sight at either end, a
+// part at a time, budget parts at most (above the screen, not while it
+// glides by itself: the glide's offset would be moved under it); then what
+// is far beyond it let go. Whether it reaches.
+win_fill(p: int, margin: f64, budget: int): bool {
+    if (win_table[p] == 0 || win_n[p] == 0) return true;
+    if (view_width(win_table[p]) != win_width[p]) {
+        win_rebuild(p);
+        return false
+    }
+    left: int = budget;
+    while (left > 0) {
+        n: int = win_n[p];
+        if (win_height(p) - win_bottom(p) < margin) {
+            win_after(p, win_c[wr(p, n - 1)], win_k[wr(p, n - 1)]);
+            if (win_next_c < 0)
+                break;
+            win_add_below(p, win_next_c, win_next_k)
+        } else if (win_top(p) < margin && !win_gliding[p]) {
+            win_before(p, win_c[wr(p, 0)], win_k[wr(p, 0)]);
+            if (win_next_c < 0)
+                break;
+            win_add_above(p, win_next_c, win_next_k)
+        } else
+            break;
+        left = left - 1
+    }
+    // (Far behind: let go.)
+    far: f64 = margin * 2.0f64 + view_height(win_table[p]);
+    while (win_n[p] > 1 && win_y[wr(p, win_n[p] - 1)] - win_bottom(p) > far) win_drop_below(p);
+    while (win_n[p] > 1 && !win_gliding[p] && win_top(p) - (win_y[wr(p, 0)] + win_h[wr(p,
+        0)]) > far) win_drop_above(p);
+    win_commit(p);
+    left > 0
+}
+
+// The window's margins: while it moves, a screen and a half ahead; at
+// rest, three, a part at a time between frames (win_fill_soon). (A short
+// pane, the panel under the page, as far as a tall one: a commentary's
+// next comments are measured before the page comes to their verses.)
+win_margin_moving(p: int): f64 {
+    win_screen(p) * 1.5f64
+}
+
+win_margin_resting(p: int): f64 {
+    win_screen(p) * 3.0f64
+}
+
+win_screen(p: int): f64 {
+    h: f64 = view_height(win_table[p]);
+    if (window != 0) {
+        l8_msg_hfa(hfa, window, sel("bounds"), 0, 0, 0);
+        if (hfa[3] > h) h = hfa[3]
+    }
+    h
+}
+
+win_fill_due: bool = false;
+
+win_fill_soon() {
+    if (win_fill_due) return;
+    win_fill_due = true;
+    _t: int = after_common(0.05f64, "paneFill:")
+}
+
+win_fill_fired(_self: int, _cmd: int, _timer: int): int {
+    win_fill_due = false;
+    again: bool = false;
+    for p in 0..PANES {
+        if (win_table[p] != 0 && win_n[p] > 0) {
+            // (A glide UIKit didn't say the end of, as one cut short: over
+            // by now.)
+            if (win_gliding[p] && CACurrentMediaTime() > win_glide_until[p]) win_glide_ended(p);
+            if (win_gliding[p] || win_moving(p)) again = true else if (!win_fill(p,
+                win_margin_resting(p), 1)) again = true
+        }
+    }
+    if (again) win_fill_soon();
+    0
+}
+
+// Whether a pane can be laid out now (its table on the screen, with a
+// width, and the chapters counted).
+win_ready(p: int): bool {
+    t: int = win_table[p];
+    t != 0 && chapters_n > 0 && view_width(t) > 1.0f64 && msg(t, sel("window")) != 0
+}
+
+// A `go` waiting for its pane's table (or its width): chapter -1, none.
+win_go_c: []int = new int[PANES](-1);
+
+win_go_i: []int = new int[PANES](-1);
+
+win_go_f: []int = new int[PANES](0);
+
+win_go_mode: []int = new int[PANES](0);
+
+// `go P C I FRAC MODE`: anchor i of chapter c (-1: its top) frac
+// thousandths through its span at the reading line (a chapter's top at the
+// top of what is in sight). In the window and brought (MODE 1) within a
+// screen and a half: a glide there; else the window made again around it
+// if it isn't near, and there at once. Then told.
+win_go(
+    p: int,
+    c: int,
+    i: int,
+    frac: int,
+    mode: int
+) {
+    if (c < 0) return;
+    if (!win_ready(p)) {
+        win_go_c[p] = c;
+        win_go_i[p] = i;
+        win_go_f[p] = frac;
+        win_go_mode[p] = mode;
+        return
+    }
+    win_go_c[p] = -1;
+    win_glide_stop(p);
+    // (Its anchors known first: its first part asked for, which says them.)
+    first: int = win_row_chapter(p, c);
+    k: int = if (first != c || i < 0) 0 else win_anchor_part(p, c, i);
+    r: int = win_row_of(p, first, k);
+    if (r < 0) {
+        win_window_at(p, first, k);
+        r = win_row_of(p, first, k)
+    }
+    y: f64 = win_anchor_pos(p, r, if (first != c) -1 else i, frac);
+    to: f64 = if (i < 0 && frac <= 0) y - top_inset(win_table[p]) - win_chapter_top_room(first) else y - win_line_below(p);
+    d: f64 = to - offset_y(win_table[p]);
+    near: bool = (if (d < 0.0f64) -d else d) <= win_seen(p) * WIN_GLIDE_SCREENS;
+    if (mode == PANE_GO_BROUGHT && near && !reduce_motion() && (d > 0.5f64 || d < -0.5f64)) {
+        win_glide_to(p, to);
+        return
+    }
+    win_set_offset(p, to);
+    // (The screen filled at once below the place, the rest a part at a
+    // time between frames.)
+    _full: bool = win_fill(p, 0.0f64, 4);
+    win_tell(p, true);
+    win_rest_tell(p);
+    win_fill_soon()
+}
+
+// Pane p to verse v of chapter c (0: its top) by its own wish (Listen's
+// verse, the status bar, the player's name): its first anchor of the verse.
+win_go_verse(
+    p: int,
+    c: int,
+    v: int,
+    mode: int
+) {
+    first: int = win_row_chapter(p, c);
+    win_go(p, c, if (v <= 0 || first != c) -1 else win_anchor_of_verse(p, c, v), 0,
+        mode)
+}
+
+WIN_GLIDE_SCREENS: f64 = 1.5f64;
+
+// The window made again around part k of chapter c, with room above it for
+// the reading line (the parts before it), so that an offset can be set.
+win_window_at(p: int, c: int, k: int) {
+    win_clear(p);
+    win_add_below(p, c, k);
+    for _step in 0..6 {
+        if (win_y[wr(p, 0)] >= win_screen(p))
+            break;
+        win_before(p, win_c[wr(p, 0)], win_k[wr(p, 0)]);
+        if (win_next_c < 0)
+            break;
+        win_add_above(p, win_next_c, win_next_k)
+    }
+    win_shift_due[p] = 0.0f64;
+    win_commit(p)
+}
+
+// The table glided to offset to by UIKit's own animation (the window grows
+// only below while it does).
+win_glide_to(p: int, to: f64) {
+    win_gliding[p] = true;
+    win_glide_until[p] = CACurrentMediaTime() + WIN_GLIDE_SECONDS;
+    win_self[p] = win_self[p] + 1;
+    msg_ff1(win_table[p], sel("setContentOffset:animated:"), 0.0f64, to, 1);
+    win_self[p] = win_self[p] - 1;
+    win_fill_soon()
+}
+
+// Where anchor i of row r's chapter is (-1: its top), frac thousandths
+// through its span, down the window's view.
+win_anchor_pos(
+    p: int,
+    r: int,
+    i: int,
+    frac: int
+): f64 {
+    if (r < 0) return 0.0f64;
+    x: int = wr(p, r);
+    c: int = win_c[x];
+    first: int = win_first_anchor(p, c, win_k[x]);
+    j: int = if (i < 0) -1 else i - first;
+    a: f64 = win_y[x] + (if (j >= 0 && j < win_vn[x]) win_vy[x * WIN_VERSES_MOST + j] else 0.0f64);
+    b: f64 = if (j + 1 < win_vn[x]) win_y[x] + win_vy[x * WIN_VERSES_MOST + j + 1] else win_y[x] + win_h[x];
+    a + (b - a) * frac as f64 / 1000.0f64
+}
+
+// How far above a chapter's top a jump to it leaves the top of what is in
+// sight (its first part's room above the opener, less 0.8 em: the opener a
+// chapter gap below the bar; the Bible's top at the top).
+win_chapter_top_room(c: int): f64 {
+    if (c == 0) return 0.0f64;
+    em * 2.4f64 - em * 0.8f64
+}
+
+// While it glides by itself, the window grows only below (win_gliding):
+// one coming in above would move the offset under the glide.
+win_gliding: []bool = new bool[PANES](false);
+
+win_glide_until: []f64 = new f64[PANES](0.0f64);
+
+// When a glide is over at the latest (UIKit's take about a third of a
+// second; one cut short isn't said to end).
+WIN_GLIDE_SECONDS: f64 = 0.6f64;
+
+win_glide_ended(p: int) {
+    win_gliding[p] = false;
+    win_tell(p, true);
+    win_rest_tell(p);
+    // (Leading, moved by the app for a hand (the status bar, a key's page):
+    // the other with it, now it is there.)
+    if (p == win_leader) win_follow(p);
+    win_fill_soon()
+}
+
+win_glide_stop(p: int) {
+    if (!win_gliding[p] || win_table[p] == 0) return;
+    win_gliding[p] = false;
+    win_set_offset(p, offset_y(win_table[p]))
+}
+
+// `halt P`: its glide stopped where it is (a finger on the other pane), a
+// finger's or its own.
+win_halt(p: int) {
+    t: int = win_table[p];
+    if (t == 0) return;
+    win_glide_stop(p);
+    if ((msg(t, sel("isDecelerating")) & 255) != 0) win_set_offset(p, offset_y(t))
+}
+
+// `forget P C`: pane p's parts of chapter c (-1: all) asked for again, the
+// rows that show them made again where they are.
+win_forget(p: int, c: int) {
+    win_forget_parts(p, c);
+    if (win_table[p] == 0) return;
+    for i in 0..win_n[p] {
+        x: int = wr(p, i);
+        if (c < 0 || win_c[x] <= c && c <= win_last[x]) win_redress(p, i)
+    }
+    win_fill_soon()
+}
+
+// The window made again around its place (its width or its parts
+// changed): the part at its reading line, as far through it as it was.
+win_rebuild(p: int) {
+    c: int = win_spot_c[p];
+    if (c < 0 || win_table[p] == 0) return;
+    k: int = win_spot_k[p];
+    part: f64 = win_spot_part[p];
+    win_window_at(p, c, k);
+    j: int = win_row_of(p, c, k);
+    if (j >= 0) win_set_offset(p, win_y[wr(p, j)] + part * win_h[wr(p, j)] - win_line_below(p));
+    _full: bool = win_fill(p, 0.0f64, 4);
+    win_tell(p, true);
+    win_fill_soon()
+}
+
+// The part at each pane's reading line as last found, and how far through
+// it (for its place to be kept as it is made again).
+win_spot_c: []int = new int[PANES](-1);
+
+win_spot_k: []int = new int[PANES](0);
+
+win_spot_part: []f64 = new f64[PANES](0.0f64);
+
+// Whether a finger moves the pane, or it glides after one.
+win_moving(p: int): bool {
+    t: int = win_table[p];
+    t != 0 && ((msg(t, sel("isTracking")) & 255) != 0 || (msg(t, sel("isDecelerating")) & 255) != 0 || devwire_gliding(t))
+}
+
+// The place told last (`at`): its chapter (-1 none) and anchor.
+win_said_c: []int = new int[PANES](-1);
+
+win_said_i: []int = new int[PANES](-1);
+
+// `at P C I FRAC`: the place at its reading line, as its anchor changes (or
+// always: at rest, after a jump).
+win_tell(p: int, always: bool) {
+    at: WinPlace = win_place(p);
+    if (!at.ok) return;
+    if (!always && at.c == win_said_c[p] && at.i == win_said_i[p]) return;
+    win_said_c[p] = at.c;
+    win_said_i[p] = at.i;
+    to_core_str("at");
+    to_core_arg(p);
+    to_core_arg(at.c);
+    to_core_arg(at.i);
+    to_core_arg((at.part * 1000.0f64) as int);
+    to_core_end();
+    uk_effects()
+}
+
+// A pane's place at its reading line: its chapter, the anchor whose span
+// holds it (-1 above the first), how far through (0 to 1), and the line
+// down the window's view; ok: whether a part is laid out there.
+type WinPlace = {
+    c: int;
+    i: int;
+    part: f64;
+    line: f64;
+    ok: bool
+}
+
+win_place(p: int): WinPlace {
+    none: WinPlace = WinPlace {
+        c: -1,
+        i: -1,
+        part: 0.0f64,
+        line: 0.0f64,
+        ok: false
+    };
+    if (win_table[p] == 0 || win_n[p] == 0) return none;
+    line: f64 = offset_y(win_table[p]) + win_line_below(p);
+    r: int = win_row_at(p, line);
+    if (r < 0) return none;
+    x: int = wr(p, r);
+    c: int = win_c[x];
+    win_spot_c[p] = c;
+    win_spot_k[p] = win_k[x];
+    win_spot_part[p] = (if (win_h[x] > 0.0f64) (line - win_y[x]) / win_h[x] else 0.0f64);
+    // (The last of its anchors at or before the line, in this part or one
+    // above it laid out.)
+    i: int = -1;
+    a: f64 = win_y[x];
+    b: f64 = win_y[x] + win_h[x];
+    first: int = win_first_anchor(p, c, win_k[x]);
+    for j in 0..win_vn[x] {
+        y: f64 = win_y[x] + win_vy[x * WIN_VERSES_MOST + j];
+        if (y <= line) {
+            i = first + j;
+            a = y;
+            b = (if (j + 1 < win_vn[x]) win_y[x] + win_vy[x * WIN_VERSES_MOST + j + 1] else win_y[x] + win_h[x])
+        } else if (i < first) b = y
+    }
+    if (i < first && first > 0) i = first - 1;
+    d: f64 = b - a;
+    part: f64 = if (d < 1.0f64) 0.0f64 else (line - a) / d;
+    WinPlace {
+        c: c,
+        i: i,
+        part: if (part < 0.0f64) 0.0f64 else if (part > 1.0f64) 1.0f64 else part,
+        line: line,
+        ok: true
+    }
+}
+
+// `rest P ENDS_HI MS`: at rest, the last chapter whose end is in sight.
+win_rest_tell(p: int) {
+    if (win_table[p] == 0 || win_n[p] == 0) return;
+    bottom: f64 = win_bottom(p);
+    top: f64 = win_top(p);
+    ends_hi: int = -1;
+    for i in 0..win_n[p] {
+        x: int = wr(p, i);
+        end: f64 = win_y[x] + win_h[x];
+        last: bool = win_last[x] != win_c[x] || win_k[x] + 1 >= win_part_count(p,
+            win_c[x]);
+        if (last && end <= bottom + 1.0f64 && end >= top && win_last[x] > ends_hi) ends_hi = win_last[x]
+    }
+    to_core_str("rest");
+    to_core_arg(p);
+    to_core_arg(ends_hi);
+    to_core_arg(clock_ms());
+    to_core_end();
+    uk_effects()
+}
+
+// The chapter at y down pane p's window (-1: none), a run's first.
+win_chapter_at(p: int, y: f64): int {
+    i: int = win_row_at(p, y);
+    if (i < 0) -1 else win_c[wr(p, i)]
+}
+
+// Its scroll: the window kept ahead of it (not while it glides by itself:
+// the table's header set again would cut the glide short), its place told;
+// leading, the other moved with it.
+win_scrolled(p: int) {
+    if (win_self[p] == 0 && !win_gliding[p]) _full: bool = win_fill(p, win_margin_moving(p),
+        1);
+    win_tell(p, false);
+    if (win_self[p] == 0 && p == win_leader && win_moving(p)) win_follow(p)
+}
+
+// A finger's drag begun on it: it leads (core stops the other's glide).
+win_drag_began(p: int) {
+    win_gliding[p] = false;
+    win_lead(p)
+}
+
+// Pane p moved by a hand (a finger, a key, the status bar): it leads.
+win_lead(p: int) {
+    if (win_leader != p) {
+        win_leader = p;
+        win_stepped_c = -1
+    }
+    to_core_str("moving");
+    to_core_arg(p);
+    to_core_arg(clock_ms());
+    to_core_end();
+    uk_effects()
+}
+
+// At rest after a finger (its glide over, or none): told; leading, the
+// other settled at its place (a commentary waits while the page glides).
+win_rested(p: int) {
+    win_gliding[p] = false;
+    win_tell(p, true);
+    win_rest_tell(p);
+    if (p == win_leader) win_follow(p);
+    win_fill_soon()
+}
+
+// A part core sent of its own (a commentary's comments come, an ESV
+// chapter come): the rows showing it made again where they are.
+win_part_came(p: int, c: int, k: int) {
+    if (p < 0 || p >= PANES || win_table[p] == 0) return;
+    for i in 0..win_n[p] {
+        x: int = wr(p, i);
+        if (win_c[x] == c && win_k[x] == k) win_redress(p, i)
+    }
+    win_fill_soon()
+}
+
+// Its table's screen coming into sight (a launch's, a reload's, the panel
+// opened again): the jump waiting done, or the window made again at its
+// place.
+win_appeared(p: int) {
+    if (!win_ready(p)) return;
+    if (win_go_c[p] >= 0) {
+        win_go(p, win_go_c[p], win_go_i[p], win_go_f[p], win_go_mode[p]);
+        return
+    }
+    if (win_n[p] == 0 || view_width(win_table[p]) != win_width[p]) win_rebuild(p)
+}
+
+// Pane p's table made its, the window opened where core said, as soon as
+// it is in the window (a jump before then has no width to lay out at).
+win_attach_later(p: int, t: int) {
+    if (win_table[p] != t) win_attach(p, t);
+    _t: int = after_common(0.05f64, if (p == PANE_PAGE) "pageOpened:" else "panelOpened:")
+}
+
+win_page_opened(_self: int, _cmd: int, _timer: int): int {
+    win_appeared(PANE_PAGE);
+    0
+}
+
+win_panel_opened(_self: int, _cmd: int, _timer: int): int {
+    win_appeared(PANE_PANEL);
+    0
+}
+
+// The chapters counted (`reader N`, a launch's or a version's): what each
+// pane knew of them let go (core says where each goes next).
+win_count_changed() {
+    for p in 0..PANES win_forget_parts(p, -1)
+}
+
+// The text view of the page's first part of chapter c in sight or near (0:
+// none in the window).
+win_view_of(p: int, c: int): int {
+    for i in 0..win_n[p] {
+        x: int = wr(p, i);
+        if (win_c[x] <= c && c <= win_last[x]) return win_view[x]
+    }
+    0
+}
+
+// Each row of pane p's window showing chapter c (-1: every row) washed
+// again, or made again (its part asked for again: what is marked changed).
+win_repaint(p: int, c: int) {
+    for i in 0..win_n[p] {
+        x: int = wr(p, i);
+        if (c < 0 || win_c[x] == c) {
+            s: int = rs_slot(rs_key(p, win_c[x], win_k[x]));
+            if (s >= 0) {
+                storage: int = msg(win_view[x], sel("textStorage"));
+                msg(storage, sel("beginEditing"));
+                paint_marks(storage, s, if (p == PANE_PAGE) win_c[x] else -1);
+                msg(storage, sel("endEditing"))
+            }
+        }
+    }
+}
+
+win_remake(p: int, c: int) {
+    win_forget_parts_marked(p, c);
+    for i in 0..win_n[p] {
+        x: int = wr(p, i);
+        if (c < 0 || win_c[x] == c) win_redress(p, i)
+    }
+}
+
+// The page's parts' words let go (what is marked on them changed: a
+// highlight, a bookmark, a note), what core said of their chapters kept.
+win_forget_parts_marked(p: int, c: int) {
+    for s in 0..RS_SLOTS {
+        if (rs_c[s] >= 0 && part_key_pane(rs_c[s]) == p && (c < 0 || part_key_chapter(rs_c[s]) == c)) {
+            rs_c[s] = -1;
+            rs_text[s] = held(rs_text[s], 0)
+        }
+    }
+}
+
+// ---- following ----
+// Whether the panel's reader is linked with the page (its screen's `reader`
+// line), and which pane a finger last moved: it leads.
+win_linked: bool = false;
+
+win_leader: int = PANE_PAGE;
+
+// Each chapter's link map as core said it (`link C MODE`, its `match I0 I1
+// J` lines), for a few chapters: those said latest.
+WIN_MAPS_MOST: int = 8;
+
+WIN_MATCHES_MOST: int = 2048;
+
+lm_c: []int = new int[WIN_MAPS_MOST](-1);
+
+lm_mode: []int = new int[WIN_MAPS_MOST](0);
+
+lm_n: []int = new int[WIN_MAPS_MOST](0);
+
+lm_i0: []int = new int[WIN_MAPS_MOST * WIN_MATCHES_MOST](0);
+
+lm_i1: []int = new int[WIN_MAPS_MOST * WIN_MATCHES_MOST](0);
+
+lm_j: []int = new int[WIN_MAPS_MOST * WIN_MATCHES_MOST](0);
+
+lm_next: int = 0;
+
+// A `link` block (data b to e: from its line past its `end`) kept.
+win_link_store(data: []i8, b: int, e: int) {
+    le: int = b;
+    while (le < e && data[le] as int != 10) le = le + 1;
+    cl_at = b + len("link");
+    c: int = cl_num(data, le);
+    mode: int = cl_num(data, le);
+    s: int = win_map_slot(c);
+    if (s < 0) {
+        s = lm_next;
+        lm_next = (lm_next + 1) % WIN_MAPS_MOST
+    }
+    lm_c[s] = c;
+    lm_mode[s] = mode;
+    lm_n[s] = 0;
+    at: int = le + 1;
+    while (at < e) {
+        le = at;
+        while (le < e && data[le] as int != 10) le = le + 1;
+        if (cl_is(data, at, le, "match") && lm_n[s] < WIN_MATCHES_MOST) {
+            cl_at = at + 5;
+            k: int = s * WIN_MATCHES_MOST + lm_n[s];
+            lm_i0[k] = cl_num(data, le);
+            lm_i1[k] = cl_num(data, le);
+            lm_j[k] = cl_num(data, le);
+            lm_n[s] = lm_n[s] + 1
+        }
+        at = le + 1
+    }
+}
+
+win_map_slot(c: int): int {
+    for s in 0..WIN_MAPS_MOST
+        if (lm_c[s] == c) return s;
+    -1
+}
+
+// Every map let go (what either pane reads changed).
+win_maps_forget() {
+    for s in 0..WIN_MAPS_MOST lm_c[s] = -1
+}
+
+// Slot s's map as follow.l8 takes it.
+win_map(s: int): LinkMap@new {
+    n: int = lm_n[s];
+    m: LinkMap = LinkMap {
+        mode: lm_mode[s],
+        i0: new int[n](0),
+        i1: new int[n](0),
+        j: new int[n](0)
+    };
+    for k in 0..n {
+        m.i0[k] = lm_i0[s * WIN_MATCHES_MOST + k];
+        m.i1[k] = lm_i1[s * WIN_MATCHES_MOST + k];
+        m.j[k] = lm_j[s * WIN_MATCHES_MOST + k]
+    }
+    m
+}
+
+// Chapter c of pane p as it is laid out: each anchor's start down the
+// window's view (known where its part is in the window), its top and end.
+win_shape(p: int, c: int): ChapterShape@new {
+    n: int = win_anchor_count(p, c);
+    s: ChapterShape = ChapterShape {
+        starts: new f64[n](0.0f64),
+        known: new bool[n](false),
+        top: 0.0f64,
+        top_known: false,
+        end: 0.0f64,
+        end_known: false,
+        em: em
+    };
+    for r in 0..win_n[p] {
+        x: int = wr(p, r);
+        if (win_c[x] == c) {
+            k: int = win_k[x];
+            if (k == 0) {
+                s.top = win_y[x];
+                s.top_known = true
+            }
+            if (win_last[x] != c || k + 1 >= win_part_count(p, c)) {
+                s.end = win_y[x] + win_h[x];
+                s.end_known = true
+            }
+            first: int = win_first_anchor(p, c, k);
+            for j in 0..win_vn[x] {
+                if (first + j < n) {
+                    s.starts[first + j] = win_y[x] + win_vy[x * WIN_VERSES_MOST + j];
+                    s.known[first + j] = true
+                }
+            }
+        }
+    }
+    s
+}
+
+// The comment step last taken, following by comment (chapter -1: none):
+// not taken again until the leader moves another way.
+win_stepped_c: int = -1;
+
+win_stepped_to: int = -1;
+
+// The leader moved: the other pane with it, by the link map of the
+// leader's chapter (SKINS.md, Panes: Linked). Not laid out there yet: there
+// at once, by the map, and with it on the next frame.
+win_follow(lead: int) {
+    f: int = 1 - lead;
+    if (!win_linked || win_table[PANE_PANEL] == 0 || win_n[f] == 0) return;
+    at: WinPlace = win_place(lead);
+    if (!at.ok) return;
+    s: int = win_map_slot(at.c);
+    if (s < 0) return;
+    region {
+        map: LinkMap = win_map(s);
+        page: ChapterShape = win_shape(PANE_PAGE, at.c);
+        panel: ChapterShape = win_shape(PANE_PANEL, at.c);
+        if (map.mode == LINK_BY_VERSE) {
+            pairs: FollowPairs = follow_pairs(&map, &page, &panel, lead == PANE_PAGE);
+            to: FollowPlace = follow_by_verse(&pairs, at.line, em, em);
+            if (to.ok) win_line_to(f, to.y) else if (win_go_c[f] < 0) win_go(f, at.c,
+                win_mapped(&map, at.i, lead == PANE_PAGE), 0, PANE_GO_AT_ONCE)
+        } else if (!(lead == PANE_PAGE && win_how_gliding(lead))) {
+            // (By comment: not while the page glides after a flick.)
+            there: WinPlace = win_place(f);
+            other_i: int = if (there.ok && there.c == at.c) there.i else -2;
+            step: CommentStep = if (lead == PANE_PAGE) follow_comment_from_page(&map,
+                at.i, other_i, &panel, there.line) else follow_page_from_comment(&map,
+                at.i, other_i);
+            match step {
+                Stay -> { }
+                GoTo g -> {
+                    if (win_stepped_c != at.c || win_stepped_to != g.anchor) {
+                        win_stepped_c = at.c;
+                        win_stepped_to = g.anchor;
+                        win_go(f, at.c, g.anchor, 0, PANE_GO_BROUGHT)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Whether pane p glides after a finger (its deceleration).
+win_how_gliding(p: int): bool {
+    t: int = win_table[p];
+    t != 0 && ((msg(t, sel("isDecelerating")) & 255) != 0 || devwire_gliding(t)) && (msg(t,
+        sel("isTracking")) & 255) == 0
+}
+
+// The follower's anchor for the leader's anchor i, by a version's map: the
+// match at or before it.
+win_mapped(map: *LinkMap, i: int, page_leads: bool): int {
+    best: int = -1;
+    for k in 0..len(map.j) {
+        from: int = if (page_leads) map.i0[k] else map.j[k];
+        if (from <= i) best = (if (page_leads) map.j[k] else map.i0[k])
+    }
+    best
+}
+
+// The follower's reading line to y down its window's view, this frame (at
+// once; not while a finger holds it).
+win_line_to(p: int, y: f64) {
+    t: int = win_table[p];
+    if (t == 0 || (msg(t, sel("isTracking")) & 255) != 0) return;
+    to: f64 = y - win_line_below(p);
+    d: f64 = to - offset_y(t);
+    if (d < 0.25f64 && d > -0.25f64) return;
+    win_glide_stop(p);
+    win_set_offset(p, to);
+    _full: bool = win_fill(p, win_margin_moving(p), 1);
+    win_tell(p, false)
+}

@@ -648,6 +648,19 @@ Screen On as `awake`. The iPhone's menus and keyboard commands are core's
 shows (`beside`): the iPhone draws them, and the panel at the page's
 right on a wide window, under it on an iPhone, its grabber resizing it.
 
+Both panes are `ios/pane.l8`'s window, one each: the page's table and the
+panel's reader screen's, each a table with no rows whose header holds its
+parts' `UITextView`s one after another, each measured whole as it comes
+in (TextKit 2), so that where anything shown is is known. Parts come in a
+screen and a half ahead while a pane moves and three at rest, those far
+behind go, and one coming in or going above what is in sight moves the
+table's offset by its height at once. A pane finds its places from its
+parts' anchors' lines, and tells core as its anchor changes and at rest.
+A `go` waits for its pane's table to be on the screen, and is carried to
+a new table as what the panel reads changes. Linked, the pane a finger
+last moved leads and the other follows each frame by core/follow.l8's
+rules (a commentary waiting while the page decelerates).
+
 ## Moving the iPhone
 
 One screen at a time, keeping its look: its rows come from core, drawn by a
