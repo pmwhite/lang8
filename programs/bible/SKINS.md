@@ -107,8 +107,8 @@ a concrete implementation: `web/main.l8` (the platform) and
   N 4 FROM TO`) into sight, scrolling as little as it can: none if they
   are in sight already.
 - The two panes (below): `reader`, `line`, then `part` lines as it asks
-  (`want`), `jump`, `scroll`, `halt`, `forget`; it says what it laid out
-  and where each is read (`measured`, `view`, `at`, `rest`, `moving`).
+  (`want`), `go`, `halt`, `forget`, `link`; it says where each is read
+  (`at`, `rest`, `moving`), and moves the one not led itself.
   With them `look`, `title`, `version`, `goto`, `page`; `selection`,
   `carried`, `hearing`, `back`, `wake`, `tick`, `jumped`.
 - The tray (`tray`, `tray_away`: screen 0), the title's menu
@@ -509,7 +509,7 @@ Other lines from core:
 | `highlights SWATCH WASH STRENGTH...`, `themes DAY NIGHT PAGE INK...`, then `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT THEME CHOSEN HAIRLINE SELECTION SHEET CELL` | all a skin needs of look.l8. `highlights`: each of the five by the color its `mark` lines name it with, and the wash a highlighted verse shows now (STRENGTH, like GLOSS, HAIRLINE and SELECTION, in thousandths). `themes`: the themes Auto follows by day and at night, then each theme's page and ink, in the Theme setting's order (for its swatches). `look`: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument); THEME the theme it is and CHOSEN the one chosen (0 Auto), of `themes`; HAIRLINE a rule's strength (RULE's color), SELECTION a selection's (ACCENT's); SHEET and CELL a sheet's color and its rows' (`-`: the platform's grouped colors) |
 | `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation, shown faint after the title (which opens Go To); the version is chosen in Go To or the Library, not from the bar |
 | `url` ADDRESS | a page outside the app to open |
-| `back` WORDS | the capsule's words (none: away); the way back and a ribbon move the page with `jump 0` |
+| `back` WORDS | the capsule's words (none: away); the way back and a ribbon move the page with `go 0` |
 | `next` | core has work going on a step at a time (the Bookshelf opening a module, making a Bible a version, decoding a commentary's block): the skin answers `next` on its next turn, once it has drawn and taken input, so the app answers its reader between steps however slow it runs |
 | `awake MS` | Keep Screen On: the screen kept on MS more (after a `rest`, a tap), or let go now (0: a sheet opened, the setting off). A skin offers the setting with `sk_has_keep_on` |
 | `settings` | a setting changed that doesn't lay the text out again |
@@ -584,7 +584,7 @@ From the skin:
 | `spoke C V MS`, `spoken C V`, `listenstop` | the skin's voice began (MS its clock: following waits 8 s after a finger moves the reader) and finished saying verse C:V (0 the chapter's title), or was stopped: a skin speaks what core's session gives it (`say C V` WORDS, `player` TITLE STATE PLAYING READER VERSION (also for the platform's own player: a lock screen's, a headset's; its buttons `listenplay`, `listenpause`, `listenprev`, `listennext`, `listenstop`), `follow C V`, `listen_stop`) |
 | `next` | the turn core asked for with `next`: a step of its work |
 | `tick MS`, `jumped KIND` | the time core asked for (`wake MS`), a jump (0 with a way back, 1 the capsule's, 2 neither): `core/reading.l8` counts chapters read (20 s at the page's `rest`, end seen), moves the carried ribbon, and puts a chapter dwelt in 20 s onto the history |
-| `back` | the capsule tapped: core goes back (`jump 0`), or opens the plan's day it came from |
+| `back` | the capsule tapped: core goes back (`go 0`), or opens the plan's day it came from |
 | `key NAME MODS` | a hardware keyboard's key (NAME its character, or `left`, `up`, `down`, `space`, `return`; MODS 1 ⌘ or Ctrl, 2 Shift, 4 Alt): `core/keys.l8` makes it a command and does it where it acts — Go To, Search, Library, Settings, chapters, Back, Listen, a page (`page 1` down, `page 0` up: the skin scrolls a screen less three lines), a plan's day's Mark Read and Next, Practice's Check and grades, the panel beside the reader and Study's verses in it. A skin with menus or a command overlay makes them from core's `command` lines and offers each where `commands` says |
 | `footnote C P`, `preview REF` | a footnote's mark tapped (its place P in chapter C), a reference tapped: core's footnote (`core/footnote.l8`) or preview |
 | `studyable C K A B`, `studyat C K A B` | whether the words at UTF-16 A to B of part K of chapter C's text on the page have a word to study (core says `studyable 1` or `0`: a skin's menu offers Study), and that word's Study opened |
