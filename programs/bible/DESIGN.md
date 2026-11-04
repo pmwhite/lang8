@@ -22,35 +22,29 @@ study records, original languages, audio timings and the ESV cache.
 `core/beside.l8` keeps the panel beside the page: what is read with the
 Bible (the Bookshelf, the document read beside the page, Study) as a stack
 of screens of its own, kept while sheets come and go and opened again as
-it was left. Its document is a version or a Bookshelf module; a version or a
-commentary there follows the page. Where the skin draws a reader in the
-panel, a version or a commentary is read there as the page is, every
-chapter in turn (a commentary's comments laid out as a chapter, each a
-verse of its own, by core/shelf_folio.l8). The iPhone reads a version or a
-commentary a part at a time (a version's: its verses from one that begins
-a paragraph, about 1.5 KB of its records on; a commentary's: about 2 KB of
-its records from one of its folio's marks, where a comment, a verse or a
-paragraph begins), so that core lays out only the parts near the screen,
-whatever a chapter's length; the folio's
-marks say which part each verse is in without decoding the others. The
-panel shows a window of parts, each measured as it comes in (its height,
-and where each of its verses begins), so that where anything shown is is
-known, never estimated; parts come in ahead of the screen and go far
-behind it, one coming in above moving the panel by its height at once.
-Linked with the page (a button at its foot), the two move together,
-whichever a hand moves leading; unlinked, neither moves the other, and
-linked again it comes to the page's place (elsewhere, a version is a page
-of paragraphs, a chapter at a time). Each side is read at one line: the
-page's a third of the way down (where Go To leaves a verse), the panel's
-at its top. A version follows verse by verse, as far through each as the
-leader is. A commentary follows by comment: the follower moves only when
-the leader comes to a verse its comment isn't on, to the nearest comment
-on it (a jump goes to its first); near, it glides, far, it is there at
-once. While the page glides after a flick, no one reads it: the
-commentary waits, and settles at the page's verse when the page stops.
-Chapters a commentary says nothing on, in a run (Spurgeon's on Genesis to
-Job), are one part of it: a line saying so, as tall as the panel, shown
-wherever the page is in them.
+it was left. Its document is a version or a Bookshelf module; a version or
+a commentary is read in the panel's reader. `core/panes.l8` keeps the two
+panes, the page and the panel's reader, the same way on every skin: each
+reads its document a part at a time (a version's chapter in parts of its
+verses from one that begins a paragraph; a commentary's, about 2 KB of its
+folio from one of its marks), every chapter in turn, as the skin asks for
+the parts near what it shows. The skin says how tall each part it laid
+out is and where each of its anchors begins (a version's verses, a
+commentary's comments' first verses), and where each pane's reading line
+is as it moves, so that core knows where anything shown is, never
+estimated, and decides where the other pane goes on each frame. Linked
+(a button at the panel's foot), the pane a hand moved last leads. A
+version follows verse by verse, as far through each as the leader is,
+along a curve through both sides' verse starts made steady, within half a
+line of them. A commentary follows by comment: it moves only when the
+leader comes to a verse its comment isn't on, to the nearest comment on
+it (near, it glides; far, it is there at once); while the page glides
+after a flick it waits, and settles when the page stops. A commentary
+leading, the page goes to the first verse of the comment at its reading
+line. Chapters a commentary says nothing on, in a run, are one part of
+it, shown wherever the page is in them. Each pane is read at one line:
+the page's a third of the way down (where Go To leaves a verse), the
+panel's at its top.
 `core/shelf.l8` keeps the Bookshelf: SWORD modules downloaded on request
 rather than bundled. A module is made as part of its download: a Bible
 becomes a version in a text slot of its own, and a commentary, dictionary
@@ -79,7 +73,7 @@ meaning where the verse exists. Ribbons are named reading places; plans
 track progress independently. Study and Practice share the language data.
 
 The iOS app is a skin like the others: it runs core on core's host and
-talks to it only in the line protocol, drawing the reader from `chapter`
+talks to it only in the line protocol, drawing both panes from `part`
 lines and every screen from `screen` lines in UIKit. Feature availability
 can depend on platform services and loaded datasets; sharing core does not
 make platform integrations identical.
