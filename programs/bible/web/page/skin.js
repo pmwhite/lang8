@@ -1161,7 +1161,10 @@ function makeReader(p, main, view, opts) {
       this.main.appendChild(this.placeholder(next[0], next[1]));
       this.want(next[0], next[1]);
     }
-    for (let guard = 0; guard < 8; guard++) {
+    // (Above, not while it glides by itself: the browser's glide goes on
+    // to where it was aimed, and a part put in or let go above would move
+    // that place under it.)
+    for (let guard = 0; guard < 8 && !this.ownGlide; guard++) {
       const first = this.main.firstElementChild;
       if (!first || !first.laid) break;
       if (this.view.inset() - first.getBoundingClientRect().top > seen * AHEAD_SCREENS) break;
@@ -1172,7 +1175,7 @@ function makeReader(p, main, view, opts) {
     }
     const far = seen * FAR_SCREENS;
     while (this.main.children.length > 1 && this.main.lastElementChild.getBoundingClientRect().top - this.view.bottom() > far) this.main.lastElementChild.remove();
-    while (this.main.children.length > 1 && this.view.inset() - this.main.firstElementChild.getBoundingClientRect().bottom > far) {
+    while (!this.ownGlide && this.main.children.length > 1 && this.view.inset() - this.main.firstElementChild.getBoundingClientRect().bottom > far) {
       const gone = this.main.firstElementChild;
       this.keepPlace(() => gone.remove());
     }
