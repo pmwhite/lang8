@@ -3,34 +3,18 @@ tag bible;
 use_tag std;
 
 // The two panes a document is read in: the page (pane 0) and the panel's
-// reader beside it (pane 1, core/beside.l8's reader screen). Both are read
-// the same way on every skin (SKINS.md, "Panes"):
-//
-// - A pane's document is read a part at a time: a version's chapter in
-//   parts of its verses, each from one that begins a paragraph; a
-//   commentary's in parts of about 2 KB from its folio's marks
-//   (core/shelf_folio.l8). The skin asks for the parts near what it shows
-//   (`want P C K`) and core answers each (`part P C K N`, then its lines),
-//   with every anchor of the chapter (each verse a version has; each verse
-//   a commentary's comments begin) and the part it is in.
-// - The skin lays each part out and says how tall it is and where each of
-//   its anchors begins (`measured`), and where the pane's reading line is
-//   as it moves (`at P C K Y HOW`, Y down part K of chapter C). So core
-//   knows where everything the skin has laid out is, in the skin's own
-//   units, never estimated.
-// - Linked, the pane a finger last moved leads and core moves the other
-//   (`scroll`, `jump`) on each `at` of the leader's: here, once, for every
-//   skin.
-//
-// A version follows verse by verse, as far through each as the leader is,
-// along a curve through both sides' verse starts made steady (within half a
-// line of them). A commentary follows by comment: it moves only when the
-// leader comes to a verse its comment isn't on, to the nearest comment on
-// it, gliding if that is near; while the page glides after a flick it
-// waits, and settles when the page rests. A commentary leading, the page
-// goes to the first verse of the comment at its reading line as that
-// changes.
+// reader beside it (pane 1, core/beside.l8's reader screen), read the same
+// way on every skin (SKINS.md, Panes). Core keeps what is the documents':
+// their parts (`want P C K` answered by `part P C K N`, with every anchor of
+// the chapter), which place in one is which in the other (a chapter's link
+// map, `link C MODE`), where each pane is read (`at`, in places: a chapter,
+// an anchor, how far through its span), and where a jump takes each (`go`).
+// The skin keeps what is the platform's: laying parts out, scrolling, and
+// following frame by frame by the link map (core/follow.l8's rules, for
+// the skins in L8 to call).
 import "skin.l8";
+
+import "follow.l8";
 
 PANE_PAGE: int = 0;
 
@@ -43,12 +27,17 @@ PANES: int = 2;
 // page's a third of the way down; the panel's, often short, at its top).
 pane_reading_lines: []int = [333, 0];
 
-// How a pane was moved, as an `at` says.
-PANE_MOVED_BY_APP: int = 0;
+// How a pane goes to a place (`go`): there at once (a jump), or brought
+// there (the skin glides if it is near).
+PANE_GO_AT_ONCE: int = 0;
 
-PANE_DRAGGED: int = 1;
+PANE_GO_BROUGHT: int = 1;
 
-PANE_GLIDING: int = 2;
+// How a chapter's anchors go with the other pane's (`link C MODE`): verse
+// by verse (two versions), or comment by comment (a commentary in either).
+LINK_BY_VERSE: int = 0;
+
+LINK_BY_COMMENT: int = 1;
 
 // What a pane reads: the page, the version read; the panel's reader, a
 // version or a commentary (nothing while the panel shows no reader).
@@ -71,61 +60,21 @@ pane_by_comment(p: int): bool {
     }
 }
 
-// ---- where a pane is read ----
-// Each pane's reading line as the skin last said (`at`): the part it is
-// in (chapter -1: not said yet) and how far down it, in hundredths of the
-// skin's unit; how it was moved; and the pane's height and an em, in the
-// same unit (`view`).
+// ---- where each is read ----
+// Each pane's reading line's place as the skin last said (`at`): its
+// chapter (-1: not said yet), the anchor there (-1: above the first) and
+// thousandths through its span.
 type PanePlace = {
     c: int;
-    k: int;
-    y: int;
-    how: int;
-    view_height: int;
-    em: int
+    i: int;
+    frac: int
 }
 
-pane_places: []PanePlace = [PanePlace {
-    c: -1,
-    k: 0,
-    y: 0,
-    how: 0,
-    view_height: 60000,
-    em: 1900
-}, PanePlace {
-    c: -1,
-    k: 0,
-    y: 0,
-    how: 0,
-    view_height: 60000,
-    em: 1900
-}];
+pane_places: []PanePlace = [PanePlace { c: -1, i: -1, frac: 0 }, PanePlace { c: -1, i: -1, frac: 0 }];
 
-// Which pane leads while they are linked: the one a finger last moved (the
-// page, after a jump).
+// Which pane a finger last moved (`moving`): for the skin it leads, linked;
+// core keeps it to know which is followed when the panel is filled.
 pane_leader: int = PANE_PAGE;
-
-// The place core last told each pane to go to (`scroll`), so that it is
-// told again only as it changes; and whether a `jump` it was told has yet
-// to arrive (no `at` since).
-type PaneTold = {
-    c: int;
-    k: int;
-    y: int;
-    jumping: bool
-}
-
-pane_told: []PaneTold = [PaneTold {
-    c: -1,
-    k: 0,
-    y: 0,
-    jumping: false
-}, PaneTold {
-    c: -1,
-    k: 0,
-    y: 0,
-    jumping: false
-}];
 
 // ---- a chapter's anchors ----
 // Chapter c's anchors in a pane's document: how many parts it is in (0:
@@ -561,6 +510,7 @@ pane_comments_came() {
     match pane_document(PANE_PANEL) {
         Commentary m -> {
             pane_anchors_forget(PANE_PANEL);
+            pane_links_forget();
             for s in 0..PANE_PARTS_COMING_MOST {
                 c: int = pane_coming_c[s];
                 if (c >= 0) {
@@ -568,311 +518,60 @@ pane_comments_came() {
                     pane_write_comment_part(m.slot, c, pane_coming_k[s])
                 }
             }
+            // (Its maps, now its anchors are known.)
+            pane_links_near(sk_c);
+            if (pane_places[PANE_PANEL].c >= 0) pane_links_near(pane_places[PANE_PANEL].c)
         }
         _ -> { }
     }
 }
 
-// ---- what the skin has measured ----
-// The parts a pane has laid out lately: each one's height and where each
-// of its anchors begins, down from its top (hundredths of the skin's
-// unit), kept until its document or its layout changes (`forget`).
-type PartShape = {
-    height: int;
-    anchor_y: []int
-}
-
-PANE_SHAPES_MOST: int = 64;
-
-pane_shapes: []?owned *PartShape = new ?owned *PartShape[PANES * PANE_SHAPES_MOST](null);
-
-pane_shapes_c: []int = new int[PANES * PANE_SHAPES_MOST](-1);
-
-pane_shapes_k: []int = new int[PANES * PANE_SHAPES_MOST](0);
-
-pane_shapes_used: []int = new int[PANES * PANE_SHAPES_MOST](0);
-
-// The slot of part k of chapter c's shape in pane p (-1: not measured).
-pane_shape(p: int, c: int, k: int): int {
-    for s in p * PANE_SHAPES_MOST..(p + 1) * PANE_SHAPES_MOST {
-        if (pane_shapes_c[s] == c && pane_shapes_k[s] == k) return s
-    }
-    -1
-}
-
-// `measured P C K H Y...` (from at in line, to e): part k of chapter c's
-// shape in pane p, in place of the one before, or of the one used longest
-// ago.
-pane_measured(
-    p: int,
-    c: int,
-    k: int,
-    line: []i8,
-    at: int,
-    e: int
-) {
-    s: int = pane_shape(p, c, k);
-    if (s < 0) {
-        s = p * PANE_SHAPES_MOST;
-        for x in p * PANE_SHAPES_MOST..(p + 1) * PANE_SHAPES_MOST
-            if (pane_shapes_used[x] < pane_shapes_used[s]) s = x
-    }
-    // (Its numbers counted, then read.)
-    count: int = 0;
-    i: int = at;
-    while (i < e) {
-        _n: int = sk_num(line, i, e);
-        if (sk_num_end == i)
-            break;
-        count = count + 1;
-        i = sk_num_end
-    }
-    if (count == 0) return;
-    drop pane_shapes[s];
-    pane_shapes[s] = pane_shape_made(line, at, e, count);
-    pane_shapes_c[s] = c;
-    pane_shapes_k[s] = k;
-    pane_clock = pane_clock + 1;
-    pane_shapes_used[s] = pane_clock
-}
-
-pane_shape_made(
-    line: []i8,
-    at: int,
-    e: int,
-    count: int
-): owned *PartShape {
-    own {
-        shape: *PartShape = new PartShape { height: sk_num(line, at, e), anchor_y: new int[count - 1](0) };
-        for j in 0..count - 1 shape.anchor_y[j] = sk_num(line, sk_num_end, e);
-        shape
-    }
-}
-
-// Pane p's parts' shapes let go: chapter c's (-1: every chapter's).
-pane_shapes_forget(p: int, c: int) {
-    for s in p * PANE_SHAPES_MOST..(p + 1) * PANE_SHAPES_MOST {
-        if (c < 0 || pane_shapes_c[s] == c) {
-            drop pane_shapes[s];
-            pane_shapes_c[s] = -1
-        }
-    }
-}
-
-// Part k of chapter c's height in pane p (-1: not measured).
-pane_part_height(p: int, c: int, k: int): int {
-    s: int = pane_shape(p, c, k);
-    if (s < 0) return -1;
-    borrow pane_shapes[s] as shape {
-        shape.height
-    }
-}
-
-// Where anchor j of part k of chapter c begins, down from its top (its
-// top, if the skin said fewer).
-pane_part_anchor_y(
-    p: int,
-    c: int,
-    k: int,
-    j: int
-): int {
-    s: int = pane_shape(p, c, k);
-    if (s < 0) return 0;
-    borrow pane_shapes[s] as shape {
-        if (j < 0 || j >= len(shape.anchor_y)) 0 else shape.anchor_y[j]
-    }
-}
-
-// ---- positions ----
-// Where things are in a chapter of a pane, as hundredths down from the top
-// of one of its parts (the base: positions in different parts compare
-// through the heights of those between), and whether that is known
-// (pane_found: every part between measured).
-pane_found: bool = false;
-
-// An anchor index for a chapter's end (the next one's top).
-PANE_END: int = -2;
-
-// How far part to's top is below part base's in chapter c (negative above
-// it).
-pane_parts_between(
-    p: int,
-    c: int,
-    base: int,
-    to: int
-): int {
-    d: int = 0;
-    k: int = base;
-    while (k < to) {
-        h: int = pane_part_height(p, c, k);
-        if (h < 0) pane_found = false;
-        d = d + h;
-        k = k + 1
-    }
-    while (k > to) {
-        k = k - 1;
-        h: int = pane_part_height(p, c, k);
-        if (h < 0) pane_found = false;
-        d = d - h
-    }
-    d
-}
-
-// Where anchor i of chapter c begins (-1: the chapter's top; PANE_END: its
-// end), down from part base's top.
-pane_anchor_y(
-    p: int,
-    c: int,
-    base: int,
-    i: int
-): f64 {
-    pane_found = true;
-    if (pane_anchored(p, c) < 0) {
-        pane_found = false;
-        return 0.0f64
-    }
-    if (i == PANE_END) return pane_parts_between(p, c, base, pane_part_count(p, c)) as f64;
-    if (i < 0) return pane_parts_between(p, c, base, 0) as f64;
-    k: int = pane_anchor_part(p, c, i);
-    if (pane_shape(p, c, k) < 0) pane_found = false;
-    within: int = pane_part_anchor_y(p, c, k, i - pane_part_first_anchor(p, c, k));
-    (pane_parts_between(p, c, base, k) + within) as f64
-}
-
-// Where verse v of chapter c begins in pane p (0: the chapter's top;
-// PANE_END: its end), down from part base's top; pane_found false too if
-// the pane hasn't the verse.
-pane_verse_y(
-    p: int,
-    c: int,
-    base: int,
-    v: int
-): f64 {
-    if (v == 0) return pane_anchor_y(p, c, base, -1);
-    if (v == PANE_END) return pane_anchor_y(p, c, base, PANE_END);
-    i: int = pane_anchor_of(p, c, v);
-    if (i < 0) {
-        pane_found = false;
-        return 0.0f64
-    }
-    pane_anchor_y(p, c, base, i)
-}
-
-// Where a pane's reading line is: its chapter, the index of the anchor
-// whose span holds it (-1 above the first), and how far through that span
-// (0 to 1): a span runs from where its anchor begins to where the next
-// does (the chapter's top before its first; its end after its last).
-type PaneSpot = {
-    c: int;
-    i: int;
-    part: f64
-}
-
-pane_locate(p: int): PaneSpot {
-    place: PanePlace = pane_places[p];
-    c: int = place.c;
-    k: int = place.k;
-    y: f64 = place.y as f64;
-    first: int = pane_part_first_anchor(p, c, k);
-    n: int = pane_anchor_count(p, c);
-    i: int = first - 1;
-    j: int = first;
-    while (j < n && pane_anchor_part(p, c, j) == k && pane_anchor_y(p, c, k, j) <= y) {
-        i = j;
-        j = j + 1
-    }
-    a: f64 = pane_anchor_y(p, c, k, i);
-    b: f64 = pane_anchor_y(p, c, k, if (i + 1 < n) i + 1 else PANE_END);
-    // (Its end in a part not measured: the end of this one.)
-    if (!pane_found) {
-        h: int = pane_part_height(p, c, k);
-        b = (if (h > 0) h as f64 else y + 1.0f64)
-    }
-    d: f64 = b - a;
-    part: f64 = if (d < 1.0f64) 0.0f64 else (y - a) / d;
-    PaneSpot { c: c, i: i, part: if (part < 0.0f64) 0.0f64 else if (part > 1.0f64) 1.0f64 else part }
-}
-
-// The verse at a spot (0: above the first).
-pane_spot_verse(p: int, spot: PaneSpot): int {
-    v: int = if (spot.i < 0) 0 else pane_anchor_verse(p, spot.c, spot.i);
-    if (v < 0) 0 else v
-}
-
 // ---- the skin's lines ----
-// `view P HEIGHT EM`: pane p's height in sight and its em, in hundredths
-// of the skin's unit.
-pane_viewed(p: int, height: int, em: int) {
-    if (p < 0 || p >= PANES) return;
-    pane_places[p].view_height = (if (height > 0) height else 1);
-    pane_places[p].em = (if (em > 0) em else 1)
-}
-
-// `at P C K Y HOW`: pane p's reading line at y down part k of chapter c,
-// moved as how says. Moved by a hand, it leads; its place kept (the page's
-// as the reading place, the panel's as its title's chapter); leading while
-// linked, the other moved with it.
+// `at P C I FRAC`: pane p's reading line's place: the page's kept as the
+// reading place (its verse, how far through it), the panel's chapter named
+// in its title; the link maps of the chapters near it sent.
 pane_at(
     p: int,
     c: int,
-    k: int,
-    y: int,
-    how: int
+    i: int,
+    frac: int
 ) {
     if (p < 0 || p >= PANES || c < 0 || c >= chapters) return;
     pane_places[p].c = c;
-    pane_places[p].k = k;
-    pane_places[p].y = (if (y < 0) 0 else y);
-    pane_places[p].how = how;
-    pane_told[p].jumping = false;
-    if (how != PANE_MOVED_BY_APP && pane_leader != p) {
-        pane_leader = p;
-        pane_moved_on()
-    }
-    spot: PaneSpot = pane_locate(p);
-    if (p == PANE_PAGE) pane_page_placed(spot) else pane_panel_placed(spot);
-    if (p == pane_leader) pane_follow(how)
+    pane_places[p].i = i;
+    pane_places[p].frac = (if (frac < 0) 0 else if (frac > 999) 999 else frac);
+    v: int = if (i < 0) 0 else pane_anchor_verse(p, c, i);
+    if (v < 0) v = 0;
+    if (p == PANE_PAGE) {
+        was: int = sk_c;
+        sk_c = c;
+        sk_v = v;
+        sk_frac = pane_places[p].frac;
+        sk_keep_place();
+        if (c != was) sk_write_title()
+    } else bb_reader_placed(pane_place_chapter(p, c), v);
+    pane_links_near(c)
 }
 
-// The page's reading line at a spot: the reading place (chapter, verse,
-// thousandths of the way through it), the title as its chapter changes.
-pane_page_placed(spot: PaneSpot) {
-    c: int = pane_spot_chapter(PANE_PAGE, spot.c);
-    was: int = sk_c;
-    sk_c = c;
-    sk_v = pane_spot_verse(PANE_PAGE, spot);
-    sk_frac = (spot.part * 1000.0f64) as int;
-    sk_keep_place();
-    if (c != was) sk_write_title()
-}
-
-// A spot's chapter: in a run of chapters a commentary says nothing on, the
-// page's if it is in the run (wherever the page is in a run, the run's one
-// part shows it), else the run's first.
-pane_spot_chapter(p: int, c: int): int {
+// A place's chapter: in a run of chapters a commentary says nothing on,
+// the page's if it is in the run (wherever the page is in a run, the run's
+// one part shows it), else the run's first.
+pane_place_chapter(p: int, c: int): int {
     to: int = pane_gap_to(p, c);
     if (to >= 0 && sk_c >= c && sk_c <= to) sk_c else c
 }
 
-// `rest P ENDS_HI MS`: pane p at rest. The page's counted as read
-// (core/reading.l8); leading while linked, the other settles at its place
-// (a commentary waits while the page glides).
+// `rest P ENDS_HI MS`: pane p at rest: the page's counted as read
+// (core/reading.l8).
 pane_rest(p: int, ends_hi: int, ms: int) {
-    if (p < 0 || p >= PANES) return;
-    pane_places[p].how = PANE_MOVED_BY_APP;
-    if (p == PANE_PAGE && pane_places[p].c >= 0) {
-        now: f64 = ms as f64 / 1000.0f64;
-        rd_rest(sk_c, sk_v, sk_frac, ends_hi >= sk_c, ends_hi, now);
-        // (Reading the ESV: the chapters around the place asked for.)
-        if (text_cur == TEXT_ESV) ew_rest(sk_c, ends_hi);
-        lw_dragged(false, now);
-        sk_wake();
-        sk_awake()
-    }
-    if (p == pane_leader) {
-        pane_moved_on();
-        pane_follow(PANE_MOVED_BY_APP)
-    }
+    if (p != PANE_PAGE || pane_places[p].c < 0) return;
+    now: f64 = ms as f64 / 1000.0f64;
+    rd_rest(sk_c, sk_v, sk_frac, ends_hi >= sk_c, ends_hi, now);
+    // (Reading the ESV: the chapters around the place asked for.)
+    if (text_cur == TEXT_ESV) ew_rest(sk_c, ends_hi);
+    lw_dragged(false, now);
+    sk_wake();
+    sk_awake()
 }
 
 // `moving P MS`: a finger on pane p: it leads, and the other's glide is
@@ -880,7 +579,6 @@ pane_rest(p: int, ends_hi: int, ms: int) {
 pane_moving(p: int, ms: int) {
     if (p < 0 || p >= PANES) return;
     pane_leader = p;
-    pane_moved_on();
     pane_write_pane_line("halt ", 1 - p);
     if (p == PANE_PAGE) {
         rd_scroll(ms as f64 / 1000.0f64);
@@ -889,87 +587,66 @@ pane_moving(p: int, ms: int) {
     }
 }
 
-// ---- telling a pane where to go ----
-// `jump P C V FRAC`: pane p's reading line to verse v of chapter c (0: its
-// top), frac thousandths of the way through it.
-pane_jump(
-    p: int,
-    c: int,
-    v: int,
-    frac: int
-) {
-    if (p < 0 || p >= PANES || c < 0 || c >= chapters) return;
-    ui_str("jump ");
-    ui_int(p);
-    ui_byte(32);
-    ui_int(c);
-    ui_byte(32);
-    ui_int(if (v < 0) 0 else v);
-    ui_byte(32);
-    ui_int(if (frac < 0) 0 else if (frac > 999) 999 else frac);
-    ui_byte(10);
-    pane_told[p].c = -1;
-    pane_told[p].jumping = true
-}
-
-// A follower to verse v of chapter c (a jump: its part not laid out),
-// unless a jump it was told hasn't arrived yet (the leader moves on every
-// frame; the follower is moved again once it is there).
-pane_follow_jump(
-    p: int,
-    c: int,
-    v: int,
-    frac: int
-) {
-    if (pane_told[p].jumping) return;
-    pane_jump(p, c, v, frac)
-}
-
-// `scroll P C K Y GLIDE`: pane p's reading line to y down part k of
-// chapter c (one it has measured), gliding there or at once; not said
-// again while the place is the same.
-pane_scroll(
-    p: int,
-    c: int,
-    k: int,
-    y: int,
-    glide: bool
-) {
-    told: PaneTold = pane_told[p];
-    if (told.jumping) return;
-    d: int = y - told.y;
-    if (told.c == c && told.k == k && d > -50 && d < 50) return;
-    here: PanePlace = pane_places[p];
-    d = y - here.y;
-    if (here.c == c && here.k == k && d > -50 && d < 50 && told.c < 0) return;
-    ui_str("scroll ");
-    ui_int(p);
-    ui_byte(32);
-    ui_int(c);
-    ui_byte(32);
-    ui_int(k);
-    ui_byte(32);
-    ui_int(y);
-    ui_byte(32);
-    ui_int(if (glide) 1 else 0);
-    ui_byte(10);
-    pane_told[p].c = c;
-    pane_told[p].k = k;
-    pane_told[p].y = y
-}
-
 pane_write_pane_line(word: str, p: int) {
     ui_str(word);
     ui_int(p);
     ui_byte(10)
 }
 
+// ---- telling a pane where to go ----
+// `go P C I FRAC MODE`: pane p's reading line to anchor i of chapter c (-1:
+// the chapter's top), frac thousandths through its span; the link maps
+// near it sent first.
+pane_go(
+    p: int,
+    c: int,
+    i: int,
+    frac: int,
+    mode: int
+) {
+    if (p < 0 || p >= PANES || c < 0 || c >= chapters) return;
+    pane_links_near(c);
+    ui_str("go ");
+    ui_int(p);
+    ui_byte(32);
+    ui_int(c);
+    ui_byte(32);
+    ui_int(if (i < 0) -1 else i);
+    ui_byte(32);
+    ui_int(if (frac < 0) 0 else if (frac > 999) 999 else frac);
+    ui_byte(32);
+    ui_int(mode);
+    ui_byte(10);
+    pane_places[p].c = c;
+    pane_places[p].i = i;
+    pane_places[p].frac = frac
+}
+
+// Pane p to verse v of chapter c (0: its top), frac through it: its first
+// anchor of the verse (a commentary's: the first comment on it).
+pane_go_verse(
+    p: int,
+    c: int,
+    v: int,
+    frac: int,
+    mode: int
+) {
+    if (c < 0 || c >= chapters) return;
+    gap: int = pane_gap_from(p, c);
+    if (gap >= 0) {
+        pane_go(p, gap, -1, 0, mode);
+        return
+    }
+    i: int = if (v <= 0) -1 else if (pane_by_comment(p)) pane_comment_first(p, c,
+        v) else pane_anchor_of(p, c, v);
+    pane_go(p, c, i, if (i < 0 || pane_by_comment(p)) 0 else frac, mode)
+}
+
 // `forget P C`: pane p's parts of chapter c (-1: every chapter) to be
 // asked for again; what core knows of them let go.
 pane_forget(p: int, c: int) {
     if (c < 0) pane_anchors_forget(p);
-    pane_shapes_forget(p, c);
-    pane_told[p].c = -1;
+    pane_links_forget();
     ui_str("forget ");
     ui_int(p);
     ui_byte(32);
@@ -977,87 +654,13 @@ pane_forget(p: int, c: int) {
     ui_byte(10)
 }
 
-// Pane p to a place given in its own terms (a spot: chapter c, anchor i
-// (-1 its top), how far through its span), made a part and a height if its
-// parts are measured; else a jump to the verse.
-pane_go(
-    p: int,
-    c: int,
-    i: int,
-    glide: bool
-) {
-    k: int = if (i < 0) 0 else pane_anchor_part(p, c, i);
-    y: f64 = pane_anchor_y(p, c, k, i);
-    if (!pane_found) {
-        pane_follow_jump(p, c, if (i < 0) 0 else pane_anchor_verse(p, c, i), 0);
-        return
-    }
-    pane_scroll(p, c, k, y as int, glide)
-}
+// ---- the link maps ----
+// The chapters whose link maps have been sent since the panel's document
+// (or either's parts) last changed: a flag each chapter.
+pane_linked_sent: []bool = new bool[len(ch_num)](false);
 
-// Pane p to y down part k of chapter c, y perhaps beyond the part (into
-// those after it or before it, measured): moved there at once.
-pane_scroll_spilled(
-    p: int,
-    c: int,
-    k: int,
-    y: f64
-) {
-    at_c: int = c;
-    at_k: int = k;
-    at_y: f64 = y;
-    for _step in 0..64 {
-        h: int = pane_part_height(p, at_c, at_k);
-        if (h < 0 || at_y < h as f64)
-            break;
-        // (Past a chapter's last part: the next chapter's first.)
-        n: int = pane_part_count(p, at_c);
-        if (at_k + 1 < n) at_k = at_k + 1 else {
-            last: int = pane_gap_to(p, at_c);
-            next: int = (if (last >= 0) last else at_c) + 1;
-            if (next >= chapters)
-                break;
-            at_c = pane_part_chapter(p, next);
-            at_k = 0
-        }
-        at_y = at_y - h as f64
-    }
-    for _step in 0..64 {
-        if (at_y >= 0.0f64)
-            break;
-        if (at_k > 0) at_k = at_k - 1 else {
-            if (at_c <= 0)
-                break;
-            prev: int = pane_part_chapter(p, at_c - 1);
-            n: int = pane_part_count(p, prev);
-            if (n <= 0)
-                break;
-            at_c = prev;
-            at_k = n - 1
-        }
-        h: int = pane_part_height(p, at_c, at_k);
-        if (h < 0)
-            break;
-        at_y = at_y + h as f64
-    }
-    if (pane_shape(p, at_c, at_k) < 0) {
-        pane_follow_jump(p, c, 0, 0);
-        return
-    }
-    pane_scroll(p, at_c, at_k, if (at_y < 0.0f64) 0 else at_y as int, false)
-}
-
-// ---- following ----
-// The verse a follower moving by comment last went to (chapter -1: none),
-// forgotten as a hand moves either pane, so that the next is gone to even
-// if it is the one before.
-pane_glided_c: int = -1;
-
-pane_glided_v: int = -1;
-
-pane_moved_on() {
-    pane_glided_c = -1;
-    pane_glided_v = -1
+pane_links_forget() {
+    for c in 0..len(pane_linked_sent) pane_linked_sent[c] = false
 }
 
 // Whether the panel's reader is linked with the page.
@@ -1065,356 +668,107 @@ pane_linked(): bool {
     bb_reader_at() >= 0 && sk_beside_linked()
 }
 
-// The leader moved (how): the follower with it, linked.
-pane_follow(how: int) {
-    if (!pane_linked()) return;
-    leader: int = pane_leader;
-    follower: int = 1 - leader;
-    if (pane_places[leader].c < 0) return;
-    if (pane_by_comment(follower)) pane_follow_by_comment(leader, follower, how) else if (pane_by_comment(leader)) pane_lead_by_comment(leader,
-        follower) else pane_follow_by_verse(leader, follower)
+// The link maps of chapter c and those either side of it, each once, while
+// the panel shows a reader.
+pane_links_near(c: int) {
+    if (bb_reader_at() < 0) return;
+    for x in c - 1..c + 2 {
+        if (x >= 0 && x < chapters && !pane_linked_sent[x]) pane_write_link(x)
+    }
 }
 
-// A version following a version: at the same verse, as far through it as
-// the leader is, along a steady line (pane_map_near).
-pane_follow_by_verse(leader: int, follower: int) {
-    spot: PaneSpot = pane_locate(leader);
-    c: int = spot.c;
-    v: int = pane_spot_verse(leader, spot);
-    // (Its verse's part not laid out yet: a jump there.)
-    fi: int = if (v > 0) pane_anchor_of(follower, c, v) else -1;
-    fk: int = if (fi >= 0) pane_anchor_part(follower, c, fi) else 0;
-    if (pane_shape(follower, c, fk) < 0) {
-        pane_follow_jump(follower, c, v, (spot.part * 1000.0f64) as int);
-        return
-    }
-    y: f64 = pane_map_near(leader, follower, spot, fk);
-    if (!pane_mapped) {
-        pane_follow_jump(follower, c, v, (spot.part * 1000.0f64) as int);
-        return
-    }
-    pane_scroll_spilled(follower, c, fk, y)
-}
-
-// A commentary following the page: as the page's reading line comes to a
-// verse the commentary's comment isn't on, the commentary goes to the
-// nearest comment on it (a long comment stays while its verses are read).
-// While the page glides after a flick, it waits: it passes a verse every
-// few frames, and no one reads it; at rest the commentary settles.
-pane_follow_by_comment(leader: int, follower: int, how: int) {
-    if (how == PANE_GLIDING) return;
-    spot: PaneSpot = pane_locate(leader);
-    c: int = spot.c;
-    v: int = pane_spot_verse(leader, spot);
-    if (c == pane_glided_c && v == pane_glided_v) return;
-    pane_glided_c = c;
-    pane_glided_v = v;
-    // (Its anchors not known yet (opening): to its part, when they are.)
-    if (pane_anchored(follower, c) < 0) {
-        pane_follow_jump(follower, c, 0, 0);
-        return
-    }
-    // (In a run of chapters without comments: its one part, wherever the
-    // page is in it.)
-    gap: int = pane_gap_from(follower, c);
-    here: PanePlace = pane_places[follower];
-    if (gap >= 0) {
-        if (here.c != gap) pane_go(follower, gap, -1, false);
-        return
-    }
-    // (At a comment on that verse already, wherever in it: it stays.)
-    if (here.c == c) {
-        at: PaneSpot = pane_locate(follower);
-        if (if (at.i < 0) v == 0 else pane_covers(follower, c, at.i, v)) return
-    }
-    i: int = if (v == 0) -1 else pane_comment_nearest(follower, c, v);
-    pane_glide_to(follower, c, i)
-}
-
-// A commentary leading the page: the page goes to the first verse of the
-// comment at its reading line as that changes (it stays while a comment is
-// read, and on a verse that comment is on already).
-pane_lead_by_comment(leader: int, follower: int) {
-    spot: PaneSpot = pane_locate(leader);
-    c: int = pane_spot_chapter(leader, spot.c);
-    if (pane_gap_from(leader, spot.c) >= 0) return;
-    v: int = pane_spot_verse(leader, spot);
-    if (c == pane_glided_c && v == pane_glided_v) return;
-    pane_glided_c = c;
-    pane_glided_v = v;
-    here: PanePlace = pane_places[follower];
-    if (spot.i >= 0 && here.c == c) {
-        at: PaneSpot = pane_locate(follower);
-        if (pane_covers(leader, c, spot.i, pane_spot_verse(follower, at))) return
-    }
-    pane_glide_to(follower, c, if (v > 0) pane_anchor_of(follower, c, v) else -1)
-}
-
-// Of the places in chapter c where verse v is commented on in pane p (one
-// each time its commentator goes through the verses), the nearest to its
-// reading line: those measured by where they are, others by how many parts
-// away (-1: none, the chapter's top).
-pane_comment_nearest(p: int, c: int, v: int): int {
-    here: PanePlace = pane_places[p];
-    best: int = -1;
-    best_d: f64 = 0.0f64;
-    for i in 0..pane_anchor_count(p, c) {
-        if (pane_covers(p, c, i, v)) {
-            d: f64 = 0.0f64;
-            if (here.c == c) {
-                y: f64 = pane_anchor_y(p, c, here.k, i);
-                d = (if (pane_found) y - here.y as f64 else (pane_anchor_part(p, c,
-                    i) - here.k) as f64 * here.view_height as f64)
-            } else d = i as f64;
-            if (d < 0.0f64) d = -d;
-            if (best < 0 || d < best_d) {
-                best = i;
-                best_d = d
+// `link C MODE`, its `match I0 I1 J` lines, `end`: which of the page's
+// anchors of chapter c go with which of the panel's. Two versions, verse
+// by verse (a verse one lacks, none); a commentary, each comment with the
+// page's verses it covers. Not sent while either's anchors can't be known
+// (a commentary opening, a version still to come): sent once they can be.
+pane_write_link(c: int) {
+    if (pane_anchored(PANE_PAGE, c) < 0 || pane_anchored(PANE_PANEL, c) < 0) return;
+    pane_linked_sent[c] = true;
+    mode: int = if (pane_by_comment(PANE_PANEL)) LINK_BY_COMMENT else LINK_BY_VERSE;
+    ui_str("link ");
+    ui_int(c);
+    ui_byte(32);
+    ui_int(mode);
+    ui_byte(10);
+    n: int = pane_anchor_count(PANE_PAGE, c);
+    if (mode == LINK_BY_VERSE) {
+        for i in 0..n {
+            j: int = pane_anchor_of(PANE_PANEL, c, pane_anchor_verse(PANE_PAGE, c,
+                i));
+            if (j >= 0) pane_write_match(i, i, j)
+        }
+    } else {
+        // (A comment covers the verses from its own to the one before the
+        // next comment that goes further: pane_covers.)
+        for j in 0..pane_anchor_count(PANE_PANEL, c) {
+            first: int = -1;
+            last: int = -1;
+            for i in 0..n {
+                if (pane_covers(PANE_PANEL, c, j, pane_anchor_verse(PANE_PAGE, c,
+                    i))) {
+                    if (first < 0) first = i;
+                    last = i
+                }
             }
+            if (first >= 0) pane_write_match(first, last, j)
         }
     }
-    best
+    ui_str("end\n")
 }
 
-// Pane p to anchor i of chapter c (-1: its top): gliding if it is within a
-// screen and a half, else at once (a blur of words otherwise); a jump if
-// it isn't laid out.
-pane_glide_to(p: int, c: int, i: int) {
-    here: PanePlace = pane_places[p];
-    k: int = if (i < 0) 0 else pane_anchor_part(p, c, i);
-    y: f64 = pane_anchor_y(p, c, k, i);
-    if (!pane_found || here.c != c) {
-        pane_go(p, c, i, false);
-        return
-    }
-    from: f64 = pane_parts_between(p, c, k, here.k) as f64 + here.y as f64;
-    near: bool = pane_found && (if (from > y) from - y else y - from) <= here.view_height as f64 * 1.5f64;
-    pane_scroll(p, c, k, y as int, near)
-}
-
-// ---- the curve between them ----
-// Where the follower's reading line goes for the leader's: through both
-// sides' verse starts (each verse lands where it begins), and between them
-// along a monotone cubic (Fritsch and Carlson's), its slope at each start
-// the harmonic mean of the two verses' ratios either side, so that the
-// follower's speed changes gradually from verse to verse and never moves
-// against the leader. Positions are the leader's down from its reading
-// line's part, the follower's down from part fk's.
-pane_mapped: bool = false;
-
-// Where verse v (0: the chapter's top; PANE_END: its end) of chapter c is
-// on a side, and whether known (pane_found).
-pane_side_y(
-    p: int,
-    c: int,
-    base: int,
-    v: int
-): f64 {
-    pane_verse_y(p, c, base, v)
-}
-
-// The leader's verse number at anchor index i (-1: the chapter's top, 0;
-// past the last, PANE_END).
-pane_number(p: int, c: int, i: int): int {
-    if (i < 0) return 0;
-    if (i >= pane_anchor_count(p, c)) return PANE_END;
-    pane_anchor_verse(p, c, i)
-}
-
-pane_ratio(
-    l0: f64,
-    l1: f64,
-    f0: f64,
-    f1: f64
-): f64 {
-    if (l1 - l0 < 1.0f64) 1.0f64 else (f1 - f0) / (l1 - l0)
-}
-
-// The harmonic mean of two slopes (0 if either isn't forward).
-pane_mean(a: f64, b: f64): f64 {
-    if (a <= 0.0f64 || b <= 0.0f64) 0.0f64 else 2.0f64 * a * b / (a + b)
-}
-
-pane_map(
-    leader: int,
-    follower: int,
-    spot: PaneSpot,
-    fk: int
-): f64 {
-    pane_mapped = true;
-    c: int = spot.c;
-    lk: int = pane_places[leader].k;
-    va: int = pane_number(leader, c, spot.i);
-    vb: int = pane_number(leader, c, spot.i + 1);
-    l1: f64 = pane_side_y(leader, c, lk, va);
-    l2: f64 = pane_side_y(leader, c, lk, vb);
-    f1: f64 = pane_side_y(follower, c, fk, va);
-    ok1: bool = pane_found;
-    f2: f64 = pane_side_y(follower, c, fk, vb);
-    ok2: bool = pane_found;
-    if (!ok1 || !ok2) {
-        // (A verse the follower hasn't: its chapter's top, as far through
-        // as the leader is through its verse.)
-        top: f64 = pane_side_y(follower, c, fk, 0);
-        top_ok: bool = pane_found;
-        end: f64 = pane_side_y(follower, c, fk, PANE_END);
-        pane_mapped = top_ok && pane_found;
-        return top + spot.part * (end - top)
-    }
-    m: f64 = pane_ratio(l1, l2, f1, f2);
-    d1: f64 = m;
-    d2: f64 = m;
-    if (spot.i >= 0) {
-        v0: int = pane_number(leader, c, spot.i - 1);
-        l0: f64 = pane_side_y(leader, c, lk, v0);
-        ok: bool = pane_found;
-        f0: f64 = pane_side_y(follower, c, fk, v0);
-        if (ok && pane_found && l1 - l0 >= 1.0f64) d1 = pane_mean(pane_ratio(l0, l1,
-            f0, f1), m)
-    }
-    if (vb != PANE_END) {
-        v3: int = pane_number(leader, c, spot.i + 2);
-        l3: f64 = pane_side_y(leader, c, lk, v3);
-        ok: bool = pane_found;
-        f3: f64 = pane_side_y(follower, c, fk, v3);
-        if (ok && pane_found && l3 - l2 >= 1.0f64) d2 = pane_mean(m, pane_ratio(l2,
-            l3, f2, f3))
-    }
-    h: f64 = l2 - l1;
-    t: f64 = spot.part;
-    t2: f64 = t * t;
-    t3: f64 = t2 * t;
-    (2.0f64 * t3 - 3.0f64 * t2 + 1.0f64) * f1 + (t3 - 2.0f64 * t2 + t) * h * d1 + (-2.0f64 * t3 + 3.0f64 * t2) * f2 + (t3 - t2) * h * d2
-}
-
-// ---- near the verses, at a steady speed ----
-// The curve through every verse's start still changes speed from verse to
-// verse, as much as their lengths differ. The follower goes instead along
-// a steadier line, fitted through the verses' starts about
-// PANE_REACH_LINES either way (each weighted less the farther it is), kept
-// within PANE_SLACK_EM of the curve (softly: the nearer the limit, the
-// less it moves apart), so that no verse is ever more than that from its
-// place.
-PANE_REACH_LINES: f64 = 6.0f64;
-
-PANE_SLACK_EM: f64 = 0.5f64;
-
-// How many verses either way the line is fitted through.
-PANE_FIT_VERSES: int = 5;
-
-pane_map_near(
-    leader: int,
-    follower: int,
-    spot: PaneSpot,
-    fk: int
-): f64 {
-    exact: f64 = pane_map(leader, follower, spot, fk);
-    if (!pane_mapped) return exact;
-    c: int = spot.c;
-    i: int = spot.i;
-    lk: int = pane_places[leader].k;
-    y: f64 = pane_places[leader].y as f64;
-    em: f64 = pane_places[leader].em as f64;
-    n: int = pane_anchor_count(leader, c);
-    reach: f64 = em * 1.5f64 * PANE_REACH_LINES;
-    // (A weighted least-squares line through the starts, x the leader's
-    // position from its reading line's, so that its value there is its
-    // intercept.)
-    sw: f64 = 0.0f64;
-    sx: f64 = 0.0f64;
-    sy: f64 = 0.0f64;
-    sxx: f64 = 0.0f64;
-    sxy: f64 = 0.0f64;
-    from: int = if (i - PANE_FIT_VERSES < -1) -1 else i - PANE_FIT_VERSES;
-    to: int = if (i + PANE_FIT_VERSES + 1 > n) n else i + PANE_FIT_VERSES + 1;
-    for k in from..to + 1 {
-        v: int = pane_number(leader, c, k);
-        l: f64 = pane_side_y(leader, c, lk, v);
-        ok: bool = pane_found;
-        f: f64 = pane_side_y(follower, c, fk, v);
-        if (ok && pane_found) {
-            x: f64 = l - y;
-            u: f64 = x / reach;
-            w: f64 = 1.0f64 / ((1.0f64 + u * u) * (1.0f64 + u * u));
-            sw = sw + w;
-            sx = sx + w * x;
-            sy = sy + w * f;
-            sxx = sxx + w * x * x;
-            sxy = sxy + w * x * f
-        }
-    }
-    det: f64 = sw * sxx - sx * sx;
-    if (sw <= 0.0f64 || det <= 0.000001f64 * sw * sw) return exact;
-    slope: f64 = (sw * sxy - sx * sy) / det;
-    if (slope <= 0.0f64) return exact;
-    steady: f64 = (sy - slope * sx) / sw;
-    // (Kept near the curve: apart by d, it goes d / (1 + |d| / slack).)
-    slack: f64 = pane_places[follower].em as f64 * PANE_SLACK_EM;
-    d: f64 = steady - exact;
-    far: f64 = if (d < 0.0f64) -d else d;
-    exact + d / (1.0f64 + far / slack)
+pane_write_match(i0: int, i1: int, j: int) {
+    ui_str("match ");
+    ui_int(i0);
+    ui_byte(32);
+    ui_int(i1);
+    ui_byte(32);
+    ui_int(j);
+    ui_byte(10)
 }
 
 // ---- jumps ----
 // The page jumped to chapter c, verse v, frac through it (Go To, a link,
-// a ribbon, the way back): it leads, and the panel's reader, linked, is
+// a ribbon, the way back): there at once, and the panel's reader, linked,
 // there too (a commentary at the first comment on the verse).
 pane_page_jump(c: int, v: int, frac: int) {
-    pane_jump(PANE_PAGE, c, v, frac);
+    pane_go_verse(PANE_PAGE, c, v, frac, PANE_GO_AT_ONCE);
     pane_leader = PANE_PAGE;
-    pane_moved_on();
-    if (pane_linked()) pane_panel_to(c, v, frac)
+    if (pane_linked()) pane_go_verse(PANE_PANEL, c, v, frac, PANE_GO_AT_ONCE)
 }
 
-// The panel's reader to the page's chapter c, verse v (a commentary to
-// the first comment on it, or its run's part).
+// The panel's reader to the page's chapter c, verse v, brought there
+// (relinked; verses selected).
 pane_panel_to(c: int, v: int, frac: int) {
-    if (!pane_by_comment(PANE_PANEL)) {
-        pane_jump(PANE_PANEL, c, v, frac);
-        return
-    }
-    gap: int = pane_gap_from(PANE_PANEL, c);
-    if (gap >= 0) {
-        pane_jump(PANE_PANEL, gap, 0, 0);
-        return
-    }
-    i: int = if (v > 0) pane_comment_first(PANE_PANEL, c, v) else -1;
-    pane_jump(PANE_PANEL, c, if (i >= 0) pane_anchor_verse(PANE_PANEL, c, i) else 0,
-        0)
+    pane_leader = PANE_PAGE;
+    pane_go_verse(PANE_PANEL, c, v, frac, PANE_GO_BROUGHT)
 }
 
 // The panel's reader begun anew (opened, or its document changed): its
-// parts forgotten, and it opens at the page's place, the page leading.
+// parts and link maps forgotten; it opens at the page's place.
 pane_panel_begun() {
     pane_forget(PANE_PANEL, -1);
     pane_places[PANE_PANEL].c = -1;
     pane_leader = PANE_PAGE;
-    pane_moved_on();
     for s in 0..PANE_PARTS_COMING_MOST pane_coming_c[s] = -1
 }
 
-// The panel's reader's screen shown (made, or made again): it goes to the
-// page's place if it has none yet, else stays where it is.
+// The panel's reader's screen shown (made, or made again): to the page's
+// place if it has none yet, else staying where it is.
 pane_panel_shown() {
     if (pane_places[PANE_PANEL].c >= 0) return;
-    pane_panel_to(sk_c, sk_v, sk_frac)
-}
-
-// The panel's reader moved: its title's chapter as it changes.
-pane_panel_placed(spot: PaneSpot) {
-    c: int = pane_spot_chapter(PANE_PANEL, spot.c);
-    bb_reader_placed(c, pane_spot_verse(PANE_PANEL, spot))
+    pane_go_verse(PANE_PANEL, sk_c, sk_v, sk_frac, PANE_GO_AT_ONCE)
 }
 
 // Every chapter laid out again (the look, the settings, the version): both
 // panes' parts asked for again, each at its place.
 pane_relayout() {
     pane_forget(PANE_PAGE, -1);
-    pane_jump(PANE_PAGE, sk_c, sk_v, sk_frac);
+    pane_go_verse(PANE_PAGE, sk_c, sk_v, sk_frac, PANE_GO_AT_ONCE);
     if (bb_reader_at() < 0) return;
     pane_forget(PANE_PANEL, -1);
-    if (pane_places[PANE_PANEL].c >= 0) pane_jump(PANE_PANEL, bb_reader_c, bb_reader_v,
-        0)
+    place: PanePlace = pane_places[PANE_PANEL];
+    if (place.c >= 0) pane_go(PANE_PANEL, place.c, place.i, place.frac, PANE_GO_AT_ONCE)
 }
 
 // `line P THOUSANDTHS` for each pane: where its reading line is (at

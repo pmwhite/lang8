@@ -49,7 +49,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test game skate race cad recipes better bible-web bible-folios bible-tui bible-spoken \
+.PHONY: all check fmt selfhost compiler-test game skate race cad recipes better bible-web bible-folios bible-tui bible-follow-test bible-spoken \
 	terminal callback-test http websocket wasm-test web \
 	profile-explorer \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
@@ -226,6 +226,16 @@ $(BUILD)/smooth-bible: l8c3 $(PROGRAMS) $(RUNTIME) $(BIBLE_FOLIOS) | $(OK)
 	@$(STEP) 'bible for the terminal' ./l8c3 build programs/bible/tui/main.l8 -o $@
 
 bible-tui: $(BUILD)/smooth-bible
+
+# Following's cases (programs/bible/tools/link_cases.l8, SKINS.md: Panes),
+# from core/follow.l8's rules, which a skin not in L8 checks its own
+# against; bible-follow-test runs the rules' own tests and the web's check.
+$(BUILD)/link-cases.txt: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'bible link cases' sh -c './l8c3 build programs/bible/tools/link_cases.l8 -o $(BUILD)/link-cases && $(BUILD)/link-cases > $@.tmp && mv -f $@.tmp $@'
+
+bible-follow-test: $(BUILD)/link-cases.txt
+	+@$(STEP) 'bible following rules' ./l8c3 test programs/bible/tools/link_cases.l8
+	+@$(STEP) 'bible following on the web' node programs/bible/web/page/follow_test.mjs $(BUILD)/link-cases.txt
 
 $(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s $(ARM_ARENA_RUNTIME) | $(OK)
 	@$(STEP) 'iOS check' sh -c './l8c3 arm64 --target ios programs/ios/check.l8 -o $@.tmp && mv -f $@.tmp $@'
@@ -467,7 +477,7 @@ help:
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
 	@echo '  game, skate, race, cad, recipes'
-	@echo '  better, bible-web, bible-tui'
+	@echo '  better, bible-web, bible-tui, bible-follow-test'
 	@echo '  terminal, callback-test'
 	@echo '  http, websocket, profile-explorer'
 	@echo '  wasm-test       run the tests as WebAssembly under Node and under the L8 interpreter; check the wasm compiler fixpoints'

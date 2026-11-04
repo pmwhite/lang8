@@ -1,0 +1,246 @@
+tag bible;
+
+use_tag std;
+
+// Following, frame by frame (SKINS.md, Panes: Linked): where the follower's
+// reading line goes for the leader's, by a chapter's link map and the two
+// panes' own geometry. The rules are the skins' (each moves its own panes),
+// written here once: the L8 skins (the iPhone's, the terminal's) call them,
+// and tools/link_cases.l8 writes cases from them that the others' tests
+// must match. Nothing here knows a platform: positions are numbers down
+// each pane's own content, in its own unit.
+
+// How a pane moved, as the rules take it: by the app (a jump, a scroll of
+// its own), by a finger or a key, or gliding after a finger (a commentary
+// waits while the page leading it glides).
+PANE_MOVED_BY_APP: int = 0;
+
+PANE_DRAGGED: int = 1;
+
+PANE_GLIDING: int = 2;
+
+// A chapter's link map (core's `link C MODE` and its `match I0 I1 J`
+// lines): the page's anchors i0 to i1 go with the panel's anchor j, in
+// order.
+type LinkMap = {
+    mode: int;
+    i0: []int;
+    i1: []int;
+    j: []int
+}
+
+// One pane's chapter as it is laid out: where each of its anchors begins
+// (known: whether it is laid out), where the chapter begins and ends (each,
+// known or not), and its em.
+type ChapterShape = {
+    starts: []f64;
+    known: []bool;
+    top: f64;
+    top_known: bool;
+    end: f64;
+    end_known: bool;
+    em: f64
+}
+
+// Where the follower's reading line goes (ok: whether it can be told from
+// what is laid out).
+type FollowPlace = {
+    y: f64;
+    ok: bool
+}
+
+// The pairs a version follows by: the leader's and the follower's
+// positions of each matched pair's first anchors, the chapter's top and
+// its end, in order and each going forward on both sides (one that
+// doesn't, as a verse moved by versification, left out).
+type FollowPairs = {
+    x: []f64;
+    y: []f64;
+    n: int
+}
+
+// The pairs, the page leading (page_leads) or the panel.
+follow_pairs(
+    map: *LinkMap,
+    page: *ChapterShape,
+    panel: *ChapterShape,
+    page_leads: bool
+): FollowPairs@new {
+    most: int = len(map.j) + 2;
+    pairs: FollowPairs = FollowPairs { x: new f64[most](0.0f64), y: new f64[most](0.0f64), n: 0 };
+    if (page.top_known && panel.top_known) {
+        if (page_leads) follow_pair_add(&pairs, page.top, panel.top) else follow_pair_add(&pairs,
+            panel.top, page.top)
+    }
+    for k in 0..len(map.j) {
+        a: int = map.i0[k];
+        b: int = map.j[k];
+        if (a >= 0 && a < len(page.known) && b >= 0 && b < len(panel.known) && page.known[a] && panel.known[b]) {
+            if (page_leads) follow_pair_add(&pairs, page.starts[a], panel.starts[b]) else follow_pair_add(&pairs,
+                panel.starts[b], page.starts[a])
+        }
+    }
+    if (page.end_known && panel.end_known) {
+        if (page_leads) follow_pair_add(&pairs, page.end, panel.end) else follow_pair_add(&pairs,
+            panel.end, page.end)
+    }
+    pairs
+}
+
+follow_pair_add(pairs: *FollowPairs, x: f64, y: f64) {
+    n: int = pairs.n;
+    if (n > 0 && (x <= pairs.x[n - 1] || y < pairs.y[n - 1])) return;
+    pairs.x[n] = x;
+    pairs.y[n] = y;
+    pairs.n = n + 1
+}
+
+// A version following, the leader's reading line at line (in the leader's
+// positions): through each pair, between them along a monotone cubic
+// (Fritsch and Carlson's, its slope at each pair the harmonic mean of the
+// ratios either side), then steadied: a line fitted through the pairs
+// about the leader's (weighted 1 / (1 + (x / 9 em))², x from the line, em
+// the leader's), the follower placed d / (1 + |d| / (0.5 em)) from the
+// curve, d the line's distance from it, em the follower's.
+FOLLOW_FIT_PAIRS: int = 5;
+
+FOLLOW_REACH_EM: f64 = 9.0f64;
+
+FOLLOW_SLACK_EM: f64 = 0.5f64;
+
+follow_by_verse(
+    pairs: *FollowPairs,
+    line: f64,
+    leader_em: f64,
+    follower_em: f64
+): FollowPlace {
+    n: int = pairs.n;
+    // (The pair at or before the line, with one after it.)
+    k: int = -1;
+    for x in 0..n
+        if (pairs.x[x] <= line) k = x;
+    if (k < 0 || k + 1 >= n) return FollowPlace { y: 0.0f64, ok: false };
+    exact: f64 = follow_curve(pairs, k, line);
+    // (The steady line: weighted least squares, its value at the line.)
+    reach: f64 = leader_em * FOLLOW_REACH_EM;
+    sw: f64 = 0.0f64;
+    sx: f64 = 0.0f64;
+    sy: f64 = 0.0f64;
+    sxx: f64 = 0.0f64;
+    sxy: f64 = 0.0f64;
+    from: int = if (k - FOLLOW_FIT_PAIRS < 0) 0 else k - FOLLOW_FIT_PAIRS;
+    to: int = if (k + FOLLOW_FIT_PAIRS + 2 > n) n else k + FOLLOW_FIT_PAIRS + 2;
+    for x in from..to {
+        d: f64 = pairs.x[x] - line;
+        u: f64 = d / reach;
+        w: f64 = 1.0f64 / ((1.0f64 + u * u) * (1.0f64 + u * u));
+        sw = sw + w;
+        sx = sx + w * d;
+        sy = sy + w * pairs.y[x];
+        sxx = sxx + w * d * d;
+        sxy = sxy + w * d * pairs.y[x]
+    }
+    det: f64 = sw * sxx - sx * sx;
+    if (sw <= 0.0f64 || det <= 0.000001f64 * sw * sw) return FollowPlace { y: exact, ok: true };
+    slope: f64 = (sw * sxy - sx * sy) / det;
+    if (slope <= 0.0f64) return FollowPlace { y: exact, ok: true };
+    steady: f64 = (sy - slope * sx) / sw;
+    slack: f64 = follower_em * FOLLOW_SLACK_EM;
+    d: f64 = steady - exact;
+    far: f64 = if (d < 0.0f64) -d else d;
+    FollowPlace { y: exact + d / (1.0f64 + far / slack), ok: true }
+}
+
+// The monotone cubic between pairs k and k + 1, at line.
+follow_curve(pairs: *FollowPairs, k: int, line: f64): f64 {
+    x1: f64 = pairs.x[k];
+    x2: f64 = pairs.x[k + 1];
+    y1: f64 = pairs.y[k];
+    y2: f64 = pairs.y[k + 1];
+    h: f64 = x2 - x1;
+    m: f64 = (y2 - y1) / h;
+    d1: f64 = if (k > 0) follow_mean(follow_ratio(pairs, k - 1), m) else m;
+    d2: f64 = if (k + 2 < pairs.n) follow_mean(m, follow_ratio(pairs, k + 1)) else m;
+    t: f64 = (line - x1) / h;
+    t2: f64 = t * t;
+    t3: f64 = t2 * t;
+    (2.0f64 * t3 - 3.0f64 * t2 + 1.0f64) * y1 + (t3 - 2.0f64 * t2 + t) * h * d1 + (-2.0f64 * t3 + 3.0f64 * t2) * y2 + (t3 - t2) * h * d2
+}
+
+// The ratio of the follower's span to the leader's between pairs k and
+// k + 1.
+follow_ratio(pairs: *FollowPairs, k: int): f64 {
+    (pairs.y[k + 1] - pairs.y[k]) / (pairs.x[k + 1] - pairs.x[k])
+}
+
+// The harmonic mean of two slopes (0 if either isn't forward).
+follow_mean(a: f64, b: f64): f64 {
+    if (a <= 0.0f64 || b <= 0.0f64) 0.0f64 else 2.0f64 * a * b / (a + b)
+}
+
+// ---- by comment ----
+// What a follower moving by comment does: stays, or goes to an anchor of
+// its (-1: its chapter's top).
+type CommentStep =
+    | Stay
+    | GoTo { anchor: int }
+
+// The page leading a commentary: the page's anchor at its reading line
+// (page_i, -1 above the first) and the commentary's at its own (panel_j,
+// -1 above the first): it stays while a comment there covers the page's
+// verse; else it goes to the comment covering it nearest its reading line
+// (by its laid-out starts; one not laid out, as far as its index is from
+// panel_j), or to its chapter's top above the page's first verse.
+follow_comment_from_page(
+    map: *LinkMap,
+    page_i: int,
+    panel_j: int,
+    panel: *ChapterShape,
+    panel_line: f64
+): CommentStep {
+    if (page_i < 0) return if (panel_j < 0) CommentStep.Stay else CommentStep.GoTo { anchor: -1 };
+    if (follow_covers(map, panel_j, page_i)) return CommentStep.Stay;
+    best: int = -1;
+    best_d: f64 = 0.0f64;
+    for k in 0..len(map.j) {
+        j: int = map.j[k];
+        if (map.i0[k] <= page_i && page_i <= map.i1[k]) {
+            // (One laid out by how far it is; any not, after them all, by
+            // how many anchors away.)
+            d: f64 = 0.0f64;
+            if (j < len(panel.known) && panel.known[j]) {
+                d = panel.starts[j] - panel_line;
+                if (d < 0.0f64) d = -d
+            } else d = FOLLOW_UNLAID + (if (j > panel_j) j - panel_j else panel_j - j) as f64;
+            if (best < 0 || d < best_d) {
+                best = j;
+                best_d = d
+            }
+        }
+    }
+    // (No comment on the verse: it stays where it is.)
+    if (best < 0) CommentStep.Stay else CommentStep.GoTo { anchor: best }
+}
+
+FOLLOW_UNLAID: f64 = 1.0e12f64;
+
+// Whether the commentary's anchor j covers the page's anchor i.
+follow_covers(map: *LinkMap, j: int, i: int): bool {
+    if (j < 0) return false;
+    for k in 0..len(map.j)
+        if (map.j[k] == j && map.i0[k] <= i && i <= map.i1[k]) return true;
+    false
+}
+
+// A commentary leading the page: the commentary's anchor at its reading
+// line (panel_j, -1 above the first) and the page's at its own (page_i):
+// the page stays on a verse that comment covers; else it goes to the first
+// verse the comment covers (its chapter's top above the commentary's
+// first, or for a comment covering none).
+follow_page_from_comment(map: *LinkMap, panel_j: int, page_i: int): CommentStep {
+    if (panel_j < 0) return if (page_i < 0) CommentStep.Stay else CommentStep.GoTo { anchor: -1 };
+    if (page_i >= 0 && follow_covers(map, panel_j, page_i)) return CommentStep.Stay;
+    for k in 0..len(map.j)
+        if (map.j[k] == panel_j) return CommentStep.GoTo { anchor: map.i0[k] };
+    CommentStep.Stay
+}

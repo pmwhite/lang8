@@ -226,97 +226,118 @@ reader as any screen does.
 
 ## Panes
 
-The page and the panel's reader are two panes, read the same way on every
-skin (`core/panes.l8`): pane 0 is the page, pane 1 the panel's reader (the
-screen whose `reader` line says so). Each reads a document a part at a
-time, and core keeps them linked. A skin draws both with one reader of
-its own, made twice; it decides nothing about where either goes.
+The page and the panel's reader are two panes: pane 0 the page, pane 1 the
+panel's reader (the screen whose `reader` line says so). Each reads a
+document a part at a time. Core and the skin divide the work by what each
+knows best, and speak across the line in the document's terms, never in
+pixels:
 
-**Parts.** A chapter is in N parts (a version's: its verses from one that
-begins a paragraph; a commentary's: about 2 KB of it). A skin asks for
-the parts near what a pane shows, `want P C K`, and core answers each:
+| Core (`core/panes.l8`): the documents | The skin: the platform |
+|---|---|
+| What a part holds: its words, runs, anchors; a commentary's runs of chapters without comments | Laying a part out and measuring it: fonts, the text's size, right to left, line breaking |
+| Which place in one document is which in the other (verses, versification, which comment covers which verses): the *link map* | Which parts exist as views, kept in place as others come and go above them |
+| Who may lead, linked or not, how each document follows (verse by verse, comment by comment), when to wait | Scrolling, its physics and glides, Reduce Motion, telling a finger from an animation, the frame clock |
+| Where a jump goes (Go To, a link, the way back, a ribbon), history, reading counted, the place kept | Following frame by frame, by the link map, at its own geometry |
+| Where each pane is read (its reading line) | Selection, the text's menus, VoiceOver and TalkBack, copying |
 
-- `part P C K N` TEXT: its words; then `layout ORIG RTL VERSELINES OPENER
-  LABEL` (the original's, set right to left, a verse a line; where its
-  opener and label end, UTF-16, 0 none), `coming` (it only holds its
-  place until it has been read: sent again when it has), `name` TITLE (its
-  chapter as the bar names it), `span A B STYLE PARA`, `verse V A B`,
-  `link A B KIND ARG` (a footnote's mark, KIND 0, ARG its place; a
-  reference, 1, ARG the reference; a word of the original's, 2; the ESV's
-  line, 3), `gloss A B` (a word of the original glossed under its
-  paragraph), `mark V HEX BOOKMARK NOTE` (a verse's highlight's color, `-`
-  none; bookmarked; noted; verse 0 the chapter's own note), `gap C0 C1`
+**Places.** A place is a chapter, an anchor of it and how far through that
+anchor's span: `C I FRAC`, I counting the chapter's anchors from 0 (-1:
+above its first), FRAC thousandths. A part's *anchors* are its `verse`
+lines, in order: a version's verses; a commentary's comments' first verses
+(one may come again, where its commentator goes through the verses again).
+An anchor's span runs from the top of the line its words begin on to the
+next anchor's (the chapter's top before its first; the next chapter's top
+after its last). Every skin turns its own layout into places and places
+into its layout; no length crosses the line.
+
+**Parts.** A skin asks for the parts near what a pane shows, `want P C K`,
+and core answers each:
+
+- `part P C K N` TEXT: part K of chapter C, the chapter in N parts (0: not
+  known yet, a commentary still opening); then `layout ORIG RTL VERSELINES
+  OPENER LABEL`, `coming` (it holds its place until it has been read: sent
+  again when it has), `name` TITLE, `span A B STYLE PARA`, `verse V A B`,
+  `link A B KIND ARG`, `gloss A B`, `mark V HEX BOOKMARK NOTE`, `gap C0 C1`
   (a commentary's run of chapters it says nothing on: this one part stands
-  for them all, sent as C0's to a `want` of any of them), then `anchor V
-  K` for every anchor of the chapter in order with the part it is in, then
+  for them all, sent as C0's to a `want` of any of them), then `anchor V K`
+  for every anchor of the chapter in order with the part it is in, then
   `end`. Places A, B are UTF-16 units of the part's words.
-- A part's *anchors* are its `verse` lines, in order: a version's verses;
-  a commentary's comments' first verses (one may come again, where its
-  commentator goes through the verses again). With the `anchor` lines a
-  skin knows which part holds a verse without asking for the others, and
-  how many parts each chapter has.
 - `forget P C`: pane P's parts of chapter C (-1: every chapter) are to be
-  asked for again (the look, the settings, the version, what the panel
-  reads changed); those shown stay until the new ones come.
+  asked for again (the look, the version, what the panel reads changed);
+  those shown stay until the new ones come.
 
-**Where it is read.** Each pane is read at one line, `line P THOUSANDTHS`
-of the way down what of it is in sight (the page's a third of the way, the
-panel's at its top). A skin tells core, in hundredths of its own unit
-(points, CSS pixels, a terminal's lines):
+A part sent again replaces the one shown where it is; a part coming in, or
+changing height, above what is in sight never moves what is in sight.
 
-- `view P HEIGHT EM`: how tall the pane is in sight, and its em, as they
-  change.
-- `measured P C K H Y...`: part K of chapter C as laid out: its height and
-  where each of its anchors begins (the top of its line), down from the
-  part's top. Said when it is first laid out and again whenever its layout
-  changes.
-- `at P C K Y HOW`: the pane's reading line is Y down part K of chapter C,
-  as it moves (at most once a frame), HOW 0 moved by the app (core's
-  `jump` or `scroll`, the window growing above it), 1 a finger or a key
-  moving it, 2 gliding after a finger.
-- `moving P MS`: a finger down on it; `rest P ENDS_HI MS`: it stopped (a
-  glide ended, a jump arrived), ENDS_HI the last chapter whose end is in
+**Where each is read.** `line P THOUSANDTHS`: a pane's reading line, that
+far down what of it is in sight (the page's a third of the way, the
+panel's at its top). The skin says where each pane is read, in places:
+
+- `at P C I FRAC`: its reading line's place, as the anchor there changes
+  and at rest (not each frame). Core keeps the page's as the reading place
+  and names the panel's chapter in its title.
+- `moving P MS`: a finger (or a key) began to move it: it leads.
+- `rest P ENDS_HI MS`: it stopped, ENDS_HI the last chapter whose end is in
   sight (-1 none).
 
-**Moving it.** Core says where a pane goes:
+**Moving it.** `go P C I FRAC MODE`: a pane to a place; MODE 0 there at
+once (a jump: Go To, the way back), 1 brought there (the skin glides if it
+is near, else is there at once, at once where motion is reduced). A pane
+not laid out yet keeps it until it is. `halt P`: its glide stopped.
 
-- `jump P C V FRAC`: its reading line to verse V of chapter C (0: the
-  chapter's top), FRAC thousandths of the way through the verse; the skin
-  brings its part in and measures it first.
-- `scroll P C K Y GLIDE`: its reading line to Y down part K of chapter C
-  (one it has measured; gone from its window, as a jump to it), at once
-  or (GLIDE 1) in the platform's own short animation, the skin's choice of
-  at once where motion is reduced.
-- `halt P`: its glide stopped where it is.
+**Linked.** Linked (`reader 1`), the pane a finger last moved leads, and
+the skin moves the other each frame by the link map. Core sends a chapter's
+map as the panel's document or the chapters near the place change:
 
-**Linked.** Linked (`reader 1`), the pane a finger last moved leads and the
-other follows it on each `at`, core deciding where: a version verse by
-verse, as far through each as the leader is (along a steady line kept
-within half a line of each verse); a commentary comment by comment (it
-moves when the leader comes to a verse its comment isn't on, gliding to
-the nearest comment on it if that is near; it waits while the page glides
-after a flick, and settles at `rest`). A commentary leading, the page goes
-to the first verse of the comment at its reading line as that changes. A
-jump of the page's (Go To, a link, the way back) takes the panel with it;
-a reference tapped in the panel leaves it where it is.
+- `link C MODE`, then `match I0 I1 J` lines, then `end`: in chapter C, the
+  page's anchors I0 to I1 go with the panel's anchor J, in order; MODE 0
+  (versions) or 1 (a commentary in either pane). A version's verses match
+  one to one (I0 = I1), a verse one side lacks has no line; a commentary's
+  comment J goes with the page's verses it covers (several comments may
+  cover a verse, where its commentator goes through the verses again). A
+  chapter of a commentary's run without comments has no lines: the run's
+  part is the follower's place wherever the leader is in its chapters.
 
-## What happens: effects
+Following, MODE 0: the follower's reading line goes through each matched
+pair's span starts (anchor I0's on the leader, J's on the follower), and
+between them along a monotone cubic (Fritsch and Carlson's: at each start
+the harmonic mean of the two neighbouring ratios of the follower's span to
+the leader's, 0 if either isn't forward), so that its speed changes
+gradually and never against the leader; the chapter's top and its end are
+pairs too. Then it is steadied: a line fitted by weighted least squares
+through the pairs from five before to five after the leader's (x the
+leader's start less its reading line, weight 1 / (1 + (x / 9 em))², em the
+leader's), its value at 0 taken, and the follower placed d / (1 + |d| /
+(0.5 em)) from the curve, d the line's distance from it (em the
+follower's): no verse is ever more than half a line from its place.
 
-Core answers an action by changing its state and returning effects, which
-the skin carries out in its own idiom:
+Following, MODE 1: the follower moves only at a comment's border. Led by
+the page, the commentary stays while one of its comments at its reading
+line covers the page's verse there; else it goes to the comment covering
+that verse nearest its reading line, its start at the reading line,
+brought there as `go` MODE 1 is. While the page glides after a flick it
+waits, and settles when the page rests. Led by the commentary, the page
+goes to the first verse of the comment at the commentary's reading line as
+that comment changes (it stays while a verse that comment covers is at its
+reading line).
 
-| Effect | iPhone | Android | Web |
-|---|---|---|---|
-| `push id`, `present id` | pushed in the sheet the action came from; a sheet | a page in the panel stack; a full-height panel | panel view with a URL |
-| `pop`, `pop_to id`, `dismiss` | pop, pop to it, dismiss | back, back to it, close | history back, close |
-| `present_over id`, `close id`, `panel id` | a sheet over the sheet; that screen's sheet away; in the panel beside the reader | a panel over the panel; back; a panel | same |
-| `update id`, `refill id fade`, `refresh` | that screen's rows made again; again as its field is typed; every screen | same | same |
-| `url` ADDRESS | Safari | the browser | a link |
-| `settings` | a setting kept the platform's way | (prefs kept by core) | same |
+These rules are the skins' each, so each is checked against core's: core's
+`link_cases` tool writes cases (a map, both panes' anchor positions, the
+leader's line, the follower's place) that every skin's tests read and must
+match to within a hundredth of a point.
 
-The platform's Back is always the skin's: it pops or dismisses, and tells
-core (`closed id`) so it can let a screen go. Effects for what only a
-platform does are the host's (below); a skin that doesn't do one ignores it.
+**How each skin draws a pane.** With its platform's own tools wherever they
+measure exactly:
+
+- The iPhone: a `UIScrollView` of `UITextView`s, one a part (TextKit 2
+  measuring each whole), so each part keeps UIKit's selection, menus,
+  Dynamic Type and VoiceOver; what comes in above is offset at once.
+- The web: a `section` a part in the document's flow; the browser's own
+  scroll anchoring (`overflow-anchor`, done by hand where a browser lacks
+  it); `content-visibility: auto` on parts far from sight.
+- Android: a `RecyclerView` of `TextView`s, one a part, measured as each is
+  bound, so TalkBack and selection are the platform's.
+- The terminal: its own reader of lines, a part's lines measured in rows.
 
 ## Views a skin makes itself
 
@@ -480,7 +501,7 @@ Other lines from core:
 | `retext ID`, `blur ID` | the fields to show the screen's words again (its search field's, and a `field` row's detail, though it is being typed in); the keyboard put away |
 | `reader N` | the Bible has N chapters (each pane's) |
 | `part P C K N` TEXT | part K of chapter C of pane P's document, the chapter in N parts (0: not known yet, a commentary still opening), and the panes' other lines: see Panes above |
-| `jump P C V FRAC`, `scroll P C K Y GLIDE`, `halt P`, `forget P C`, `line P THOUSANDTHS` | a pane moved, stopped, its parts to be asked for again, its reading line: see Panes above |
+| `go P C I FRAC MODE`, `halt P`, `forget P C`, `line P THOUSANDTHS`, `link C MODE` | a pane to a place, its glide stopped, its parts to be asked for again, its reading line; a chapter's link map: see Panes above |
 | `goto` | the sheets away, as the platform puts them away (a `jump 0` follows) |
 | `highlights SWATCH WASH STRENGTH...`, `themes DAY NIGHT PAGE INK...`, then `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT THEME CHOSEN HAIRLINE SELECTION SHEET CELL` | all a skin needs of look.l8. `highlights`: each of the five by the color its `mark` lines name it with, and the wash a highlighted verse shows now (STRENGTH, like GLOSS, HAIRLINE and SELECTION, in thousandths). `themes`: the themes Auto follows by day and at night, then each theme's page and ink, in the Theme setting's order (for its swatches). `look`: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument); THEME the theme it is and CHOSEN the one chosen (0 Auto), of `themes`; HAIRLINE a rule's strength (RULE's color), SELECTION a selection's (ACCENT's); SHEET and CELL a sheet's color and its rows' (`-`: the platform's grouped colors) |
 | `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation, shown faint after the title (which opens Go To); the version is chosen in Go To or the Library, not from the bar |
@@ -547,7 +568,7 @@ From the skin:
 | `windowrows 0/1` | choose full lazy sections (the default) or their counts with rows fetched on demand; available to every skin |
 | `editmenu COMMAND` | perform one of core's text-selection menu commands on the current selection |
 | `place C V FRAC` | the page's place as an address names it: where it opens, before `start`; Go To it, after |
-| `want P C K`, `measured P C K H Y...`, `at P C K Y HOW`, `view P HEIGHT EM`, `rest P ENDS_HI MS`, `moving P MS` | a pane's part wanted, laid out, where its reading line is, its size, at rest, a finger on it: see Panes above |
+| `want P C K`, `at P C I FRAC`, `rest P ENDS_HI MS`, `moving P MS` | a pane's part wanted, its reading line's place, at rest, a finger on it: see Panes above |
 | `dark 0/1` | the system's appearance changed |
 | `esvstatus STATUS ESV`, `esvact WHAT C` | whether the site's Worker gives the ESV (STATUS its answer's, 0 none); a tap on chapter C's ESV line (`link` KIND 3: ARG `ESV_TRY`, `ESV_BSB`, `ESV_SITE`). Core asks for the ESV's chapters near the place as a wire skin reads it (its host's `fetch`), draws one not here as its line, and ends each with "(ESV) · esv.org" |
 | `version ABBR` | the version an address names (`KJV`): before `start`, the one the reader opens in; after, read now |
