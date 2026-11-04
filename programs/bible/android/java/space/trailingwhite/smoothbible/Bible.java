@@ -20,12 +20,16 @@ import java.util.ArrayList;
 
 // Smooth Bible on Android: a skin (SKINS.md). The app is core's, in L8
 // (android/main.l8); this draws what it says with Android's own views, and
-// tells it what is done: the reader (Reader), the bar, and core's screens
-// over them (Panel).
+// tells it what is done: the page (a Reader, pane 0) and its bar, the
+// panel beside it (core's screens of group 1, a Panel, its reader pane 1),
+// and core's sheet over them (a Panel of group 0).
 public final class Bible extends Activity {
   final Look look = new Look();
-  Reader reader;
-  Panel panel;
+  // The two panes: the page, and the panel's reader.
+  Reader reader, besideReader;
+  // Every screen core has built, by id; the sheet's and the panel's.
+  final java.util.HashMap<Integer, Screen> screens = new java.util.HashMap<>();
+  Panel sheet, beside;
   Tray tray;
   // The way back (core's capsule): its words, at the reader's foot.
   TextView capsule;
@@ -48,12 +52,15 @@ public final class Bible extends Activity {
   LinearLayout bar;
   TextView title, settings, library, shelf;
   android.widget.ImageView search;
-  // A screen or a chapter being said (between its first line and end).
+  // A screen or a part being said (between its first line and end): the
+  // part's pane (null: one not shown), its chapter, index, count and words.
   Screen building;
   Screen.Section section;
-  int chapterC = -1;
-  String chapterText;
-  final ArrayList<Wire> chapterLines = new ArrayList<>();
+  boolean gatheringPart;
+  Reader partPane;
+  int partC, partK, partN;
+  String partText;
+  final ArrayList<Wire> partLines = new ArrayList<>();
 
   // (The versions bundled, as assets, copied to the app's files once.)
   static final String[] VERSIONS = {"bsb.folio", "kjv.folio", "web.folio", "asv.folio", "ylt.folio",
@@ -65,8 +72,9 @@ public final class Bible extends Activity {
     requestWindowFeature(Window.FEATURE_NO_TITLE);
     Native.app = this;
     root = new FrameLayout(this);
-    reader = new Reader(this, look);
+    reader = new Reader(this, look, Reader.PAGE);
     root.addView(reader, new FrameLayout.LayoutParams(-1, -1));
+    besideReader = new Reader(this, look, Reader.PANEL);
     bar = new LinearLayout(this);
     bar.setGravity(Gravity.CENTER_VERTICAL);
     bar.setPadding(dp(16), 0, dp(8), 0);
@@ -103,7 +111,21 @@ public final class Bible extends Activity {
     bar.addView(search, new LinearLayout.LayoutParams(dp(44), dp(44)));
     bar.addView(settings);
     root.addView(bar, new FrameLayout.LayoutParams(-1, dp(52), Gravity.TOP));
-    reader.topInset = dp(52);
+    // (The panel beside the page: at its right after a rule, or under it
+    // after a strip its grabber is in.)
+    rule = new View(this);
+    rule.setVisibility(View.GONE);
+    root.addView(rule, new FrameLayout.LayoutParams(1, -1));
+    strip = new FrameLayout(this);
+    grabber = new View(this);
+    strip.addView(grabber, new FrameLayout.LayoutParams(dp(36), dp(5), Gravity.CENTER));
+    strip.setVisibility(View.GONE);
+    strip.setOnTouchListener(this::stripTouched);
+    strip.setContentDescription("Resize the panel");
+    root.addView(strip, new FrameLayout.LayoutParams(-1, dp(STRIP_DP)));
+    beside = new Panel(this, look, screens, Panel.BESIDE, besideReader);
+    beside.setVisibility(View.GONE);
+    root.addView(beside, new FrameLayout.LayoutParams(-1, -1));
     player = new LinearLayout(this);
     player.setOrientation(LinearLayout.HORIZONTAL);
     player.setGravity(Gravity.CENTER_VERTICAL);
@@ -148,25 +170,25 @@ public final class Bible extends Activity {
     root.addView(capsule, cp);
     tray = new Tray(this, look);
     root.addView(tray, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
-    panel = new Panel(this, look);
-    root.addView(panel, new FrameLayout.LayoutParams(-1, -1));
+    sheet = new Panel(this, look, screens, Panel.SHEET, null);
+    root.addView(sheet, new FrameLayout.LayoutParams(-1, -1));
     setContentView(root);
     // (Edge to edge: the bar below the status bar, the reader's ends clear
     // of the system's bars.)
     root.setOnApplyWindowInsetsListener((v, insets) -> {
       android.graphics.Insets bars = insets.getInsets(android.view.WindowInsets.Type.systemBars());
-      FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) bar.getLayoutParams();
-      lp.height = bars.top + dp(52);
-      bar.setLayoutParams(lp);
+      barsTop = bars.top;
+      barsBottom = bars.bottom;
       bar.setPadding(dp(16), bars.top, dp(8), 0);
-      reader.topInset = bars.top + dp(52);
-      reader.setPadding(0, 0, 0, bars.bottom);
-      reader.setClipToPadding(false);
-      panel.setPadding(0, bars.top, 0, bars.bottom);
+      sheet.setPadding(0, bars.top, 0, bars.bottom);
       tray.setPadding(dp(16), dp(10), dp(16), dp(10) + bars.bottom);
-      ((FrameLayout.LayoutParams) capsule.getLayoutParams()).bottomMargin = dp(16) + bars.bottom;
       player.setPadding(dp(16), dp(8), dp(8), dp(8) + bars.bottom);
+      arrange();
       return insets;
+    });
+    // (The page and the panel placed again as the window's size changes.)
+    root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+      if (r - l != or - ol || b - t != ob - ot) root.post(this::arrange);
     });
     restyle();
     new Thread(() -> {
@@ -199,6 +221,137 @@ public final class Bible extends Activity {
   int dp(float n) {
     return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, n,
         getResources().getDisplayMetrics());
+  }
+
+  // ---- the panel beside the page (core/beside.l8) ----
+  // Whether core wants it open, and filling the screen (`beside OPEN
+  // FULL`); whether its screens were asked for (`panelmake`) and haven't
+  // come yet; whether it is shown, as core was told (`panelvisible`).
+  boolean besideOpen, besideFull, besideMaking, besideShown;
+  // The rule at its left (at the page's right), the strip over it (under
+  // the page) and the strip's grabber.
+  View rule, grabber;
+  FrameLayout strip;
+  // The system's bars' heights (the app draws under them).
+  int barsTop, barsBottom;
+  // Its width at the page's right (dp), the least column (em) the page
+  // keeps beside it there, and the strip's height (dp).
+  static final int PANEL_DP = 390, STRIP_DP = 18;
+  static final float PAGE_LEAST_EM = 24;
+  // Under the page: its share of the window's height, as the grabber
+  // leaves it; the least and most a drag leaves it, and below and above
+  // what a drag let go closes it or fills the screen with it.
+  float underShare = 0.5f;
+  static final float SHARE_LEAST = 0.28f, SHARE_MOST = 0.86f, SHARE_GONE = 0.18f, SHARE_FULL = 0.92f;
+
+  // Whether a window this wide has room for the panel at the page's right.
+  private boolean fitsRight(int width) {
+    float em = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, look.textSp(),
+        getResources().getDisplayMetrics());
+    return width >= dp(PANEL_DP) + 1 + 2 * dp(look.margin) + PAGE_LEAST_EM * em;
+  }
+
+  // The page and its bar, the panel and what is over them placed for the
+  // window: the panel (open, its screens come) at the page's right where a
+  // column fits, else under it; filling the screen, the page hidden under
+  // it. Core told whether it shows.
+  void arrange() {
+    int w = root.getWidth(), h = root.getHeight();
+    if (w <= 0 || h <= 0 || beside == null) return;
+    boolean open = besideOpen && !beside.stack.isEmpty();
+    boolean full = open && besideFull;
+    boolean right = open && !full && fitsRight(w);
+    boolean under = open && !full && !right;
+    int panelW = dp(PANEL_DP), stripH = dp(STRIP_DP), underH = Math.round(underShare * h);
+    int pageW = right ? w - panelW - 1 : w, pageH = under ? h - underH - stripH : h;
+    int topLeft = Gravity.TOP | Gravity.START;
+    place(reader, pageW, pageH, topLeft, 0, 0);
+    place(bar, pageW, barsTop + dp(52), topLeft, 0, 0);
+    reader.setInsets(barsTop + dp(52), under ? 0 : barsBottom);
+    reader.setVisibility(full ? View.INVISIBLE : View.VISIBLE);
+    bar.setVisibility(full ? View.INVISIBLE : View.VISIBLE);
+    rule.setVisibility(right ? View.VISIBLE : View.GONE);
+    if (right) place(rule, 1, h, Gravity.TOP | Gravity.END, panelW, 0);
+    strip.setVisibility(under ? View.VISIBLE : View.GONE);
+    if (under) place(strip, w, stripH, Gravity.BOTTOM, 0, underH);
+    if (open) {
+      if (full) place(beside, w, h, topLeft, 0, 0);
+      else if (right) place(beside, panelW, h, Gravity.TOP | Gravity.END, 0, 0);
+      else place(beside, w, underH, Gravity.BOTTOM, 0, 0);
+      beside.setPadding(0, under ? 0 : barsTop, 0, barsBottom);
+      beside.filling(full);
+    }
+    beside.setVisibility(open ? View.VISIBLE : View.GONE);
+    FrameLayout.LayoutParams cp = (FrameLayout.LayoutParams) capsule.getLayoutParams();
+    int capsuleBottom = dp(16) + (under ? underH + stripH : barsBottom);
+    if (cp.bottomMargin != capsuleBottom) {
+      cp.bottomMargin = capsuleBottom;
+      capsule.setLayoutParams(cp);
+    }
+    if (open != besideShown) {
+      besideShown = open;
+      Native.send("panelvisible " + (open ? 1 : 0));
+    }
+    backChanged();
+  }
+
+  // View v's size, gravity and margins in the root, if they changed.
+  private static void place(View v, int width, int height, int gravity, int endMargin, int bottomMargin) {
+    FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) v.getLayoutParams();
+    if (lp.width == width && lp.height == height && lp.gravity == gravity
+        && lp.getMarginEnd() == endMargin && lp.bottomMargin == bottomMargin) return;
+    lp.width = width;
+    lp.height = height;
+    lp.gravity = gravity;
+    lp.setMarginEnd(endMargin);
+    lp.bottomMargin = bottomMargin;
+    v.setLayoutParams(lp);
+  }
+
+  // `beside OPEN FULL`: the panel's screens asked for as it opens, let go
+  // as it closes (core has let them go), and laid out.
+  private void besideLine(boolean open, boolean full) {
+    besideOpen = open;
+    besideFull = open && full;
+    if (!open) {
+      beside.dismiss();
+      besideMaking = false;
+    } else if (beside.stack.isEmpty() && !besideMaking) {
+      besideMaking = true;
+      Native.send("panelmake");
+    }
+    arrange();
+  }
+
+  // The strip's grabber dragged: the panel under the page taller or
+  // shorter; let go low, closed, or high, filling the screen (keeping its
+  // height for the next time).
+  private float stripFrom, stripDownY;
+
+  private boolean stripTouched(View v, android.view.MotionEvent e) {
+    float h = Math.max(1, root.getHeight());
+    float share = stripFrom - (e.getRawY() - stripDownY) / h;
+    switch (e.getActionMasked()) {
+      case android.view.MotionEvent.ACTION_DOWN:
+        stripDownY = e.getRawY();
+        stripFrom = underShare;
+        return true;
+      case android.view.MotionEvent.ACTION_MOVE:
+        underShare = Math.max(0.1f, Math.min(0.96f, share));
+        arrange();
+        return true;
+      case android.view.MotionEvent.ACTION_UP:
+      case android.view.MotionEvent.ACTION_CANCEL:
+        if (share < SHARE_GONE || share > SHARE_FULL) {
+          underShare = stripFrom;
+          if (e.getActionMasked() == android.view.MotionEvent.ACTION_UP)
+            Native.send(share < SHARE_GONE ? "tap shelf" : "tap full");
+        } else underShare = Math.max(SHARE_LEAST, Math.min(SHARE_MOST, share));
+        arrange();
+        return true;
+      default:
+        return true;
+    }
   }
 
   // (And the language data, the cross references, the commentary, the
@@ -332,10 +485,16 @@ public final class Bible extends Activity {
     begun = true;
     // (The voice made now, so core knows the device's voices: Voice's.)
     if (voice == null) voice = new Voice(this);
+    // (The panel beside the page always fits: at its right, or under it.)
+    Native.send("panelfits 1");
     android.util.DisplayMetrics m = getResources().getDisplayMetrics();
+    saidDark = systemDark();
     Native.send("start " + (int) (m.widthPixels / m.density) + " " + (int) (m.heightPixels / m.density)
-        + " " + (int) (m.density * 100) + " " + (systemDark() ? 1 : 0) + " "
+        + " " + (int) (m.density * 100) + " " + (saidDark ? 1 : 0) + " "
         + java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 1000);
+    // (The panes' lines to core from now on: their sizes first.)
+    reader.begin();
+    besideReader.begin();
     reminded(getIntent());
   }
 
@@ -489,8 +648,16 @@ public final class Bible extends Activity {
   @Override
   public void onConfigurationChanged(Configuration c) {
     super.onConfigurationChanged(c);
-    Native.send("dark " + (systemDark() ? 1 : 0));
+    // (Said only as it changes: core lays both panes out again for it, and
+    // a turn of the phone changes the configuration too.)
+    boolean dark = systemDark();
+    if (dark == saidDark) return;
+    saidDark = dark;
+    Native.send("dark " + (dark ? 1 : 0));
   }
+
+  // The system's appearance as core was last told (at `start`, then here).
+  private boolean saidDark;
 
   // A hardware keyboard's keys, to core (key NAME MODS: core/keys.l8 makes
   // them its commands). A field typed in keeps its own keys, but for ⌘'s.
@@ -501,9 +668,9 @@ public final class Bible extends Activity {
           | (e.isAltPressed() ? 4 : 0);
       String name = keyName(e);
       View f = getCurrentFocus();
-      boolean typing = f instanceof android.widget.EditText && !panel.isKeyTrap(f);
+      boolean typing = f instanceof android.widget.EditText && !sheet.isKeyTrap(f);
       // (A screen that takes letters, Practice's: each one its action.)
-      Screen top = panel.top();
+      Screen top = sheet.top();
       int ch = e.getUnicodeChar();
       if (top != null && top.keys > 0 && !typing && (mods & 1) == 0 && ch > 32) {
         Native.send("act " + top.id + " " + top.keys + " " + ch + " 0");
@@ -532,6 +699,19 @@ public final class Bible extends Activity {
     return String.valueOf((char) Character.toLowerCase(ch));
   }
 
+  // Pane p (null: not one).
+  private Reader pane(int p) {
+    return p == Reader.PAGE ? reader : p == Reader.PANEL ? besideReader : null;
+  }
+
+  // Core's wake: a tick at its time (the skin's clock, ms).
+  private final Runnable tick = () -> Native.send("tick " + Reader.now());
+
+  private void wake(long at) {
+    timers.removeCallbacks(tick);
+    timers.postDelayed(tick, Math.max(50, at - Reader.now()));
+  }
+
   private final Runnable letScreenGo = () ->
       getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
@@ -541,16 +721,26 @@ public final class Bible extends Activity {
     Native.send("away");
   }
 
-  // Back closes the screens first (the system's Back, with predictive
-  // back, asks a callback only while one is registered: while screens show).
-  private final android.window.OnBackInvokedCallback backCallback = () -> panel.back();
+  // Back closes the sheet's screens first, then puts the panel beside the
+  // page again if it fills the screen, then goes back in the panel's (the
+  // system's Back, with predictive back, asks a callback only while one is
+  // registered: while there is one of these to do).
+  private final android.window.OnBackInvokedCallback backCallback = this::backPressed;
   private boolean backRegistered;
 
-  void panelShown(boolean shown) {
-    if (shown == backRegistered) return;
-    backRegistered = shown;
+  private void backPressed() {
+    if (sheet.shown()) sheet.back();
+    else if (besideShown && besideFull) Native.send("tap full");
+    else if (besideShown && beside.stack.size() > 1) beside.back();
+  }
+
+  void backChanged() {
+    if (sheet == null || beside == null) return;
+    boolean wanted = sheet.shown() || besideShown && (besideFull || beside.stack.size() > 1);
+    if (wanted == backRegistered) return;
+    backRegistered = wanted;
     android.window.OnBackInvokedDispatcher d = getOnBackInvokedDispatcher();
-    if (shown) d.registerOnBackInvokedCallback(
+    if (wanted) d.registerOnBackInvokedCallback(
         android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
     else d.unregisterOnBackInvokedCallback(backCallback);
   }
@@ -582,12 +772,19 @@ public final class Bible extends Activity {
   void restyle() {
     root.setBackgroundColor(look.bg);
     // (Over the status bar too, the page's color.)
-    reader.setBackgroundColor(look.bg);
+    reader.restyle();
+    rule.setBackgroundColor(Look.alpha(look.rule, 0.2f));
+    strip.setBackgroundColor(Look.alpha(look.ink, 0.05f));
+    android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+    g.setCornerRadius(dp(3));
+    g.setColor(Look.alpha(look.ink, 0.25f));
+    grabber.setBackground(g);
     bar.setBackgroundColor(look.bg);
     title.setTextColor(look.ink);
     showTitle();
     settings.setTextColor(look.accent);
     library.setTextColor(look.accent);
+    shelf.setTextColor(look.accent);
     search.setColorFilter(look.accent);
     Window w = getWindow();
     w.setStatusBarColor(look.bg);
@@ -595,11 +792,12 @@ public final class Bible extends Activity {
     View d = w.getDecorView();
     int flags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
     d.setSystemUiVisibility(look.dark ? 0 : flags);
-    panel.restyle();
+    sheet.restyle();
+    beside.restyle();
   }
 
-  // What core said: lines, each acted on, a screen's or a chapter's
-  // gathered to its end first.
+  // What core said: lines, each acted on, a screen's or a part's gathered
+  // to its end first.
   void said(String lines) {
     int p = 0;
     while (p < lines.length()) {
@@ -680,6 +878,8 @@ public final class Bible extends Activity {
         building.scopes = w.field(2).split("\\|");
         building.scopeLabels = w.field(3).split("\\|");
       } else if (word.equals("plain")) building.plain = true;
+      else if (word.equals("reader")) building.reader = true;
+      else if (word.equals("subtitle")) building.subtitle = w.field(1);
       else if (word.equals("grid")) building.grid = true;
       else if (word.equals("button")) building.button = w.field(1);
       else if (word.equals("command")) {
@@ -691,7 +891,7 @@ public final class Bible extends Activity {
         building.commands.add(c);
       }
       else if (word.equals("end")) {
-        panel.screens.put(building.id, building);
+        screens.put(building.id, building);
         if (titleMenuNext) {
           titleMenuNext = false;
           menuWanted = false;
@@ -702,12 +902,12 @@ public final class Bible extends Activity {
       }
       return;
     }
-    if (chapterC >= 0) {
+    if (gatheringPart) {
       if (word.equals("end")) {
-        reader.chapter(chapterC, chapterText, chapterLines);
-        chapterC = -1;
-        chapterLines.clear();
-      } else chapterLines.add(w);
+        if (partPane != null) partPane.part(partC, partK, partN, partText, partLines);
+        gatheringPart = false;
+        partLines.clear();
+      } else partLines.add(w);
       return;
     }
     switch (word) {
@@ -717,37 +917,57 @@ public final class Bible extends Activity {
         building.id = w.num(1);
         building.kind = w.num(2);
         building.arg = w.num(3);
+        building.group = w.num(4);
         building.title = w.field(1);
         building.search = w.field(2);
         break;
-      case "chapter":
-        chapterC = w.num(1);
-        chapterText = w.field(1);
+      case "part":
+        // (part P C K N, its words, then its lines to end: a pane's.)
+        gatheringPart = true;
+        partPane = pane(w.num(1));
+        partC = w.num(2);
+        partK = w.num(3);
+        partN = w.num(4);
+        partText = w.field(1);
         break;
       case "present":
-        panel.present(w.num(1));
+        sheet.present(w.num(1));
+        break;
+      case "panel":
+        // (The panel's first screen: its stack made again, and shown.)
+        besideMaking = false;
+        beside.present(w.num(1));
+        arrange();
         break;
       case "push":
-        panel.push(w.num(1));
+      case "present_over": {
+        // (A screen of the panel's goes on its stack, whichever acted.)
+        Screen s = screens.get(w.num(1));
+        if (s != null && s.group == Panel.BESIDE) {
+          beside.push(w.num(1));
+          arrange();
+        } else sheet.push(w.num(1));
         break;
+      }
       case "update":
       case "refill":
-        panel.update(w.num(1));
+        sheet.update(w.num(1));
+        beside.update(w.num(1));
         break;
       case "reveal":
-        panel.reveal(w.num(1));
+        sheet.reveal(w.num(1));
+        beside.reveal(w.num(1));
         break;
       case "pop":
-        panel.back();
-        break;
-      case "present_over":
-        panel.push(w.num(1));
-        break;
       case "close":
-        panel.back();
+        sheet.back();
         break;
       case "pop_to":
-        panel.popTo(w.num(1));
+        sheet.popTo(w.num(1));
+        beside.popTo(w.num(1));
+        break;
+      case "beside":
+        besideLine(w.num(1) == 1, w.num(2) == 1);
         break;
       case "url":
         // (A page outside the app, in the browser.)
@@ -759,13 +979,15 @@ public final class Bible extends Activity {
         }
         break;
       case "retext":
-        panel.retext(w.num(1));
+        sheet.retext(w.num(1));
+        beside.retext(w.num(1));
         break;
       case "blur":
-        panel.blur();
+        sheet.blur();
+        beside.blur();
         break;
       case "dismiss":
-        panel.dismiss();
+        sheet.dismiss();
         break;
       case "refresh":
         // (What is kept changed: every screen shown made again.)
@@ -778,7 +1000,7 @@ public final class Bible extends Activity {
         Native.send("versestudy " + w.num(1) + " " + w.num(2));
         break;
       case "tray":
-        tray.show(panel.screens.get(0));
+        tray.show(screens.get(0));
         break;
       case "tray_away":
         tray.hide();
@@ -792,9 +1014,11 @@ public final class Bible extends Activity {
         break;
       case "highlighted":
         reader.reask(reader.selC);
+        besideReader.reask(reader.selC);
         break;
       case "bookmarked":
         reader.reask(reader.selC);
+        besideReader.reask(reader.selC);
         android.widget.Toast.makeText(this, w.num(1) == 1 ? "Bookmarked" : "Bookmark Removed",
             android.widget.Toast.LENGTH_SHORT).show();
         break;
@@ -844,11 +1068,6 @@ public final class Bible extends Activity {
         capsule.postDelayed(capsuleAway, w.num(1));
         break;
       }
-      case "place":
-        // (The reader to a place: chapter, verse, how far into it.)
-        panel.dismiss();
-        reader.jump(w.num(1), w.num(2));
-        break;
       case "say":
         if (voice == null) voice = new Voice(this);
         sound.stop();
@@ -953,17 +1172,42 @@ public final class Bible extends Activity {
         break;
       case "wake":
         try {
-          reader.wake(Long.parseLong(w.word(1)));
+          wake(Long.parseLong(w.word(1)));
         } catch (NumberFormatException e) {
           // (Not a time: no tick.)
         }
         break;
       case "reader":
-        reader.setCount(w.num(1));
+        reader.setChapters(w.num(1));
+        besideReader.setChapters(w.num(1));
         break;
-      case "jump":
-        reader.jump(w.num(1), w.num(2));
+      case "line": {
+        Reader r = pane(w.num(1));
+        if (r != null) r.setReadingLine(w.num(2));
         break;
+      }
+      case "jump": {
+        // (jump P C V FRAC)
+        Reader r = pane(w.num(1));
+        if (r != null) r.jump(w.num(2), w.num(3), w.num(4));
+        break;
+      }
+      case "scroll": {
+        // (scroll P C K Y GLIDE)
+        Reader r = pane(w.num(1));
+        if (r != null) r.scrollTo(w.num(2), w.num(3), w.num(4), w.num(5) == 1);
+        break;
+      }
+      case "halt": {
+        Reader r = pane(w.num(1));
+        if (r != null) r.halt();
+        break;
+      }
+      case "forget": {
+        Reader r = pane(w.num(1));
+        if (r != null) r.forget(w.num(2));
+        break;
+      }
       case "awake": {
         // (Keep Screen On: the screen kept on so long, or let go now.)
         View d = getWindow().getDecorView();
@@ -979,13 +1223,10 @@ public final class Bible extends Activity {
         reader.page(w.num(1) == 1 ? 1 : -1);
         break;
       case "goto":
-        // (A jump the reader is moved by: the carried ribbon put down.)
+        // (The sheets away; a jump of the page's follows, which puts the
+        // carried ribbon down.)
         Native.send("jumped 0");
-        panel.dismiss();
-        reader.jump(w.num(1), w.num(2));
-        break;
-      case "relayout":
-        reader.forget();
+        sheet.dismiss();
         break;
       case "highlights":
         look.readHighlights(w);

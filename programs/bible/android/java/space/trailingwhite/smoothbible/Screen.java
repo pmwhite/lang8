@@ -5,7 +5,13 @@ import java.util.ArrayList;
 // A screen as core built it (SKINS.md): its sections and rows, and what is
 // around them (its field, tools, segments, filter, sort, confirm, hero).
 final class Screen {
-  int id, kind, arg;
+  // Its id, kind and argument, and its group (Panel.SHEET, Panel.BESIDE).
+  int id, kind, arg, group;
+  // Whether it is the panel's reader (`reader LINKED`: pane 1 in place of
+  // its rows; its link button says whether it is linked); what its reading
+  // is of, under its title.
+  boolean reader;
+  String subtitle = "";
   // The action each typed letter is (Practice's typing: keys ACTION; 0 none).
   int keys;
   String title = "", search = "";

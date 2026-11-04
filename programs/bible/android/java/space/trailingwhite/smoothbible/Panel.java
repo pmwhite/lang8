@@ -34,19 +34,30 @@ import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.HashMap;
 
-// Core's screens, over the reader (SKINS.md: present, push, update, pop,
-// dismiss): a stack of them, the top one shown, each a title and a list
-// of its rows drawn with Android's own widgets, and what is around it (its
-// field and scopes, segments, filter, sort, confirm, the buttons at its
-// foot). Every action goes back to core as it is (act ID ACTION ARG
-// VALUE; text ID ACTION ARG WORDS for a field's); Back pops, and core is
-// told (closed ID).
+// Core's screens (SKINS.md: present, push, update, pop, dismiss), a group
+// of them: the sheet's over the page (group 0), or the panel's beside it
+// (group 1, core/beside.l8's). Each is a stack, the top one shown, each a
+// title and a list of its rows drawn with Android's own widgets, and what
+// is around it (its field and scopes, segments, filter, sort, confirm, the
+// buttons at its foot). Every action goes back to core as it is (act ID
+// ACTION ARG VALUE; text ID ACTION ARG WORDS for a field's). The sheet's
+// Back pops, and core is told (closed ID); the panel's tells core which of
+// its screens shows (panelanchor ID), or, on its first, closes it (tap
+// shelf). A screen of the panel's that says `reader` is the panel's
+// reader (pane 1) in place of its rows.
 final class Panel extends FrameLayout {
+  // The groups, as core numbers them.
+  static final int SHEET = 0, BESIDE = 1;
+
   final Look look;
-  final HashMap<Integer, Screen> screens = new HashMap<>();
+  final int group;
+  // Every screen core has built (the sheet's and the panel's), by id.
+  final HashMap<Integer, Screen> screens;
   final ArrayList<Integer> stack = new ArrayList<>();
+  // The panel's reader (pane 1; null for the sheet's).
+  private final Reader reader;
   private final LinearLayout page;
-  private final TextView title, back, button, sortButton, empty;
+  private final TextView title, subtitle, back, full, button, sortButton, empty;
   private final ListView list;
   private final Rows rows = new Rows();
   // The screen's field (Go To's): what is typed goes to core as it is
@@ -69,9 +80,12 @@ final class Panel extends FrameLayout {
   // keyboard up for this, each letter typed sent as its action.
   private final EditText trap;
 
-  Panel(Context c, Look look) {
+  Panel(Context c, Look look, HashMap<Integer, Screen> screens, int group, Reader reader) {
     super(c);
     this.look = look;
+    this.screens = screens;
+    this.group = group;
+    this.reader = reader;
     page = new LinearLayout(c);
     page.setOrientation(LinearLayout.VERTICAL);
     LinearLayout bar = new LinearLayout(c);
@@ -91,6 +105,21 @@ final class Panel extends FrameLayout {
     title.setTypeface(Typeface.DEFAULT_BOLD);
     title.setSingleLine();
     title.setEllipsize(TextUtils.TruncateAt.END);
+    // (What a reading is of, under its title: a version's, a commentary's.)
+    subtitle = new TextView(c);
+    subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+    subtitle.setSingleLine();
+    subtitle.setEllipsize(TextUtils.TruncateAt.END);
+    LinearLayout titles = new LinearLayout(c);
+    titles.setOrientation(LinearLayout.VERTICAL);
+    titles.addView(title);
+    titles.addView(subtitle);
+    // (The panel's: filling the screen, or beside the page again.)
+    full = new TextView(c);
+    full.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+    full.setPadding(dp(12), dp(8), dp(4), dp(8));
+    full.setOnClickListener(v -> Native.send("tap full"));
+    full.setVisibility(group == BESIDE ? VISIBLE : GONE);
     sortButton = new TextView(c);
     sortButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
     sortButton.setPadding(dp(12), dp(8), dp(4), dp(8));
@@ -100,9 +129,10 @@ final class Panel extends FrameLayout {
     button.setPadding(dp(12), dp(8), dp(4), dp(8));
     button.setOnClickListener(v -> barButton());
     bar.addView(back, new LinearLayout.LayoutParams(-2, dp(56)));
-    bar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+    bar.addView(titles, new LinearLayout.LayoutParams(0, -2, 1));
     bar.addView(sortButton);
     bar.addView(button);
+    bar.addView(full);
     page.addView(bar, new LinearLayout.LayoutParams(-1, dp(56)));
     field = new EditText(c);
     field.setSingleLine();
@@ -164,6 +194,10 @@ final class Panel extends FrameLayout {
     empty.setPadding(dp(32), dp(32), dp(32), dp(32));
     empty.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
     page.addView(empty, new LinearLayout.LayoutParams(-1, 0, 1));
+    if (reader != null) {
+      reader.setVisibility(GONE);
+      page.addView(reader, new LinearLayout.LayoutParams(-1, 0, 1));
+    }
     // (The buttons at a screen's foot: Start Plan, Practice, Export.)
     foot = new LinearLayout(c);
     foot.setGravity(Gravity.CENTER_VERTICAL);
@@ -195,9 +229,12 @@ final class Panel extends FrameLayout {
       }
     });
     addView(trap, new LayoutParams(1, 1));
-    // (Over the selection's tray, which stays under it.)
-    setElevation(dp(24));
-    setVisibility(GONE);
+    // (The sheet over the selection's tray, which stays under it; away until
+    // a screen comes.)
+    if (group == SHEET) {
+      setElevation(dp(24));
+      setVisibility(GONE);
+    }
   }
 
   // The screen on top (null: none).
@@ -238,9 +275,16 @@ final class Panel extends FrameLayout {
   @Override
   public void setVisibility(int v) {
     super.setVisibility(v);
-    if (Native.app != null) Native.app.panelShown(v == VISIBLE);
+    if (Native.app != null) Native.app.backChanged();
   }
 
+  // The panel's button as the panel fills the screen or not.
+  void filling(boolean filling) {
+    full.setText(filling ? "\u2921" : "\u2922");
+    full.setContentDescription(filling ? "Beside the Page" : "Full Screen");
+  }
+
+  // The sheet's first screen (`present`), or the panel's (`panel`).
   void present(int id) {
     stack.clear();
     stack.add(id);
@@ -321,11 +365,13 @@ final class Panel extends FrameLayout {
     if (!stack.isEmpty()) update(stack.get(stack.size() - 1));
   };
 
+  // Its screens let go (the sheet's dismissed, the panel closed).
   void dismiss() {
     stack.clear();
     rowFields.clear();
     keyboardAway();
-    setVisibility(GONE);
+    if (group == SHEET) setVisibility(GONE);
+    else if (Native.app != null) Native.app.backChanged();
   }
 
   // Back to screen id (Add Words' Add: the language page): those over it
@@ -380,10 +426,23 @@ final class Panel extends FrameLayout {
   }
 
   // Back: the top screen let go, and core told (its field's words first).
+  // The panel's: the screen under it shown (core told which), or, its
+  // first, the panel closed.
   boolean back() {
     if (stack.isEmpty()) return false;
     int id = stack.get(stack.size() - 1);
     commitField(id);
+    if (group == BESIDE) {
+      if (stack.size() == 1) {
+        Native.send("tap shelf");
+        return true;
+      }
+      stack.remove(stack.size() - 1);
+      rowFields.remove(id);
+      Native.send("panelanchor " + stack.get(stack.size() - 1));
+      show(false);
+      return true;
+    }
     stack.remove(stack.size() - 1);
     rowFields.remove(id);
     Native.send("closed " + id);
@@ -397,6 +456,9 @@ final class Panel extends FrameLayout {
   void restyle() {
     setBackgroundColor(look.bg);
     title.setTextColor(look.ink);
+    subtitle.setTextColor(look.faint);
+    full.setTextColor(look.accent);
+    if (reader != null) reader.restyle();
     back.setTextColor(look.accent);
     button.setTextColor(look.accent);
     sortButton.setTextColor(look.accent);
@@ -461,10 +523,15 @@ final class Panel extends FrameLayout {
         s.sorts.length - 1))] + " ▾");
     boolean none = true;
     for (Screen.Section sec : s.sections) if (!sec.rows.isEmpty()) none = false;
-    boolean showEmpty = none && !s.emptyTitle.isEmpty();
+    boolean showEmpty = none && !s.emptyTitle.isEmpty() && !s.reader;
     empty.setText(showEmpty ? s.emptyTitle + "\n\n" + s.emptyLine : "");
     empty.setVisibility(showEmpty ? VISIBLE : GONE);
-    list.setVisibility(showEmpty ? GONE : VISIBLE);
+    // (The panel's reader in place of its rows.)
+    boolean reading = s.reader && reader != null;
+    list.setVisibility(showEmpty || reading ? GONE : VISIBLE);
+    if (reader != null) reader.setVisibility(reading ? VISIBLE : GONE);
+    subtitle.setText(s.subtitle);
+    subtitle.setVisibility(s.subtitle.isEmpty() ? GONE : VISIBLE);
     back.setText(!s.left.isEmpty() ? s.left : stack.size() > 1 ? "‹" : "✕");
     back.setTextSize(TypedValue.COMPLEX_UNIT_SP, s.left.isEmpty() ? 22 : 17);
     back.setContentDescription(!s.left.isEmpty() ? s.left : stack.size() > 1 ? "Back" : "Close");
@@ -473,7 +540,8 @@ final class Panel extends FrameLayout {
     keys(s);
     if (fresh && rows.focusItem >= 0) list.setSelectionFromTop(rows.focusItem, dp(160));
     else if (fresh) list.setSelection(0);
-    setVisibility(VISIBLE);
+    if (group == SHEET) setVisibility(VISIBLE);
+    else if (Native.app != null) Native.app.backChanged();
   }
 
   // The screen's scopes, as a row of words, the one chosen in the accent.

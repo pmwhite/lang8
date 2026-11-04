@@ -655,6 +655,47 @@ lessons work, and the lessons finished are kept. Reading Plans work there from c
 days, core's day's reader (`SCR_DAY`: its passages, Mark Read, the day's
 end), Day Done.
 
+Its two panes are one reader made twice (`Reader.java`, pane 0 the page,
+pane 1 the panel's reader), its units hundredths of a pixel. Each shows a
+window of parts, each part a `TextView` laid out and measured as it comes
+in (`measured`, again as the width changes), each at a place in the
+window's own coordinates; parts are asked for (`want`) two and a half
+windows ahead and a window and a half behind, and let go further away; a
+part that comes in above, or one above the screen sent again taller or
+shorter, moves those above it, never what is in sight. Its scrolling is
+its own (the parts moved, not laid out again: core's `scroll` on every
+frame is cheap), a fling the platform's `OverScroller`, a glide (`scroll
+... 1`, a key's page) 0.3 s, at once where the system's animations are
+off. It says `moving` as a finger starts to drag it (or stops its glide),
+`at` once a frame as it moves, `rest` as the finger lets go, a fling or a
+glide ends, a jump arrives, or a moment after core last moved it; a line
+of core's moving a pane a finger is on is let go. A chapter's first part
+has room above it and its last below; a part that only holds a place (a
+commentary's coming, a run without comments, the ESV's waiting line) is
+as tall as the pane. The page's taps are core's (`footnote`, `word`,
+`esvact`, `preview`, `tapverse`, `tapnone`, each with its part's chapter),
+and the selection, the verse heard and highlights are washed on its
+parts; the panel's reader previews a reference tapped.
+
+The panel beside the page is a second stack of core's screens (group 1),
+said to fit always (`panelfits 1`): at the page's right, 390 dp wide after
+a rule, where the page keeps a column of 24 em beside it (a tablet, a
+phone on its side), else under the page (half the window, a strip's
+grabber dragged to resize it, down to close it or up to fill the screen);
+filling the screen (`beside 1 1`, its button), the page hidden under it.
+It asks for its screens as core opens it (`panelmake`), says whether it
+shows (`panelvisible`), and its Back says `panelanchor`, or on its first
+screen closes it (`tap shelf`); the system's Back closes a sheet, then
+puts a full panel beside the page, then goes back in the panel. A screen
+that says `reader` shows pane 1 in place of its rows, under its title and
+subtitle, with its link button at its foot. Checked on the emulator
+(2026-11-04): the page scrolled and flung, Go To, a version (KJV) read
+beside the page under it, the two moving together as either is dragged,
+unlinked and linked again, a commentary downloaded from the Bookshelf
+(Burkitt's) following comment by comment and leading the page, its run of
+chapters without comments, Study in the panel, the panel at the right on a
+phone on its side, filling the screen, and turned back.
+
 Since 2026-10-22 its host is core's (`core/host.l8`), as the web's is: its
 L8 (`android/main.l8`) is only the platform's primitives, read from the
 app's files (a version asked as `bsb.folio` is that folio), the kept files there,
