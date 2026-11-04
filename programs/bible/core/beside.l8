@@ -906,17 +906,99 @@ sk_beside_want(c: int) {
 }
 
 // `besidewant C P`: part p of chapter c of what the panel reads: a
-// commentary's (shelf_folio.l8's parts), or, not here yet, a line that
-// says it is coming (told again when it has come); a version's chapter is
-// one part, the chapter whole.
+// version's (bb_version_parts), or a commentary's (shelf_folio.l8's
+// parts), or, not here yet, a line that says it is coming (told again
+// when it has come).
 sk_beside_want_part(c: int, p: int) {
     at: int = bb_reader_at();
     if (at < 0 || c < 0 || c >= chapters) return;
-    if (sk_kinds[at] != SCR_SHELF_COMMENTARY) {
-        sk_beside_want(c);
+    if (sk_kinds[at] == SCR_SHELF_COMMENTARY) {
+        bb_write_comment_part(sk_args[at] / SHELF_PLACE, c, p);
         return
     }
-    bb_write_comment_part(sk_args[at] / SHELF_PLACE, c, p)
+    t: int = sk_args[at] / SHELF_PLACE;
+    if (t != text_cur && !text_ready(t)) return;
+    bb_write_version_part(t, c, p)
+}
+
+// ---- a version's chapter in parts ----
+// Read beside the page, a version's chapter is laid out a part at a time,
+// as a commentary's is: each part its verses from one that begins a
+// paragraph (or a heading, a stanza) BB_VERSION_PART_BYTES or more of the
+// chapter's records past the part's first, laid out as a passage of them
+// (its first part with the chapter's number), so that the parts read on
+// one after another as the chapter does.
+BB_VERSION_PART_BYTES: int = 1536;
+
+// Chapter c's parts in version source: each part's first verse (0: the
+// chapter's start), and every verse, in order, with the part it is in.
+type VersionParts = {
+    firsts: []int;
+    verses: []int;
+    verse_parts: []int
+}
+
+bb_version_parts(source: *TextData, c: int): VersionParts@new {
+    // (Counted, then placed.)
+    parts: int = 1;
+    verses: int = 0;
+    for pass in 0..2 {
+        made: VersionParts = VersionParts { firsts: new int[if (pass == 0) 0 else parts](0), verses: new int[if (pass == 0) 0 else verses](0), verse_parts: new int[if (pass == 0) 0 else verses](0) };
+        part: int = 0;
+        verse: int = 0;
+        began: int = source.starts[c];
+        opens: bool = false;
+        p: int = source.starts[c];
+        while (p < source.ends[c]) {
+            k: int = source.data[p] as int;
+            if (k == 'V' as int) {
+                n: int = record_key_at(source.data, source.size, p + 1);
+                if (opens && verse > 0 && p - began >= BB_VERSION_PART_BYTES) {
+                    part = part + 1;
+                    if (pass == 1) made.firsts[part] = n;
+                    began = p
+                }
+                if (pass == 1) {
+                    made.verses[verse] = n;
+                    made.verse_parts[verse] = part
+                }
+                verse = verse + 1;
+                opens = false
+            } else if (k == 'P' as int || k == 'S' as int || k == 's' as int || k == '_' as int) opens = true else if (k == 'T' as int || k == 'W' as int || k == 'I' as int || k == 'J' as int || k == 'U' as int) opens = false;
+            p = record_line_end(source.data, source.size, p) + 1
+        }
+        if (pass == 1) return made;
+        parts = part + 1;
+        verses = verse
+    }
+    VersionParts { firsts: new int[1](0), verses: new int[0](0), verse_parts: new int[0](0) }
+}
+
+// Part p of chapter c of version t as the reader's lines (`besidepart C P
+// N`), with every verse of the chapter and the part it is in.
+bb_write_version_part(t: int, c: int, p: int) {
+    region {
+        parts: VersionParts = VersionParts { firsts: new int[1](0), verses: new int[0](0), verse_parts: new int[0](0) };
+        borrow texts[t] as source {
+            parts = bb_version_parts(source, c)
+        }
+        n: int = len(parts.firsts);
+        part: int = if (p < 0) 0 else if (p >= n) n - 1 else p;
+        // (Its verses: from its first to the one before the next part's.)
+        v1: int = parts.firsts[part];
+        v2: int = if (part + 1 < n) parts.firsts[part + 1] - 1 else 0;
+        sk_lay_version_verses(t, c, ChapterHead.NumberOnly, v1, v2);
+        sk_write_laid(c, "besidepart ", LaidText.Part {
+            coming: false,
+            marked: true,
+            part: part,
+            parts: n,
+            verses: parts.verses,
+            verse_parts: parts.verse_parts,
+            gap_from: -1,
+            gap_to: -1
+        })
+    }
 }
 
 // The commentary chapters told as coming, to be told again as they come
@@ -953,12 +1035,15 @@ bb_write_comment_part(slot: int, c: int, p: int) {
             lay_str(&sk_layout, "Opening\â\€\¦")
         }
         measure_chapter(&sk_layout, &sk_ranges, c);
-        sk_write_laid(c, "besidepart ", LaidText.CommentPart {
+        sk_write_laid(c, "besidepart ", LaidText.Part {
             coming: !laid,
+            marked: false,
             part: part,
             parts: if (parts.division == -2) 0 else len(parts.starts),
             verses: parts.verses,
-            verse_parts: parts.verse_parts
+            verse_parts: parts.verse_parts,
+            gap_from: parts.gap_from,
+            gap_to: parts.gap_to
         });
         if (laid) {
             bb_part_coming_done(c, part);
@@ -1025,12 +1110,15 @@ bb_comments_came() {
                 if (shelf_lay_comment_part(slot, c, p, &sk_layout)) {
                     parts: CommentParts = shelf_comment_parts(slot, c);
                     measure_chapter(&sk_layout, &sk_ranges, c);
-                    sk_write_laid(c, "besidepart ", LaidText.CommentPart {
+                    sk_write_laid(c, "besidepart ", LaidText.Part {
                         coming: false,
+                        marked: false,
                         part: p,
                         parts: len(parts.starts),
                         verses: parts.verses,
-                        verse_parts: parts.verse_parts
+                        verse_parts: parts.verse_parts,
+                        gap_from: parts.gap_from,
+                        gap_to: parts.gap_to
                     });
                     bb_coming_c[k] = -1;
                     ui_effect("besidechapterready", c, -1)

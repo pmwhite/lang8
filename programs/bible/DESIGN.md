@@ -26,10 +26,12 @@ it was left. Its document is a version or a Bookshelf module; a version or a
 commentary there follows the page. Where the skin draws a reader in the
 panel, a version or a commentary is read there as the page is, every
 chapter in turn (a commentary's comments laid out as a chapter, each a
-verse of its own, by core/shelf_folio.l8). The iPhone reads a commentary
-a part at a time: about 2 KB of its records from one of its folio's marks
-(where a comment, a verse or a paragraph begins), so that core lays out
-only the parts near the screen, whatever a chapter's length; the folio's
+verse of its own, by core/shelf_folio.l8). The iPhone reads a version or a
+commentary a part at a time (a version's: its verses from one that begins
+a paragraph, about 1.5 KB of its records on; a commentary's: about 2 KB of
+its records from one of its folio's marks, where a comment, a verse or a
+paragraph begins), so that core lays out only the parts near the screen,
+whatever a chapter's length; the folio's
 marks say which part each verse is in without decoding the others. The
 panel shows a window of parts, each measured as it comes in (its height,
 and where each of its verses begins), so that where anything shown is is
@@ -46,6 +48,9 @@ the leader comes to a verse its comment isn't on, to the nearest comment
 on it (a jump goes to its first); near, it glides, far, it is there at
 once. While the page glides after a flick, no one reads it: the
 commentary waits, and settles at the page's verse when the page stops.
+Chapters a commentary says nothing on, in a run (Spurgeon's on Genesis to
+Job), are one part of it: a line saying so, as tall as the panel, shown
+wherever the page is in them.
 `core/shelf.l8` keeps the Bookshelf: SWORD modules downloaded on request
 rather than bundled. A module is made as part of its download: a Bible
 becomes a version in a text slot of its own, and a commentary, dictionary

@@ -91,7 +91,11 @@ pr_part_count(c: int): int {
 // version, what is read, or how it looks): the parts kept, their counts
 // and the chapters' anchors.
 pr_parts_forget() {
-    for c in 0..PR_CHAPTERS_MOST pr_parts[c] = 1;
+    for c in 0..PR_CHAPTERS_MOST {
+        pr_parts[c] = 1;
+        pr_gap_first[c] = -1;
+        pr_gap_last[c] = -1
+    }
     for k in 0..PR_ANCHORED_MOST pr_an_c[k] = -1;
     for s in 0..RS_SLOTS {
         if (rs_c[s] >= PR_PART_KEY) {
@@ -105,6 +109,34 @@ pr_parts_forget() {
 // not known yet).
 pr_part_stored(c: int, _p: int, parts: int) {
     if (c >= 0 && c < PR_CHAPTERS_MOST && parts > 0) pr_parts[c] = parts
+}
+
+// The chapters a commentary has no comment on, in runs (core's `gap C0
+// C1`): each one's run's first and last (-1: not one, or not known yet).
+// A run is one row of the window, the placeholder that says so.
+pr_gap_first: []int = new int[PR_CHAPTERS_MOST](-1);
+
+pr_gap_last: []int = new int[PR_CHAPTERS_MOST](-1);
+
+pr_gap_noted(from: int, to: int) {
+    for c in from..to + 1 {
+        if (c >= 0 && c < PR_CHAPTERS_MOST) {
+            pr_gap_first[c] = from;
+            pr_gap_last[c] = to
+        }
+    }
+}
+
+// The first chapter of the row chapter c is in (its gap's first, in one;
+// its first part asked for, if it isn't known), and the last.
+pr_row_chapter(c: int): int {
+    if (c < 0 || c >= PR_CHAPTERS_MOST) return c;
+    if (!pr_known(c)) _first: int = rs_need(pr_part_key(c, 0));
+    if (pr_gap_first[c] >= 0) pr_gap_first[c] else c
+}
+
+pr_row_last(c: int): int {
+    if (c < 0 || c >= PR_CHAPTERS_MOST || pr_gap_first[c] < 0) c else pr_gap_last[c]
 }
 
 // Whether part p of chapter c only holds its place while core reads it.
@@ -289,6 +321,9 @@ pw_h: []f64 = new f64[PW_MOST](0.0f64);
 
 pw_first: []int = new int[PW_MOST](0);
 
+// The last chapter each row stands for (its own; a gap's last).
+pw_last: []int = new int[PW_MOST](-1);
+
 pw_vn: []int = new int[PW_MOST](0);
 
 pw_vy: []f64 = new f64[PW_MOST * PW_VERSES_MOST](0.0f64);
@@ -329,7 +364,7 @@ pw_clear() {
 // The row of the window showing part p of chapter c (-1: none).
 pw_row_of(c: int, p: int): int {
     for k in 0..pw_n
-        if (pw_c[k] == c && pw_p[k] == p) return k;
+        if (pw_c[k] <= c && c <= pw_last[k] && pw_p[k] == p) return k;
     -1
 }
 
@@ -378,8 +413,17 @@ pw_dress(
     h: f64 = top + (if (last) 120.0f64 else 0.0f64) + pw_text_height(tv);
     if (h < 1.0f64) h = 1.0f64;
     msg_rect(tv, sel("setFrame:"), 0.0f64, 0.0f64, pw_width, h);
+    // (A gap's placeholder as tall as what the panel shows: in view
+    // wherever the page is in the gap.)
+    gap: bool = c >= 0 && c < PR_CHAPTERS_MOST && pr_gap_first[c] >= 0;
+    shown: f64 = view_height(pr_table) - top_inset(pr_table);
+    if (gap && h < shown) {
+        h = shown;
+        msg_rect(tv, sel("setFrame:"), 0.0f64, 0.0f64, pw_width, h)
+    }
     pw_h[k] = h;
     pw_c[k] = c;
+    pw_last[k] = pr_row_last(c);
     pw_p[k] = p;
     pw_first[k] = pr_part_first_anchor(c, p);
     // (Its verses' places: its verse lines are its anchors, in order.)
@@ -469,6 +513,7 @@ pw_add_above(c: int, p: int) {
         pw_h[k] = pw_h[k - 1];
         pw_first[k] = pw_first[k - 1];
         pw_vn[k] = pw_vn[k - 1];
+        pw_last[k] = pw_last[k - 1];
         for v in 0..pw_vn[k] pw_vy[k * PW_VERSES_MOST + v] = pw_vy[(k - 1) * PW_VERSES_MOST + v]
     }
     pw_n = pw_n + 1;
@@ -492,6 +537,7 @@ pw_drop_above() {
         pw_h[k] = pw_h[k + 1];
         pw_first[k] = pw_first[k + 1];
         pw_vn[k] = pw_vn[k + 1];
+        pw_last[k] = pw_last[k + 1];
         for v in 0..pw_vn[k] pw_vy[k * PW_VERSES_MOST + v] = pw_vy[(k + 1) * PW_VERSES_MOST + v]
     }
     pw_n = pw_n - 1;
@@ -529,11 +575,12 @@ pw_next_c: int = -1;
 pw_next_p: int = 0;
 
 pw_after(c: int, p: int) {
-    if (p + 1 < pr_part_count(c)) {
+    last: int = pr_row_last(c);
+    if (last == c && p + 1 < pr_part_count(c)) {
         pw_next_c = c;
         pw_next_p = p + 1
-    } else if (c + 1 < chapters_n) {
-        pw_next_c = c + 1;
+    } else if (last + 1 < chapters_n) {
+        pw_next_c = pr_row_chapter(last + 1);
         pw_next_p = 0
     } else pw_next_c = -1
 }
@@ -548,10 +595,11 @@ pw_before(c: int, p: int) {
         pw_next_c = -1;
         return
     }
-    // (Its chapter's parts counted: its first asked for, which says.)
-    if (!pr_known(c - 1)) _first: int = rs_need(pr_part_key(c - 1, 0));
-    pw_next_c = c - 1;
-    pw_next_p = pr_part_count(c - 1) - 1
+    // (Its chapter's parts counted, and whether it is in a gap: its first
+    // asked for, which says.)
+    first: int = pr_row_chapter(c - 1);
+    pw_next_c = first;
+    pw_next_p = (if (first != c - 1) 0 else pr_part_count(c - 1) - 1)
 }
 
 // The window made to reach margin beyond the screen at either end, a part
@@ -608,7 +656,13 @@ pr_fill_soon() {
 
 pr_fill_fired(_self: int, _cmd: int, _timer: int): int {
     pr_fill_due = false;
-    if (pr_table == 0 || pr_moving()) return 0;
+    if (pr_table == 0) return 0;
+    // (A glide UIKit didn't say the end of, as one cut short: over by now.)
+    if (pr_gliding) {
+        if (CACurrentMediaTime() > pr_glide_until) pr_glide_ended() else pr_fill_soon();
+        return 0
+    }
+    if (pr_moving()) return 0;
     if (!pw_fill(pw_margin_resting(), 1)) pr_fill_soon();
     0
 }
@@ -640,13 +694,13 @@ pr_index_y(c: int, i: int): f64 {
 pr_chapter_y(c: int): f64 {
     pr_found = true;
     for k in 0..pw_n {
-        if (pw_c[k] == c && pw_p[k] == 0) return pw_y[k];
+        if (pw_c[k] <= c && c <= pw_last[k] && pw_p[k] == 0) return pw_y[k];
         if (pw_c[k] >= c) {
             pr_found = false;
             return pw_y[k]
         }
     }
-    pr_found = pw_n > 0 && pw_c[pw_n - 1] == c - 1 && pw_p[pw_n - 1] + 1 >= pr_part_count(c - 1);
+    pr_found = pw_n > 0 && pw_last[pw_n - 1] == c - 1 && (pw_last[pw_n - 1] != pw_c[pw_n - 1] || pw_p[pw_n - 1] + 1 >= pr_part_count(c - 1));
     pw_height()
 }
 
@@ -693,7 +747,7 @@ pr_jump_to_anchor(c: int, i: int) {
     p: int = if (i >= 0) pr_anchor_part(c, i) else 0;
     pr_glide_stop();
     pw_clear();
-    pw_add_below(c, p);
+    pw_add_below(if (i >= 0) c else pr_row_chapter(c), p);
     pw_commit();
     y: f64 = pr_index_y(c, i);
     pr_set_offset(y - top_inset(pr_table));
@@ -740,9 +794,14 @@ pr_glide_to(c: int, i: int) {
         pr_fill_soon();
         return
     }
-    if (d < 1.0f64) return;
+    if (d < 1.0f64) {
+        pr_place_tell();
+        return
+    }
     pr_gliding = true;
-    msg_ff1(pr_table, sel("setContentOffset:animated:"), 0.0f64, to, 1)
+    pr_glide_until = CACurrentMediaTime() + PR_GLIDE_SECONDS;
+    msg_ff1(pr_table, sel("setContentOffset:animated:"), 0.0f64, to, 1);
+    pr_fill_soon()
 }
 
 // The window grown to reach part p of chapter c, if it is a few parts
@@ -750,8 +809,9 @@ pr_glide_to(c: int, i: int) {
 // does now.
 PW_REACH_PARTS: int = 6;
 
-pw_reach(c: int, p: int): bool {
+pw_reach(to_c: int, p: int): bool {
     if (pw_n == 0) return false;
+    c: int = if (p == 0) pr_row_chapter(to_c) else to_c;
     if (c > pw_c[pw_n - 1] || c == pw_c[pw_n - 1] && p > pw_p[pw_n - 1]) {
         for _step in 0..PW_REACH_PARTS {
             pw_after(pw_c[pw_n - 1], pw_p[pw_n - 1]);
@@ -775,11 +835,23 @@ pw_reach(c: int, p: int): bool {
 }
 
 // Its glide ended (scrollViewDidEndScrollingAnimation), or stopped.
+// Following the page, at rest: where its verse is checked again (a glide
+// cut short goes on).
 pr_glide_ended() {
     pr_gliding = false;
     pr_place_tell();
+    if (pr_linked && !link_leader_panel && table != 0 && !touched(table)) {
+        pr_glided_forget();
+        pr_follow_page()
+    }
     pr_fill_soon()
 }
+
+// When a glide is over at the latest (UIKit's take about a third of a
+// second; one cut short isn't said to end).
+PR_GLIDE_SECONDS: f64 = 0.6f64;
+
+pr_glide_until: f64 = 0.0f64;
 
 pr_glide_stop() {
     if (!pr_gliding || pr_table == 0) return;
@@ -821,7 +893,8 @@ pr_measure(): bool {
     if (pr_table == 0 || pw_n == 0) return false;
     top: f64 = offset_y(pr_table) + top_inset(pr_table);
     k: int = pw_row_at(top);
-    c: int = pw_c[k];
+    // (A gap's placeholder: the page's chapter, if it is in the gap.)
+    c: int = if (pw_last[k] > pw_c[k] && cur >= pw_c[k] && cur <= pw_last[k]) cur else pw_c[k];
     into: f64 = top - pw_y[k];
     // (The last of its verses at or before the top; else the last of the
     // rows above's in the chapter; else none.)
@@ -839,11 +912,12 @@ pr_measure(): bool {
     true
 }
 
-// Its scroll: the window kept ahead of it, its place told; moved by a
-// finger (or gliding after one) while linked and leading, the page kept
-// with it.
+// Its scroll: the window kept ahead of it (not while it glides by itself:
+// the table's header set again would cut the glide short; room for where
+// it goes was made before), its place told; moved by a finger (or gliding
+// after one) while linked and leading, the page kept with it.
 pr_scrolled() {
-    if (pr_self == 0) _full: bool = pw_fill(pw_margin_moving(), 1);
+    if (pr_self == 0 && !pr_gliding) _full: bool = pw_fill(pw_margin_moving(), 1);
     pr_place_tell();
     if (pr_self == 0 && pr_linked && link_leader_panel && touched(pr_table)) pr_lead_page()
 }
@@ -1303,9 +1377,13 @@ pr_follow_by_comment() {
     pr_glided_v = v;
     if (!pr_known(c)) _first: int = rs_need(pr_part_key(c, 0));
     // (The reader at a comment on that verse already, wherever in it: it
-    // stays. A long comment is a long way to its start.)
+    // stays (its place told: a gap's placeholder stands for the page's
+    // chapter). A long comment is a long way to its start.)
     if (pr_measure() && pr_at_c == c && (if (pr_at_i < 0) v == 0 else pr_covers(c,
-        pr_at_i, v))) return;
+        pr_at_i, v))) {
+        pr_place_tell();
+        return
+    }
     pr_stepped_at = now;
     pr_glide_to(c, if (v == 0) -1 else pr_comment_nearest(c, v))
 }
@@ -1319,11 +1397,19 @@ pr_follow_page() {
     }
     if (!link_locate(LinkSide.Page)) return;
     c: int = at_c;
-    // (Its chapter not in the window: there first.)
-    _y: f64 = pr_chapter_y(c);
-    if (!pr_found && pw_row_of(c, 0) < 0) pr_jump(c, if (at_i < 0) 0 else link_verse_num(c,
-        at_i));
+    v: int = if (at_i < 0) 0 else link_verse_num(c, at_i);
+    // (The verse's part in the window: grown to it if it is near, else
+    // there at once.)
+    if (!pr_known(c)) _first: int = rs_need(pr_part_key(c, 0));
+    i: int = if (v > 0) pr_anchor_of(c, v) else -1;
+    if (!pw_reach(c, if (i >= 0) pr_anchor_part(c, i) else 0)) {
+        pw_commit();
+        pr_jump(c, v)
+    }
+    pw_commit();
     pr_set_offset(link_map_near(LinkSide.Page, LinkSide.Panel, c, at_i, at_part, side_top(LinkSide.Page)) - side_line_below(LinkSide.Panel));
+    // (Moved by the app, not a finger: the window kept ahead of it here.)
+    _full: bool = pw_fill(pw_margin_moving(), 1);
     pr_place_tell()
 }
 
