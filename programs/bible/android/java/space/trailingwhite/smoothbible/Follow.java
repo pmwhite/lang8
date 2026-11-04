@@ -17,17 +17,21 @@ final class Follow {
   // either).
   static final int BY_VERSE = 0, BY_COMMENT = 1;
 
-  // A chapter's link map (core's `link C MODE` and its `match I0 I1 J`
-  // lines): the page's anchors i0[k] to i1[k] go with the panel's anchor
-  // j[k], in order.
+  // A chapter's link map (core's `link C MODE COMMENTS` and its `match I0
+  // I1 J` lines): by verse, the page's anchors i0[k] (i1[k] the same) go
+  // with the panel's anchor j[k]; by comment, the version's anchors i0[k]
+  // to i1[k] go with the commentary's anchor j[k], the commentary in pane
+  // comments (0 the page, 1 the panel); in order.
   static final class LinkMap {
     final int mode;
+    final int comments;
     final int[] i0, i1, j;
 
-    LinkMap(int mode, int[] i0, int[] i1, int[] j) {
+    LinkMap(int mode, int comments, int[] i0, int[] i1, int[] j) {
       if (i0.length != j.length || i1.length != j.length)
         throw new IllegalArgumentException("a link map's matches have three numbers each");
       this.mode = mode;
+      this.comments = comments;
       this.i0 = i0;
       this.i1 = i1;
       this.j = j;
@@ -193,22 +197,22 @@ final class Follow {
   private static final double UNLAID = 1.0e12;
 
   // The page leading a commentary: the page's anchor at its reading line
-  // (pageI, -1 above the first) and the commentary's at its own (panelJ,
+  // (verseI, -1 above the first) and the commentary's at its own (commentJ,
   // -1 above the first): it stays while a comment there covers the page's
   // verse; else it goes to the comment covering it nearest its reading
   // line (by its laid-out starts; one not laid out, as far as its index is
-  // from panelJ), or to its chapter's top above the page's first verse.
-  static CommentStep commentFromPage(LinkMap map, int pageI, int panelJ, ChapterShape panel,
-      double panelLine) {
-    if (pageI < 0) return panelJ < 0 ? CommentStep.STAY : CommentStep.goTo(-1);
-    if (covers(map, panelJ, pageI)) return CommentStep.STAY;
+  // from commentJ), or to its chapter's top above the page's first verse.
+  static CommentStep commentFromVerses(LinkMap map, int verseI, int commentJ, ChapterShape comments,
+      double commentLine) {
+    if (verseI < 0) return commentJ < 0 ? CommentStep.STAY : CommentStep.goTo(-1);
+    if (covers(map, commentJ, verseI)) return CommentStep.STAY;
     int best = -1;
     double bestD = 0;
     for (int k = 0; k < map.j.length; k++) {
       int j = map.j[k];
-      if (map.i0[k] <= pageI && pageI <= map.i1[k]) {
-        double d = j < panel.known.length && panel.known[j] ? Math.abs(panel.starts[j] - panelLine)
-            : UNLAID + Math.abs(j - panelJ);
+      if (map.i0[k] <= verseI && verseI <= map.i1[k]) {
+        double d = j < comments.known.length && comments.known[j] ? Math.abs(comments.starts[j] - commentLine)
+            : UNLAID + Math.abs(j - commentJ);
         if (best < 0 || d < bestD) {
           best = j;
           bestD = d;
@@ -227,14 +231,14 @@ final class Follow {
   }
 
   // A commentary leading the page: the commentary's anchor at its reading
-  // line (panelJ, -1 above the first) and the page's at its own (pageI):
+  // line (commentJ, -1 above the first) and the page's at its own (verseI):
   // the page stays on a verse that comment covers; else it goes to the
   // first verse the comment covers (its chapter's top above the
   // commentary's first), and stays for a comment covering none.
-  static CommentStep pageFromComment(LinkMap map, int panelJ, int pageI) {
-    if (panelJ < 0) return pageI < 0 ? CommentStep.STAY : CommentStep.goTo(-1);
-    if (pageI >= 0 && covers(map, panelJ, pageI)) return CommentStep.STAY;
-    for (int k = 0; k < map.j.length; k++) if (map.j[k] == panelJ) return CommentStep.goTo(map.i0[k]);
+  static CommentStep versesFromComment(LinkMap map, int commentJ, int verseI) {
+    if (commentJ < 0) return verseI < 0 ? CommentStep.STAY : CommentStep.goTo(-1);
+    if (verseI >= 0 && covers(map, commentJ, verseI)) return CommentStep.STAY;
+    for (int k = 0; k < map.j.length; k++) if (map.j[k] == commentJ) return CommentStep.goTo(map.i0[k]);
     return CommentStep.STAY;
   }
 

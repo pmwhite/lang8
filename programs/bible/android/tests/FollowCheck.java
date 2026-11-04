@@ -114,11 +114,11 @@ final class FollowCheck {
           break;
         }
         case "frompage":
-          got = Follow.commentFromPage(map, pageI, panelJ, panel, readingLine).toString();
+          got = Follow.commentFromVerses(map, pageI, panelJ, panel, readingLine).toString();
           same = got.equals(expected);
           break;
         case "frompanel":
-          got = Follow.pageFromComment(map, panelJ, pageI).toString();
+          got = Follow.versesFromComment(map, panelJ, pageI).toString();
           same = got.equals(expected);
           break;
         case "run": {
@@ -149,7 +149,7 @@ final class FollowCheck {
       i1[k] = Integer.parseInt(w[2 + 3 * k]);
       j[k] = Integer.parseInt(w[3 + 3 * k]);
     }
-    return new Follow.LinkMap(Follow.BY_VERSE, i0, i1, j);
+    return new Follow.LinkMap(Follow.BY_VERSE, 1, i0, i1, j);
   }
 
   // `page TOP END START...` or `panel ...`, `-` not laid out.

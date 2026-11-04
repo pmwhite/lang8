@@ -16,7 +16,7 @@ final class Linking implements Reader.Moves {
   // lines, `end`); all let go as either pane's parts are forgotten.
   private final HashMap<Integer, Follow.LinkMap> maps = new HashMap<>();
   // A map being said: its chapter (-1: none), mode and matches so far.
-  private int sayingC = -1, sayingMode;
+  private int sayingC = -1, sayingMode, sayingComments;
   private final ArrayList<int[]> saying = new ArrayList<>();
   private Reader leader;
 
@@ -29,10 +29,12 @@ final class Linking implements Reader.Moves {
   }
 
   // ---- core's lines ----
-  // `link C MODE`.
-  void linkBegin(int c, int mode) {
+  // `link C MODE COMMENTS` (COMMENTS, by comment, the commentary's pane:
+  // the panel, if unsaid).
+  void linkBegin(int c, int mode, int comments) {
     sayingC = c;
     sayingMode = mode;
+    sayingComments = comments == 0 ? 0 : 1;
     saying.clear();
   }
 
@@ -51,7 +53,7 @@ final class Linking implements Reader.Moves {
       i1[k] = saying.get(k)[1];
       j[k] = saying.get(k)[2];
     }
-    maps.put(sayingC, new Follow.LinkMap(sayingMode, i0, i1, j));
+    maps.put(sayingC, new Follow.LinkMap(sayingMode, sayingComments, i0, i1, j));
     sayingC = -1;
     saying.clear();
   }
@@ -87,18 +89,25 @@ final class Linking implements Reader.Moves {
   private void follow(Reader lead, boolean resting) {
     Reader.Place at = lead.placeAtLine();
     if (at == null) return;
-    // (In a commentary's run of chapters without comments: no map needed.)
-    int runFrom = panel.runFrom(at.c);
-    if (runFrom >= 0) {
-      if (lead == page) commentaryInRun(runFrom, resting);
-      else pageInRun(runFrom, panel.runTo(at.c));
-      return;
-    }
     Follow.LinkMap map = maps.get(at.c);
     if (map == null) return;
-    if (map.mode == Follow.BY_VERSE) byVerse(lead, at, map);
-    else if (lead == page) commentaryFollows(at, map, resting);
-    else pageFollows(at, map);
+    if (map.mode == Follow.BY_VERSE) {
+      byVerse(lead, at, map);
+      return;
+    }
+    // (By comment: the commentary in the map's pane, the version in the
+    // other, whichever leads.)
+    Reader commentary = map.comments == 0 ? page : panel;
+    Reader version = map.comments == 0 ? panel : page;
+    // (In the commentary's run of chapters without comments.)
+    int runFrom = commentary.runFrom(at.c);
+    if (runFrom >= 0) {
+      if (lead == version) commentaryInRun(version, commentary, runFrom, resting);
+      else versionInRun(version, runFrom, commentary.runTo(at.c));
+      return;
+    }
+    if (lead == version) commentaryFollows(version, commentary, at, map, resting);
+    else versionFollows(version, at, map);
   }
 
   // A version following the other, its reading line by the rules; where
@@ -124,43 +133,45 @@ final class Linking implements Reader.Moves {
     return best;
   }
 
-  // The page leading a commentary in its run of chapters without comments
-  // (waiting while the page is flung): the run's part is its place.
-  private void commentaryInRun(int runFrom, boolean resting) {
-    if (page.flung() && !resting) return;
-    Reader.Place aim = panel.aim();
-    if (aim == null || aim.c != runFrom) panel.bring(runFrom, -1, true);
+  // The version leading a commentary in its run of chapters without
+  // comments (waiting while the version is flung): the run's part is its
+  // place.
+  private void commentaryInRun(Reader version, Reader commentary, int runFrom, boolean resting) {
+    if (version.flung() && !resting) return;
+    Reader.Place aim = commentary.aim();
+    if (aim == null || aim.c != runFrom) commentary.bring(runFrom, -1, true);
   }
 
-  // A commentary in its run leading the page: by Follow.runChapter (no
+  // A commentary in its run leading the version: by Follow.runChapter (no
   // place yet: the run's first).
-  private void pageInRun(int runFrom, int runTo) {
-    Reader.Place aim = page.aim();
+  private void versionInRun(Reader version, int runFrom, int runTo) {
+    Reader.Place aim = version.aim();
     int to = aim == null ? runFrom : Follow.runChapter(runFrom, runTo, aim.c);
-    if (to >= 0) page.bring(to, -1, true);
+    if (to >= 0) version.bring(to, -1, true);
   }
 
-  // The page leading a commentary: it waits while the page is flung; it
-  // stays while its comment covers the page's verse, and goes to the
-  // comment covering it nearest its reading line.
-  private void commentaryFollows(Reader.Place at, Follow.LinkMap map, boolean resting) {
-    if (page.flung() && !resting) return;
-    Reader.Place aim = panel.aim();
+  // The version leading a commentary (in either pane): it waits while the
+  // version is flung; it stays while its comment covers the version's
+  // verse, and goes to the comment covering it nearest its reading line.
+  private void commentaryFollows(Reader version, Reader commentary, Reader.Place at,
+      Follow.LinkMap map, boolean resting) {
+    if (version.flung() && !resting) return;
+    Reader.Place aim = commentary.aim();
     boolean same = aim != null && aim.c == at.c;
-    Follow.CommentStep step = Follow.commentFromPage(map, at.i, same ? aim.i : -1,
-        panel.shape(at.c), panel.lineY());
-    if (!step.stays) panel.bring(at.c, step.anchor, true);
-    else if (!same && at.i < 0) panel.bring(at.c, -1, true);
+    Follow.CommentStep step = Follow.commentFromVerses(map, at.i, same ? aim.i : -1,
+        commentary.shape(at.c), commentary.lineY());
+    if (!step.stays) commentary.bring(at.c, step.anchor, true);
+    else if (!same && at.i < 0) commentary.bring(at.c, -1, true);
   }
 
-  // A commentary leading the page: it stays while a verse the comment at
-  // the commentary's reading line covers is at its own, and goes to the
-  // comment's first verse.
-  private void pageFollows(Reader.Place at, Follow.LinkMap map) {
-    Reader.Place aim = page.aim();
+  // A commentary leading the version (in either pane): it stays while a
+  // verse the comment at the commentary's reading line covers is at its
+  // own, and goes to the comment's first verse.
+  private void versionFollows(Reader version, Reader.Place at, Follow.LinkMap map) {
+    Reader.Place aim = version.aim();
     boolean same = aim != null && aim.c == at.c;
-    Follow.CommentStep step = Follow.pageFromComment(map, at.i, same ? aim.i : -1);
-    if (!step.stays) page.bring(at.c, step.anchor, true);
-    else if (!same && at.i < 0) page.bring(at.c, -1, true);
+    Follow.CommentStep step = Follow.versesFromComment(map, at.i, same ? aim.i : -1);
+    if (!step.stays) version.bring(at.c, step.anchor, true);
+    else if (!same && at.i < 0) version.bring(at.c, -1, true);
   }
 }

@@ -86,7 +86,7 @@ export function followByVerse(p, line, leaderEm, followerEm) {
   return exact + d / (1 + Math.abs(d) / slack);
 }
 
-// Whether the commentary's anchor j covers the page's anchor i.
+// Whether the commentary's anchor j covers the version's anchor i.
 function covers(map, j, i) {
   if (j < 0) return false;
   for (let k = 0; k < map.j.length; k++) if (map.j[k] === j && map.i0[k] <= i && i <= map.i1[k]) return true;
@@ -95,16 +95,16 @@ function covers(map, j, i) {
 
 // A step by comment: null to stay, else the anchor to go to (-1: the
 // chapter's top).
-export function commentFromPage(map, pageI, panelJ, panel, panelLine) {
-  if (pageI < 0) return panelJ < 0 ? null : -1;
-  if (covers(map, panelJ, pageI)) return null;
+export function commentFromVerses(map, verseI, commentJ, comments, commentLine) {
+  if (verseI < 0) return commentJ < 0 ? null : -1;
+  if (covers(map, commentJ, verseI)) return null;
   let best = -1;
   let bestD = 0;
   for (let k = 0; k < map.j.length; k++) {
-    if (!(map.i0[k] <= pageI && pageI <= map.i1[k])) continue;
+    if (!(map.i0[k] <= verseI && verseI <= map.i1[k])) continue;
     const j = map.j[k];
-    const s = panel.starts[j];
-    const d = s != null ? Math.abs(s - panelLine) : UNLAID + Math.abs(j - panelJ);
+    const s = comments.starts[j];
+    const d = s != null ? Math.abs(s - commentLine) : UNLAID + Math.abs(j - commentJ);
     if (best < 0 || d < bestD) {
       best = j;
       bestD = d;
@@ -113,17 +113,17 @@ export function commentFromPage(map, pageI, panelJ, panel, panelLine) {
   return best < 0 ? null : best;
 }
 
-// A commentary leading the page from a run of chapters it says nothing on
-// (runFrom to runTo): null to stay (the page in one of them), else the
-// run's chapter nearest the page.
+// A commentary leading a version from a run of chapters it says nothing on
+// (runFrom to runTo): null to stay (the version in one of them), else the
+// run's chapter nearest the version.
 export function runChapter(runFrom, runTo, pageC) {
   if (pageC >= runFrom && pageC <= runTo) return null;
   return pageC < runFrom ? runFrom : runTo;
 }
 
-export function pageFromComment(map, panelJ, pageI) {
-  if (panelJ < 0) return pageI < 0 ? null : -1;
-  if (pageI >= 0 && covers(map, panelJ, pageI)) return null;
-  for (let k = 0; k < map.j.length; k++) if (map.j[k] === panelJ) return map.i0[k];
+export function versesFromComment(map, commentJ, verseI) {
+  if (commentJ < 0) return verseI < 0 ? null : -1;
+  if (verseI >= 0 && covers(map, commentJ, verseI)) return null;
+  for (let k = 0; k < map.j.length; k++) if (map.j[k] === commentJ) return map.i0[k];
   return null;
 }

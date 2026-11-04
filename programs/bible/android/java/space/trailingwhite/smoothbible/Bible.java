@@ -1209,8 +1209,8 @@ public final class Bible extends Activity {
         break;
       }
       case "link":
-        // (link C MODE, its match lines, end: a chapter's link map.)
-        linking.linkBegin(w.num(1), w.num(2));
+        // (link C MODE COMMENTS, its match lines, end: a chapter's link map.)
+        linking.linkBegin(w.num(1), w.num(2), w.num(3));
         gatheringLink = true;
         break;
       case "halt": {

@@ -228,7 +228,11 @@ reader as any screen does.
 
 The page and the panel's reader are two panes: pane 0 the page, pane 1 the
 panel's reader (the screen whose `reader` line says so). Each reads a
-document a part at a time. Core and the skin divide the work by what each
+document a part at a time: the page the Bible, or a commentary (Swap Panes,
+the reader screen's tool, trades what the two read, each going to the
+other's place; the bar's `version` then names the commentary); the panel a
+version or a commentary. A commentary on the page has no verses to select:
+core lets a `tapverse` on it go. Core and the skin divide the work by what each
 knows best, and speak across the line in the document's terms, never in
 pixels:
 
@@ -289,16 +293,18 @@ not laid out yet keeps it until it is. `halt P`: its glide stopped.
 the skin moves the other each frame by the link map. Core sends a chapter's
 map as the panel's document or the chapters near the place change:
 
-- `link C MODE`, then `match I0 I1 J` lines, then `end` (a skin keeps the
-  maps of at least the eight chapters said latest: core says a map again
-  as its chapter comes near again): in chapter C, the
-  page's anchors I0 to I1 go with the panel's anchor J, in order; MODE 0
-  (versions) or 1 (a commentary in either pane). A version's verses match
-  one to one (I0 = I1), a verse one side lacks has no line; a commentary's
-  comment J goes with the page's verses it covers (several comments may
-  cover a verse, where its commentator goes through the verses again). A
-  chapter of a commentary's run without comments has no lines: the run's
-  part is the follower's place wherever the leader is in its chapters.
+- `link C MODE COMMENTS`, then `match I0 I1 J` lines, then `end` (a skin
+  keeps the maps of at least the eight chapters said latest: core says a
+  map again as its chapter comes near again): in chapter C, MODE 0, two
+  versions, the page's anchor I0 (I1 the same) goes with the panel's
+  anchor J, verse by verse (a verse one side lacks has no line); MODE 1,
+  a version and a commentary (COMMENTS the pane the commentary is in, the
+  other the version's), the version's verses I0 to I1 go with the comment
+  J that covers them (several comments may cover a verse, where its
+  commentator goes through the verses again). A chapter of a commentary's
+  run without comments has no lines: the run's part is the follower's
+  place wherever the leader is in its chapters. Two commentaries have no
+  map.
 
 Following, MODE 0: the follower's reading line goes through each matched
 pair's span starts (anchor I0's on the leader, J's on the follower), and
@@ -313,18 +319,19 @@ leader's), its value at 0 taken, and the follower placed d / (1 + |d| /
 (0.5 em)) from the curve, d the line's distance from it (em the
 follower's): no verse is ever more than half a line from its place.
 
-Following, MODE 1: the follower moves only at a comment's border. Led by
-the page, the commentary stays while one of its comments at its reading
-line covers the page's verse there; else it goes to the comment covering
-that verse nearest its reading line, its start at the reading line,
-brought there as `go` MODE 1 is. While the page glides after a flick it
-waits, and settles when the page rests. Led by the commentary, the page
-goes to the first verse of the comment at the commentary's reading line as
-that comment changes (it stays while a verse that comment covers is at its
-reading line). A commentary leading from its run of chapters without
-comments leaves the page where it is in them; the page outside them goes
-to the run's chapter nearest it (the run's first coming from before it,
-its last coming back from after it).
+Following, MODE 1: the follower moves only at a comment's border,
+whichever pane the commentary is in. Led by the version, the commentary
+stays while one of its comments at its reading line covers the version's
+verse there; else it goes to the comment covering that verse nearest its
+reading line, its start at the reading line, brought there as `go` MODE 1
+is. While the version glides after a flick it waits, and settles when the
+version rests. Led by the commentary, the version goes to the first verse
+of the comment at the commentary's reading line as that comment changes
+(it stays while a verse that comment covers is at its reading line). A
+commentary leading from its run of chapters without comments leaves the
+version where it is in them; the version outside them goes to the run's
+chapter nearest it (the run's first coming from before it, its last coming
+back from after it).
 
 These rules are the skins' each, so each is checked against core's: core's
 `link_cases` tool writes cases (a map, both panes' anchor positions, the

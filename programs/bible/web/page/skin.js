@@ -7,7 +7,7 @@
 // (UTF-8, `\n`-ended, fields split by tabs), as Android's skin does.
 import { runResumable, pausing } from "../../../../web/l8-runtime.js";
 import { Reloader, watchBuilds } from "../../../../web/reload.js";
-import { BY_VERSE, followPairs, followByVerse, commentFromPage, pageFromComment, runChapter } from "./follow.js";
+import { BY_VERSE, followPairs, followByVerse, commentFromVerses, versesFromComment, runChapter } from "./follow.js";
 
 const meta = (n) => document.querySelector(`meta[name="${n}"]`)?.content || "";
 const DATA = "/read/data/" + meta("sb-data");
@@ -646,7 +646,8 @@ function line(w) {
       panes[w.num(1)]?.go(w.num(2), w.num(3), w.num(4), w.num(5));
       break;
     case "link":
-      linkBlock = { c: w.num(1), mode: w.num(2), i0: [], i1: [], j: [] };
+      // (By comment: which pane the commentary is in; the panel, if unsaid.)
+      linkBlock = { c: w.num(1), mode: w.num(2), comments: w.num(3) === 0 ? 0 : 1, i0: [], i1: [], j: [] };
       break;
     case "halt":
       panes[w.num(1)]?.halt();
@@ -1584,16 +1585,19 @@ function follow(lead) {
     else if (!other.pending) other.go(at.c, mappedAnchor(map, at.i, lead.p === 0), 0, 0);
     return;
   }
-  // (By comment: not while the page glides after a flick.)
-  if (lead.p === 0 && lead.gliding) return;
+  // (By comment, the commentary in pane map.comments, the version in the
+  // other: not while the version glides after a flick.)
+  const versionLeads = lead.p !== map.comments;
+  const comments = panes[map.comments];
+  if (versionLeads && lead.gliding) return;
   const there = other.placeAt();
   const otherI = there && there.c === at.c ? there.i : -2;
-  // (A chapter of a commentary's run without comments: the page leading,
-  // its one part; the commentary leading, the run's chapter nearest the
-  // page.)
-  const run = (lead.p === 0 ? other : lead).chapters.get(at.c)?.gap;
+  // (A chapter of a commentary's run without comments: the version
+  // leading, its one part; the commentary leading, the run's chapter
+  // nearest the version.)
+  const run = comments.chapters.get(at.c)?.gap;
   if (run) {
-    if (lead.p === 0) {
+    if (versionLeads) {
       if (!(there && there.c === run[0])) other.go(at.c, -1, 0, 1);
     } else {
       const to = runChapter(run[0], run[1], there ? there.c : run[0]);
@@ -1604,7 +1608,7 @@ function follow(lead) {
     }
     return;
   }
-  const step = lead.p === 0 ? commentFromPage(map, at.i, otherI, panel.shape(at.c), there ? there.line : 0) : pageFromComment(map, at.i, otherI);
+  const step = versionLeads ? commentFromVerses(map, at.i, otherI, comments.shape(at.c), there ? there.line : 0) : versesFromComment(map, at.i, otherI);
   const key = `${at.c}:${step}`;
   if (step === null || other.stepped === key) return;
   other.stepped = key;

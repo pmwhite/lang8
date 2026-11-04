@@ -47,7 +47,12 @@ type PaneDocument =
     | Commentary { slot: int }
 
 pane_document(p: int): PaneDocument {
-    if (p == PANE_PAGE) return PaneDocument.Version { text: text_cur };
+    if (p == PANE_PAGE) {
+        match page_document() {
+            Module m -> return PaneDocument.Commentary { slot: m.slot };
+            Bible -> return PaneDocument.Version { text: text_cur }
+        }
+    }
     at: int = bb_reader_at();
     if (at < 0) return PaneDocument.Nothing;
     if (sk_kinds[at] == SCR_SHELF_COMMENTARY) PaneDocument.Commentary { slot: sk_args[at] / SHELF_PLACE } else PaneDocument.Version { text: sk_args[at] / SHELF_PLACE }
@@ -58,6 +63,78 @@ pane_by_comment(p: int): bool {
         Commentary _c -> true;
         _ -> false
     }
+}
+
+// ---- the page's document ----
+// What a place is in (the page's, the history's, a ribbon's, the way
+// back's): the Bible, in whichever version is read (a place in it is a
+// reference, the same in every version), or a Bookshelf module, by its
+// slot (in kept files, by its name: core/store.l8's).
+type PlaceDocument =
+    | Bible
+    | Module { slot: int }
+
+// The page's document: the Bible, or a commentary on the Bookshelf, ready
+// to read (pageSlot, its slot plus one; any other, the Bible).
+page_document(): PlaceDocument {
+    slot: int = pref_get("pageSlot") - 1;
+    if (slot < 0) return PlaceDocument.Bible;
+    i: int = shelf_find_slot(slot);
+    if (i < 0 || !shelf_ready_at(i) || shelf_kind_at(i) != SHELF_KIND_COMMENTARY) return PlaceDocument.Bible;
+    PlaceDocument.Module { slot: slot }
+}
+
+page_reads_bible(): bool {
+    match page_document() {
+        Bible -> true;
+        Module _m -> false
+    }
+}
+
+place_documents_same(a: PlaceDocument, b: PlaceDocument): bool {
+    place_document_slot(a) == place_document_slot(b)
+}
+
+// A document's Bookshelf slot (-1: the Bible).
+place_document_slot(d: PlaceDocument): int {
+    match d {
+        Bible -> -1;
+        Module m -> m.slot
+    }
+}
+
+// The page to read document d (not saved: the caller saves): its parts
+// asked for again and its title said; the caller says where it goes.
+page_read(d: PlaceDocument) {
+    if (place_documents_same(d, page_document())) return;
+    match d {
+        Bible -> set_pref("pageSlot", 0);
+        Module m -> {
+            // (Its folio opened, for its parts: Study's use, as beside.)
+            set_pref("pageSlot", m.slot + 1);
+            i: int = shelf_find_slot(m.slot);
+            if (i >= 0) _open: bool = shelf_ensure_open(m.slot)
+        }
+    }
+    pane_forget(PANE_PAGE, -1);
+    sk_write_title()
+}
+
+// A place's document in a kept file's field: the module's name (none: the
+// Bible), onto fbuf; read back from fbuf's from to to (a name no longer on
+// the Bookshelf: the Bible).
+fput_place_document(d: PlaceDocument) {
+    match d {
+        Bible -> { }
+        Module m -> fput_shelf_name(shelf_find_slot(m.slot))
+    }
+}
+
+place_document_of_field(from: int, to: int): PlaceDocument {
+    if (to <= from) return PlaceDocument.Bible;
+    i: int = shelf_find_bytes(fbuf, from, to);
+    if (i < 0) return PlaceDocument.Bible;
+    PlaceDocument.Module { slot: shelf_slot_at(i) }
 }
 
 // ---- where each is read ----
@@ -376,7 +453,7 @@ pane_want(p: int, c: int, k: int) {
             if (v.text != text_cur && !text_ready(v.text)) return;
             pane_write_version_part(p, v.text, c, k)
         }
-        Commentary m -> pane_write_comment_part(m.slot, c, k)
+        Commentary m -> pane_write_comment_part(p, m.slot, c, k)
     }
 }
 
@@ -442,21 +519,28 @@ pane_lay_page_part(c: int, k: int) {
     }
 }
 
-// The commentary's parts told as coming (chapter and part), to be told
-// again as they come.
+// The commentaries' parts told as coming (pane, chapter and part), to be
+// told again as they come.
 PANE_PARTS_COMING_MOST: int = 64;
+
+pane_coming_p: []int = new int[PANE_PARTS_COMING_MOST](0);
 
 pane_coming_c: []int = new int[PANE_PARTS_COMING_MOST](-1);
 
 pane_coming_k: []int = new int[PANE_PARTS_COMING_MOST](-1);
 
-// Part k of chapter c of the commentary in slot as the panel's lines (N 0
+// Part k of chapter c of the commentary in slot as pane p's lines (N 0
 // while the commentary is opening): its comments, or a line saying they are
 // coming, with every verse the chapter's comments begin and the part each
 // is in. A chapter in a run without comments: the run's one part, as its
 // first chapter's. Laid out, the parts beside it read ahead; coming,
 // noted.
-pane_write_comment_part(slot: int, c: int, k: int) {
+pane_write_comment_part(
+    p: int,
+    slot: int,
+    c: int,
+    k: int
+) {
     region {
         parts: CommentParts = shelf_comment_parts(slot, c);
         at_c: int = if (parts.gap_from >= 0) parts.gap_from else c;
@@ -468,7 +552,7 @@ pane_write_comment_part(slot: int, c: int, k: int) {
             lay_str(&sk_layout, "Opening...")
         }
         measure_chapter(&sk_layout, &sk_ranges, at_c);
-        sk_write_laid(at_c, PANE_PANEL, LaidPart {
+        sk_write_laid(at_c, p, LaidPart {
             coming: !laid,
             marked: false,
             esv: false,
@@ -480,49 +564,53 @@ pane_write_comment_part(slot: int, c: int, k: int) {
             gap_to: parts.gap_to
         });
         if (laid) {
-            pane_part_coming_done(at_c, part);
+            pane_part_coming_done(p, at_c, part);
             _held: bool = shelf_comment_part_ahead(slot, at_c, part)
-        } else pane_part_coming(at_c, part)
+        } else pane_part_coming(p, at_c, part)
     }
 }
 
-pane_part_coming(c: int, k: int) {
+pane_part_coming(p: int, c: int, k: int) {
     free: int = -1;
     for s in 0..PANE_PARTS_COMING_MOST {
-        if (pane_coming_c[s] == c && pane_coming_k[s] == k) return;
+        if (pane_coming_c[s] == c && pane_coming_k[s] == k && pane_coming_p[s] == p) return;
         if (pane_coming_c[s] < 0 && free < 0) free = s
     }
     // (Full: the oldest let go; the skin asks again as it shows it.)
     if (free < 0) free = 0;
+    pane_coming_p[free] = p;
     pane_coming_c[free] = c;
     pane_coming_k[free] = k
 }
 
-pane_part_coming_done(c: int, k: int) {
+pane_part_coming_done(p: int, c: int, k: int) {
     for s in 0..PANE_PARTS_COMING_MOST {
-        if (pane_coming_c[s] == c && pane_coming_k[s] == k) pane_coming_c[s] = -1
+        if (pane_coming_c[s] == c && pane_coming_k[s] == k && pane_coming_p[s] == p) pane_coming_c[s] = -1
     }
 }
 
 // A commentary's text come (shelf_screens_changed): its chapters' parts
-// known now, and each part told as coming told again.
+// known now, and each part told as coming told again, in whichever pane
+// reads it.
 pane_comments_came() {
-    match pane_document(PANE_PANEL) {
-        Commentary m -> {
-            pane_anchors_forget(PANE_PANEL);
-            pane_links_forget();
-            for s in 0..PANE_PARTS_COMING_MOST {
-                c: int = pane_coming_c[s];
-                if (c >= 0) {
-                    pane_coming_c[s] = -1;
-                    pane_write_comment_part(m.slot, c, pane_coming_k[s])
+    for p in 0..PANES {
+        match pane_document(p) {
+            Commentary m -> {
+                pane_anchors_forget(p);
+                pane_links_forget();
+                for s in 0..PANE_PARTS_COMING_MOST {
+                    c: int = pane_coming_c[s];
+                    if (c >= 0 && pane_coming_p[s] == p) {
+                        pane_coming_c[s] = -1;
+                        pane_write_comment_part(p, m.slot, c, pane_coming_k[s])
+                    }
                 }
+                // (Its maps, now its anchors are known.)
+                for q in 0..PANES
+                    if (pane_places[q].c >= 0) pane_links_near(pane_places[q].c)
             }
-            // (Its maps, now its anchors are known.)
-            pane_links_near(sk_c);
-            if (pane_places[PANE_PANEL].c >= 0) pane_links_near(pane_places[PANE_PANEL].c)
+            _ -> { }
         }
-        _ -> { }
     }
 }
 
@@ -564,7 +652,9 @@ pane_place_chapter(p: int, c: int): int {
 // `rest P ENDS_HI MS`: pane p at rest: the page's counted as read
 // (core/reading.l8).
 pane_rest(p: int, ends_hi: int, ms: int) {
-    if (p != PANE_PAGE || pane_places[p].c < 0) return;
+    // (Reading counted in the Bible alone: a commentary on the page isn't
+    // its chapter read.)
+    if (p != PANE_PAGE || pane_places[p].c < 0 || !page_reads_bible()) return;
     now: f64 = ms as f64 / 1000.0f64;
     rd_rest(sk_c, sk_v, sk_frac, ends_hi >= sk_c, ends_hi, now);
     // (Reading the ESV: the chapters around the place asked for.)
@@ -689,24 +779,29 @@ pane_links_near(c: int) {
     }
 }
 
-// `link C MODE`, its `match I0 I1 J` lines, `end`: which of the page's
-// anchors of chapter c go with which of the panel's. Two versions, verse
-// by verse (a verse one lacks, none); a commentary, each comment with the
-// page's verses it covers. Not sent while either's anchors can't be known
-// (a commentary opening, a version still to come): sent once they can be.
+// `link C MODE COMMENTS`, its `match I0 I1 J` lines, `end`: which anchors
+// of chapter c go with which. Two versions, verse by verse: the page's
+// anchor I0 (I1 the same) with the panel's J (a verse one lacks, none). A
+// version and a commentary (COMMENTS the pane the commentary is in): the
+// version's verses I0 to I1 with the comment J that covers them. Two
+// commentaries: none. Not sent while either's anchors can't be known (a
+// commentary opening, a version still to come): sent once they can be.
 pane_write_link(c: int) {
     if (pane_anchored(PANE_PAGE, c) < 0 || pane_anchored(PANE_PANEL, c) < 0) return;
+    comments: int = if (pane_by_comment(PANE_PANEL)) PANE_PANEL else if (pane_by_comment(PANE_PAGE)) PANE_PAGE else -1;
+    if (comments >= 0 && pane_by_comment(1 - comments)) return;
     pane_linked_sent[pane_linked_next] = c;
     pane_linked_next = (pane_linked_next + 1) % PANE_LINKS_KEPT;
-    mode: int = if (pane_by_comment(PANE_PANEL)) LINK_BY_COMMENT else LINK_BY_VERSE;
+    mode: int = if (comments >= 0) LINK_BY_COMMENT else LINK_BY_VERSE;
     ui_str("link ");
     ui_int(c);
     ui_byte(32);
     ui_int(mode);
+    ui_byte(32);
+    ui_int(if (comments >= 0) comments else PANE_PANEL);
     ui_byte(10);
-    n: int = pane_anchor_count(PANE_PAGE, c);
     if (mode == LINK_BY_VERSE) {
-        for i in 0..n {
+        for i in 0..pane_anchor_count(PANE_PAGE, c) {
             j: int = pane_anchor_of(PANE_PANEL, c, pane_anchor_verse(PANE_PAGE, c,
                 i));
             if (j >= 0) pane_write_match(i, i, j)
@@ -714,12 +809,13 @@ pane_write_link(c: int) {
     } else {
         // (A comment covers the verses from its own to the one before the
         // next comment that goes further: pane_covers.)
-        for j in 0..pane_anchor_count(PANE_PANEL, c) {
+        verses: int = 1 - comments;
+        n: int = pane_anchor_count(verses, c);
+        for j in 0..pane_anchor_count(comments, c) {
             first: int = -1;
             last: int = -1;
             for i in 0..n {
-                if (pane_covers(PANE_PANEL, c, j, pane_anchor_verse(PANE_PAGE, c,
-                    i))) {
+                if (pane_covers(comments, c, j, pane_anchor_verse(verses, c, i))) {
                     if (first < 0) first = i;
                     last = i
                 }
@@ -750,6 +846,13 @@ pane_page_jump(c: int, v: int, frac: int) {
     if (pane_linked()) pane_go_verse(PANE_PANEL, c, v, frac, PANE_GO_AT_ONCE)
 }
 
+// The page to chapter c, verse v, frac through it, at once, the panel's
+// reader left where it is (core moves it itself: Swap Panes).
+pane_page_jump_alone(c: int, v: int, frac: int) {
+    pane_go_verse(PANE_PAGE, c, v, frac, PANE_GO_AT_ONCE);
+    pane_leader = PANE_PAGE
+}
+
 // The panel's reader to the page's chapter c, verse v, brought there
 // (relinked; verses selected).
 pane_panel_to(c: int, v: int, frac: int) {
@@ -763,7 +866,9 @@ pane_panel_begun() {
     pane_forget(PANE_PANEL, -1);
     pane_places[PANE_PANEL].c = -1;
     pane_leader = PANE_PAGE;
-    for s in 0..PANE_PARTS_COMING_MOST pane_coming_c[s] = -1
+    for s in 0..PANE_PARTS_COMING_MOST {
+        if (pane_coming_p[s] == PANE_PANEL) pane_coming_c[s] = -1
+    }
 }
 
 // The panel's reader's screen shown (made, or made again): to the page's

@@ -42,7 +42,11 @@ it (near, it glides; far, it is there at once); while the page glides
 after a flick it waits, and settles when the page stops. A commentary
 leading, the page goes to the first verse of the comment at its reading
 line. Chapters a commentary says nothing on, in a run, are one part of
-it, shown wherever the page is in them. Each pane is read at one line:
+it, shown wherever the page is in them. The page reads the Bible or a commentary (Swap Panes trades
+what the two panes read); a place, the page's, the history's, a
+ribbon's or the way back's, is in the Bible (whichever version is read)
+or in a Bookshelf module (kept by its name), and going back to one reads
+its document on the page again. Each pane is read at one line:
 the page's a third of the way down (where Go To leaves a verse), the
 panel's at its top.
 `core/shelf.l8` keeps the Bookshelf: SWORD modules downloaded on request
