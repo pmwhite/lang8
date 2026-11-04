@@ -289,7 +289,9 @@ not laid out yet keeps it until it is. `halt P`: its glide stopped.
 the skin moves the other each frame by the link map. Core sends a chapter's
 map as the panel's document or the chapters near the place change:
 
-- `link C MODE`, then `match I0 I1 J` lines, then `end`: in chapter C, the
+- `link C MODE`, then `match I0 I1 J` lines, then `end` (a skin keeps the
+  maps of at least the eight chapters said latest: core says a map again
+  as its chapter comes near again): in chapter C, the
   page's anchors I0 to I1 go with the panel's anchor J, in order; MODE 0
   (versions) or 1 (a commentary in either pane). A version's verses match
   one to one (I0 = I1), a verse one side lacks has no line; a commentary's
@@ -502,7 +504,7 @@ Other lines from core:
 | `reader N` | the Bible has N chapters (each pane's) |
 | `part P C K N` TEXT | part K of chapter C of pane P's document, the chapter in N parts (0: not known yet, a commentary still opening), and the panes' other lines: see Panes above |
 | `go P C I FRAC MODE`, `halt P`, `forget P C`, `line P THOUSANDTHS`, `link C MODE` | a pane to a place, its glide stopped, its parts to be asked for again, its reading line; a chapter's link map: see Panes above |
-| `goto` | the sheets away, as the platform puts them away (a `jump 0` follows) |
+| `goto` | the sheets away, as the platform puts them away (a `go 0` follows) |
 | `highlights SWATCH WASH STRENGTH...`, `themes DAY NIGHT PAGE INK...`, then `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT THEME CHOSEN HAIRLINE SELECTION SHEET CELL` | all a skin needs of look.l8. `highlights`: each of the five by the color its `mark` lines name it with, and the wash a highlighted verse shows now (STRENGTH, like GLOSS, HAIRLINE and SELECTION, in thousandths). `themes`: the themes Auto follows by day and at night, then each theme's page and ink, in the Theme setting's order (for its swatches). `look`: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument); THEME the theme it is and CHOSEN the one chosen (0 Auto), of `themes`; HAIRLINE a rule's strength (RULE's color), SELECTION a selection's (ACCENT's); SHEET and CELL a sheet's color and its rows' (`-`: the platform's grouped colors) |
 | `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation, shown faint after the title (which opens Go To); the version is chosen in Go To or the Library, not from the bar |
 | `url` ADDRESS | a page outside the app to open |
