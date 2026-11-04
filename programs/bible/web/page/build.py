@@ -146,7 +146,9 @@ def build(wasm, data_manifest, site):
     names["wasm"] = put(read, "app", "wasm", open(wasm, "rb").read())
     names["icons"] = put(read, "icons", "svg", open(os.path.join(HERE, "icons.svg"), "rb").read())
     names["css"] = put(read, "read", "css", css.encode())
+    names["follow"] = put(read, "follow", "js", open(os.path.join(HERE, "follow.js"), "rb").read())
     js = text(os.path.join(HERE, "skin.js"))
+    js = js.replace("./follow.js", "./" + names["follow"])
     js = js.replace("../../../../web/l8-runtime.js", "./" + names["runtime"])
     js = js.replace("../../../../web/reload.js", "./" + names["reload"])
     names["js"] = put(read, "bible", "js", js.encode())
@@ -174,7 +176,7 @@ def build(wasm, data_manifest, site):
 
     # The Service Worker (its build's files to keep, WEB.md §W9.1) and the
     # manifest (§W9.2), at fixed names.
-    shell = ["/read/shell", "/read/about", "/read/manifest.webmanifest"] + ["/read/" + names[k] for k in ("css", "js", "runtime", "icons", "wasm")] + fonts + \
+    shell = ["/read/shell", "/read/about", "/read/manifest.webmanifest"] + ["/read/" + names[k] for k in ("css", "js", "follow", "runtime", "icons", "wasm")] + fonts + \
         ["/img/favicon.png", "/img/apple-touch-icon.png", "/img/icon-192.png", "/img/icon-512.png"]
     build_id = digest(json.dumps(shell).encode())
     sw = text(os.path.join(HERE, "sw.js")).replace("{{build}}", build_id).replace("{{data}}", dhash)

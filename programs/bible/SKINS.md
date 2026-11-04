@@ -818,13 +818,17 @@ The skin is JavaScript (`web/page/skin.js`), drawing core's wire the web's
 way rather than the iPhone's: the page is the window itself, and both
 panes are one reader (`makeReader`) made twice, the panel's scrolled in
 the panel's list while core's `reader` screen shows: each a window of
-parts, a `section` each, put in as either end comes within two screens
-and let go six screens away (one above the reading line put in or let go
-without moving what is read), measured in hundredths of a CSS pixel as
-each is laid out and again as the width changes (the part at the reading
-line kept there, as far through it). A jump is held at its place as parts
-come in above it until a hand moves the pane. The page's chapter is in the
-address (`/read/bsb/john/3`, said to core as `place C 0 0` before
+parts, a `section` each in the document's flow, put in as either end comes
+within two screens and let go six screens away (one above the reading line
+put in or let go without moving what is read, where the browser's own
+scroll anchoring hasn't kept it already). A pane finds its places from
+where its anchors' spans are laid out, and tells core as its anchor
+changes and at rest. A `go` is held at its place as parts come in above it
+until a hand moves the pane; a resize keeps the part at the reading line
+where it was. Linked, the pane a finger (or a wheel) last moved leads, and
+`follow.js` (core/follow.l8's rules, `make bible-follow-test` checks them
+against its cases) places the other each frame. The page's chapter is in
+the address (`/read/bsb/john/3`, said to core as `place C 0 0` before
 `start`). Core's screens are in a panel beside the reader on a wide window
 and under it on a narrow one (the page's reading line then a third of the
 way down what is above the panel), each screen an entry of the browser's
