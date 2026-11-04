@@ -758,21 +758,42 @@ called but through the wire. Its own parts:
   spacing a line between paragraphs), poetry indented, a chapter's number
   centered, verse numbers and footnote marks raised; on the page,
   highlights, the selection, the verse heard and the keys' cursor washed,
-  in the theme's 24-bit colors. Its unit is a line: `measured`, `view` and
-  `at` are in hundredths of one. A pane's place is its reading line (the
-  page's a third of the way down, the panel's at its top); a part coming
-  above it doesn't move it, and at the document's start the rows above
-  its first line are blank. A key or the wheel moves a pane a line or a
-  page (`moving`, then `at ... 1`). Core's `jump` and `scroll` move it at
-  once (a terminal has no glide; `halt` has nothing to stop) when the part
-  is here and laid out, answered `at ... 0`; a part still to be read
-  (`coming`) or an ESV chapter still to come is shown until it is. 250 ms
-  after a pane last moved it is at rest (`rest`), whether a key, the wheel
-  or core moved it. A pane out of sight (the page under the panel filling
-  the screen) still goes where core says. In the panel's reader a
-  reference or a word of the original opens as on the page; a footnote
-  and the ESV's line are the page's alone (core reads them in the page's
-  version).
+  in the theme's 24-bit colors. Its unit is a line, and an anchor begins
+  on the line its verse number is on. A pane's place is its reading line
+  (the page's a third of the way down, the panel's at its top); a part
+  coming above it doesn't move it, and at the document's start the rows
+  above its first line are blank. A key or the wheel moves a pane a line
+  or a page (`moving`). Each pane says its place (`at`) as the anchor at
+  its reading line changes, when it arrives where it was sent, and at
+  rest; of anchors beginning on the same line, the one it was sent to
+  (Go To's verse), else the last. Core's `go` moves it at once, whatever
+  its mode (a terminal has no glide; `halt` has nothing to stop), when
+  the part is here and laid out; a part still to be read (`coming`) or an
+  ESV chapter still to come is shown until it is. 250 ms after a pane
+  last moved it is at rest (`rest`), whether a key, the wheel, core or
+  the other pane moved it. A pane out of sight (the page under the panel
+  filling the screen) still goes where it is sent and follows. In the
+  panel's reader a reference or a word of the original opens as on the
+  page; a footnote and the ESV's line are the page's alone (core reads
+  them in the page's version).
+- Following (Panes: Linked), in the reader: linked (the panel's top
+  screen a reader whose `reader` line says 1), the pane a key or the
+  mouse last moved leads, and on each of its moves, before the panes are
+  drawn, the other is placed by `core/follow.l8`'s rules, called with
+  both panes' chapter as laid out in rows from each one's reading line
+  (an anchor's start, the chapter's top and end, known where its part is
+  in the window; a row each one's em). By verse (`link C 0`), the
+  follower moves the rows `follow_by_verse` says; past what both have laid
+  out, to the anchor matched with the leader's, as far through it. By
+  comment (`link C 1`), `follow_comment_from_page` or
+  `follow_page_from_comment` says whether it stays or goes to an anchor;
+  a terminal has no glide to wait for. A chapter's map is kept from its
+  `link` until a `forget P -1` (core sends each once until then); while
+  the leader's chapter's is still to come, the following waits for it.
+  Moved by core (Go To, a reference in the panel, relinking) or by
+  following, a pane doesn't become the leader: after a reference in the
+  panel moves the page, the panel stays where it is, and moving it brings
+  the page back beside it, until a key moves the page.
 - Core's screens (`tui/panel.l8`): a sheet's beside the reader (110 columns
   and wider) or over it; the panel beside the page at its right (110
   columns and wider) or under it, the rows split, so that it always fits
