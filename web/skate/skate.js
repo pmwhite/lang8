@@ -260,8 +260,8 @@ const LESSONS = [
   },
   {
     title: "The ramp",
-    thumbs: "Put your right thumb down early, and he crouches. Slide it up to set a frontflip: the further you slide, the more flips. Let go, and he jumps. A bigger trick needs longer in the air to finish, and the later you let go, the more air you get. The ramp glows green where letting go lands the trick you've set clean: the bigger the trick, the less green there is.",
-    keys: "Hold Space early, and he crouches. Tap Up to set a frontflip: each tap adds a flip. Let go, and he jumps. A bigger trick needs longer in the air to finish, and the later you let go, the more air you get. The ramp glows green where letting go lands the trick you've set clean: the bigger the trick, the less green there is.",
+    thumbs: "Put your right thumb down early, and he crouches. Slide it up to set a frontflip: the further you slide, the more flips. Let go, and he jumps. A bigger trick needs longer in the air to finish, and the later you let go, the more air you get.",
+    keys: "Hold Space early, and he crouches. Tap Up to set a frontflip: each tap adds a flip. Let go, and he jumps. A bigger trick needs longer in the air to finish, and the later you let go, the more air you get.",
     scoring: "A flip is 600; two are 900, three 1100. A kicker pays flips double. A trick that hasn't finished when he lands is sketchy, and scores nothing.",
   },
   {
@@ -278,8 +278,8 @@ const LESSONS = [
   },
   {
     title: "The halfpipe",
-    thumbs: "Steer up a wall and he rides it. Slide sideways to set a spin: further for a bigger one, a half turn at a time. Let go on the green near the top, where there's air enough for it. Then the other wall.",
-    keys: "Steer up a wall and he rides it. Hold Space and tap Left or Right to set a spin: each tap adds a half turn. Let go on the green near the top, where there's air enough for it. Then the other wall.",
+    thumbs: "Steer up a wall and he rides it. Slide sideways to set a spin: further for a bigger one, a half turn at a time. Let go near the top, where there's air enough for it. Then the other wall.",
+    keys: "Steer up a wall and he rides it. Hold Space and tap Left or Right to set a spin: each tap adds a half turn. Let go near the top, where there's air enough for it. Then the other wall.",
     scoring: "A 180 is 200, a 360 is 350, a 540 is 480, a 720 is 580. A halfpipe pays spins double. Landing switch, facing backward, scores half again.",
   },
   {
