@@ -966,6 +966,8 @@ win_fill_fired(_self: int, _cmd: int, _timer: int): int {
             win_follow(win_leader)
         }
     }
+    // (Placed by the rule as parts come in about the two.)
+    if (win_ruled) win_follow(PANE_PAGE);
     if (again) win_fill_soon();
     0
 }
@@ -1030,9 +1032,12 @@ win_go(
     // (The screen filled at once below the place, the rest a part at a
     // time between frames.)
     _full: bool = win_fill(p, 0.0f64, 4);
-    win_follow_jumped();
+    win_follow_jumped(p, mode);
     win_tell(p, true);
     win_rest_tell(p);
+    // (Sent to be where the rule puts it: there now, as far as what is laid
+    // out tells.)
+    if (win_ruled) win_follow(PANE_PAGE);
     win_fill_soon()
 }
 
@@ -1378,6 +1383,7 @@ win_drag_began(p: int) {
 win_lead(p: int) {
     win_aim_let_go(p);
     win_jump_held = false;
+    win_ruled = false;
     win_rest_checked = false;
     if (p == PANE_PANEL && bs_full) win_full_read_on = true;
     if (win_follow_glide_pane == p) win_follow_glide_stop();
@@ -1406,6 +1412,10 @@ win_part_came(p: int, c: int, k: int) {
         x: int = wr(p, i);
         if (win_c[x] == c && win_k[x] == k) win_redress(p, i)
     }
+    // (Laid out where the rule puts it as the part comes: the panel slid
+    // in, if it waits for it.)
+    if (win_ruled) win_follow(PANE_PAGE);
+    if (p == PANE_PANEL) beside_slide_check();
     win_fill_soon()
 }
 
@@ -1433,7 +1443,23 @@ win_panel_opening: bool = false;
 win_opened_follow(p: int) {
     if (p != PANE_PANEL || !win_panel_opening || win_n[p] == 0) return;
     win_panel_opening = false;
-    win_page_moved_alone()
+    win_page_moved_alone();
+    beside_slide_check()
+}
+
+// Whether the panel's reader is laid out at its place: its `go` done, and
+// every part in sight come (not only holding its place).
+win_panel_placed(): bool {
+    p: int = PANE_PANEL;
+    if (win_table[p] == 0 || win_n[p] == 0 || win_go_c[p] >= 0) return false;
+    top: f64 = win_top(p);
+    bottom: f64 = top + win_seen(p);
+    for i in 0..win_n[p] {
+        x: int = wr(p, i);
+        if (win_y[x] < bottom && win_y[x] + win_h[x] > top && win_coming(p, win_c[x],
+            win_k[x])) return false
+    }
+    true
 }
 
 // The page's reading line moved under a place without a hand (the page
@@ -1845,11 +1871,11 @@ win_following: bool = false;
 // panel as can be. The page moved, the panel moves; the panel moved, the
 // page. Gliding there (win_follow_to). Not while a jump holds both panes.
 win_follow(lead: int) {
-    if (!win_linked || win_following || win_jump_held || win_table[PANE_PAGE] == 0 || win_table[PANE_PANEL] == 0 || win_n[PANE_PAGE] == 0 || win_n[PANE_PANEL] == 0) return;
+    if (!win_linked || win_following || win_jump_held && !win_ruled || win_table[PANE_PAGE] == 0 || win_table[PANE_PANEL] == 0 || win_n[PANE_PAGE] == 0 || win_n[PANE_PANEL] == 0) return;
     win_following = true;
     region {
         links: FollowLinks = win_follow_links();
-        page_leads: bool = lead == PANE_PAGE;
+        page_leads: bool = lead == PANE_PAGE || win_ruled;
         moving: int = if (page_leads) PANE_PANEL else PANE_PAGE;
         next: FollowMove = if (page_leads) follow_bottom_move(&links, win_top(PANE_PAGE),
             win_top(PANE_PANEL), win_seen(PANE_PANEL)) else follow_top_move(&links,
@@ -1859,7 +1885,7 @@ win_follow(lead: int) {
         match next {
             Stay -> { }
             ScrollTo s -> if (!(moving == PANE_PAGE && bs_full)) win_follow_to(moving,
-                s.top)
+                s.top, win_ruled)
         }
     }
     win_following = false
@@ -1869,13 +1895,13 @@ win_follow(lead: int) {
 // frame at a time by core/follow.l8's follow_glide, its first step now, in
 // the frame the rule broke in; a glide under way glides on to the new
 // place from where it is. At once where motion is reduced.
-win_follow_to(p: int, top: f64) {
+win_follow_to(p: int, top: f64, at_once: bool) {
     t: int = win_table[p];
     if ((msg(t, sel("isTracking")) & 255) != 0) return;
     if (win_follow_glide_pane != p && (top - win_top(p) < 1.0f64 && top - win_top(p) > -1.0f64)) return;
     win_aim_let_go(p);
     win_glide_stop(p);
-    if (reduce_motion()) {
+    if (at_once || reduce_motion()) {
         win_follow_glide_stop();
         win_set_offset(p, top - top_inset(t));
         _full: bool = win_fill(p, win_margin_moving(p), 1);
@@ -2015,8 +2041,20 @@ win_follow_links(): FollowLinks@new {
 }
 
 // A jump (either pane's `go` at once: Go To, a link, Swap Panes): both
-// panes held where it put them until a hand moves either.
-win_follow_jumped() {
-    win_jump_held = true;
+// panes held where it put them until a hand moves either. The panel's
+// reader sent where the rule puts it (PANE_GO_RULED: opened, its document
+// come, the app restored): placed by the rule at once, and again as parts
+// come and tell it better, until a hand moves either pane (the page going
+// elsewhere at once with it, at launch, leaves it so).
+win_follow_jumped(p: int, mode: int) {
+    if (p == PANE_PANEL && mode == PANE_GO_RULED) {
+        win_ruled = true;
+        win_jump_held = false
+    } else {
+        win_jump_held = true;
+        if (p == PANE_PANEL) win_ruled = false
+    }
     win_follow_glide_stop()
 }
+
+win_ruled: bool = false

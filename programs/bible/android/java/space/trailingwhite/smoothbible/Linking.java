@@ -71,6 +71,7 @@ final class Linking implements Reader.Moves {
   @Override
   public void moving(Reader r) {
     held = false;
+    ruled = false;
     if (r == panel && fills) fullReadOn = true;
     if (gliding == r) stopGlide();
     leader = r;
@@ -78,7 +79,7 @@ final class Linking implements Reader.Moves {
 
   @Override
   public void moved(Reader r) {
-    if (linked() && r == leader) follow(leader);
+    if (linked() && (r == leader || ruled)) follow(leader);
   }
 
   // (At rest the parts following goes by are measured ahead, and the rule
@@ -115,12 +116,27 @@ final class Linking implements Reader.Moves {
   }
 
   // A jump (either pane's `go`: Go To, a link, Swap Panes): both panes held
-  // where it puts them until a hand moves either.
+  // where it puts them until a hand moves either. The panel's sent where
+  // the rule puts it (MODE 2: opened, its document come, the app restored):
+  // placed by the rule at once, and again as parts come and it is laid out
+  // anew, until a hand moves either pane (the page going elsewhere with it,
+  // at launch, leaves it so).
+  static final int GO_RULED = 2;
+
   @Override
-  public void jumped(Reader r) {
-    held = true;
+  public void jumped(Reader r, int mode) {
+    if (r == panel && mode == GO_RULED) {
+      ruled = true;
+      held = false;
+    } else {
+      held = true;
+      if (r == panel) ruled = false;
+    }
     stopGlide();
+    if (ruled && linked()) follow(page);
   }
+
+  private boolean ruled;
 
   // From a jump until a hand moves either pane, both panes are held where
   // the jump put them (core's `go` for each, as a `go` holds its pane's
@@ -170,11 +186,11 @@ final class Linking implements Reader.Moves {
   // panel moved, the page. Gliding there (at once where animations are
   // off). Not while a jump holds both panes.
   private void follow(Reader lead) {
-    if (following || held) return;
+    if (following || held && !ruled) return;
     following = true;
     try {
       Follow.Links links = links();
-      boolean pageLeads = lead == page;
+      boolean pageLeads = lead == page || ruled;
       Reader moving = pageLeads ? panel : page;
       OptionalDouble to = pageLeads
           ? Follow.bottomMove(links, page.sightTop(), panel.sightTop(), panel.sightHeight())
@@ -182,7 +198,7 @@ final class Linking implements Reader.Moves {
       // (The page isn't moved while the panel fills the screen over it: it
       // is where it was when the panel is beside it again.)
       if (!to.isPresent() || Math.abs(to.getAsDouble() - moving.sightTop()) < 1 || (moving == page && fills)) return;
-      if (!Reader.animatorsOn()) {
+      if (ruled || !Reader.animatorsOn()) {
         stopGlide();
         moving.followSight(to.getAsDouble());
       } else glideTo(moving, to.getAsDouble());

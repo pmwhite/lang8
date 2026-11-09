@@ -324,7 +324,10 @@ panel's at its top). The skin says where each pane is read, in places:
 
 **Moving it.** `go P C I FRAC MODE`: a pane to a place; MODE 0 there at
 once (a jump: Go To, the way back), 1 brought there (the skin glides if it
-is near, else is there at once, at once where motion is reduced). A pane
+is near, else is there at once, at once where motion is reduced), 2 (the
+panel's reader, linked: opened, its document come, the app restored) there
+at once and then where following's rule puts it for the page, at once and
+again as parts come, until a hand moves either pane (Panes: Linked). A pane
 not laid out yet keeps it until it is. `halt P`: its glide stopped.
 
 **Arriving.** A document picked for a pane that isn't on the device yet
@@ -440,7 +443,13 @@ A jump (Go To, a link, the way back, Swap Panes) moves both panes: core
 sends a `go` for each, and each is held where its `go` puts it (as a `go`
 holds a pane's place as parts come in about it). The rule moves neither
 until a hand moves either pane, so Swap Panes and the way back leave
-both panes where they were. A pane moved by the app (the status bar, a
+both panes where they were. The panel's reader opened, its document
+come, or the app restored has no jump to hold: core sends its `go` with
+MODE 2, and the skin puts it where the rule says for the page, at once
+(not glided), and again as parts come and tell it better, until a hand
+moves either pane. Opening, the panel slides in only once its reader is
+laid out there (at most half a second), so nothing in it moves as it
+comes; closing, it slides away the way it came (0.2 s). A pane moved by the app (the status bar, a
 key's page) leads as a hand's move does.
 
 Once both panes rest (and no jump holds them), the rule is checked

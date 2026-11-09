@@ -1201,6 +1201,8 @@ function makeReader(p, main, view, opts) {
     if (this.heard && this.heard.c === c) this.paintHeard();
     if (this.pending) this.finishPending();
     else this.extend();
+    // (Sent where the rule puts it: placed again by what has come.)
+    if (followRuled && linked) followSoon();
   },
 
   // `forget P C`: its parts of chapter c (-1: all) asked for again, those
@@ -1572,13 +1574,14 @@ function makeReader(p, main, view, opts) {
   // `go P C I FRAC MODE`: anchor i of chapter c (-1: its top) frac
   // thousandths through its span at the reading line (the chapter's top at
   // the top of what is in sight); its part brought in first. Brought
-  // (MODE 1): a glide if it is near.
+  // (MODE 1): a glide if it is near. Ruled (MODE 2, the panel's): then
+  // where the rule puts it (followJumped).
   go(c, i, f, mode) {
     if (c < 0 || c >= this.count) return;
     this.settle = null;
     this.stopGlide();
     // (A jump: both panes held where it puts them: followJumped.)
-    followJumped();
+    followJumped(this.p, mode);
     this.pending = { c, i, f, mode };
     this.finishPending();
   },
@@ -1612,6 +1615,7 @@ function makeReader(p, main, view, opts) {
     requestAnimationFrame(() => {
       this.tell(true);
       this.rested();
+      if (followRuled) follow(panes[0]);
     });
   },
 
@@ -1703,6 +1707,7 @@ function makeReader(p, main, view, opts) {
     this.settle = null;
     this.stopGlide();
     followHeld = false;
+    followRuled = false;
     if (this.p === 1 && panel.full) followFullReadOn = true;
     if (followGlide && followGlide.r === this) stopFollowGlide();
     leader = this.p;
@@ -1851,6 +1856,11 @@ const FOLLOW_CHAPTERS = 2;
 // leave both where they were.
 let followHeld = false;
 
+// The panel's reader sent where the rule puts it (`go` MODE 2: opened, its
+// document come, the app restored): placed by the rule at once, and again
+// as parts come, until a hand moves either pane.
+let followRuled = false;
+
 // Whether a hand moved the panel while it filled the window: beside the
 // page again, the page follows it (else the page leads, and stays).
 let followFullReadOn = false;
@@ -1888,9 +1898,19 @@ function followSoon() {
 }
 
 // A jump (either pane's `go`: Go To, a link, Swap Panes): both panes held
-// where it puts them until a hand moves either.
-function followJumped() {
-  followHeld = true;
+// where it puts them until a hand moves either; the panel's sent where
+// the rule puts it, so placed (the page going elsewhere with it, at launch,
+// leaves it so).
+const GO_RULED = 2;
+
+function followJumped(p, mode) {
+  if (p === 1 && mode === GO_RULED) {
+    followRuled = true;
+    followHeld = false;
+  } else {
+    followHeld = true;
+    if (p === 1) followRuled = false;
+  }
   stopFollowGlide();
 }
 
@@ -1920,7 +1940,7 @@ function followChapters() {
 let following = false;
 
 function follow(lead) {
-  if (!linked || !besideReader.main.isConnected || following || followHeld) return;
+  if (!linked || !besideReader.main.isConnected || following || (followHeld && !followRuled)) return;
   following = true;
   try {
     followNow(lead);
@@ -1944,7 +1964,7 @@ function followNow(lead) {
     const map = linkMaps.get(c);
     if (map) addLinks(links, map, page.shapeGuessed(c, pageGuess), panel.shapeGuessed(c, panelGuess));
   }
-  const pageLeads = lead.p === 0;
+  const pageLeads = lead.p === 0 || followRuled;
   const moving = pageLeads ? panel : page;
   const y = pageLeads
     ? bottomMove(links, sightTop(page), sightTop(panel), sightHeight(panel))
@@ -1955,7 +1975,7 @@ function followNow(lead) {
   if (y === null || Math.abs(y - sightTop(moving)) < 1 || (moving === page && panelFills())) return;
   // (Moved by following now: a `go`'s place held for it let go.)
   moving.settle = null;
-  if (reducedMotion()) {
+  if (followRuled || reducedMotion()) {
     stopFollowGlide();
     moving.scrollBy(y - sightTop(moving));
     moving.extend();

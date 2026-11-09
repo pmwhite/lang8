@@ -85,8 +85,9 @@ final class Reader extends ListView {
     // A finger, a fling or a key's page let it rest.
     void rested(Reader r);
 
-    // Core sent it somewhere (`go`): a jump, which the other makes too.
-    void jumped(Reader r);
+    // Core sent it somewhere (`go`, its MODE): a jump, which the other makes
+    // too.
+    void jumped(Reader r, int mode);
   }
 
   final int pane;
@@ -398,7 +399,7 @@ final class Reader extends ListView {
   void go(int c, int i, int frac, int mode) {
     if (touching || c < 0 || c >= chapters) return;
     goTo(new Target(c, i, 0, Math.max(0, Math.min(999, frac)), mode == 1, false));
-    if (moves != null) moves.jumped(this);
+    if (moves != null) moves.jumped(this, mode);
   }
 
   // `halt P`: its glide (or fling) stopped where it is, as the other pane
