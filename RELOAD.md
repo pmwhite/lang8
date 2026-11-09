@@ -215,10 +215,14 @@ hot reload (`programs/bible/ios/devwire.l8`) long-polls the server's
 `trayact ACTION 0`, `act ID ACTION ARG VALUE`; `|` separates several;
 `!screens` writes the screens shown to the log, `!close` closes the
 sheets shown, as their Done does, `!back` goes back a screen (the top
-sheet's, else the panel's), `!tap WORDS` taps the row or button whose
-title begins with WORDS, `!info WORDS` that row's ⓘ, `!flick page DY` or
-`!flick panel DY` flicks the page or the panel's reader DY points, and
-`!state` writes the wire's flags). While it is connected the app keeps the
+sheet's, else the panel's), `!tap WORDS` taps the row, button, menu item
+(the panel reader's Swap Panes, Full Screen, Close Panel) or bar's left
+button (the panel reader's name) whose title begins with WORDS, else the
+panel's own Close Panel or Full Screen, `!info WORDS` that row's ⓘ,
+`!flick page DY` or `!flick panel DY` flicks the page or the panel's
+reader DY points, `!scroll DY` scrolls the top sheet's list (else the
+panel's), `!where` writes each pane's place at its reading line and its
+anchors' distances from it, and `!state` writes the wire's flags). While it is connected the app keeps the
 screen on and writes its diagnostics, among them each frame drawn late
 while the page or panel moves (`frame late ms N`) and, at a flick's end,
 how many were (`flick ended late N worst ms M`). A build without a

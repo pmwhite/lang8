@@ -1,0 +1,261 @@
+tag bible_ios;
+
+use_tag std, ios, bible, bible_wire;
+
+// A frame-by-frame log of the two linked panes, for measuring following
+// (SKINS.md, Panes: Linked) in the hot reload build: `!follow on` from the
+// development server (devwire.l8) starts it, `!follow off` ends it and
+// posts it to the server (POST /uilog, saved under .build/dev/uilog/).
+// Lighter than uilog.l8's walk of every view (it reads only the panes), so
+// the frames it times are the app's own. Each display-link frame while the
+// panel's reader shows, a JSON line:
+//
+//   {"t":MS,"e":"fl","lead":P,"lk":0|1,"y":[PAGE,PANEL],"rb":[N,N],
+//    "at":["C:aI.FFF",..],"mv":[0|1,0|1],"mk":MS,"jp":N,"ex":PT|null}
+//
+// y: each pane's reading line down its window less the shifts rows coming
+// and going above have made (win_shifted): the same place while rb (the
+// window made anew) stays the same; mv: moved by a finger or its glide;
+// mk: ms spent laying parts out since the frame before; jp: jumps
+// following made (win_follow_jumps); ex: verse by verse, the follower's
+// line less where the leader's place is in it exactly (its matched verse,
+// as far through), in points.
+import "../../ios/objc.l8";
+
+fl_on: bool = false;
+
+fl_t0: f64 = 0.0f64;
+
+fl_data: int = 0;
+
+fl_line: []i8 = new i8[1024](0i8);
+
+fl_n: int = 0;
+
+fl_jumps_seen: int = 0;
+
+followlog_line(b: []i8, from: int, to: int): bool {
+    if (devwire_line_is(b, from, to, "!follow on")) {
+        release(fl_data);
+        fl_data = make("NSMutableData");
+        fl_t0 = CACurrentMediaTime();
+        fl_on = true;
+        win_measured_ms = 0.0f64;
+        fl_jumps_seen = win_follow_jumps;
+        fl_n = 0;
+        fl_str("{\"t\":0,\"e\":\"meta\",\"platform\":\"ios\",\"log\":\"follow\",\"em\":");
+        fl_num(em);
+        fl_str(",\"spacing\":");
+        fl_num(look_spacing);
+        fl_str("}\n");
+        fl_keep();
+        note("bible: follow log on");
+        return true
+    }
+    if (devwire_line_is(b, from, to, "!follow pairs")) {
+        followlog_pairs();
+        return true
+    }
+    if (devwire_line_is(b, from, to, "!follow off")) {
+        followlog_post();
+        return true
+    }
+    if (fl_on) {
+        fl_n = 0;
+        fl_begin("input");
+        fl_str(",\"type\":\"wire\",\"detail\":\"");
+        for i in from..to {
+            k: int = b[i] as int & 255;
+            if (k != 34 && k != 92 && k >= 32) fl_byte(k)
+        }
+        fl_str("\"}\n");
+        fl_keep()
+    }
+    false
+}
+
+followlog_post() {
+    fl_on = false;
+    if (fl_data == 0) {
+        note("bible: follow log: nothing logged");
+        return
+    }
+    url: int = msg1(cls("NSURL"), sel("URLWithString:"), msg1(dw_url, sel("stringByAppendingString:"),
+        nsstring("/uilog")));
+    request: int = if (url == 0) 0 else msg1(cls("NSMutableURLRequest"), sel("requestWithURL:"),
+        url);
+    if (request == 0) {
+        note("bible: follow log: could not post");
+        return
+    }
+    msg1(request, sel("setHTTPMethod:"), nsstring("POST"));
+    msg1(request, sel("setHTTPBody:"), fl_data);
+    task: int = msg1(dw_session, sel("dataTaskWithRequest:"), request);
+    if (task == 0) {
+        note("bible: follow log: could not post");
+        return
+    }
+    msg(task, sel("resume"));
+    tb_n = 0;
+    tb_str("bible: follow log off: posting ");
+    tb_int(msg(fl_data, sel("length")));
+    tb_str(" bytes to the server's /uilog");
+    note_ns(tb_ns());
+    release(fl_data);
+    fl_data = 0
+}
+
+// Each frame (devwire_frame).
+followlog_frame(now: f64) {
+    if (!fl_on || fl_data == 0 || !bs_shown || win_table[PANE_PAGE] == 0 || win_table[PANE_PANEL] == 0) return;
+    fl_n = 0;
+    fl_str("{\"t\":");
+    fl_num((now - fl_t0) * 1000.0f64);
+    fl_str(",\"e\":\"fl\",\"lead\":");
+    fl_int(win_leader);
+    fl_str(",\"lk\":");
+    fl_int(if (win_linked) 1 else 0);
+    fl_str(",\"y\":[");
+    for p in 0..PANES {
+        if (p > 0) fl_byte(44);
+        fl_num(offset_y(win_table[p]) + win_line_below(p) - win_shifted[p])
+    }
+    fl_str("],\"rb\":[");
+    fl_int(win_rebuilt[0]);
+    fl_byte(44);
+    fl_int(win_rebuilt[1]);
+    fl_str("],\"at\":[");
+    for p in 0..PANES {
+        if (p > 0) fl_byte(44);
+        fl_place(p)
+    }
+    fl_str("],\"mv\":[");
+    for p in 0..PANES {
+        if (p > 0) fl_byte(44);
+        fl_int(if (win_moving(p) || win_gliding[p]) 1 else 0)
+    }
+    fl_str("],\"mk\":");
+    fl_num(win_measured_ms);
+    win_measured_ms = 0.0f64;
+    fl_str(",\"jp\":");
+    fl_int(win_follow_jumps - fl_jumps_seen);
+    fl_jumps_seen = win_follow_jumps;
+    fl_str(",\"ex\":");
+    fl_exact_error();
+    fl_str("}\n");
+    fl_keep()
+}
+
+// (win_place notes the place it finds as the pane's spot: put back after.)
+fl_place(p: int) {
+    spot_c: int = win_spot_c[p];
+    spot_k: int = win_spot_k[p];
+    spot_part: f64 = win_spot_part[p];
+    at: WinPlace = win_place(p);
+    win_spot_c[p] = spot_c;
+    win_spot_k[p] = spot_k;
+    win_spot_part[p] = spot_part;
+    if (!at.ok) {
+        fl_str("null");
+        return
+    }
+    fl_byte(34);
+    fl_int(at.c);
+    fl_str(":a");
+    fl_int(at.i);
+    fl_byte(46);
+    thousandths: int = (at.part * 1000.0f64 + 0.5f64) as int;
+    if (thousandths > 999) thousandths = 999;
+    if (thousandths < 100) fl_byte(48);
+    if (thousandths < 10) fl_byte(48);
+    fl_int(thousandths);
+    fl_byte(34)
+}
+
+// (Kept for the log's readers: the follower's offset from an exact place,
+// which the rule by sections doesn't have.)
+fl_exact_error() {
+    fl_str("null")
+}
+
+fl_begin(event: str) {
+    fl_str("{\"t\":");
+    fl_num((CACurrentMediaTime() - fl_t0) * 1000.0f64);
+    fl_str(",\"e\":\"");
+    fl_str(event);
+    fl_str("\"")
+}
+
+fl_keep() {
+    if (fl_data != 0) msg2(fl_data, sel("appendBytes:length:"), bytes_address(fl_line),
+        fl_n)
+}
+
+fl_byte(k: int) {
+    if (fl_n < len(fl_line)) {
+        fl_line[fl_n] = k trunc i8;
+        fl_n = fl_n + 1
+    }
+}
+
+fl_str(s: str) {
+    for c in s fl_byte(c as int)
+}
+
+fl_int(n: int) {
+    if (n < 0) {
+        fl_byte(45);
+        fl_int(-n);
+        return
+    }
+    if (n >= 10) fl_int(n / 10);
+    fl_byte(48 + n % 10)
+}
+
+// A number to a hundredth.
+fl_num(x: f64) {
+    if (x < 0.0f64) {
+        fl_byte(45);
+        fl_num(-x);
+        return
+    }
+    hundredths: int = (x * 100.0f64 + 0.5f64) as int;
+    fl_int(hundredths / 100);
+    fl_byte(46);
+    fl_byte(48 + hundredths / 10 % 10);
+    fl_byte(48 + hundredths % 10)
+}
+
+// `!follow pairs`: the links following goes by within a screen of either
+// pane's sight, to the server's log: each link's page section and panel
+// section, less each pane's sight's top; then what the rule says.
+followlog_pairs() {
+    region {
+        links: FollowLinks = win_follow_links();
+        page_top: f64 = win_top(PANE_PAGE);
+        panel_top: f64 = win_top(PANE_PANEL);
+        tb_n = 0;
+        tb_str("bible: follow links");
+        for k in 0..links.n {
+            d: f64 = links.top_from[k] - page_top;
+            if (d > -800.0f64 && d < 800.0f64) {
+                tb_str(" | ");
+                tb_int(d as int);
+                tb_str("..");
+                tb_int((links.top_to[k] - page_top) as int);
+                tb_str(" ");
+                tb_int((links.bottom_from[k] - panel_top) as int);
+                tb_str("..");
+                tb_int((links.bottom_to[k] - panel_top) as int)
+            }
+        }
+        match follow_bottom_move(&links, page_top, panel_top, win_seen(PANE_PANEL)) {
+            Stay -> tb_str(" | panel stays");
+            ScrollTo t -> {
+                tb_str(" | panel by ");
+                tb_int((t.top - panel_top) as int)
+            }
+        }
+        note_ns(tb_ns())
+    }
+}

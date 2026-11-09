@@ -99,7 +99,7 @@ final class Look {
       TITLE = 7, MAJOR = 8, RANGE = 9, ACROSTIC = 10, NOTE = 11, BOOKLABEL = 12, CAPS = 13,
       RULE = 14, NUMERAL1 = 15, JESUS = 16, JESUS_CAPS = 17, XREF = 18, SUPPLIED = 19,
       JESUS_SUPPLIED = 20, PASSAGE = 21, ORIG = 22, ORIG_GL = 23, OTITLE = 24, OTITLE_GL = 25,
-      QERE = 26, APPARATUS = 27, APP_ENTRY = 28;
+      QERE = 26, APPARATUS = 27, APP_ENTRY = 28, LABEL = 29;
   static final int PROSE = 0, Q1 = 1, Q2 = 2, L1 = 3, L2 = 4, CENTER = 5, RIGHT = 6, VERSE_LINE = 7;
 
   private static void span(SpannableStringBuilder s, Object o, int a, int b) {
@@ -190,6 +190,13 @@ final class Look {
       case OTITLE:
         span(s, new ForegroundColorSpan(heading), a, b);
         break;
+      case LABEL:
+        // (A commentary's label for its paragraph, "Verse 12.": small,
+        // sans, medium, faint.)
+        span(s, new RelativeSizeSpan(0.78f), a, b);
+        span(s, new TypefaceSpan("sans-serif-medium"), a, b);
+        span(s, new ForegroundColorSpan(faint), a, b);
+        break;
       case QERE:
       case APPARATUS:
       case APP_ENTRY:
@@ -208,12 +215,13 @@ final class Look {
 
   // core/ui.l8's runs beyond the reader's styles: a verse's number, a verse
   // a version lacks, Greek and Hebrew (faint or not), a transliteration, a
-  // code, faint, strong, plain, small, the reader's face, italic, accent.
+  // code, faint, strong, plain, small, the reader's face, italic, accent,
+  // small and underlined.
   static final int RUN_NUMBER = 100, RUN_MISSING = 101, RUN_GREEK = 102, RUN_HEBREW = 103,
       RUN_TRANSLIT = 104, RUN_CODE = 105, RUN_FAINT = 106, RUN_STRONG = 107, RUN_PLAIN = 108,
       RUN_SMALL = 109, RUN_GREEK_FAINT = 110, RUN_HEBREW_FAINT = 111, RUN_READING = 112,
       RUN_ITALIC = 113, RUN_ACCENT = 114, RUN_SYMBOL = 115, RUN_SYMBOL_BOLD = 116,
-      RUN_SCRIPTURE = 117, RUN_DIVINE = 118, RUN_PRACTICE = 200;
+      RUN_SCRIPTURE = 117, RUN_DIVINE = 118, RUN_SMALL_UNDERLINED = 119, RUN_PRACTICE = 200;
 
   // Words set by their runs (END, STYLE pairs; END in UTF-16 units, as
   // Java counts): the reader's styles, or core's RUN_.
@@ -275,6 +283,12 @@ final class Look {
       case RUN_SMALL:
         span(s, new RelativeSizeSpan(0.87f), a, b);
         span(s, new ForegroundColorSpan(faint), a, b);
+        break;
+      case RUN_SMALL_UNDERLINED:
+        // (A quiet link in a page's last words: a document's Remove.)
+        span(s, new RelativeSizeSpan(0.87f), a, b);
+        span(s, new ForegroundColorSpan(faint), a, b);
+        span(s, new android.text.style.UnderlineSpan(), a, b);
         break;
       case RUN_ITALIC:
         span(s, new StyleSpan(Typeface.ITALIC), a, b);

@@ -584,8 +584,8 @@ rp_shown_as(cp: int, st: int): int {
 // The paragraph whose cells are from `from` to lay's last, wrapped into
 // its lines: its kind's indent (poetry's 2 and 4, a verse a line's
 // hanging), centered (the book, the number, the rule, PARA_CENTER) or at
-// the right; a heading with a line before it; an empty paragraph a line of
-// its own.
+// the right; a heading, or a stanza's break (para plus KINDS), with a line
+// before it; an empty paragraph a line of its own.
 rp_wrap(
     lay: *PartLayout,
     from: int,
@@ -593,13 +593,14 @@ rp_wrap(
     first: int
 ) {
     w: int = lay.width;
-    kind: int = para % 16;
+    kind: int = para % KINDS;
     base: int = if (kind == 1 || kind == 3) 2 else if (kind == 2 || kind == 4) 4 else 0;
     hang: int = if (kind == 7) 2 else if (kind >= 1 && kind <= 4) 2 else 0;
     centered: bool = kind == 5 || first == 2 || first == 3 || first == 15 || first == 12 || first == 14;
     right: bool = kind == 6;
     heading: bool = first == 4 || first == 10 || first == 21 || first == 8 || first == 5;
-    if (heading && lay.line_count > 0) rp_line(lay, from, from, 0);
+    stanza: bool = (para & KINDS) != 0;
+    if ((heading || stanza) && lay.line_count > 0) rp_line(lay, from, from, 0);
     if (lay.cell_count == from) {
         rp_line(lay, from, from, 0);
         return
@@ -683,6 +684,17 @@ type KeysOn =
     | OnVerse { c: int, k: int, anchor: int }
     | OnLink { c: int, k: int, link: int }
 
+// A document on its way to a pane (SKINS.md, Arriving): nothing; coming,
+// the thousandths come (core's `arriving P THOUSANDTHS`); or come
+// (`arrived P`), its hairline shown faint until a time (ms), then gone.
+type Arrival =
+    | NothingComing
+    | Coming { thousandths: int }
+    | Fading { thousandths: int, until: int }
+
+// How long an arrived document's hairline fades (ms).
+RP_ARRIVAL_FADE_MS: int = 200;
+
 // A pane (core's PANE_PAGE or PANE_PANEL) and what it reads:
 // - its reading line (thousandths down its rows, core's `line`);
 // - its window: the parts near what it shows (RP_WINDOW at most, those
@@ -696,6 +708,7 @@ type KeysOn =
 //   where it was sent once it arrives there; the place that was found
 //   from; whether an `at` is owed (it arrived where it was sent);
 // - what the keys are on;
+// - a document on its way to it, drawn as a hairline under its bar;
 // - the parts asked for lately (chapter, part, when), so that one isn't
 //   asked for again while core answers;
 // - whether it is to be drawn again.
@@ -719,6 +732,7 @@ type ReaderPane = {
     told_from: ReadingPlace;
     at_owed: bool;
     keys: KeysOn;
+    arrival: Arrival;
     asked_c: []int;
     asked_k: []int;
     asked_at: []int;
@@ -757,6 +771,7 @@ rp_pane_made(index: int): ReaderPane@new {
         place: ReadingPlace.Unplaced,
         pending: PendingMove.Settled,
         motion: PaneMotion.Resting,
+        arrival: Arrival.NothingComing,
         told: DocumentPlace.Unknown,
         told_from: ReadingPlace.Unplaced,
         at_owed: false,
@@ -773,6 +788,64 @@ reader_panes: []ReaderPane = [rp_pane_made(PANE_PAGE), rp_pane_made(PANE_PANEL)]
 
 reader_pane(index: int): *ReaderPane {
     &reader_panes[index]
+}
+
+// ---- a document arriving ----
+// `arriving P THOUSANDTHS`: its hairline filled that far.
+rp_document_arriving(pane: *ReaderPane, thousandths: int) {
+    pane.arrival = Arrival.Coming { thousandths: if (thousandths < 0) 0 else if (thousandths > 1000) 1000 else thousandths };
+    pane.dirty = true
+}
+
+// `arrived P`: its hairline, if one is shown, faint for a moment, then
+// gone (rp_arrivals_due).
+rp_document_arrived(pane: *ReaderPane) {
+    match pane.arrival {
+        Coming coming -> {
+            pane.arrival = Arrival.Fading { thousandths: coming.thousandths, until: tm_now() + RP_ARRIVAL_FADE_MS };
+            pane.dirty = true
+        }
+        _ -> { }
+    }
+}
+
+// The columns of a bar `width` wide its hairline fills (0: none shown).
+rp_arrival_columns(pane: *ReaderPane, width: int): int {
+    match pane.arrival {
+        NothingComing -> 0;
+        Coming coming -> width * coming.thousandths / 1000;
+        Fading fading -> width * fading.thousandths / 1000
+    }
+}
+
+// Its hairline's color over a bar's background: the ink at 45% (a
+// terminal's cells are coarse: the iPhone's 30% would hardly show), fading
+// at 15%.
+rp_arrival_color(pane: *ReaderPane, background: int): int {
+    match pane.arrival {
+        Fading _f -> tm_mix(lk_ink, background, 150);
+        _ -> tm_mix(lk_ink, background, 450)
+    }
+}
+
+// Hairlines whose fading is over let go (their panes drawn again); the
+// wait (ms) shortened to the next fading's end.
+rp_arrivals_due(wait: int): int {
+    now: int = tm_now();
+    most: int = wait;
+    for p in 0..PANES {
+        pane: *ReaderPane = reader_pane(p);
+        match pane.arrival {
+            Fading fading -> {
+                if (now >= fading.until) {
+                    pane.arrival = Arrival.NothingComing;
+                    pane.dirty = true
+                } else if (fading.until - now < most) most = fading.until - now
+            }
+            _ -> { }
+        }
+    }
+    most
 }
 
 // ---- what a slot holds ----
@@ -1364,7 +1437,8 @@ rp_part_run(pane: *ReaderPane, c: int): PartRun@new {
 // ChapterShape): where each of its anchors begins, where it begins (its
 // first part's top) and ends (its last part's end: the next chapter's
 // top), each known where its part is in the run; in rows down from the
-// pane's reading line, a row its em.
+// pane's reading line, a row its em. (A commentary's chapter in its run
+// of chapters without comments: follow.l8's ChapterShape says how.)
 rp_chapter_shape(pane: *ReaderPane, run: *PartRun, c: int): ChapterShape@new {
     n: int = 0;
     for x in 0..run.count {
@@ -1385,7 +1459,15 @@ rp_chapter_shape(pane: *ReaderPane, run: *PartRun, c: int): ChapterShape@new {
         s: int = run.slots[x];
         top: int = run.tops[x];
         info: SlotPart = rp_slot_part(pane, s);
-        if (info.c == c) {
+        if (info.gap_to > info.c && info.c <= c && c <= info.gap_to) {
+            // (A commentary's run of chapters without comments, one part:
+            // each chapter of it begins at its top, and the last ends at
+            // its end.)
+            shape.top = top as f64;
+            shape.top_known = true;
+            shape.end = (if (c == info.gap_to) top + rp_height(pane, s) else top) as f64;
+            shape.end_known = true
+        } else if (info.c == c) {
             h: int = rp_height(pane, s);
             if (info.k == 0) {
                 shape.top = top as f64;
@@ -1895,7 +1977,7 @@ rp_wash(
 
 // A style's color (core's STYLE_, then core's own RUN_).
 rd_fg(st: int): int {
-    if (st == 1 || st == 6 || st == 9 || st == 12 || st == 14 || st >= 26 && st <= 28) return lk_faint;
+    if (st == 1 || st == 6 || st == 9 || st == 12 || st == 14 || st >= 26 && st <= 29) return lk_faint;
     if (st == 2 || st == 3 || st == 15 || st == 4 || st == 10 || st == 21 || st == 5 || st == 7 || st == 8 || st == 24 || st == 25) return lk_heading;
     if (st == 11 || st == 18) return lk_accent;
     if ((st == 16 || st == 17 || st == 20) && lk_red) return lk_accent;
@@ -1903,7 +1985,7 @@ rd_fg(st: int): int {
 }
 
 rd_attr(st: int): int {
-    if (st == 2 || st == 3 || st == 15 || st == 4 || st == 10 || st == 21 || st == 8) return TA_BOLD;
+    if (st == 2 || st == 3 || st == 15 || st == 4 || st == 10 || st == 21 || st == 8 || st == 29) return TA_BOLD;
     if (st == 5 || st == 7 || st == 6 || st == 9 || st == 19 || st == 20) return TA_ITALIC;
     if (st == 23 || st == 25) return TA_UNDER;
     0
@@ -2412,13 +2494,12 @@ type Following = {
 
 rp_following: Following = Following { leader: PANE_PAGE, owed: false };
 
-// What the follower does, by core/follow.l8's rules: wait (its chapter's
-// link map still to come), stay, move by rows, or go to a place.
-type FollowMove =
+// What the follower does, by core/follow.l8's rule: wait (its chapter's
+// link map still to come), stay, or move by rows.
+type RpFollowStep =
     | Wait
     | Stay
     | ByRows { rows: int }
-    | ToPlace { c: int, i: int, frac: int }
 
 // The follower placed by the leader, if a following is owed and the
 // panel's reader is linked with the page (linked: its screen says so).
@@ -2430,11 +2511,10 @@ rp_follow_leader(linked: bool) {
         rp_following.owed = false;
         return
     }
-    match rp_follow_move(leader, follower) {
+    match rp_follow_move(leader) {
         Wait -> return;
         Stay -> { }
-        ByRows b -> rp_follower_by_rows(follower, b.rows);
-        ToPlace t -> rp_go(follower, t.c, t.i, t.frac)
+        ByRows b -> rp_follower_by_rows(follower, b.rows)
     }
     rp_following.owed = false
 }
@@ -2442,6 +2522,7 @@ rp_follow_leader(linked: bool) {
 // The follower moved rows down (up, rows < 0), as far as its parts here
 // go: where it was to go given up.
 rp_follower_by_rows(follower: *ReaderPane, rows: int) {
+    if (rows == 0) return;
     at: LineAt = rp_place_line(follower);
     match at {
         Shown _s -> { }
@@ -2453,29 +2534,62 @@ rp_follower_by_rows(follower: *ReaderPane, rows: int) {
     if (!rp_same_place(was, follower.place)) rp_moved(follower, PANE_MOVED_BY_APP)
 }
 
-rp_follow_move(leader: *ReaderPane, follower: *ReaderPane): FollowMove {
-    s: int = rp_place_slot(leader);
-    if (s < 0) return FollowMove.Stay;
-    info: SlotPart = rp_slot_part(leader, s);
-    c: int = info.c;
-    // (A commentary leading in a run of chapters it says nothing on: by
-    // core/follow.l8's follow_run_chapter.)
-    if (info.gap_to >= 0) {
-        to: int = follow_run_chapter(c, info.gap_to, rp_place_chapter(follower));
-        return if (to < 0) FollowMove.Stay else FollowMove.ToPlace { c: to, i: -1, frac: 0 }
+// The chapters either side of each pane's whose maps following goes by.
+RP_FOLLOW_CHAPTERS: int = 2;
+
+// Where the follower goes, by core/follow.l8's rule: the section at the
+// page's top edge has one linked with it as much in sight in the panel as
+// can be; the page moved, the panel moves as little as makes it so; the
+// panel moved, the page. Each pane's rows count from its own reading line,
+// so its top edge is its reading line's rows above it. A move in a
+// terminal is a key's, whole rows at a time: the follower takes it at once.
+rp_follow_move(leader: *ReaderPane): RpFollowStep {
+    page: *ReaderPane = reader_pane(PANE_PAGE);
+    panel: *ReaderPane = reader_pane(PANE_PANEL);
+    from_c: int = 1000000;
+    to_c: int = -1;
+    for c in [rp_place_chapter(page), rp_place_chapter(panel)] {
+        if (c >= 0) {
+            if (c - RP_FOLLOW_CHAPTERS < from_c) from_c = c - RP_FOLLOW_CHAPTERS;
+            if (c + RP_FOLLOW_CHAPTERS > to_c) to_c = c + RP_FOLLOW_CHAPTERS
+        }
     }
-    if (!rp_link_map_here(c)) return FollowMove.Wait;
-    mode: int = LINK_BY_VERSE;
-    comments: int = PANE_PANEL;
-    borrow rp_link_maps[c] as map {
-        mode = map.mode;
-        comments = map.comments
+    if (to_c < from_c) return RpFollowStep.Stay;
+    if (!rp_link_map_here(rp_place_chapter(leader))) return RpFollowStep.Wait;
+    room: int = 0;
+    for x in from_c..to_c + 1 {
+        if (rp_link_map_here(x)) {
+            borrow rp_link_maps[x] as map {
+                room = room + follow_links_room(map)
+            }
+        }
     }
-    if (mode == LINK_BY_VERSE) return rp_follow_by_verse(leader, follower, c);
-    // (The version leading the commentary, or the commentary the version:
-    // in whichever pane each is.)
-    if (leader.index != comments) rp_commentary_led(leader, follower, c) else rp_version_led(leader,
-        follower, c)
+    page_top: f64 = -page.reading_line as f64;
+    panel_top: f64 = -panel.reading_line as f64;
+    page_leads: bool = leader.index == PANE_PAGE;
+    step: RpFollowStep = RpFollowStep.Stay;
+    region {
+        links: FollowLinks = follow_links_new(room);
+        for x in from_c..to_c + 1 {
+            if (rp_link_map_here(x)) {
+                page_run: PartRun = rp_part_run(page, x);
+                page_shape: ChapterShape = rp_chapter_shape(page, &page_run, x);
+                panel_run: PartRun = rp_part_run(panel, x);
+                panel_shape: ChapterShape = rp_chapter_shape(panel, &panel_run, x);
+                borrow rp_link_maps[x] as map {
+                    follow_links_add(&links, map, &page_shape, &panel_shape)
+                }
+            }
+        }
+        next: FollowMove = if (page_leads) follow_bottom_move(&links, page_top, panel_top,
+            panel.rows as f64) else follow_top_move(&links, page_top, page.rows as f64,
+            panel_top, panel.rows as f64);
+        match next {
+            Stay -> { }
+            ScrollTo t -> step = RpFollowStep.ByRows { rows: rp_rounded(t.top - (if (page_leads) panel_top else page_top)) }
+        }
+    }
+    step
 }
 
 // The chapter of a pane's place (-1: not placed).
@@ -2486,123 +2600,6 @@ rp_place_chapter(pane: *ReaderPane): int {
     }
 }
 
-// A version following, by chapter c's link map: through the pairs both
-// panes have laid out (each one's rows from its own reading line, the
-// leader's line at 0); past them, to the follower's anchor matched with
-// the leader's.
-rp_follow_by_verse(leader: *ReaderPane, follower: *ReaderPane, c: int): FollowMove {
-    step: FollowMove = FollowMove.Stay;
-    page_leads: bool = leader.index == PANE_PAGE;
-    region {
-        leader_run: PartRun = rp_part_run(leader, c);
-        leader_shape: ChapterShape = rp_chapter_shape(leader, &leader_run, c);
-        follower_run: PartRun = rp_part_run(follower, c);
-        follower_shape: ChapterShape = rp_chapter_shape(follower, &follower_run, c);
-        borrow rp_link_maps[c] as map {
-            pairs: FollowPairs = if (page_leads) follow_pairs(map, &leader_shape,
-                &follower_shape, true) else follow_pairs(map, &follower_shape, &leader_shape,
-                false);
-            at: FollowPlace = follow_by_verse(&pairs, 0.0f64, leader_shape.em, follower_shape.em);
-            if (at.ok) step = FollowMove.ByRows { rows: rp_rounded(at.y) } else {
-                i: int = rp_anchor_at_row(&leader_shape, 0.0f64);
-                span: AnchorSpan = rp_anchor_span(&leader_shape, i);
-                frac: int = if (span.known) (-span.from * 1000.0f64 / (span.to - span.from)) as int else 0;
-                step = rp_matched_place(map, c, i, frac, page_leads)
-            }
-        }
-    }
-    step
-}
-
 rp_rounded(y: f64): int {
     if (y >= 0.0f64) (y + 0.5f64) as int else -(0.5f64 - y) as int
-}
-
-// The follower's anchor matched with the leader's anchor i (the page's,
-// if page_leads), as far through it (a verse it lacks: the start of the
-// one matched before it; -1, the chapter's top).
-rp_matched_place(
-    map: *LinkMap,
-    c: int,
-    i: int,
-    frac: int,
-    page_leads: bool
-): FollowMove {
-    to: int = -1;
-    exact: bool = i < 0;
-    for k in 0..len(map.j) {
-        from_i: int = if (page_leads) map.i0[k] else map.j[k];
-        to_i: int = if (page_leads) map.i1[k] else map.j[k];
-        other: int = if (page_leads) map.j[k] else map.i0[k];
-        if (!exact && from_i <= i && i <= to_i) {
-            to = other;
-            exact = true
-        } else if (!exact && to_i < i) to = other
-    }
-    FollowMove.ToPlace { c: c, i: to, frac: if (exact) frac else 0 }
-}
-
-// The commentary led by the version (in either pane): it stays while one
-// of its comments at its reading line covers the version's verse there,
-// else goes to the one covering it nearest its reading line (in another
-// chapter: to the version's chapter's top, if none does). In a run of
-// chapters it says nothing on that holds the version's, it stays.
-rp_commentary_led(version: *ReaderPane, commentary: *ReaderPane, c: int): FollowMove {
-    s: int = rp_place_slot(commentary);
-    if (s >= 0) {
-        held: SlotPart = rp_slot_part(commentary, s);
-        if (held.gap_to >= 0 && held.c <= c && c <= held.gap_to) return FollowMove.Stay
-    }
-    verse_i: int = rp_anchor_index(rp_document_place(version));
-    commentary_at: DocumentPlace = rp_document_place(commentary);
-    same: bool = rp_place_in_chapter(commentary_at, c);
-    if (!same && verse_i < 0) return FollowMove.ToPlace { c: c, i: -1, frac: 0 };
-    step: CommentStep = CommentStep.Stay;
-    region {
-        run: PartRun = rp_part_run(commentary, c);
-        shape: ChapterShape = rp_chapter_shape(commentary, &run, c);
-        borrow rp_link_maps[c] as map {
-            step = follow_comment_from_verses(map, verse_i, if (same) rp_anchor_index(commentary_at) else -1,
-                &shape, 0.0f64)
-        }
-    }
-    rp_comment_step(step, c, same)
-}
-
-// The version led by the commentary (in either pane): it stays on a verse
-// the comment at the commentary's reading line covers, else goes to the
-// comment's first.
-rp_version_led(commentary: *ReaderPane, version: *ReaderPane, c: int): FollowMove {
-    comment_j: int = rp_anchor_index(rp_document_place(commentary));
-    version_at: DocumentPlace = rp_document_place(version);
-    same: bool = rp_place_in_chapter(version_at, c);
-    if (!same && comment_j < 0) return FollowMove.ToPlace { c: c, i: -1, frac: 0 };
-    step: CommentStep = CommentStep.Stay;
-    borrow rp_link_maps[c] as map {
-        step = follow_verses_from_comment(map, comment_j, if (same) rp_anchor_index(version_at) else -1)
-    }
-    rp_comment_step(step, c, same)
-}
-
-// A step by comment as the follower's move (staying in another chapter:
-// to chapter c's top).
-rp_comment_step(step: CommentStep, c: int, same: bool): FollowMove {
-    match step {
-        Stay -> if (same) FollowMove.Stay else FollowMove.ToPlace { c: c, i: -1, frac: 0 };
-        GoTo g -> FollowMove.ToPlace { c: c, i: g.anchor, frac: 0 }
-    }
-}
-
-rp_anchor_index(place: DocumentPlace): int {
-    match place {
-        Unknown -> -1;
-        Anchored a -> a.i
-    }
-}
-
-rp_place_in_chapter(place: DocumentPlace, c: int): bool {
-    match place {
-        Unknown -> false;
-        Anchored a -> a.c == c
-    }
 }

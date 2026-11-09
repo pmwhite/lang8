@@ -16,11 +16,9 @@ import "skin.l8";
 
 import "follow.l8";
 
-PANE_PAGE: int = 0;
-
-PANE_PANEL: int = 1;
-
-PANES: int = 2;
+// (The panes, PANE_PAGE and PANE_PANEL, and how a chapter's anchors go
+// with the other pane's, LINK_BY_VERSE and LINK_BY_COMMENT, are named in
+// follow.l8, whose rules take them.)
 
 // Each pane's reading line, thousandths of the way down what of it is in
 // sight: where its place is read, and where a jump puts a verse (the
@@ -32,12 +30,6 @@ pane_reading_lines: []int = [333, 0];
 PANE_GO_AT_ONCE: int = 0;
 
 PANE_GO_BROUGHT: int = 1;
-
-// How a chapter's anchors go with the other pane's (`link C MODE`): verse
-// by verse (two versions), or comment by comment (a commentary in either).
-LINK_BY_VERSE: int = 0;
-
-LINK_BY_COMMENT: int = 1;
 
 // What a pane reads: the page, the version read; the panel's reader, a
 // version or a commentary (nothing while the panel shows no reader).
@@ -56,6 +48,14 @@ pane_document(p: int): PaneDocument {
     at: int = bb_reader_at();
     if (at < 0) return PaneDocument.Nothing;
     if (sk_kinds[at] == SCR_SHELF_COMMENTARY) PaneDocument.Commentary { slot: sk_args[at] / SHELF_PLACE } else PaneDocument.Version { text: sk_args[at] / SHELF_PLACE }
+}
+
+// Whether pane p reads the commentary in slot.
+pane_reads_commentary(p: int, slot: int): bool {
+    match pane_document(p) {
+        Commentary c -> c.slot == slot;
+        _ -> false
+    }
 }
 
 pane_by_comment(p: int): bool {
@@ -82,6 +82,14 @@ page_document(): PlaceDocument {
     i: int = shelf_find_slot(slot);
     if (i < 0 || !shelf_ready_at(i) || shelf_kind_at(i) != SHELF_KIND_COMMENTARY) return PlaceDocument.Bible;
     PlaceDocument.Module { slot: slot }
+}
+
+// Whether the page reads the module in slot.
+page_reads_module(slot: int): bool {
+    match page_document() {
+        Bible -> false;
+        Module m -> m.slot == slot
+    }
 }
 
 page_reads_bible(): bool {
@@ -152,6 +160,9 @@ pane_places: []PanePlace = [PanePlace { c: -1, i: -1, frac: 0 }, PanePlace { c: 
 // Which pane a finger last moved (`moving`): for the skin it leads, linked;
 // core keeps it to know which is followed when the panel is filled.
 pane_leader: int = PANE_PAGE;
+
+// Whether a hand moves the leader now: from its `moving` to its `rest`.
+pane_hand_moving: bool = false;
 
 // ---- a chapter's anchors ----
 // Chapter c's anchors in a pane's document: how many parts it is in (0:
@@ -389,21 +400,44 @@ pane_part_chapter(p: int, c: int): int {
 PANE_VERSION_PART_BYTES: int = 1536;
 
 // Chapter c's parts in version source: each part's first verse (0: the
-// chapter's start), and every verse, in order, with the part it is in.
+// chapter's start) and how many bytes of records it is, and every verse,
+// in order, with the part it is in and how many bytes into it it begins
+// (a skin guesses where parts not laid out would be by them: SKINS.md,
+// Panes).
 type VersionParts = {
     firsts: []int;
+    part_bytes: []int;
     verses: []int;
-    verse_parts: []int
+    verse_parts: []int;
+    verse_offsets: []int
+}
+
+pane_version_parts_none(): VersionParts@new {
+    VersionParts {
+        firsts: new int[1](0),
+        part_bytes: new int[1](0),
+        verses: new int[0](0),
+        verse_parts: new int[0](0),
+        verse_offsets: new int[0](0)
+    }
 }
 
 pane_version_parts(source: *TextData, t: int, c: int): VersionParts@new {
-    if (c < 0 || c >= len(source.starts) || source.starts[c] < 0) return VersionParts { firsts: new int[1](0), verses: new int[0](0), verse_parts: new int[0](0) };
+    if (c < 0 || c >= len(source.starts) || source.starts[c] < 0) return pane_version_parts_none();
     whole: bool = t == TEXT_ESV;
     // (Counted, then placed.)
     parts: int = 1;
     verses: int = 0;
     for pass in 0..2 {
-        made: VersionParts = VersionParts { firsts: new int[if (pass == 0) 0 else parts](0), verses: new int[if (pass == 0) 0 else verses](0), verse_parts: new int[if (pass == 0) 0 else verses](0) };
+        counted_parts: int = if (pass == 0) 0 else parts;
+        counted_verses: int = if (pass == 0) 0 else verses;
+        made: VersionParts = VersionParts {
+            firsts: new int[counted_parts](0),
+            part_bytes: new int[counted_parts](0),
+            verses: new int[counted_verses](0),
+            verse_parts: new int[counted_verses](0),
+            verse_offsets: new int[counted_verses](0)
+        };
         part: int = 0;
         verse: int = 0;
         began: int = source.starts[c];
@@ -414,30 +448,39 @@ pane_version_parts(source: *TextData, t: int, c: int): VersionParts@new {
             if (k == 'V' as int) {
                 n: int = record_key_at(source.data, source.size, p + 1);
                 if (!whole && opens && verse > 0 && p - began >= PANE_VERSION_PART_BYTES) {
+                    if (pass == 1) made.part_bytes[part] = p - began;
                     part = part + 1;
                     if (pass == 1) made.firsts[part] = n;
                     began = p
                 }
                 if (pass == 1) {
                     made.verses[verse] = n;
-                    made.verse_parts[verse] = part
+                    made.verse_parts[verse] = part;
+                    made.verse_offsets[verse] = p - began
                 }
                 verse = verse + 1;
                 opens = false
             } else if (k == 'P' as int || k == 'S' as int || k == 's' as int || k == '_' as int) opens = true else if (k == 'T' as int || k == 'W' as int || k == 'I' as int || k == 'J' as int || k == 'U' as int) opens = false;
             p = record_line_end(source.data, source.size, p) + 1
         }
-        if (pass == 1) return made;
+        if (pass == 1) {
+            made.part_bytes[part] = source.ends[c] - began;
+            return made
+        }
         parts = part + 1;
         verses = verse
     }
-    VersionParts { firsts: new int[1](0), verses: new int[0](0), verse_parts: new int[0](0) }
+    pane_version_parts_none()
 }
 
 // ---- parts, as lines ----
 // `want P C K`: part k of chapter c of pane p's document, as its lines.
 pane_want(p: int, c: int, k: int) {
     if (c < 0 || c >= chapters) return;
+    if (doc_pane_opening(p)) {
+        pane_write_opening_part(p);
+        return
+    }
     match pane_document(p) {
         Nothing -> { }
         Version v -> {
@@ -481,7 +524,7 @@ pane_write_version_part(
     k: int
 ) {
     region {
-        parts: VersionParts = VersionParts { firsts: new int[1](0), verses: new int[0](0), verse_parts: new int[0](0) };
+        parts: VersionParts = pane_version_parts_none();
         borrow texts[t] as source {
             parts = pane_version_parts(source, t, c)
         }
@@ -499,6 +542,8 @@ pane_write_version_part(
             parts: n,
             verses: parts.verses,
             verse_parts: parts.verse_parts,
+            part_bytes: parts.part_bytes,
+            verse_offsets: parts.verse_offsets,
             gap_from: -1,
             gap_to: -1
         })
@@ -509,7 +554,7 @@ pane_write_version_part(
 // sk_ranges), as its part lines say it.
 pane_lay_page_part(c: int, k: int) {
     region {
-        parts: VersionParts = VersionParts { firsts: new int[1](0), verses: new int[0](0), verse_parts: new int[0](0) };
+        parts: VersionParts = pane_version_parts_none();
         borrow texts[text_cur] as source {
             parts = pane_version_parts(source, text_cur, c)
         }
@@ -560,6 +605,8 @@ pane_write_comment_part(
             parts: if (parts.division == -2) 0 else len(parts.starts),
             verses: parts.verses,
             verse_parts: parts.verse_parts,
+            part_bytes: comment_part_bytes(&parts),
+            verse_offsets: parts.verse_offsets,
             gap_from: parts.gap_from,
             gap_to: parts.gap_to
         });
@@ -567,6 +614,33 @@ pane_write_comment_part(
             pane_part_coming_done(p, at_c, part);
             _held: bool = shelf_comment_part_ahead(slot, at_c, part)
         } else pane_part_coming(p, at_c, part)
+    }
+}
+
+// The one part of a pane that shows "Openingâ€¦" in place of a document on
+// its way (doc_pane_opening): a faint line, as a commentary's run of
+// chapters without comments is, standing for every chapter, until the
+// document has come and the pane's parts are asked for again.
+pane_write_opening_part(p: int) {
+    region {
+        layout_begin(&sk_layout);
+        lay_begin(&sk_layout, STYLE_REF, PARA_CENTER, 0);
+        lay_str(&sk_layout, "Opening\â\€\¦");
+        lay_byte(&sk_layout, 10);
+        measure_chapter(&sk_layout, &sk_ranges, 0);
+        sk_write_laid(0, p, LaidPart {
+            coming: false,
+            marked: false,
+            esv: false,
+            part: 0,
+            parts: 1,
+            verses: new int[0](0),
+            verse_parts: new int[0](0),
+            part_bytes: new int[1](0),
+            verse_offsets: new int[0](0),
+            gap_from: 0,
+            gap_to: chapters - 1
+        })
     }
 }
 
@@ -625,6 +699,8 @@ pane_at(
     frac: int
 ) {
     if (p < 0 || p >= PANES || c < 0 || c >= chapters) return;
+    // (Showing "Openingâ€¦": no place in a document yet.)
+    if (doc_pane_opening(p)) return;
     pane_places[p].c = c;
     pane_places[p].i = i;
     pane_places[p].frac = (if (frac < 0) 0 else if (frac > 999) 999 else frac);
@@ -636,7 +712,10 @@ pane_at(
         sk_v = v;
         sk_frac = pane_places[p].frac;
         sk_keep_place();
-        if (c != was) sk_write_title()
+        if (c != was) {
+            sk_write_title();
+            bb_page_placed()
+        }
     } else bb_reader_placed(pane_place_chapter(p, c), v);
     pane_links_near(c)
 }
@@ -652,6 +731,10 @@ pane_place_chapter(p: int, c: int): int {
 // `rest P ENDS_HI MS`: pane p at rest: the page's counted as read
 // (core/reading.l8).
 pane_rest(p: int, ends_hi: int, ms: int) {
+    if (p == pane_leader && pane_hand_moving) {
+        pane_hand_moving = false;
+        bb_reader_rested()
+    }
     // (Reading counted in the Bible alone: a commentary on the page isn't
     // its chapter read.)
     if (p != PANE_PAGE || pane_places[p].c < 0 || !page_reads_bible()) return;
@@ -669,6 +752,7 @@ pane_rest(p: int, ends_hi: int, ms: int) {
 pane_moving(p: int, ms: int) {
     if (p < 0 || p >= PANES) return;
     pane_leader = p;
+    pane_hand_moving = true;
     pane_write_pane_line("halt ", 1 - p);
     if (p == PANE_PAGE) {
         rd_scroll(ms as f64 / 1000.0f64);
@@ -770,11 +854,14 @@ pane_linked(): bool {
     bb_reader_at() >= 0 && sk_beside_linked()
 }
 
-// The link maps of chapter c and those either side of it, each once, while
-// the panel shows a reader.
+// The link maps of chapter c and the two either side of it, each once,
+// while the panel shows a reader: a skin following has the maps of the
+// chapters its rules reach before the leader comes to them.
+PANE_LINKS_NEAR: int = 2;
+
 pane_links_near(c: int) {
     if (bb_reader_at() < 0) return;
-    for x in c - 1..c + 2 {
+    for x in c - PANE_LINKS_NEAR..c + PANE_LINKS_NEAR + 1 {
         if (x >= 0 && x < chapters && !pane_link_sent(x)) pane_write_link(x)
     }
 }
@@ -887,6 +974,26 @@ pane_relayout() {
     pane_forget(PANE_PANEL, -1);
     place: PanePlace = pane_places[PANE_PANEL];
     if (place.c >= 0) pane_go(PANE_PANEL, place.c, place.i, place.frac, PANE_GO_AT_ONCE)
+}
+
+// Pane p's document made again in place (an update swapped in for the
+// copy it read): its parts asked for again, those shown kept until the
+// new ones come, and the pane sent to the place it said last, at once, so
+// that the same words are at its reading line and nothing glides.
+pane_reread(p: int) {
+    place: PanePlace = pane_places[p];
+    pane_forget(p, -1);
+    if (place.c >= 0) pane_go(p, place.c, place.i, place.frac, PANE_GO_AT_ONCE)
+}
+
+// Each pane reading version t made again in place (pane_reread).
+pane_reread_version(t: int) {
+    for p in 0..PANES {
+        match pane_document(p) {
+            Version v -> if (v.text == t) pane_reread(p);
+            _ -> { }
+        }
+    }
 }
 
 // `line P THOUSANDTHS` for each pane: where its reading line is (at

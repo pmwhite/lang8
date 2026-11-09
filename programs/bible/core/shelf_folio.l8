@@ -4,7 +4,8 @@ use_tag std, sword, builder, sword_folio;
 
 // Commentaries on the bookshelf as folios (folio/README.md): a module is
 // made into one when it is first wanted (programs/sword_folio, some
-// chapters a step: core/shelf.l8's work), kept as shelf-NAME.folio, and
+// chapters a step: core/shelf.l8's work), kept as shelf-NAME.folio (or
+// its other copy's name, shelf_copy_ending: an update's), and
 // read a chapter at a time: the blocks holding a chapter are a span of
 // the kept file (shelf_span_ready), decoded as they are read. The page
 // beside the Bible (core/beside.l8), the Bookshelf's commentary and Study
@@ -67,20 +68,38 @@ type DocumentMaking =
 
 shelf_document_job: ?owned *DocumentJob = null;
 
-// A module's package read, to be made a folio.
-shelf_document_make(i: int) {
-    if (!shelf_kept_at(i, ".zip")) {
-        shelf_file_gone(i);
+// A module's package (a download's or an update's) read, to be made a
+// folio.
+shelf_document_make(i: int, source: MakingSource) {
+    if (!shelf_kept_package_at(i, source)) {
+        shelf_document_lost(i, source);
         return
     }
-    shelf_work = ShelfWork.MakingDocument { slot: shelf_slot_at(i) };
+    shelf_work = ShelfWork.MakingDocument { slot: shelf_slot_at(i), source: source };
     shelf_work_done = 0;
     shelf_read_named(i)
 }
 
-shelf_document_got(i: int, id: int, size: int) {
+// Its package gone: a download's module wanted again; an update let go,
+// the copy before still read.
+shelf_document_lost(i: int, source: MakingSource) {
+    match source {
+        Download -> shelf_file_gone(i);
+        Update -> {
+            shelf_update_failed(i, false);
+            shelf_work_rests()
+        }
+    }
+}
+
+shelf_document_got(
+    i: int,
+    id: int,
+    size: int,
+    source: MakingSource
+) {
     if (size <= 0) {
-        shelf_file_gone(i);
+        shelf_document_lost(i, source);
         return
     }
     try {
@@ -102,8 +121,17 @@ shelf_document_got(i: int, id: int, size: int) {
         shelf_document_job = move next;
         shelf_work_next()
     } with SwordError _error -> {
-        shelf_set_broken(i, true);
+        shelf_document_failed(i, source);
         shelf_work_rests()
+    }
+}
+
+// It couldn't be made: a download's module marked broken; an update let
+// go, the copy before still read.
+shelf_document_failed(i: int, source: MakingSource) {
+    match source {
+        Download -> shelf_set_broken(i, true);
+        Update -> shelf_update_failed(i, false)
     }
 }
 
@@ -121,7 +149,7 @@ shelf_document_stepping(): bool {
 // commentary's chapters (about SHELF_STEP_BYTES of records a step), a
 // dictionary's entries or a book's parts made; after the last, its folio
 // finished and kept.
-shelf_document_step() {
+shelf_document_step(source: MakingSource) {
     i: int = shelf_find_slot(shelf_work_slot());
     if (i < 0 || shelf_document_job == null) {
         drop shelf_document_job;
@@ -233,7 +261,7 @@ shelf_document_step() {
                     job.keeping = true;
                     allocate job {
                         packed: []i8 = folio::folio_finish(job.writer);
-                        if (shelf_kept_at(i, ".folio")) shelf_keep_named(i, packed,
+                        if (shelf_kept_making_at(i, source)) shelf_keep_named(i, packed,
                             len(packed)) else unkept = true
                     }
                 }
@@ -247,17 +275,40 @@ shelf_document_step() {
     }
     if (failed || unkept) {
         drop shelf_document_job;
-        if (failed) shelf_set_broken(i, true);
+        // (Not kept: a download's made again when it is next wanted.)
+        match source {
+            Download -> if (failed) shelf_set_broken(i, true);
+            Update -> shelf_update_failed(i, false)
+        }
         shelf_work_rests();
         return
     }
     if (!finished) shelf_work_shown(progress)
 }
 
-// Its folio kept (or not: made again when it is next wanted): its package
-// let go, and the module read from its folio from now on.
-shelf_document_kept(i: int, ok: bool) {
+// Its folio kept (or not): a download's package let go, and the module
+// read from its folio from now on (not kept, made again when it is next
+// wanted); an update's swapped in (shelf_update_swap), what read the copy
+// before let go and the panes reading it sent to the new one once they
+// can be shown there at once (shelf_reread_when_ready), or, not kept, let
+// go.
+shelf_document_kept(i: int, ok: bool, source: MakingSource) {
     drop shelf_document_job;
+    match source {
+        Update -> {
+            if (ok) {
+                slot: int = shelf_slot_at(i);
+                shelf_update_swap(i, ShelfForm.Folio, BibleOpened { red: false, report: no_report });
+                shelf_close_slot(slot);
+                shelf_decoded_forget();
+                if (pane_reads_commentary(PANE_PAGE, slot) || pane_reads_commentary(PANE_PANEL,
+                    slot)) shelf_rereading = slot
+            } else shelf_update_failed(i, false);
+            shelf_work_rests();
+            return
+        }
+        Download -> { }
+    }
     if (ok) {
         if (shelf_kept_at(i, ".zip")) {
             f: fn() = kept_store.remove;
@@ -272,7 +323,7 @@ shelf_document_kept(i: int, ok: bool) {
 // Its head read (the file's first bytes, which say how many the head is;
 // then the head), and the module put to its use.
 shelf_folio_open(i: int, use: int) {
-    if (!shelf_kept_at(i, ".folio")) return;
+    if (!shelf_kept_made_at(i)) return;
     shelf_work = ShelfWork.OpeningFolio { slot: shelf_slot_at(i), use: use, head: 0 };
     shelf_work_done = 0;
     shelf_read_named_range(i, 0, folio::FOLIO_PREFIX)
@@ -298,7 +349,7 @@ shelf_folio_got(
                 hs_file(id, prefix);
                 head_size = folio::folio_head_size(prefix, size)
             }
-            if (!shelf_kept_at(i, ".folio")) return;
+            if (!shelf_kept_made_at(i)) return;
             shelf_work = ShelfWork.OpeningFolio { slot: shelf_slot_at(i), use: use, head: head_size };
             shelf_read_named_range(i, 0, head_size);
             return
@@ -359,15 +410,20 @@ folio_chapter_division(folio: *folio::Folio, c: int): int {
     found
 }
 
-// The span of the kept folio that holds the blocks of a part of its
-// content (start to end).
-folio_range_span(folio: *folio::Folio, start: int, end: int): TextSpan {
+// The span of slot's kept folio (the copy its line names) that holds the
+// blocks of a part of its content (start to end).
+folio_range_span(
+    slot: int,
+    folio: *folio::Folio,
+    start: int,
+    end: int
+): TextSpan {
     first: int = folio::folio_block_first(folio, start);
     last: int = if (end > start) folio::folio_block_last(folio, end) else first;
     from: int = folio::folio_block_offset(folio, first);
     to: int = folio::folio_block_offset(folio, last) + folio::folio_block_compressed(folio,
         last);
-    TextSpan { ending: "folio", offset: from, count: to - from }
+    TextSpan { ending: shelf_copy_ending(shelf_copy_at(shelf_find_slot(slot))), offset: from, count: to - from }
 }
 
 // Chapter c of the folio open in slot: its records (shelf_folio_range).
@@ -413,7 +469,7 @@ shelf_folio_range_whole(
     start: int,
     end: int
 ): FolioChapter@new {
-    span: TextSpan = folio_range_span(folio, start, end);
+    span: TextSpan = folio_range_span(slot, folio, start, end);
     if (!shelf_span_ready(slot, span)) return FolioChapter.ChapterWaiting;
     at: int = shelf_holds(slot, span);
     if (at < 0) return FolioChapter.ChapterWaiting;
@@ -507,7 +563,7 @@ shelf_folio_range_decoded(
     for block in first..last + 1
         if (shelf_decoded_at(slot, block) < 0) missing = true;
     if (missing) {
-        span: TextSpan = folio_range_span(folio, start, end);
+        span: TextSpan = folio_range_span(slot, folio, start, end);
         if (!shelf_span_ready(slot, span)) return FolioChapter.ChapterWaiting;
         at: int = shelf_holds(slot, span);
         if (at < 0) return FolioChapter.ChapterWaiting;
@@ -799,7 +855,11 @@ lay_comment_lines(
             for k in tab + 1..line.to lay_byte(ctx, data[k] as int);
             line_open = true
         } else if (kind == 'T' || kind == 'I' || kind == 'G' || kind == 'U' || kind == 'W' || kind == 'J') {
-            lay_begin(ctx, record_style(kind), PARA_PROSE, 0);
+            // (Bold words opening a paragraph: the commentator's label for
+            // it, "Verse 12.", a label's run; bold words within it, the
+            // body's.)
+            lay_begin(ctx, if (kind == 'G' && !line_open) STYLE_LABEL else record_style(kind),
+                PARA_PROSE, 0);
             for k in line.from + 1..line.to lay_byte(ctx, data[k] as int);
             line_open = true
         }
@@ -836,6 +896,8 @@ type CommentParts = {
     end: int;
     verses: []int;
     verse_parts: []int;
+    // (How far into its part each verse's mark is, in bytes.)
+    verse_offsets: []int;
     // A chapter it has no comment on: the run of such chapters it is in,
     // first to last (-1: not one).
     gap_from: int;
@@ -856,6 +918,7 @@ comment_parts(folio: *folio::Folio, c: int): CommentParts@new {
             end: 0,
             verses: new int[0](0),
             verse_parts: new int[0](0),
+            verse_offsets: new int[0](0),
             gap_from: from,
             gap_to: to
         }
@@ -879,6 +942,7 @@ comment_parts(folio: *folio::Folio, c: int): CommentParts@new {
         end: folio::folio_division_end(folio, d),
         verses: new int[verses](0),
         verse_parts: new int[verses](0),
+        verse_offsets: new int[verses](0),
         gap_from: -1,
         gap_to: -1
     };
@@ -894,6 +958,7 @@ comment_parts(folio: *folio::Folio, c: int): CommentParts@new {
         if (m.verse > 0) {
             made.verses[verse] = m.verse;
             made.verse_parts[verse] = part;
+            made.verse_offsets[verse] = m.offset - made.starts[part];
             verse = verse + 1
         }
     }
@@ -903,6 +968,13 @@ comment_parts(folio: *folio::Folio, c: int): CommentParts@new {
 // Where part p of parts ends in the content.
 comment_part_end(parts: *CommentParts, p: int): int {
     if (p + 1 < len(parts.starts)) parts.starts[p + 1] else parts.end
+}
+
+// How many bytes of content each part is.
+comment_part_bytes(parts: *CommentParts): []int@new {
+    bytes: []int = new int[len(parts.starts)](0);
+    for p in 0..len(parts.starts) bytes[p] = comment_part_end(parts, p) - parts.starts[p];
+    bytes
 }
 
 // Chapter c of the commentary open in slot read in parts (not open yet:
@@ -922,6 +994,7 @@ shelf_comment_parts(slot: int, c: int): CommentParts@new {
         end: 0,
         verses: new int[0](0),
         verse_parts: new int[0](0),
+        verse_offsets: new int[0](0),
         gap_from: -1,
         gap_to: -1
     }
@@ -1016,7 +1089,7 @@ shelf_comment_part_ahead(slot: int, c: int, p: int): bool {
                     if (parts.division >= 0) {
                         for q in [p + 1, p - 1] {
                             if (held && q >= 0 && q < len(parts.starts)) held = shelf_span_ready(slot,
-                                folio_range_span(d.folio, parts.starts[q], comment_part_end(&parts,
+                                folio_range_span(slot, d.folio, parts.starts[q], comment_part_end(&parts,
                                 q)))
                         }
                     }
@@ -1026,6 +1099,55 @@ shelf_comment_part_ahead(slot: int, c: int, p: int): bool {
         }
     }
     held
+}
+
+// Whether the part of chapter c of the commentary in slot that holds its
+// anchor i (-1: the chapter's top), and the parts beside it, can be laid
+// out now; if not, what they need is asked for (the commentary opened,
+// a span read), once the bookshelf rests.
+shelf_comment_place_ready(slot: int, c: int, i: int): bool {
+    if (c < 0 || c >= chapters) return true;
+    if (!shelf_ensure_open(slot)) return false;
+    ready: bool = true;
+    part: int = 0;
+    borrow shelf_open[SHELF_USE_STUDY] as open {
+        match open.reader {
+            Document d -> {
+                region {
+                    parts: CommentParts = comment_parts(d.folio, c);
+                    if (parts.division >= 0) {
+                        part = (if (i >= 0 && i < len(parts.verse_parts)) parts.verse_parts[i] else 0);
+                        ready = shelf_span_ready(slot, folio_range_span(slot, d.folio,
+                            parts.starts[part], comment_part_end(&parts, part)))
+                    }
+                }
+            }
+            _ -> { }
+        }
+    }
+    ready && shelf_comment_part_ahead(slot, c, part)
+}
+
+// Whether the commentary in slot can show verse v of chapter c at once
+// (shelf_comment_place_ready at its last comment beginning at or before
+// the verse; the chapter's top before its first): asked for if not.
+shelf_comment_verse_ready(slot: int, c: int, v: int): bool {
+    if (c < 0 || c >= chapters) return true;
+    if (!shelf_ensure_open(slot)) return false;
+    anchor: int = -1;
+    borrow shelf_open[SHELF_USE_STUDY] as open {
+        match open.reader {
+            Document d -> {
+                region {
+                    parts: CommentParts = comment_parts(d.folio, c);
+                    for k in 0..len(parts.verses)
+                        if (parts.verses[k] > 0 && parts.verses[k] <= v) anchor = k
+                }
+            }
+            _ -> { }
+        }
+    }
+    shelf_comment_place_ready(slot, c, anchor)
 }
 
 // The reader's style for a record of words.
@@ -1253,8 +1375,8 @@ shelf_commentary_ahead(slot: int, c: int): bool {
                 if (division >= 0) {
                     start: int = folio::folio_division_start(d.folio, division);
                     end: int = folio::folio_division_end(d.folio, division);
-                    if (end > start) held = shelf_span_ready(slot, folio_range_span(d.folio,
-                        start, end))
+                    if (end > start) held = shelf_span_ready(slot, folio_range_span(slot,
+                        d.folio, start, end))
                 }
             }
             _ -> { }

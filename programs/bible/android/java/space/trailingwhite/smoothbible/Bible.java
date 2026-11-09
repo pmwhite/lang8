@@ -32,6 +32,9 @@ public final class Bible extends Activity {
   // Every screen core has built, by id; the sheet's and the panel's.
   final java.util.HashMap<Integer, Screen> screens = new java.util.HashMap<>();
   Panel sheet, beside;
+  // A document on its way to the page: its hairline along the bar's foot
+  // (SKINS.md, Panes: Arriving).
+  Hairline pageHairline;
   Tray tray;
   // The way back (core's capsule): its words, at the reader's foot.
   TextView capsule;
@@ -103,9 +106,9 @@ public final class Bible extends Activity {
     // (The Library: what is kept, Memory, and the languages.)
     library = button("☰", "library");
     library.setContentDescription("Library");
-    // (The Bookshelf: what is read beside the Bible.)
+    // (The panel: what is read beside the page.)
     shelf = button("▤", "shelf");
-    shelf.setContentDescription("Bookshelf");
+    shelf.setContentDescription("Panel");
     search = new android.widget.ImageView(this);
     search.setImageResource(android.R.drawable.ic_menu_search);
     search.setPadding(dp(10), dp(10), dp(10), dp(10));
@@ -117,6 +120,10 @@ public final class Bible extends Activity {
     bar.addView(search, new LinearLayout.LayoutParams(dp(44), dp(44)));
     bar.addView(settings);
     root.addView(bar, new FrameLayout.LayoutParams(-1, dp(52), Gravity.TOP));
+    pageHairline = new Hairline(this, look);
+    FrameLayout.LayoutParams line = new FrameLayout.LayoutParams(-1, Math.max(1, dp(1)), Gravity.TOP);
+    line.topMargin = dp(52) - Math.max(1, dp(1));
+    root.addView(pageHairline, line);
     // (The panel beside the page: at its right after a rule, or under it
     // after a strip its grabber is in.)
     rule = new View(this);
@@ -319,6 +326,7 @@ public final class Bible extends Activity {
   private void besideLine(boolean open, boolean full) {
     besideOpen = open;
     besideFull = open && full;
+    linking.filling(besideFull);
     if (!open) {
       beside.dismiss();
       besideMaking = false;
@@ -1216,6 +1224,17 @@ public final class Bible extends Activity {
       case "halt": {
         Reader r = pane(w.num(1));
         if (r != null) r.halt();
+        break;
+      }
+      case "arriving": {
+        // (arriving P THOUSANDTHS: a document on its way to pane P.)
+        Hairline h = w.num(1) == 0 ? pageHairline : w.num(1) == 1 ? beside.hairline : null;
+        if (h != null) h.arriving(w.num(2));
+        break;
+      }
+      case "arrived": {
+        Hairline h = w.num(1) == 0 ? pageHairline : w.num(1) == 1 ? beside.hairline : null;
+        if (h != null) h.arrived();
         break;
       }
       case "forget": {

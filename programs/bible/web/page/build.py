@@ -176,7 +176,10 @@ def build(wasm, data_manifest, site):
 
     # The Service Worker (its build's files to keep, WEB.md §W9.1) and the
     # manifest (§W9.2), at fixed names.
-    shell = ["/read/shell", "/read/about", "/read/manifest.webmanifest"] + ["/read/" + names[k] for k in ("css", "js", "follow", "runtime", "icons", "wasm")] + fonts + \
+    # (Every file of the build the shell loads, each name put above, so that
+    # a shell kept never asks for one that a later build has let go: the
+    # scripts it imports among them, the reloader too.)
+    shell = ["/read/shell", "/read/about", "/read/manifest.webmanifest"] + ["/read/" + name for k, name in names.items() if k != "data"] + fonts + \
         ["/img/favicon.png", "/img/apple-touch-icon.png", "/img/icon-192.png", "/img/icon-512.png"]
     build_id = digest(json.dumps(shell).encode())
     sw = text(os.path.join(HERE, "sw.js")).replace("{{build}}", build_id).replace("{{data}}", dhash)

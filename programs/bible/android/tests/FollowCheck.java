@@ -9,7 +9,7 @@ import java.util.OptionalDouble;
 // Android's following (Follow.java) checked against core's rules: every
 // case programs/bible/tools/link_cases.l8 writes (its format is at the top
 // of that file) worked out here and compared, a place within a hundredth
-// of a point, a step exactly.
+// of a point, an anchor or a chapter exactly.
 //
 //   programs/bible/android/follow_test.sh .build/link-cases.txt
 final class FollowCheck {
@@ -37,60 +37,56 @@ final class FollowCheck {
     System.out.println(cases.checked + " cases of following match core's rules");
   }
 
-  // The cases' lines as they come: a case's map and shapes, then what it
-  // asks, then what is expected.
+  // The cases' lines as they come: what the case asks, its maps and
+  // shapes, then what is expected.
   private static final class Cases {
-    Follow.LinkMap map;
-    Follow.ChapterShape page, panel;
-    // What the case asks (a verse's: whether the page leads, the ems and
-    // the leader's line; a comment's: its two anchors and the panel's
-    // line), and its line number.
     String asks;
     int asksLine;
-    boolean pageLeads;
-    double leaderEm, followerEm, readingLine;
-    int pageI, panelJ;
-    int runFrom, runTo, pageC;
+    int mode, comments;
+    double[] numbers;
+    Follow.Links links;
+    Follow.LinkMap map;
+    Follow.ChapterShape page;
+    int anchor, placeFrac;
+    double readingLine;
     int checked, failed;
 
     void take(int lineNumber, String[] w) {
       switch (w[0]) {
-        case "verse":
-          asks = "verse";
+        case "bottom":
+        case "top":
+          asks = w[0];
           asksLine = lineNumber;
-          pageLeads = w[1].equals("1");
-          leaderEm = Double.parseDouble(w[2]);
-          followerEm = Double.parseDouble(w[3]);
-          readingLine = Double.parseDouble(w[4]);
+          mode = Integer.parseInt(w[1]);
+          comments = (int) Double.parseDouble(w[2]);
+          numbers = new double[w.length - 3];
+          for (int i = 3; i < w.length; i++) numbers[i - 3] = Double.parseDouble(w[i]);
+          links = new Follow.Links();
           break;
         case "map":
-          map = readMap(w);
+          map = readMap(w, mode, comments);
           break;
         case "page":
-          page = readShape(w, pageLeads ? leaderEm : followerEm);
+          page = readShape(w, 1);
           break;
         case "panel":
-          panel = readShape(w, pageLeads ? followerEm : leaderEm);
+          links.add(map, page, readShape(w, 1));
           break;
-        case "frompage":
-          asks = "frompage";
+        case "glide":
+          asks = "glide";
           asksLine = lineNumber;
-          pageI = Integer.parseInt(w[1]);
-          panelJ = Integer.parseInt(w[2]);
-          readingLine = Double.parseDouble(w[3]);
+          numbers = new double[] {Double.parseDouble(w[1]), Double.parseDouble(w[2]), Double.parseDouble(w[3]), Double.parseDouble(w[4])};
           break;
-        case "frompanel":
-          asks = "frompanel";
+        case "place":
+          asks = "place";
           asksLine = lineNumber;
-          panelJ = Integer.parseInt(w[1]);
-          pageI = Integer.parseInt(w[2]);
+          anchor = Integer.parseInt(w[1]);
+          placeFrac = Integer.parseInt(w[2]);
           break;
-        case "run":
-          asks = "run";
+        case "at":
+          asks = "at";
           asksLine = lineNumber;
-          runFrom = Integer.parseInt(w[1]);
-          runTo = Integer.parseInt(w[2]);
-          pageC = Integer.parseInt(w[3]);
+          readingLine = Double.parseDouble(w[1]);
           break;
         case "expect":
           check(lineNumber, w);
@@ -105,25 +101,30 @@ final class FollowCheck {
       String got;
       boolean same;
       switch (asks == null ? "" : asks) {
-        case "verse": {
-          OptionalDouble y = Follow.byVerse(Follow.pairs(map, page, panel, pageLeads), readingLine,
-              leaderEm, followerEm);
-          got = y.isPresent() ? String.format("%.4f", y.getAsDouble()) : "none";
-          same = expected.equals("none") ? !y.isPresent()
-              : y.isPresent() && Math.abs(y.getAsDouble() - Double.parseDouble(expected)) <= CLOSE_ENOUGH;
+        case "bottom":
+        case "top": {
+          OptionalDouble y = asks.equals("bottom") ? Follow.bottomMove(links, numbers[0], numbers[1], numbers[2])
+              : Follow.topMove(links, numbers[0], numbers[1], numbers[2], numbers[3]);
+          got = y.isPresent() ? String.format("to %.4f", y.getAsDouble()) : "stay";
+          same = expected.equals("stay") ? !y.isPresent()
+              : y.isPresent() && Math.abs(y.getAsDouble() - Double.parseDouble(expected.substring(3))) <= CLOSE_ENOUGH;
           break;
         }
-        case "frompage":
-          got = Follow.commentFromVerses(map, pageI, panelJ, panel, readingLine).toString();
-          same = got.equals(expected);
+        case "glide": {
+          double y = Follow.glide(numbers[0], numbers[1], numbers[2], numbers[3]);
+          got = String.format("%.4f", y);
+          same = Math.abs(y - Double.parseDouble(expected)) <= CLOSE_ENOUGH;
           break;
-        case "frompanel":
-          got = Follow.versesFromComment(map, panelJ, pageI).toString();
-          same = got.equals(expected);
+        }
+        case "place": {
+          double y = Follow.placeY(page, anchor, placeFrac);
+          got = String.format("%.4f", y);
+          same = Math.abs(y - Double.parseDouble(expected)) <= CLOSE_ENOUGH;
           break;
-        case "run": {
-          int to = Follow.runChapter(runFrom, runTo, pageC);
-          got = to < 0 ? "stay" : "go " + to;
+        }
+        case "at": {
+          int[] p = Follow.linePlace(page, readingLine);
+          got = p[0] + " " + p[1];
           same = got.equals(expected);
           break;
         }
@@ -141,7 +142,7 @@ final class FollowCheck {
   }
 
   // `map I0 I1 J ...`.
-  private static Follow.LinkMap readMap(String[] w) {
+  private static Follow.LinkMap readMap(String[] w, int mode, int comments) {
     int n = (w.length - 1) / 3;
     int[] i0 = new int[n], i1 = new int[n], j = new int[n];
     for (int k = 0; k < n; k++) {
@@ -149,7 +150,7 @@ final class FollowCheck {
       i1[k] = Integer.parseInt(w[2 + 3 * k]);
       j[k] = Integer.parseInt(w[3 + 3 * k]);
     }
-    return new Follow.LinkMap(Follow.BY_VERSE, 1, i0, i1, j);
+    return new Follow.LinkMap(mode, comments, i0, i1, j);
   }
 
   // `page TOP END START...` or `panel ...`, `-` not laid out.

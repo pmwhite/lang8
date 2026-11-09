@@ -10,15 +10,23 @@ use_tag std, ios, bible, bible_wire;
 // line beginning ! is the app's: `!screens` writes the screens shown to
 // the log, `!close` closes the sheets shown (as their Done does), `!back`
 // goes back a screen (the top sheet's, else the panel's), `!info WORDS`
-// taps a row's ⓘ as `!tap` taps the row, `!tap
-// WORDS` taps the row or the toolbar's button of a screen shown whose
-// title (or spoken label) begins with WORDS. While it is connected, the screen stays on (a phone's
+// taps a row's ⓘ as `!tap` taps the row, `!tap WORDS` taps the row, the
+// button (or a button's menu item: Swap Panes, Close Panel) or the bar's
+// left button of a screen shown whose title (or spoken label) begins with
+// WORDS, or the panel's own Close Panel or Full Screen; `!scroll DY`
+// scrolls the top sheet's list (else the panel's); `!uilog on|off` and
+// `!follow on|off|pairs` are the logs' (uilog.l8, followlog.l8). While it is
+// connected, the screen stays on (a phone's
 // Auto-Lock, not ten minutes of Keep Screen On) and its diagnostics are
 // written. Data files changed on the server since it started (web/dev.mjs
 // --data) are read from it instead of the bundle, so a course or the
 // Manual reloads without a new build. A build from the App Store has no
 // server set and asks nothing.
 import "../../ios/objc.l8";
+
+import "uilog.l8";
+
+import "followlog.l8";
 
 // The server's address (http://HOST:PORT), the cursor of its lines, the
 // request under way, its body, and its session (with a long timeout).
@@ -326,12 +334,18 @@ devwire_lines(body: int) {
 
 // One line: the app's (!screens, !close, !back, !tap, !info), else core's.
 devwire_line(b: []i8, from: int, to: int) {
+    if (uilog_line(b, from, to)) return;
+    if (followlog_line(b, from, to)) return;
     if (devwire_line_is(b, from, to, "!screens")) {
         devwire_screens();
         return
     }
     if (devwire_line_is(b, from, to, "!state")) {
         devwire_state();
+        return
+    }
+    if (devwire_line_is(b, from, to, "!where")) {
+        devwire_where();
         return
     }
     if (devwire_line_is(b, from, to, "!close")) {
@@ -344,6 +358,10 @@ devwire_line(b: []i8, from: int, to: int) {
     }
     if (to - from > 7 && devwire_line_is(b, from, from + 7, "!flick ")) {
         devwire_flick(b, from + 7, to);
+        return
+    }
+    if (to - from > 8 && devwire_line_is(b, from, from + 8, "!scroll ")) {
+        devwire_scroll(b, from + 8, to);
         return
     }
     if (to - from > 5 && devwire_line_is(b, from, from + 5, "!tap ")) {
@@ -374,9 +392,41 @@ devwire_back() {
     _p: int = msg1(nav, sel("popViewControllerAnimated:"), 1)
 }
 
-// `!tap WORDS`: the first row (or toolbar button) of a screen shown, the
-// top of its navigation, whose title or spoken label begins with WORDS,
-// tapped as a finger would; `!info WORDS`, the first such row's ⓘ.
+// `!scroll DY`: the list of the top sheet's screen (else the panel's top
+// screen's) scrolled DY points down (negative: up), within its content.
+devwire_scroll(b: []i8, from: int, to: int) {
+    at: int = from;
+    up: bool = at < to && b[at] as int == 45;
+    if (up) at = at + 1;
+    dy: int = 0;
+    while (at < to && b[at] as int >= 48 && b[at] as int <= 57) {
+        dy = dy * 10 + b[at] as int - 48;
+        at = at + 1
+    }
+    nav: int = top_presented();
+    if (nav == 0 || (msg1(nav, sel("isKindOfClass:"), cls("UINavigationController")) & 255) == 0) nav = bs_nav;
+    vc: int = if (nav == 0) 0 else msg(nav, sel("topViewController"));
+    t: int = 0;
+    for k in 0..UK_SLOTS
+        if (vc != 0 && uk_vcs[k] == vc) t = uk_tables[k];
+    if (t == 0) {
+        note("bible: driven: no list to scroll");
+        return
+    }
+    y: f64 = offset_y(t) + (if (up) -dy else dy) as f64;
+    l8_msg_hfa(hfa, t, sel("contentSize"), 0, 0, 0);
+    most: f64 = hfa[1] + bottom_inset(t) - view_height(t);
+    if (y > most) y = most;
+    if (y < -top_inset(t)) y = -top_inset(t);
+    _o: int = msg_ff(t, sel("setContentOffset:"), 0.0f64, y)
+}
+
+// `!tap WORDS`: the first row, button at its foot (or a menu's item of
+// one) or button at the left of its bar, of a screen shown at the top of
+// its navigation, whose title or spoken label begins with WORDS, tapped
+// as a finger would; else the panel's own close or Full Screen (Close
+// Panel, Full Screen, Beside the Page); `!info WORDS`, the first such
+// row's ⓘ.
 devwire_tap(
     b: []i8,
     from: int,
@@ -415,8 +465,43 @@ devwire_tap(
                     uk_effects();
                     return
                 }
+                // (A tool's menu's items, as if chosen from it: the panel's
+                // reader's Swap Panes, Full Screen, Close Panel.)
+                idx: int = 0;
+                while (idx < 64 && uk_menu_item(tool.menu, idx)) {
+                    if (devwire_begins(nsstring_at(bytes_address(uk_ui.pool) + uk_mi_b,
+                        uk_mi_e - uk_mi_b), words)) {
+                        release(words);
+                        uk_nav = nav;
+                        uk_wire_act(uk_ids[k], tool.action, uk_mi_arg, 0);
+                        uk_effects();
+                        return
+                    }
+                    idx = idx + 1
+                }
+            }
+            // (The button at the left of its bar: the panel's reader's
+            // name.)
+            if (uk_ui.left.n > 0 && devwire_begins(uk_text(uk_ui.left), words)) {
+                release(words);
+                uk_nav = nav;
+                uk_wire_act(uk_ids[k], uk_ui.left_action, 0, 0);
+                uk_effects();
+                return
             }
         }
+    }
+    // (The panel's own buttons, the skin's: its close, Full Screen.)
+    if (bs_shown && devwire_begins(nsstring(w_close_beside), words)) {
+        release(words);
+        _c: int = beside_close_tapped(app_obj, 0, 0);
+        return
+    }
+    if (bs_shown && (devwire_begins(nsstring(w_full_beside), words) || devwire_begins(nsstring(w_unfull_beside),
+        words))) {
+        release(words);
+        _f: int = beside_full_tapped(app_obj, 0, 0);
+        return
     }
     release(words);
     note("bible: driven: nothing shown to tap so")
@@ -442,6 +527,76 @@ devwire_state() {
     tb_str(" from core ");
     tb_int(from_core_n - from_core_at);
     note_ns(tb_ns())
+}
+
+// `!where`: each pane's place at its reading line, to the log: its
+// chapter, anchor and how far through; the line, the top inset and the
+// offset; and, for the anchors of the part at the line, where the window
+// keeps each one's start and where its text view lays it out now (a
+// difference: a place measured before its part was laid out as shown).
+devwire_where() {
+    for p in 0..PANES {
+        t: int = win_table[p];
+        at: WinPlace = win_place(p);
+        tb_n = 0;
+        tb_str("bible: where pane ");
+        tb_int(p);
+        if (t == 0 || !at.ok) {
+            tb_str(" none");
+            note_ns(tb_ns());
+            continue
+        }
+        tb_str(" c ");
+        tb_int(at.c);
+        tb_str(" i ");
+        tb_int(at.i);
+        tb_str(" part ");
+        tb_int((at.part * 1000.0f64) as int);
+        tb_str(" line ");
+        tb_int((at.line * 10.0f64) as int);
+        tb_str(" inset ");
+        tb_int((top_inset(t) * 10.0f64) as int);
+        tb_str(" offset ");
+        tb_int((offset_y(t) * 10.0f64) as int);
+        note_ns(tb_ns());
+        r: int = win_row_at(p, at.line);
+        if (r < 0)
+            continue;
+        x: int = wr(p, r);
+        s: int = rs_slot(rs_key(p, win_c[x], win_k[x]));
+        n: int = win_vn[x];
+        first: int = win_first_anchor(p, win_c[x], win_k[x]);
+        tb_n = 0;
+        tb_str("bible: where   row part ");
+        tb_int(win_k[x]);
+        tb_str(" verses ");
+        tb_int(n);
+        tb_str(" first anchor ");
+        tb_int(first);
+        tb_str(" top ");
+        tb_int(((win_y[x] - at.line) * 10.0f64) as int);
+        note_ns(tb_ns());
+        for j in 0..n {
+            y: f64 = win_y[x] + win_vy[x * WIN_VERSES_MOST + j];
+            if (y > at.line - 400.0f64 && y < at.line + 400.0f64) {
+                now: f64 = if (s >= 0 && range_rect(win_view[x], rs_vb2[s * VS_MOST + j],
+                    1)) win_y[x] + hfa[1] else -1.0f64;
+                tb_n = 0;
+                tb_str("bible: where   anchor ");
+                tb_int(first + j);
+                tb_str(" verse ");
+                tb_int(win_anchor_verse(p, win_c[x], first + j));
+                tb_str(" part's ");
+                tb_int(if (s >= 0) rs_v_num[s * VS_MOST + j] else -1);
+                tb_str(" kept ");
+                tb_int(((y - at.line) * 10.0f64) as int);
+                tb_str(" now ");
+                tb_int(((now - at.line) * 10.0f64) as int);
+                tb_str(" (tenths of a point from the line)");
+                note_ns(tb_ns())
+            }
+        }
+    }
 }
 
 // Whether bytes from to to of b are word.
@@ -542,6 +697,8 @@ devwire_frame(_self: int, _cmd: int, _link: int): int {
         devwire_glide_step(now)
     }
     dw_frame_last = now;
+    uilog_frame(now);
+    followlog_frame(now);
     0
 }
 

@@ -7,7 +7,7 @@
 // (UTF-8, `\n`-ended, fields split by tabs), as Android's skin does.
 import { runResumable, pausing } from "../../../../web/l8-runtime.js";
 import { Reloader, watchBuilds } from "../../../../web/reload.js";
-import { BY_VERSE, followPairs, followByVerse, commentFromVerses, versesFromComment, runChapter } from "./follow.js";
+import { PLACE_SLACK, newLinks, addLinks, bottomMove, topMove, glide, GLIDE_MOST } from "./follow.js";
 
 const meta = (n) => document.querySelector(`meta[name="${n}"]`)?.content || "";
 const DATA = "/read/data/" + meta("sb-data");
@@ -71,6 +71,8 @@ const files = new Map();
 // sent by hand: sbSend("...").)
 const DEBUG = location.search.includes("debug");
 if (DEBUG) window.sbSend = (line) => send(line);
+// (And a line taken as core's, for trying the skin alone: sbSaid("...").)
+if (DEBUG) window.sbSaid = (line) => said(line + "\n");
 
 function send(line) {
   if (DEBUG) console.log("→ " + line);
@@ -492,9 +494,21 @@ const CUSTOM_HIT = 5;
 const CUSTOM_SWATCHES = 6;
 const CUSTOM_FONT = 4;
 const CUSTOM_CARD = 11;
-// (Something coming, a download or a module being opened: its value is its
-// progress in thousandths, drawn as a bar at its end.)
+// (Something coming, a book's recordings: its value is its progress in
+// thousandths, drawn as a bar at its end.)
 const CUSTOM_DOWNLOAD = 7;
+
+// Go To (core/skin.l8's SCR_GOTO), aimed at the panel by its argument
+// (core/documents.l8's GOTO_PANEL; else at the page).
+const SCR_GOTO = 1;
+const GOTO_PANEL = 1;
+
+// A wide window's least width (read.css's min-width: 1000px): the panel
+// at the page's right, Go To a popover hanging from its opener, POPOVER_GAP
+// below it and at least POPOVER_MARGIN inside the window.
+const WIDE_PX = 1000;
+const POPOVER_GAP = 6;
+const POPOVER_MARGIN = 12;
 
 function screenLine(w) {
   const word = w.word(0);
@@ -526,7 +540,7 @@ function screenLine(w) {
       Object.assign(s, { intro: w.field(1), introRuns: parseRuns(w.field(2)), introQuote: w.fnum(3) === 1 });
       break;
     case "left":
-      Object.assign(s, { leftAction: w.fnum(1), left: w.field(2) });
+      Object.assign(s, { leftAction: w.fnum(1), left: w.field(2), leftIcon: w.field(3) });
       break;
     case "hero":
       Object.assign(s, { hero: w.field(1), heroScript: w.fnum(2), heroSub: w.field(3), heroLine: w.field(4), heroRuns: parseRuns(w.field(5)), heroLarge: w.fnum(6) === 1 });
@@ -785,6 +799,12 @@ function line(w) {
     case "toast":
       toast(w.field(1));
       break;
+    case "arriving":
+      arrival.show(w.num(1), w.num(2));
+      break;
+    case "arrived":
+      arrival.done(w.num(1));
+      break;
     case "announce":
       announce(w.field(1));
       break;
@@ -932,6 +952,38 @@ const bar = {
   },
 };
 
+// ---- a document arriving for a pane (SKINS.md, Arriving) ----
+// The only progress shown: a hairline along the bottom edge of the pane's
+// bar (the page's top bar, the panel's row), filled from the leading edge
+// to the thousandths come; faded out over ARRIVAL_FADE_MS once nothing is
+// on its way (gone at once where motion is reduced).
+const ARRIVAL_FADE_MS = 200;
+const arrival = {
+  // Pane p's hairline (read.css's .arrival), or null.
+  line(p) {
+    if (p === 0) return $(".bar .arrival");
+    return p === 1 ? $(".pbar .arrival", panel.besideBox) : null;
+  },
+  show(p, thousandths) {
+    const a = this.line(p);
+    if (!a) return;
+    for (const fading of a.getAnimations()) if (fading.id === "arrived") fading.cancel();
+    a.hidden = false;
+    a.style.transform = `scaleX(${Math.max(0, Math.min(1000, thousandths)) / 1000})`;
+  },
+  done(p) {
+    const a = this.line(p);
+    if (!a || a.hidden) return;
+    const gone = () => {
+      a.hidden = true;
+      a.style.transform = "";
+    };
+    if (reducedMotion()) return gone();
+    const fade = a.animate([{ opacity: 1 }, { opacity: 0 }], { duration: ARRIVAL_FADE_MS, easing: "ease-out", id: "arrived" });
+    fade.onfinish = gone;
+  },
+};
+
 bar.titleButton.addEventListener("click", () => send("tap goto"));
 bar.titleButton.addEventListener("contextmenu", (e) => {
   e.preventDefault();
@@ -989,6 +1041,15 @@ function makeReader(p, main, view, opts) {
   // part]) and, for a run of chapters without comments, the run.
   chapters: new Map(),
   asked: new Set(),
+  // Every part measured since its document came, and how many bytes it is
+  // (guessParts).
+  measured: new Map(),
+  // Parts measured ahead, out of sight ("c:k" to the width they were
+  // measured at, their height and where each anchor begins in them), and
+  // the one asked for to be (aheadNext).
+  ahead: new Map(),
+  aheadAsked: null,
+  aheadAskedAt: 0,
   // A `go` waiting for its part.
   pending: null,
   said: { c: -1 },
@@ -1005,9 +1066,6 @@ function makeReader(p, main, view, opts) {
   restTimer: 0,
   wakeTimer: 0,
   wheelTimer: 0,
-  // The comment step last taken, following by comment (kept until the
-  // leader moves another way).
-  stepped: null,
 
   setCount(n) {
     this.count = n;
@@ -1080,6 +1138,9 @@ function makeReader(p, main, view, opts) {
     const links = [];
     const marks = new Map();
     const anchors = [];
+    // (How many bytes each of the chapter's parts is: following guesses
+    // where those not laid out would be by them.)
+    const sizes = [];
     let gap = null;
     let coming = false;
     for (const w of lines) {
@@ -1088,11 +1149,12 @@ function makeReader(p, main, view, opts) {
       else if (x === "verse") verses.push([w.num(1), w.num(2), w.num(3)]);
       else if (x === "link") links.push([w.num(1), w.num(2), w.num(3), Number(w.word(4))]);
       else if (x === "mark") marks.set(w.num(1), { hex: w.word(2), bm: w.num(3) === 1, note: w.num(4) === 1 });
-      else if (x === "anchor") anchors.push([w.num(1), w.num(2)]);
+      else if (x === "anchor") anchors.push([w.num(1), w.num(2), w.num(3)]);
+      else if (x === "sizes") for (let i = 1; w.word(i) !== ""; i++) sizes.push(w.num(i));
       else if (x === "gap") gap = [w.num(1), w.num(2)];
       else if (x === "coming") coming = true;
     }
-    if (n > 0) this.chapters.set(c, { n, anchors, gap });
+    if (n > 0) this.chapters.set(c, { n, anchors, gap, sizes });
     if (gap) for (let x = gap[0]; x <= gap[1]; x++) if (x !== c) this.chapters.set(x, { n: 1, anchors: [], gap });
     // (Its place: held for it, or for its chapter's last part, or for a
     // chapter of its run.)
@@ -1107,6 +1169,12 @@ function makeReader(p, main, view, opts) {
     }
     this.asked.delete(this.key(c, k));
     if (!s) {
+      // (Asked for to be measured ahead: measured out of sight.)
+      if (this.aheadAsked === this.key(c, k)) {
+        this.aheadAsked = null;
+        if (!coming && !gap) this.measureAhead(c, k, layChapter(text, spans, verses, links, marks));
+        followAheadSoon();
+      }
       if (this.pending) this.finishPending();
       return;
     }
@@ -1138,7 +1206,11 @@ function makeReader(p, main, view, opts) {
   // `forget P C`: its parts of chapter c (-1: all) asked for again, those
   // shown kept until they come.
   forget(c) {
-    if (c < 0) this.chapters.clear();
+    this.ahead.clear();
+    if (c < 0) {
+      this.chapters.clear();
+      this.measured.clear();
+    }
     for (const s of [...this.sections()]) {
       const sc = +s.dataset.c;
       if (c >= 0 && sc !== c) continue;
@@ -1206,6 +1278,7 @@ function makeReader(p, main, view, opts) {
   // The pane's width changed: what was at the reading line kept there, as
   // far through its part as it was.
   resized() {
+    this.fitHeld();
     const spot = this.spot;
     if (spot && spot.s.isConnected) {
       const r = spot.s.getBoundingClientRect();
@@ -1217,6 +1290,24 @@ function makeReader(p, main, view, opts) {
 
   // The part at the reading line as last found, and how far through it.
   spot: null,
+
+  // The parts that only hold a place (a part still to come, a run of
+  // chapters without comments) as tall as the pane is now (SKINS.md).
+  fitHeld() {
+    const h = `${this.view.height()}px`;
+    for (const s of this.sections()) if (s.style.minHeight) s.style.minHeight = h;
+  },
+
+  // Its words laid out again at another size (the panel filling the window
+  // or back beside the page): the place it told last (at rest, where it
+  // is) put back at its reading line, held there as a `go` is. (Not from
+  // how far down it was scrolled: that moves with every line above it.)
+  relaid() {
+    this.fitHeld();
+    const t = this.told;
+    if (this.pending || !t) this.resized();
+    else this.go(t.c, t.i, t.f, 0);
+  },
 
   // ---- places ----
   // Chapter c's shape as it is laid out (follow.js's): each anchor's start
@@ -1243,6 +1334,188 @@ function makeReader(p, main, view, opts) {
     return { starts, top, end, em: emPx() };
   },
 
+  // Every part of chapters fromC to toC not laid out, where it would begin
+  // and how tall it would be: as tall for its length as the laid-out parts
+  // are on average (core's `sizes`, each part's bytes; a chapter's not told
+  // yet, their mean height), the parts between it and what is laid out
+  // counted too, however many (a commentary's chapter may be hundreds; at
+  // most GUESS_WALK_MOST walked each way). Following goes by anchors not
+  // laid out yet as well (follow.js; how far a guess was out is closed as
+  // the leader moves).
+  guessParts(fromC, toC) {
+    const laid = [...this.sections()].filter((s) => s.laid);
+    const guess = { parts: [], mean: this.view.height(), perByte: 0 };
+    if (!laid.length) return guess;
+    const bytesOf = (c, k) => this.chapters.get(c)?.sizes?.[k] || 0;
+    const plain = laid.filter((s) => !s.style.minHeight);
+    if (plain.length) guess.mean = plain.reduce((t, s) => t + s.getBoundingClientRect().height, 0) / plain.length;
+    // (How tall a byte is, over every part of the document measured so
+    // far, not only those laid out now: a few parts' say varies.)
+    for (const s of plain) {
+      const b = bytesOf(+s.dataset.c, +s.dataset.k);
+      if (b > 0) this.measured.set(`${s.dataset.c}:${s.dataset.k}`, [s.getBoundingClientRect().height, b]);
+    }
+    let sized = 0;
+    let bytes = 0;
+    for (const [h, b] of this.measured.values()) {
+      sized += h;
+      bytes += b;
+    }
+    if (bytes > 0) guess.perByte = sized / bytes;
+    const width = plain.length ? plain[0].getBoundingClientRect().width : 0;
+    guess.width = width;
+    const height = (c, k) => {
+      const known = this.aheadAt(c, k, width);
+      if (known) return known.h;
+      return bytesOf(c, k) > 0 && guess.perByte > 0 ? bytesOf(c, k) * guess.perByte : guess.mean;
+    };
+    let [c, k] = [+laid[laid.length - 1].dataset.c, +laid[laid.length - 1].dataset.k];
+    let y = this.contentY(laid[laid.length - 1].getBoundingClientRect().bottom);
+    for (let n = 0; n < GUESS_WALK_MOST; n++) {
+      const next = this.after(c, k);
+      if (!next || next[1] === "last" || next[0] > toC) break;
+      [c, k] = next;
+      const h = height(c, k);
+      if (c >= fromC) guess.parts.push({ c, k, y, h });
+      y += h;
+    }
+    [c, k] = [+laid[0].dataset.c, +laid[0].dataset.k];
+    y = this.contentY(laid[0].getBoundingClientRect().top);
+    for (let n = 0; n < GUESS_WALK_MOST; n++) {
+      const prev = this.before(c, k);
+      if (!prev || prev[1] === "last") break;
+      const gap = this.chapters.get(prev[0])?.gap;
+      if ((gap ? gap[1] : prev[0]) < fromC) break;
+      [c, k] = prev;
+      const h = height(c, k);
+      y -= h;
+      if (c <= toC) guess.parts.push({ c, k, y, h });
+    }
+    return guess;
+  },
+
+  // Chapter c's shape as following takes it: anchors not laid out where
+  // they would be by guess (their bytes into their part, or spread through
+  // it), its top and end too (not a run of chapters without comments: one
+  // part, there or not).
+  shapeGuessed(c, guess) {
+    const sh = this.shape(c);
+    const info = this.chapters.get(c);
+    if (!info || info.gap) return sh;
+    // (Each part's first anchor, at once: a long chapter has many.)
+    const firstOf = new Array(info.n + 1).fill(info.anchors.length);
+    for (let i = info.anchors.length - 1; i >= 0; i--) firstOf[Math.min(info.anchors[i][1], info.n)] = i;
+    for (let k = info.n - 1; k >= 0; k--) firstOf[k] = Math.min(firstOf[k], firstOf[k + 1]);
+    for (const g of guess.parts) {
+      if (g.c !== c) continue;
+      if (g.k === 0 && sh.top == null) sh.top = g.y;
+      if (g.k + 1 >= info.n && sh.end == null) sh.end = g.y + g.h;
+      const bytes = info.sizes?.[g.k] || 0;
+      const first = firstOf[Math.min(g.k, info.n)];
+      const last = firstOf[Math.min(g.k + 1, info.n)];
+      const known = this.aheadAt(c, g.k, guess.width);
+      for (let i = first; i < last; i++) {
+        if (sh.starts[i] != null) continue;
+        if (known && i - first < known.ys.length) {
+          sh.starts[i] = g.y + known.ys[i - first];
+          continue;
+        }
+        const into = bytes > 0 ? Math.min(1, (info.anchors[i][2] || 0) / bytes) : (i - first) / (last - first);
+        sh.starts[i] = g.y + g.h * into;
+      }
+    }
+    return sh;
+  },
+
+  // ---- parts measured ahead ----
+  // While the panes rest, the parts of the chapters following goes by that
+  // aren't in the window are measured out of sight, nearest first
+  // (followAhead), so that a flick finds them known, not guessed: laid out
+  // in a section put after the window's, hidden and out of the flow, and
+  // taken away again at once. Nothing shown moves; only guesses change.
+  aheadAt(c, k, width) {
+    const known = this.ahead.get(`${c}:${k}`);
+    return known && Math.abs(known.w - width) < 0.5 ? known : null;
+  },
+
+  measureAhead(c, k, laid) {
+    const like = [...this.sections()].find((s) => s.laid && !s.style.minHeight);
+    if (!like) return;
+    const r = like.getBoundingClientRect();
+    const s = el("section", "part");
+    s.classList.toggle("k0", k === 0);
+    s.style.cssText = `position: absolute; visibility: hidden; left: ${like.offsetLeft}px; top: 0; width: ${r.width}px;`;
+    s.replaceChildren(laid.frag);
+    this.main.appendChild(s);
+    const top = s.getBoundingClientRect().top;
+    const ys = laid.anchors.map((a) => (a ? a.getBoundingClientRect().top - top : 0));
+    this.ahead.set(`${c}:${k}`, { w: r.width, h: s.getBoundingClientRect().height, ys });
+    s.remove();
+  },
+
+  // The nearest part of chapters fromC to toC not in the window nor
+  // measured asked for, to be measured as it comes (each way from the
+  // window's ends in turn); whether one was.
+  aheadNext(fromC, toC) {
+    // (One asked for at a time; one not come in two seconds let go.)
+    if (this.aheadAsked && clock() - this.aheadAskedAt < 2000) return true;
+    this.aheadAsked = null;
+    const laid = [...this.sections()].filter((s) => s.laid);
+    if (!laid.length) return false;
+    const width = laid[0].getBoundingClientRect().width;
+    const wanted = (c, k) => {
+      if (this.chapters.get(c)?.gap || this.findPart(c, k) || this.aheadAt(c, k, width) || this.asked.has(this.key(c, k))) return false;
+      this.aheadAsked = this.key(c, k);
+      this.aheadAskedAt = clock();
+      this.want(c, k);
+      return true;
+    };
+    let on = [+laid[laid.length - 1].dataset.c, +laid[laid.length - 1].dataset.k];
+    let back = [+laid[0].dataset.c, +laid[0].dataset.k];
+    for (let n = 0; n < GUESS_WALK_MOST && (on || back); n++) {
+      if (on) {
+        const next = this.after(on[0], on[1]);
+        on = next && next[1] !== "last" && next[0] <= toC ? next : null;
+        if (on && on[0] >= fromC && wanted(on[0], on[1])) return true;
+      }
+      if (back) {
+        const prev = this.before(back[0], back[1]);
+        const gap = prev && this.chapters.get(prev[0])?.gap;
+        back = prev && prev[1] !== "last" && (gap ? gap[1] : prev[0]) >= fromC ? prev : null;
+        if (back && back[0] <= toC && wanted(back[0], back[1])) return true;
+      }
+    }
+    return false;
+  },
+
+  // A position down the content kept as the laid-out part it is in and how
+  // far below that part's top (null: none laid out), and back: so that
+  // parts coming and going above leave it the same place.
+  spotOf(y) {
+    let best = null;
+    for (const s of this.sections()) {
+      if (!s.laid) continue;
+      const top = this.contentY(s.getBoundingClientRect().top);
+      if (!best || top <= y) best = { s, dy: y - top };
+      if (top > y) break;
+    }
+    return best;
+  },
+
+  spotY(spot) {
+    return spot && spot.s.isConnected && spot.s.laid ? this.contentY(spot.s.getBoundingClientRect().top) + spot.dy : null;
+  },
+
+  // The chapter of the part at viewport y (-1: none laid out there).
+  chapterAt(y) {
+    for (const s of this.sections()) {
+      if (!s.laid) continue;
+      const r = s.getBoundingClientRect();
+      if (r.bottom > y) return r.top <= y ? +s.dataset.c : -1;
+    }
+    return -1;
+  },
+
   // The index of chapter info's first anchor in part k.
   firstAnchor(info, k) {
     let i = 0;
@@ -1251,25 +1524,30 @@ function makeReader(p, main, view, opts) {
   },
 
   // The place at the reading line: its chapter, the anchor whose span holds
-  // it (-1 above the first), how far through (0 to 1), and the line down
-  // the content (null: not laid out there).
+  // it (-1 above the first), how far through (thousandths), and the line
+  // down the content (null: not laid out there). By follow.js's linePlace
+  // rule: a part or an anchor beginning within PLACE_SLACK below the line
+  // is the one the line is at, so that a pane sent to a chapter's top (its
+  // first part's top at the reading line) tells that chapter, never the
+  // one before it, whatever the scroll's rounding.
   placeAt() {
     const y = this.lineY();
     for (const s of this.sections()) {
       const r = s.getBoundingClientRect();
-      if (r.bottom <= y) continue;
-      if (!s.laid || r.top > y) return null;
-      this.spot = { s, frac: (y - r.top) / Math.max(1, r.height) };
+      const next = s.nextElementSibling;
+      if (r.bottom <= y || (r.bottom <= y + PLACE_SLACK && next && next.laid)) continue;
+      if (!s.laid || r.top > y + PLACE_SLACK) return null;
+      this.spot = { s, frac: Math.max(0, y - r.top) / Math.max(1, r.height) };
       const c = +s.dataset.c;
       const line = this.contentY(y);
       const sh = this.shape(c);
       let i = -1;
-      for (let x = 0; x < sh.starts.length; x++) if (sh.starts[x] != null && sh.starts[x] <= line) i = x;
+      for (let x = 0; x < sh.starts.length; x++) if (sh.starts[x] != null && sh.starts[x] <= line + PLACE_SLACK) i = x;
       const a = i < 0 ? (sh.top ?? this.contentY(r.top)) : sh.starts[i];
       let b = i + 1 < sh.starts.length ? sh.starts[i + 1] : sh.end;
       if (b == null) b = this.contentY(r.bottom);
-      const part = b - a < 1 ? 0 : Math.min(1, Math.max(0, (line - a) / (b - a)));
-      return { c, i, part, line };
+      const frac = b - a < 1 ? 0 : Math.trunc(((line - a) / (b - a)) * 1000 + 0.5);
+      return { c, i, frac: Math.max(0, Math.min(999, frac)), line };
     }
     return null;
   },
@@ -1279,10 +1557,10 @@ function makeReader(p, main, view, opts) {
     if (this.pending) return;
     const at = this.placeAt();
     if (!at) return;
-    const frac = Math.round(at.part * 1000);
+    const frac = at.frac;
     const t = this.told;
     if (!always && t && t.c === at.c && t.i === at.i) return;
-    this.told = { c: at.c, i: at.i };
+    this.told = { c: at.c, i: at.i, f: frac };
     send(`at ${this.p} ${at.c} ${at.i} ${frac}`);
     if (at.c !== this.said.c) {
       this.said = { c: at.c };
@@ -1299,6 +1577,8 @@ function makeReader(p, main, view, opts) {
     if (c < 0 || c >= this.count) return;
     this.settle = null;
     this.stopGlide();
+    // (A jump: both panes held where it puts them: followJumped.)
+    followJumped();
     this.pending = { c, i, f, mode };
     this.finishPending();
   },
@@ -1358,17 +1638,6 @@ function makeReader(p, main, view, opts) {
     this.scrollBy(this.distanceTo(t.c, t.s, t.i, t.f));
   },
 
-  // The follower's reading line to y down its content, this frame.
-  lineTo(y) {
-    this.settle = null;
-    const d = y - this.contentY(this.lineY());
-    if (Math.abs(d) < 0.25) return;
-    this.stopGlide();
-    this.scrollBy(d);
-    this.extend();
-    this.tell(false);
-  },
-
   // A glide of its own: its scrolls not a finger's until it ends.
   glideTimer: 0,
   ownGlide: false,
@@ -1408,10 +1677,9 @@ function makeReader(p, main, view, opts) {
   },
 
   // ---- moving ----
-  // At rest: told, with the last chapter whose end is in sight; leading, the
-  // other settled at its place.
+  // At rest: told, with the last chapter whose end is in sight. (The other
+  // has followed it frame by frame, and isn't moved now it rests.)
   rested() {
-    const was = this.moving;
     this.moving = false;
     this.gliding = false;
     const bottom = this.view.bottom();
@@ -1426,7 +1694,7 @@ function makeReader(p, main, view, opts) {
     }
     this.tell(true);
     send(`rest ${this.p} ${endsHi} ${clock()}`);
-    if (was && leader === this.p) follow(this);
+    followAheadSoon();
   },
 
   // A finger (or a wheel, a key) on it: it leads.
@@ -1434,10 +1702,10 @@ function makeReader(p, main, view, opts) {
     this.finger = true;
     this.settle = null;
     this.stopGlide();
-    if (leader !== this.p) {
-      leader = this.p;
-      for (const r of panes) r.stepped = null;
-    }
+    followHeld = false;
+    if (this.p === 1 && panel.full) followFullReadOn = true;
+    if (followGlide && followGlide.r === this) stopFollowGlide();
+    leader = this.p;
     if (!this.moving) {
       this.moving = true;
       send(`moving ${this.p} ${clock()}`);
@@ -1457,12 +1725,14 @@ function makeReader(p, main, view, opts) {
   },
 
   scrolled() {
+    // (Leading, the other moved with it now, in the frame the scroll is
+    // drawn in, whatever moved it.)
+    if (leader === this.p) follow(this);
     if (!this.frame) {
       this.frame = requestAnimationFrame(() => {
         this.frame = 0;
         this.extend();
         this.tell(false);
-        if (this.self === 0 && leader === this.p && this.moving) follow(this);
       });
     }
     clearTimeout(this.restTimer);
@@ -1567,63 +1837,185 @@ function makeReader(p, main, view, opts) {
   };
 }
 
-// The leader moved: the other pane with it, by the link map of the
-// leader's chapter (SKINS.md, Panes: Linked). Not laid out there yet: there
-// at once, by the map, and with it on the next frame.
-function follow(lead) {
-  const other = panes[1 - lead.p];
-  if (!linked || !besideReader.main.isConnected) return;
-  const at = lead.placeAt();
-  if (!at) return;
-  const map = linkMaps.get(at.c);
-  if (!map) return;
-  const page = lead.p === 0 ? lead : other;
-  const panel = lead.p === 0 ? other : lead;
-  if (map.mode === BY_VERSE) {
-    const y = followByVerse(followPairs(map, page.shape(at.c), panel.shape(at.c), lead.p === 0), at.line, emPx(), emPx());
-    if (y != null) other.lineTo(y);
-    else if (!other.pending) other.go(at.c, mappedAnchor(map, at.i, lead.p === 0), 0, 0);
-    return;
-  }
-  // (By comment, the commentary in pane map.comments, the version in the
-  // other: not while the version glides after a flick.)
-  const versionLeads = lead.p !== map.comments;
-  const comments = panes[map.comments];
-  if (versionLeads && lead.gliding) return;
-  const there = other.placeAt();
-  const otherI = there && there.c === at.c ? there.i : -2;
-  // (A chapter of a commentary's run without comments: the version
-  // leading, its one part; the commentary leading, the run's chapter
-  // nearest the version.)
-  const run = comments.chapters.get(at.c)?.gap;
-  if (run) {
-    if (versionLeads) {
-      if (!(there && there.c === run[0])) other.go(at.c, -1, 0, 1);
-    } else {
-      const to = runChapter(run[0], run[1], there ? there.c : run[0]);
-      if (to !== null && other.stepped !== `run:${to}`) {
-        other.stepped = `run:${to}`;
-        other.go(to, -1, 0, 1);
-      }
-    }
-    return;
-  }
-  const step = versionLeads ? commentFromVerses(map, at.i, otherI, comments.shape(at.c), there ? there.line : 0) : versesFromComment(map, at.i, otherI);
-  const key = `${at.c}:${step}`;
-  if (step === null || other.stepped === key) return;
-  other.stepped = key;
-  other.go(at.c, step, 0, 1);
+// The parts walked each way past what is laid out at most, guessing where
+// they would be, for following.
+const GUESS_WALK_MOST = 4000;
+
+// The chapters either side of each pane's whose maps following goes by
+// (core sends those of two either side as the place comes near them).
+const FOLLOW_CHAPTERS = 2;
+
+// From a jump until a hand moves either pane, both panes are held where
+// the jump put them (core's `go` for each, as a `go` holds its pane's
+// place): the rule doesn't move either, so that Swap Panes and the way back
+// leave both where they were.
+let followHeld = false;
+
+// Whether a hand moved the panel while it filled the window: beside the
+// page again, the page follows it (else the page leads, and stays).
+let followFullReadOn = false;
+
+// While both panes rest, linked: the parts following goes by measured
+// ahead, a part a turn (aheadNext).
+let followAheadTimer = 0;
+
+function followAheadSoon() {
+  clearTimeout(followAheadTimer);
+  followAheadTimer = setTimeout(followAhead, AHEAD_MS);
 }
 
-// The follower's anchor for the leader's anchor i, by a version's map: the
-// match at or before it.
-function mappedAnchor(map, i, pageLeads) {
-  let best = -1;
-  for (let k = 0; k < map.j.length; k++) {
-    const from = pageLeads ? map.i0[k] : map.j[k];
-    if (from <= i) best = pageLeads ? map.j[k] : map.i0[k];
+function followAhead() {
+  if (!linked || !besideReader.main.isConnected || followGlide || panes.some((r) => r.moving || r.pending)) return followAheadSoon();
+  const [from, to] = followChapters();
+  if (from > to) return followAheadSoon();
+  if (panes[1 - leader].aheadNext(from, to) || panes[leader].aheadNext(from, to)) followAheadSoon();
+  // (Both at rest: the rule kept as what has been measured tells more.)
+  follow(panes[leader]);
+}
+
+// How long between parts measured ahead (ms).
+const AHEAD_MS = 40;
+
+// Following once this turn's lines are taken (a part come may bring more:
+// one following for them all, never inside another's).
+let followFrame = 0;
+
+function followSoon() {
+  if (!followFrame) followFrame = requestAnimationFrame(() => {
+    followFrame = 0;
+    follow(panes[0]);
+  });
+}
+
+// A jump (either pane's `go`: Go To, a link, Swap Panes): both panes held
+// where it puts them until a hand moves either.
+function followJumped() {
+  followHeld = true;
+  stopFollowGlide();
+}
+
+// Each pane's top edge, down its content, and how tall its sight is.
+const sightTop = (r) => r.contentY(r.view.inset());
+const sightHeight = (r) => r.view.bottom() - r.view.inset();
+
+// The chapters following goes by: two either side of each pane's at its
+// top edge.
+function followChapters() {
+  let from = Infinity;
+  let to = -Infinity;
+  for (const r of panes) {
+    const c = r.chapterAt(r.view.inset());
+    if (c < 0) continue;
+    from = Math.min(from, c - FOLLOW_CHAPTERS);
+    to = Math.max(to, c + FOLLOW_CHAPTERS);
   }
-  return best;
+  return [from, to];
+}
+
+// A pane moved by a hand (or a jump): the other moved by the rule, at once
+// if the rule doesn't hold (SKINS.md, Panes: Linked; follow.js's rules, the
+// same as core/follow.l8's): the section at the top pane's top edge has
+// one linked with it as much in sight in the bottom pane as can be. The
+// page is the top pane: moved, the panel moves; the panel moved, the page.
+let following = false;
+
+function follow(lead) {
+  if (!linked || !besideReader.main.isConnected || following || followHeld) return;
+  following = true;
+  try {
+    followNow(lead);
+  } finally {
+    following = false;
+  }
+}
+
+// Whether the panel fills the window (over the page).
+const panelFills = () => panel.full;
+
+function followNow(lead) {
+  const page = panes[0];
+  const panel = panes[1];
+  const [from, to] = followChapters();
+  if (from > to) return;
+  const pageGuess = page.guessParts(from, to);
+  const panelGuess = panel.guessParts(from, to);
+  const links = newLinks();
+  for (let c = from; c <= to; c++) {
+    const map = linkMaps.get(c);
+    if (map) addLinks(links, map, page.shapeGuessed(c, pageGuess), panel.shapeGuessed(c, panelGuess));
+  }
+  const pageLeads = lead.p === 0;
+  const moving = pageLeads ? panel : page;
+  const y = pageLeads
+    ? bottomMove(links, sightTop(page), sightTop(panel), sightHeight(panel))
+    : topMove(links, sightTop(page), sightHeight(page), sightTop(panel), sightHeight(panel));
+  // (Within a pixel: as near as a scroll's whole pixels come.)
+  // (The page isn't moved while the panel fills the window over it: it is
+  // where it was when the panel is beside it again.)
+  if (y === null || Math.abs(y - sightTop(moving)) < 1 || (moving === page && panelFills())) return;
+  // (Moved by following now: a `go`'s place held for it let go.)
+  moving.settle = null;
+  if (reducedMotion()) {
+    stopFollowGlide();
+    moving.scrollBy(y - sightTop(moving));
+    moving.extend();
+    moving.tell(false);
+  } else followGlideTo(moving, y);
+}
+
+// The pane following glides (its sight's top going to a place kept as a
+// spot in a part, so that parts coming and going above it leave it the
+// same), a frame at a time by follow.js's glide; a new place mid-glide is
+// glided to from where it is.
+let followGlide = null;
+
+function followGlideTo(r, to) {
+  if (followGlide && followGlide.r !== r) stopFollowGlide();
+  const spot = r.spotOf(to);
+  if (followGlide) {
+    // (There at most GLIDE_MOST after its place was last new.)
+    const was = r.spotY(followGlide.to);
+    if (was === null || Math.abs(to - was) > 0.5) followGlide.new = performance.now();
+    followGlide.to = spot;
+    return;
+  }
+  // (Its first step now, in the frame the rule broke in.)
+  followGlide = { r, to: spot, at: performance.now() - FRAME_MS, new: performance.now(), frame: 0 };
+  followGlideFrame(performance.now());
+}
+
+// A frame's time, for a glide's first step (ms).
+const FRAME_MS = 1000 / 60;
+
+function followGlideFrame(now) {
+  const g = followGlide;
+  if (!g) return;
+  const r = g.r;
+  const from = sightTop(r);
+  const to = r.spotY(g.to);
+  if (to === null) {
+    followGlide = null;
+    return;
+  }
+  const seconds = Math.min(0.1, (now - g.at) / 1000);
+  const next = glide(from, to, seconds, GLIDE_MOST - ((now - g.new) / 1000 - seconds));
+  g.at = now;
+  r.scrollBy(next - from);
+  const moved = sightTop(r);
+  r.extend();
+  r.tell(false);
+  // (There, or held at its content's end: over.)
+  const at = sightTop(r);
+  if (Math.abs(at - (r.spotY(g.to) ?? at)) <= 0.5 || (Math.abs(next - from) >= 0.1 && Math.abs(at - from) < 0.05)) {
+    followGlide = null;
+    return;
+  }
+  g.frame = requestAnimationFrame(followGlideFrame);
+}
+
+function stopFollowGlide() {
+  if (followGlide) cancelAnimationFrame(followGlide.frame);
+  followGlide = null;
 }
 
 const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -1637,7 +2029,7 @@ const windowView = {
   origin: () => 0,
   // (Above the panel, when it is under the page.)
   bottom: () => {
-    const p = $(".panel");
+    const p = panel.besideBox;
     const r = p && !p.hidden ? p.getBoundingClientRect() : null;
     return r && r.left < 1 && r.top > barHeight() ? r.top : innerHeight;
   },
@@ -1668,6 +2060,12 @@ const reader = makeReader(0, $("#reader"), windowView, { tap: true, address: tru
 // say where it goes before that).
 const besideReader = makeReader(1, el("div", "preader"), elementView(document.body), { tap: false, address: false });
 const panes = [reader, besideReader];
+
+// A span's paragraph (core/text.l8's PARA_): its kind (the pk classes)
+// below PARA_KINDS; plus PARA_KINDS with a stanza's break before it; plus
+// PARA_TIGHT followed by its apparatus.
+const PARA_KINDS = 8;
+const PARA_TIGHT = 16;
 
 // A part laid out as the page's paragraphs: each line of its text a
 // paragraph (its kind from its runs), each run a span in its style, with
@@ -1714,7 +2112,8 @@ function layChapter(text, spans, verses, links, marks) {
     const sp = si < spans.length && spans[si][0] <= a ? spans[si] : null;
     if (sp && !paraSet) {
       const para = sp[3];
-      p.className = `pk${para % 16}${para >= 16 ? " tight" : ""}`;
+      const kind = para % PARA_KINDS;
+      p.className = `pk${kind}${para & PARA_KINDS ? " stanza" : ""}${para & PARA_TIGHT ? " tight" : ""}`;
       paraSet = true;
     }
     const span = el("span", sp ? `s${sp[2]}` : "", text.slice(a, b));
@@ -1748,15 +2147,94 @@ addEventListener("resize", () => {
   for (const r of panes) r.resized();
 });
 
+// The versions an address can name (/read/kjv/john/3): the bundled ones.
+// A version downloaded from the catalog isn't named, so the address
+// (/read/john/3) opens in the version kept, as it is read now, not the BSB.
+const ADDRESS_VERSIONS = ["bsb", "kjv", "web", "asv", "ylt", "esv"];
+
 // The address: the place's chapter, as the browser keeps it (no new entry).
 function address(c) {
   const a = chapterAddress(c);
-  const v = /^[A-Z]{3}$/.test(bar.versionWord) ? bar.versionWord.toLowerCase() : "bsb";
-  if (a) history.replaceState(history.state, "", `/read/${v}/${a}`);
+  const word = bar.versionWord.toLowerCase();
+  const v = ADDRESS_VERSIONS.includes(word) ? `${word}/` : "";
+  if (a) history.replaceState(history.state, "", `/read/${v}${a}`);
 }
 
 // ---- menus ----
 let menuOpen = null;
+
+// Parent's children made those given, keeping each child that is already
+// the same (equal nodes: the same words, classes and what they do, as
+// data-act says), so an unchanged row or button is never removed and put
+// back. Whole children are compared, in order; a control is the same only
+// if it is set the same (a switch's state, a slider's value: properties,
+// not attributes).
+const CONTROLS = "input, select, progress, textarea";
+
+function controlsSet(e) {
+  if (e.nodeType !== Node.ELEMENT_NODE) return "";
+  const all = e.matches(CONTROLS) ? [e] : [...e.querySelectorAll(CONTROLS)];
+  return all.map((c) => `${c.value}|${c.checked}`).join(" ");
+}
+
+function morphChildren(parent, nodes) {
+  const old = [...parent.childNodes];
+  for (let i = 0; i < nodes.length; i++) {
+    const was = old[i];
+    const now = nodes[i];
+    if (was && was.isEqualNode(now) && controlsSet(was) === controlsSet(now)) continue;
+    // (The same words but for a count: its text changed where it is. The
+    // same element, with the same attributes, so the same action: its
+    // children made those given in turn.)
+    if (was && was.nodeType === Node.TEXT_NODE && now.nodeType === Node.TEXT_NODE) was.nodeValue = now.nodeValue;
+    else if (was && was.nodeType === Node.ELEMENT_NODE && !was.matches(CONTROLS) && was.cloneNode(false).isEqualNode(now.cloneNode(false))) morphChildren(was, [...now.childNodes]);
+    else if (was) parent.replaceChild(now, was);
+    else parent.appendChild(now);
+  }
+  for (let i = nodes.length; i < old.length; i++) old[i].remove();
+}
+
+// The longest the panel waits, laid out out of sight, for its reader to
+// come to its place before it slides in anyway (ms).
+const PANEL_COMPOSE_MS = 700;
+const PANEL_OPENING_MS = 300;
+// The panel under the page, out of sight past the window's foot: its
+// height, and the page's soft foot over it (read.css, 32px over its 1px
+// divider).
+const UNDER_AWAY = "translateY(calc(100% + 33px))";
+
+// ---- coming and going (as iOS's views do through UIKit: nothing pops) ----
+// Element e shown, coming in from `from` (keyframe values: opacity 0 and a
+// transform), over ms with curve; with reduced motion, by its opacity
+// alone. A going animation still running on it is let go first.
+const EASE_OUT = "cubic-bezier(0.2, 0.8, 0.2, 1)";
+
+function comeIn(e, from, ms, easing = EASE_OUT) {
+  e.leaving?.cancel();
+  e.leaving = null;
+  e.hidden = false;
+  const first = reducedMotion() ? { opacity: 0 } : { opacity: 0, ...from };
+  e.animate([first, { opacity: 1, transform: "none" }], { duration: ms, easing });
+}
+
+// Element e going: animated to `to`, then hidden, unless it is shown
+// again meanwhile (comeIn lets the animation go); after() then runs.
+function goOut(e, to, ms, after = () => {}, easing = "ease-in") {
+  if (e.hidden) return after();
+  // (From where it is: still coming in, it turns back from there.)
+  const style = getComputedStyle(e);
+  const first = { opacity: style.opacity, transform: style.transform };
+  for (const a of e.getAnimations()) a.cancel();
+  const last = reducedMotion() ? { opacity: 0 } : { opacity: 0, ...to };
+  const a = e.animate([first, last], { duration: ms, easing });
+  e.leaving = a;
+  a.onfinish = () => {
+    if (e.leaving !== a) return;
+    e.leaving = null;
+    e.hidden = true;
+    after();
+  };
+}
 
 function popup(anchor, items) {
   closeMenu();
@@ -1779,12 +2257,16 @@ function popup(anchor, items) {
   const below = r.bottom + 4;
   m.style.top = (below + m.offsetHeight < innerHeight ? below : Math.max(8, r.top - m.offsetHeight - 4)) + "px";
   menuOpen = m;
+  // (Grown from its button.)
+  m.style.transformOrigin = `${r.left + r.width / 2 - parseFloat(m.style.left)}px ${below + m.offsetHeight < innerHeight ? "0" : "100%"}`;
+  comeIn(m, { transform: "scale(0.96)" }, 120);
   m.querySelector("button")?.focus();
 }
 
 function closeMenu() {
-  if (menuOpen) menuOpen.remove();
+  const m = menuOpen;
   menuOpen = null;
+  if (m) goOut(m, { transform: "scale(0.96)" }, 100, () => m.remove());
 }
 
 addEventListener("pointerdown", (e) => {
@@ -1792,13 +2274,17 @@ addEventListener("pointerdown", (e) => {
 });
 
 // ---- the panel: core's screens ----
-// Beside the reader on a wide window, over it on a narrow one; a stack of
-// screens, the top one shown, its Back the browser's too.
+// Two boxes, each a stack of screens, the top one shown: the sheet's
+// (core's group 0), its Back the browser's too, and the panel beside the
+// page (group 1), kept as it is under the sheet while sheets come and go.
+// Beside the reader on a wide window, under it on a narrow one (or filling
+// the window). The sheet fills a narrow window; on a wide one it is in the
+// panel's column, but for Go To, a popover hanging from what opened it
+// (the page's title, the panel's name), the same screen either way.
 const panel = {
-  box: null,
-  // The sheet's screens (core's group 0), and those read beside the page
-  // (group 1: the Bookshelf, a commentary following the page, Study),
-  // shown while no sheet is up and kept while sheets come and go.
+  // The sheet's box and the panel's beside the page.
+  sheetBox: null,
+  besideBox: null,
   stack: [],
   beside: [],
   besideOpen: false,
@@ -1809,21 +2295,23 @@ const panel = {
   fields: new Map(),
   typed: 0,
   pending: null,
-  shown: -1,
-  // The screen whose reader the list holds (-1: none).
+  // The screen whose reader the panel's list holds (-1: none).
   readerFor: -1,
   depth: 0,
   ignorePops: 0,
 
+  // The box of the screens shown: the sheet's while one is up.
+  get box() {
+    return this.stack.length ? this.sheetBox : this.besideBox;
+  },
+
   init() {
-    const p = el("aside", "panel");
-    p.hidden = true;
-    p.setAttribute("aria-label", "Panel");
-    p.innerHTML = `<div class="pbar"><button type="button" class="pback"></button><h2 class="ptitle"></h2><button type="button" class="psort" hidden></button><button type="button" class="pbutton" hidden></button><button type="button" class="pfull" hidden aria-label="Full Screen"></button></div><div class="pfield" hidden><input type="search" enterkeyhint="search" autocomplete="off" spellcheck="false"></div><div class="pscopes" hidden></div><div class="psegments" hidden></div><div class="pfilter" hidden></div><div class="plist"></div><div class="ptools" hidden></div>`;
-    document.body.appendChild(p);
-    this.box = p;
+    this.besideBox = this.makeBox("beside", "Panel");
+    this.sheetBox = this.makeBox("stack", "Sheet");
+    this.sheetBox.classList.add("sheet");
+    this.sheetBox.setAttribute("role", "dialog");
     // (The panel's reader: told of its scrolling, and of a hand's.)
-    const list = $(".plist", p);
+    const list = $(".plist", this.besideBox);
     besideReader.view = elementView(list);
     const inReader = () => list.contains(besideReader.main);
     list.addEventListener("scroll", () => inReader() && besideReader.scrolled(), { passive: true });
@@ -1831,27 +2319,48 @@ const panel = {
     list.addEventListener("wheel", () => inReader() && besideReader.wheeled(), { passive: true });
     for (const t of ["touchend", "pointerup", "pointercancel"]) list.addEventListener(t, () => inReader() && besideReader.released(), { passive: true });
     list.addEventListener("click", (e) => inReader() && besideReader.tapped(e));
+    $(".pfull", this.besideBox).addEventListener("click", () => send("tap full"));
+    addEventListener("popstate", () => this.popped());
+    // (A popover put away by a press outside it, as a menu is; its opener
+    // left to open it again.)
+    addEventListener("pointerdown", (e) => {
+      const box = this.sheetBox;
+      if (box.hidden || !box.classList.contains("popover") || box.contains(e.target) || menuOpen?.contains(e.target)) return;
+      if (this.opener()?.contains(e.target)) return;
+      while (this.stack.length) this.back(true);
+    });
+    addEventListener("resize", () => this.place());
+  },
+
+  // A box for the screens of this[which] ("stack" or "beside"): its bar,
+  // field, choices, list and foot, its controls acting on their top.
+  makeBox(which, label) {
+    const p = el("aside", "panel");
+    p.hidden = true;
+    p.setAttribute("aria-label", label);
+    p.innerHTML = `<div class="pbar"><button type="button" class="pback"></button><h2 class="ptitle"></h2><button type="button" class="psort" hidden></button><button type="button" class="pbutton" hidden></button><div class="pbartools" hidden></div><button type="button" class="pfull" hidden aria-label="Full Screen"></button><div class="arrival" hidden></div></div><div class="pfield" hidden><input type="search" enterkeyhint="search" autocomplete="off" spellcheck="false"></div><div class="pscopes" hidden></div><div class="psegments" hidden></div><div class="pfilter" hidden></div><div class="plist"></div><div class="ptools" hidden></div>`;
+    document.body.appendChild(p);
+    const top = () => this.topOf(this[which]);
     $(".pback", p).addEventListener("click", () => {
-      const s = this.top();
+      const s = top();
       if (s && s.left && s.leftAction) send(`act ${s.id} ${s.leftAction} 0 0`);
       else this.userBack();
     });
-    $(".pbutton", p).addEventListener("click", (e) => this.barButton(e.currentTarget));
-    $(".pfull", p).addEventListener("click", () => send("tap full"));
+    $(".pbutton", p).addEventListener("click", (e) => this.barButton(top(), e.currentTarget));
     $(".psort", p).addEventListener("click", (e) => {
-      const s = this.top();
+      const s = top();
       popup(e.currentTarget, s.sorts.map((t, i) => ({ title: (i === s.sort ? "✓ " : "") + t, run: () => send(`act ${s.id} ${s.sortAction} 0 ${i}`) })));
     });
     const f = $(".pfield input", p);
     f.addEventListener("input", () => {
-      const s = this.top();
+      const s = top();
       if (!s) return;
       clearTimeout(this.pending);
       this.pending = setTimeout(() => send(`query ${s.id} ${escape(f.value)}`), s.wait || 0);
     });
     f.addEventListener("keydown", (e) => {
       if (e.key !== "Enter") return;
-      const s = this.top();
+      const s = top();
       if (!s) return;
       clearTimeout(this.pending);
       send(`query ${s.id} ${escape(f.value)}`);
@@ -1863,7 +2372,7 @@ const panel = {
         this.userBack();
       }
     });
-    addEventListener("popstate", () => this.popped());
+    return p;
   },
 
   // The screens shown: the sheet's, else those beside the page.
@@ -1872,13 +2381,26 @@ const panel = {
   },
 
   top() {
-    const c = this.current();
-    return c.length ? screens.get(c[c.length - 1]) : null;
+    return this.topOf(this.current());
+  },
+
+  // The top screen of a stack (this.stack or this.beside), or null.
+  topOf(ids) {
+    return ids.length ? screens.get(ids[ids.length - 1]) : null;
+  },
+
+  // The box showing screen id on top, with its screen; or null.
+  showing(id) {
+    for (const [ids, box] of [[this.stack, this.sheetBox], [this.beside, this.besideBox]]) {
+      if (!box.hidden && ids.length && ids[ids.length - 1] === id) return { box, s: screens.get(id) };
+    }
+    return null;
   },
 
   present(id) {
+    this.forgetFields(this.stack);
     this.stack = [id];
-    this.show(true);
+    this.showSheet(true);
     this.syncHistory();
   },
 
@@ -1886,61 +2408,66 @@ const panel = {
     // (One of the panel's beside the page: on its screens.)
     if (screens.get(id)?.group === 1) {
       this.beside.push(id);
-      if (!this.stack.length) this.show(true);
+      this.showBeside(true);
       return;
     }
     this.stack.push(id);
-    this.show(true);
+    this.showSheet(true);
     this.syncHistory();
   },
 
   // The panel's first screen beside the page (its others pushed after).
   besideFirst(id) {
+    this.forgetFields(this.beside);
     this.beside = [id];
-    if (!this.stack.length) this.show(true);
+    this.showBeside(true);
   },
 
   // `beside OPEN FULL`: the panel beside the page wanted, its screens
   // asked for, filling the window or not; or let go.
   besideLine(open, full) {
     const changed = (open && full) !== this.full;
+    // (Beside the page again: the page follows the panel only if a hand
+    // moved the panel while it filled the window.)
+    if (this.full && !(open && full)) leader = followFullReadOn ? 1 : 0;
+    if (!this.full && open && full) followFullReadOn = false;
     this.besideOpen = open;
     this.full = open && full;
-    if (open && changed && this.beside.length && !this.stack.length) this.show(false);
+    if (open && changed && this.beside.length) this.showBeside(false);
     $(".bar .shelf").setAttribute("aria-pressed", open ? "true" : "false");
     if (open) {
       if (!this.beside.length) send("panelmake");
       return;
     }
+    this.forgetFields(this.beside);
     this.beside = [];
-    if (!this.stack.length) this.hide();
+    this.hideBeside();
   },
 
   update(id) {
-    const c = this.current();
-    if (!c.length || c[c.length - 1] !== id) return;
-    this.show(false);
+    if (this.stack.length && this.stack[this.stack.length - 1] === id) this.showSheet(false);
+    else if (this.beside.length && this.beside[this.beside.length - 1] === id) this.showBeside(false);
   },
 
   // A screen's focus row brought into sight again (a commentary beside
   // the page following it).
   refocus(id) {
-    const s = this.top();
-    if (!s || s.id !== id) return;
-    const list = $(".plist", this.box);
+    const on = this.showing(id);
+    if (!on) return;
+    const list = $(".plist", on.box);
     const fr = list.querySelector(".focus");
     if (!fr) return;
     const at = fr.getBoundingClientRect().top - list.getBoundingClientRect().top + list.scrollTop;
-    list.scrollTo({ top: at - 8, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+    list.scrollTo({ top: at - 8, behavior: reducedMotion() ? "instant" : "smooth" });
   },
 
   // The focus row's words brought into sight, the list moving as little
   // as it can (Practice's words practised, the word being typed).
   reveal(id) {
-    const s = this.top();
-    if (!s || s.id !== id || !s.focusWords) return;
-    const [from, to] = s.focusWords;
-    const list = $(".plist", this.box);
+    const on = this.showing(id);
+    if (!on || !on.s.focusWords) return;
+    const [from, to] = on.s.focusWords;
+    const list = $(".plist", on.box);
     const row = list.querySelector(".focus");
     if (!row) return;
     let top = Infinity;
@@ -1965,22 +2492,33 @@ const panel = {
     let by = 0;
     if (top - margin < box.top) by = top - margin - box.top;
     else if (bottom + margin > box.bottom) by = Math.min(bottom + margin - box.bottom, top - margin - box.top);
-    if (by) list.scrollBy({ top: by, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+    if (by) list.scrollBy({ top: by, behavior: reducedMotion() ? "instant" : "smooth" });
   },
 
   dismiss() {
     if (!this.stack.length) return;
+    this.forgetFields(this.stack);
     this.stack = [];
-    this.fields.clear();
-    if (this.beside.length) this.show(true);
-    else this.hide();
+    this.hideSheet();
     this.syncHistory();
   },
 
+  // The fields kept for the screens of ids let go.
+  forgetFields(ids) {
+    for (const id of ids) this.fields.delete(id);
+  },
+
   popTo(id) {
+    // (One of the panel's beside the page: those above it let go; core
+    // has let them go already.)
+    if (!this.stack.includes(id) && this.beside.includes(id)) {
+      while (this.beside[this.beside.length - 1] !== id) this.fields.delete(this.beside.pop());
+      this.showBeside(false);
+      return;
+    }
     if (!this.stack.includes(id)) return;
     while (this.stack[this.stack.length - 1] !== id) this.fields.delete(this.stack.pop());
-    this.show(false);
+    this.showSheet(false);
     this.syncHistory();
   },
 
@@ -1996,7 +2534,7 @@ const panel = {
       }
       this.fields.delete(this.beside.pop());
       send(`panelanchor ${this.beside[this.beside.length - 1]}`);
-      this.show(false);
+      this.showBeside(false);
       return;
     }
     const id = this.stack[this.stack.length - 1];
@@ -2004,8 +2542,8 @@ const panel = {
     this.stack.pop();
     this.fields.delete(id);
     if (tell) send(`closed ${id}`);
-    if (this.current().length) this.show(!this.stack.length);
-    else this.hide();
+    if (this.stack.length) this.showSheet(false);
+    else this.hideSheet();
     this.syncHistory();
   },
 
@@ -2048,7 +2586,7 @@ const panel = {
   // has), or back (kept filling the window, sliding to where it is beside
   // the page, then laid out there).
   sweep(from, full) {
-    const p = this.box;
+    const p = this.besideBox;
     const body = document.body.classList;
     body.remove("sweeping-in", "sweeping-out");
     const to = p.getBoundingClientRect();
@@ -2063,14 +2601,139 @@ const panel = {
       if (this.sweeping !== a) return;
       this.sweeping = null;
       body.remove("sweeping-in", "sweeping-out");
+      // (Back beside the page, its reader is laid out at its own width
+      // only now.)
+      if (!full && this.readerFor >= 0) besideReader.relaid();
     };
   },
 
-  hide() {
-    this.box.hidden = true;
-    document.body.classList.remove("panel-open", "beside-under", "full");
-    this.box.classList.remove("under");
-    this.shown = -1;
+  // Box p shown: a sheet comes up 12 px as it fades in (180 ms); the panel
+  // beside the page is laid out out of sight first (its bar, its reader at
+  // its place: nothing in it moves once it shows), then slides in from the
+  // window's foot, or its trailing edge on a wide window (240 ms). Showing
+  // "Opening…" (opening), it waits a little for the reader in its place.
+  reveal(p, sheet, reading, opening) {
+    if (sheet) {
+      p.inert = false;
+      return comeIn(p, { transform: "translateY(12px)" }, 180, "ease-out");
+    }
+    const from = { transform: p.classList.contains("under") ? UNDER_AWAY : "translateX(100%)" };
+    p.leaving?.cancel();
+    p.leaving = null;
+    p.hidden = false;
+    if (reducedMotion()) return comeIn(p, {}, 150);
+    // (Laid out just past the window's edge, where it slides in from.)
+    p.style.transform = from.transform;
+    // (Laid out: what waited for it, Go To's sheet going, goes now.)
+    const composed = () => {
+      p.composing = false;
+      p.composed?.();
+      p.composed = null;
+    };
+    const slide = () => {
+      p.style.transform = "";
+      p.animate([from, { transform: "none" }], { duration: 240, easing: EASE_OUT });
+      composed();
+    };
+    if (!reading && !opening) return slide();
+    p.composing = true;
+    const list = $(".plist", p);
+    const name = $(".pback", p);
+    let was = "";
+    let still = 0;
+    const began = performance.now();
+    const look = () => {
+      if (p.hidden) {
+        p.style.transform = "";
+        return composed();
+      }
+      const now = `${list.scrollTop} ${name.offsetWidth} ${$(".pbartools", p).childElementCount} ${besideReader.main.childElementCount}`;
+      // (Still: its reader has gone where it was sent, no part yet to come.)
+      const placed = this.readerFor >= 0 && !besideReader.pending && besideReader.main.childElementCount > 0;
+      still = now === was && placed ? still + 1 : 0;
+      was = now;
+      const most = this.readerFor >= 0 ? PANEL_COMPOSE_MS : PANEL_OPENING_MS;
+      if (still < 6 && performance.now() - began < most) return requestAnimationFrame(look);
+      slide();
+    };
+    requestAnimationFrame(look);
+  },
+
+  // (Closed as the panel opens, Go To having picked what it reads: the
+  // sheet goes as the panel slides in, with its curve, one movement.)
+  hideSheet() {
+    const p = this.sheetBox;
+    p.shownId = -1;
+    this.besideBox.inert = false;
+    p.inert = true;
+    const go = (easing) => {
+      if (p.shownId !== -1) return;
+      goOut(p, { transform: "translateY(12px)" }, 140, () => {
+        p.classList.remove("popover");
+        this.layout();
+      }, easing);
+    };
+    // (The panel's screen comes in core's next message, not this one: it
+    // is looked for at the next frame.)
+    requestAnimationFrame(() => {
+      if (this.besideBox.composing) this.besideBox.composed = () => go(EASE_OUT);
+      else go();
+    });
+  },
+
+  hideBeside() {
+    const p = this.besideBox;
+    p.shownId = -1;
+    const to = { transform: p.classList.contains("under") ? UNDER_AWAY : "translateX(100%)" };
+    goOut(p, to, 200, () => {
+      p.classList.remove("under", "beside");
+      document.body.classList.remove("beside-under", "full");
+      this.layout();
+    });
+  },
+
+  // The page's room as the boxes shown leave it: beside the panel's
+  // column on a wide window while the panel or a sheet in its column
+  // shows (a popover leaves the page as it is).
+  layout() {
+    const sheet = !this.sheetBox.hidden && !this.sheetBox.classList.contains("popover");
+    document.body.classList.toggle("panel-open", !this.besideBox.hidden || sheet);
+  },
+
+  // Whether Go To hangs from its opener: a popover, on a wide window.
+  popover() {
+    const first = screens.get(this.stack[0]);
+    return !!first && first.kind === SCR_GOTO && matchMedia(`(min-width: ${WIDE_PX}px)`).matches;
+  },
+
+  // What opened the sheet's Go To: the panel's name for the panel (the
+  // bar's panel button while the panel isn't shown), else the page's
+  // title.
+  opener() {
+    const first = screens.get(this.stack[0]);
+    if (!first || first.kind !== SCR_GOTO) return null;
+    if (first.arg !== GOTO_PANEL) return bar.titleButton;
+    const name = $(".pbar.reading .pback", this.besideBox);
+    return !this.besideBox.hidden && name ? name : $(".bar .shelf");
+  },
+
+  // The popover put under its opener (the same size from either), within
+  // the window.
+  place() {
+    const p = this.sheetBox;
+    if (p.hidden) return;
+    const pop = this.popover();
+    p.classList.toggle("popover", pop);
+    this.layout();
+    if (!pop) {
+      p.style.left = p.style.top = "";
+      return;
+    }
+    const at = (this.opener() ?? bar.titleButton).getBoundingClientRect();
+    // (Inside the page's width: its scrollbar's left out.)
+    const room = document.documentElement.clientWidth;
+    p.style.left = `${Math.max(POPOVER_MARGIN, Math.min(at.left, room - p.offsetWidth - POPOVER_MARGIN))}px`;
+    p.style.top = `${at.bottom + POPOVER_GAP}px`;
   },
 
   commitField(id) {
@@ -2083,9 +2746,10 @@ const panel = {
   },
 
   retext(id) {
-    const s = screens.get(id);
-    if (!s || this.shown !== id) return;
-    $(".pfield input", this.box).value = s.searchText;
+    const on = this.showing(id);
+    if (!on || on.box.shownId !== id) return;
+    const s = on.s;
+    $(".pfield input", on.box).value = s.searchText;
     // (And a field row's words as core has them: emptied for the next
     // answer.)
     const f = this.fields.get(id), r = fieldRow(s);
@@ -2094,8 +2758,7 @@ const panel = {
     if (f && r && r.flag("e")) f.focus({ preventScroll: true });
   },
 
-  barButton(b) {
-    const s = this.top();
+  barButton(s, b) {
     if (!s) return;
     if (s.confirm) {
       this.commitField(s.id);
@@ -2107,38 +2770,72 @@ const panel = {
     send(`act ${s.id} ${r.action} ${r.arg} ${value}`);
   },
 
-  // The top screen shown (fresh: just opened, at its focus).
-  show(fresh) {
-    const s = this.top();
+  // The sheet's top screen shown (fresh: just opened, at its focus), over
+  // the panel beside the page; that panel left to the reader and the keys.
+  showSheet(fresh) {
+    const s = this.topOf(this.stack);
     if (!s) return;
-    const p = this.box;
+    const p = this.sheetBox;
+    this.fill(p, s, fresh);
+    p.setAttribute("aria-label", s.title || "Sheet");
+    this.besideBox.inert = true;
+    this.place();
+  },
+
+  // The panel's top screen beside the page shown: under the page on a
+  // narrow window, at its right on a wide one, or filling the window.
+  showBeside(fresh) {
+    const s = this.topOf(this.beside);
+    if (!s) return;
+    const p = this.besideBox;
+    const full = this.full;
+    const refills = full !== document.body.classList.contains("full");
+    const sweeps = refills && !p.hidden && !reducedMotion();
+    const from = sweeps ? p.getBoundingClientRect() : null;
+    p.classList.toggle("under", !full);
+    p.classList.add("beside");
+    document.body.classList.toggle("beside-under", !full);
+    document.body.classList.toggle("full", full);
+    const fb = $(".pfull", p);
+    // (The panel's reader has Full Screen in its menu.)
+    fb.hidden = !!s.reader;
+    fb.replaceChildren(icon(full ? "minimize-2" : "maximize-2"));
+    fb.setAttribute("aria-label", full ? "Beside the Bible" : "Full Screen");
+    if (from) this.sweep(from, full);
+    this.fill(p, s, fresh);
+    // (Its reader's text at the page's size filling the window, else 0.9
+    // of it: its place kept through the change.)
+    if (refills && s.reader && this.readerFor === s.id) besideReader.relaid();
+    this.layout();
+    // (A Go To hanging from the panel's name follows it.)
+    this.place();
+  },
+
+  // Screen s drawn in box p (fresh: just opened, at its focus).
+  fill(p, s, fresh) {
+    const sheet = p === this.sheetBox;
     const typingIn = this.fields.get(s.id);
     const focused = typingIn && document.activeElement === typingIn ? [typingIn.selectionStart, typingIn.selectionEnd] : null;
     const list = $(".plist", p);
     const scroll = fresh ? 0 : list.scrollTop;
     // (Its title, and under it what it is of.)
+    // (The panel's reader's name and chapter: one quiet title that opens Go
+    // To, "Spurgeon · Psalm 147 ⌄", in the left button.)
+    const named = !!(s.left && s.reader);
     const title = $(".ptitle", p);
-    title.textContent = s.title;
+    title.textContent = named ? "" : s.title;
     if (s.subtitle) title.appendChild(el("small", "", s.subtitle));
     const back = $(".pback", p);
-    const depth = this.current().length;
-    back.replaceChildren(s.left ? document.createTextNode(s.left) : icon(depth > 1 ? "chevron-left" : "x"));
-    back.setAttribute("aria-label", s.left || (depth > 1 ? "Back" : "Close"));
-    // (Beside the page: under it on a narrow window, the page above; or
-    // filling the window.)
-    const beside = !this.stack.length;
-    const full = beside && this.full;
-    const sweeps = full !== document.body.classList.contains("full") && !p.hidden && !matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const from = sweeps ? p.getBoundingClientRect() : null;
-    p.classList.toggle("under", beside && !full);
-    p.classList.toggle("beside", beside);
-    document.body.classList.toggle("beside-under", beside && !full);
-    document.body.classList.toggle("full", full);
-    const fb = $(".pfull", p);
-    fb.hidden = !beside;
-    fb.replaceChildren(icon(full ? "minimize-2" : "maximize-2"));
-    fb.setAttribute("aria-label", full ? "Beside the Bible" : "Full Screen");
-    if (from) this.sweep(from, full);
+    const depth = (sheet ? this.stack : this.beside).length;
+    // (Its words in spans of their own, cut short with an ellipsis where
+    // they don't fit (read.css: the name first); the icon after them
+    // always shown.)
+    back.replaceChildren(s.left ? el("span", "pname", s.left) : icon(depth > 1 ? "chevron-left" : "x"));
+    if (named && s.title) back.append(el("span", "pmid", "·"), el("span", "pchapter", s.title));
+    if (s.left && s.leftIcon) back.appendChild(symbol(s.leftIcon) ?? document.createTextNode(""));
+    back.classList.toggle("named", named);
+    $(".pbar", p).classList.toggle("reading", !!s.reader);
+    back.setAttribute("aria-label", named && s.title ? `${s.left}, ${s.title}` : s.left || (depth > 1 ? "Back" : "Close"));
     const bt = s.confirm || s.button;
     const button = $(".pbutton", p);
     button.hidden = !bt;
@@ -2154,26 +2851,30 @@ const panel = {
     const input = $("input", fieldBox);
     input.placeholder = s.search;
     input.enterKeyHint = s.go ? "go" : "search";
-    if (this.shown !== s.id) {
+    if (p.shownId !== s.id) {
       clearTimeout(this.pending);
       input.value = s.searchText;
     }
-    this.showScopes(s);
-    this.showSegments(s);
-    this.showFilter(s);
-    this.showTools(s);
-    // (The panel's reader, pane 1: put in the list while its screen
-    // shows, kept as it is while the screen is made again; where it goes
-    // is core's.)
-    const reading = !!s.reader;
+    this.showScopes(p, s);
+    this.showSegments(p, s);
+    this.showFilter(p, s);
+    this.showTools(p, s);
+    // (The panel's reader, pane 1: put in the panel's list while its
+    // screen shows, kept as it is while the screen is made again; where it
+    // goes is core's.)
+    const reading = !sheet && !!s.reader;
     if (reading && this.readerFor !== s.id) {
       list.replaceChildren(besideReader.main);
       this.readerFor = s.id;
       besideReader.resized();
       besideReader.finishPending();
     } else if (!reading) {
-      this.readerFor = -1;
-      list.replaceChildren(this.rows(s));
+      if (!sheet) this.readerFor = -1;
+      // (Made again, the same screen keeps the rows that haven't changed:
+      // nothing in sight is taken out and put back. Their taps go to the
+      // screen they were made for: another's are made anew.)
+      if (fresh || p.shownId !== s.id) list.replaceChildren(this.rows(s));
+      else morphChildren(list, [...this.rows(s).childNodes]);
     }
     // (A screen that takes letters: a field of its own, so a phone's
     // keyboard comes up; what is typed in it goes to core a letter at a
@@ -2187,7 +2888,7 @@ const panel = {
         trap.autocomplete = "off";
         trap.spellcheck = false;
         trap.addEventListener("input", () => {
-          const top = this.top();
+          const top = this.topOf(sheet ? this.stack : this.beside);
           for (const ch of trap.value) if (top && top.keys && ch !== " ") send(`act ${top.id} ${top.keys} ${ch.codePointAt(0)} 0`);
           trap.value = "";
         });
@@ -2196,11 +2897,12 @@ const panel = {
       if (document.activeElement !== trap) trap.focus({ preventScroll: true });
     } else if (trap) trap.remove();
     list.classList.toggle("page", !!s.page);
-    p.hidden = false;
-    document.body.classList.add("panel-open");
+    const opening = !sheet && !reading && s.sections.some((sec) => sec.rows.some((r) => r.flag("w")));
+    // (A sheet still there, going as the panel opens, is shown again.)
+    if (p.hidden || p.leaving || (sheet && p.inert)) this.reveal(p, sheet, reading, opening);
     // (Its field takes the keys as it opens: where core says, and wherever
     // there is a keyboard and a pointer, as a web page's search does.)
-    const typeIn = s.search && (s.focusField || !matchMedia("(pointer: coarse)").matches) && this.stack.length > 0;
+    const typeIn = sheet && s.search && (s.focusField || !matchMedia("(pointer: coarse)").matches);
     if (fresh && typeIn) input.focus();
     if (focused && this.fields.get(s.id)) {
       const f = this.fields.get(s.id);
@@ -2217,13 +2919,13 @@ const panel = {
         if (s.focusMode === 3) fr.classList.add("washed");
       } else list.scrollTop = 0;
       // (A sheet takes the keys; what is beside the page leaves them to it.)
-      if (!typeIn && this.stack.length) $(".pback", p).focus({ preventScroll: true });
+      if (!typeIn && sheet) $(".pback", p).focus({ preventScroll: true });
     } else list.scrollTop = scroll;
-    this.shown = s.id;
+    p.shownId = s.id;
   },
 
-  showScopes(s) {
-    const box = $(".pscopes", this.box);
+  showScopes(p, s) {
+    const box = $(".pscopes", p);
     box.hidden = !s.scopes.length;
     box.replaceChildren(...s.scopes.map((t, i) => {
       const b = el("button", i === s.scope ? "on" : "", t);
@@ -2235,20 +2937,24 @@ const panel = {
     }));
   },
 
-  showSegments(s) {
-    const box = $(".psegments", this.box);
+  showSegments(p, s) {
+    const box = $(".psegments", p);
     box.hidden = !s.segments.length;
     box.replaceChildren(...s.segments.map((t, i) => {
       const b = el("button", i === s.segment ? "on" : "", t);
       b.type = "button";
       b.setAttribute("aria-pressed", i === s.segment);
-      b.addEventListener("click", () => send(`act ${s.id} ${s.segmentsAction} 0 ${i}`));
+      b.addEventListener("click", () => {
+        send(`act ${s.id} ${s.segmentsAction} 0 ${i}`);
+        // (Another segment's rows from their top.)
+        $(".plist", p).scrollTop = 0;
+      });
       return b;
     }));
   },
 
-  showFilter(s) {
-    const box = $(".pfilter", this.box);
+  showFilter(p, s) {
+    const box = $(".pfilter", p);
     box.hidden = !s.filterColors.length;
     const all = el("button", s.filter < 0 ? "on" : "", "All");
     all.type = "button";
@@ -2256,17 +2962,27 @@ const panel = {
     box.replaceChildren(all, ...s.filterColors.map((hex, i) => {
       const b = el("button", "dot" + (i === s.filter ? " on" : ""));
       b.type = "button";
-      b.style.background = "#" + hex;
+      b.style.background = `linear-gradient(${washes.get(hex) ?? "#" + hex}, ${washes.get(hex) ?? "#" + hex}), var(--bg)`;
       b.setAttribute("aria-label", s.filterLabels[i] || hex);
       b.addEventListener("click", () => send(`act ${s.id} ${s.filterAction} 0 ${i}`));
       return b;
     }));
   },
 
-  // The buttons at its foot: left, middle, right.
-  showTools(s) {
-    const box = $(".ptools", this.box);
-    box.hidden = !s.tools.length;
+  // The buttons at its foot: left, middle, right; the panel's reader's in
+  // its bar, at the right (one row: its name, Link, its menu).
+  showTools(p, s) {
+    const inBar = !!s.reader;
+    const box = $(".ptools", p);
+    const barBox = $(".pbartools", p);
+    box.hidden = inBar || !s.tools.length;
+    barBox.hidden = !inBar || !s.tools.length;
+    if (inBar) box.replaceChildren();
+    else barBox.replaceChildren();
+    // (Its screen, which a kept tool's tap goes to: a screen made anew
+    // with the same tools keeps them.)
+    const holder = inBar ? barBox : box;
+    holder.screen = s;
     const places = [el("div", "left"), el("div", "middle"), el("div", "right")];
     for (const t of s.tools) {
       const b = el("button", `tool st${t.style}`);
@@ -2280,16 +2996,19 @@ const panel = {
       } else b.textContent = t.label || glyph(t.icon);
       if (t.label) b.setAttribute("aria-label", t.label);
       b.disabled = t.style === 3;
+      // (What it does, in its node too, so an unchanged tool is kept.)
+      b.dataset.act = `${t.action} ${t.arg} ${t.menu}`;
       b.addEventListener("click", () => {
+        const id = holder.screen.id;
         if (t.menu) popup(b, split(t.menu).map((m) => {
           const k = m.indexOf(":");
-          return { title: m.slice(k + 1), run: () => send(`act ${s.id} ${t.action} ${m.slice(0, k)} 0`) };
+          return { title: m.slice(k + 1), run: () => send(`act ${id} ${t.action} ${m.slice(0, k)} 0`) };
         }));
-        else send(`act ${s.id} ${t.action} ${t.arg} 0`);
+        else send(`act ${id} ${t.action} ${t.arg} 0`);
       });
       places[Math.max(0, Math.min(2, t.place))].appendChild(b);
     }
-    box.replaceChildren(...places);
+    morphChildren(holder, places);
   },
 
   // The screen's rows: its hero, intro, sections (headers, rows, footers).
@@ -2400,7 +3119,8 @@ const panel = {
     rich(t, r.title, r.truns);
     if (r.custom === CUSTOM_FONT) t.style.fontFamily = FONTS[+r.arg] || "";
     if (r.suffix) t.appendChild(el("span", "suffix", r.suffix));
-    if (r.flag("x") || r.flag("t")) t.classList.add("accent");
+    if (r.flag("x")) line.classList.add("destructive");
+    else if (r.flag("t")) t.classList.add("accent");
     if (r.flag("f")) t.classList.add("faint");
     if (r.flag("b")) t.classList.add("strong");
     if (r.titleLines > 0) t.style.webkitLineClamp = r.titleLines;
@@ -2468,6 +3188,9 @@ const panel = {
       if (!r.flag("d") && (r.action || r.kind === "button")) {
         line.tabIndex = 0;
         line.setAttribute("role", "button");
+        // (What it does, in its node too: a screen made again keeps a row
+        // that looks and acts the same, morphChildren.)
+        line.dataset.act = `${r.action} ${r.arg}`;
         line.addEventListener("click", () => this.act(s, r));
         line.addEventListener("keydown", (e) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -2900,12 +3623,13 @@ const SYMBOLS = {
   bookmark: "bookmark", "bookmark.fill": "bookmark", "books.vertical": "library", brain: "brain",
   calendar: "calendar", "character.book.closed": "book-a", "doc.on.doc": "copy",
   "note.text": "sticky-note", "text.quote": "text-quote", "clock.arrow.circlepath": "history",
-  globe: "globe", "arrow.right.circle": "circle-arrow-right", "arrow.down.circle": "circle-arrow-down", "arrow.right.circle.fill": "circle-arrow-right",
+  globe: "globe", "arrow.right.circle": "circle-arrow-right", "arrow.down.circle": "circle-arrow-down", "arrow.right.circle.fill": "circle-arrow-right", "arrow.right": "arrow-right",
   "arrow.triangle.branch": "split", "arrow.up.arrow.down": "arrow-up-down", "checkmark.circle": "circle-check",
   "circle.slash": "circle-slash", "hand.tap": "pointer", "info.circle": "info", "textformat.abc": "case-sensitive",
   "textformat.size": "a-large-small", "text.book.closed": "book-text", trash: "trash-2",
   magnifyingglass: "search", highlighter: "highlighter", xmark: "x", headphones: "headphones", link: "link",
   "arrow.up.left.and.arrow.down.right": "maximize-2", "arrow.down.right.and.arrow.up.left": "minimize-2",
+  ellipsis: "more",
 };
 
 // An icon core names, drawn (else a character that reads as it; else
@@ -2925,7 +3649,7 @@ function symbol(name, cls = "") {
 function glyph(name) {
   return {
     ribbon: "▮", plus: "+", circle: "○", "circle.lefthalf.filled": "◐", "checkmark.circle.fill": "●",
-    "clock.arrow.circlepath": "↺", globe: "⊕", "arrow.right.circle.fill": "→", "square.and.arrow.up": "⇪",
+    "clock.arrow.circlepath": "↺", globe: "⊕", "arrow.right.circle.fill": "→", "arrow.right": "→", "square.and.arrow.up": "⇪",
     "square.and.pencil": "✎", "chevron.up": "⌃", "chevron.down": "⌄", "play.fill": "▶", repeat: "↻",
     "speaker.wave.2": "🔈", keyboard: "⌨", "keyboard.chevron.compact.down": "⌨", "book.closed": "📖", brain: "✦",
     calendar: "▦", magnifyingglass: "⌕", bookmark: "🔖", "highlighter": "✎", "note.text": "✎", trash: "🗑",
@@ -2955,14 +3679,19 @@ const tray = {
         hex.forEach((h, j) => {
           const d = el("button", "dot" + (h ? "" : " none") + (j === r.value ? " on" : ""));
           d.type = "button";
-          if (h) d.style.background = "#" + h;
+          // (The wash a highlighted verse shows, over the page's color,
+          // not the color's pure hue.)
+          if (h) d.style.background = `linear-gradient(${washes.get(h) ?? "#" + h}, ${washes.get(h) ?? "#" + h}), var(--bg)`;
           d.setAttribute("aria-label", labels[j] || "Remove");
           d.addEventListener("click", () => send(`trayact ${r.action} ${h ? j : 5}`));
           sw.appendChild(d);
         });
         continue;
       }
-      const x = el("button", r.flag("t") ? "accent" : "", r.title);
+      const x = el("button", r.flag("t") ? "accent" : "");
+      const g = r.icon && symbol(r.icon);
+      if (g) x.appendChild(g);
+      x.appendChild(el("span", "tl", r.title));
       x.type = "button";
       x.disabled = r.flag("d");
       if (r.label) x.setAttribute("aria-label", r.label);
@@ -2986,23 +3715,24 @@ const capsule = {
     this.box.type = "button";
     this.box.hidden = true;
     this.box.addEventListener("click", () => {
-      this.box.hidden = true;
+      goOut(this.box, {}, 120);
       send("back");
     });
     document.body.appendChild(this.box);
   },
-  // (back MS SCREENS WORDS HINT: shown for MS.)
+  // (back MS SCREENS WORDS HINT: shown for MS; faded in once the jump has
+  // settled, faded out.)
   show(words, hint, ms) {
     clearTimeout(this.timer);
     if (!words) {
-      this.box.hidden = true;
+      goOut(this.box, {}, 120);
       return;
     }
     this.box.textContent = `‹ ${words}`;
     this.box.setAttribute("aria-label", words);
     this.box.setAttribute("aria-description", hint);
-    this.box.hidden = false;
-    this.timer = setTimeout(() => (this.box.hidden = true), ms);
+    if (this.box.hidden || this.box.leaving) comeIn(this.box, {}, 160, "ease-out");
+    this.timer = setTimeout(() => goOut(this.box, {}, 120), ms);
   },
 };
 
@@ -3289,8 +4019,8 @@ function begin() {
   started = true;
   tellVoices();
   const c = chapterOfAddress(location.pathname);
-  const v = /^\/read\/(bsb|kjv|web|asv|ylt|esv)\//.exec(location.pathname);
-  if (v) send(`version ${v[1].toUpperCase()}`);
+  const v = /^\/read\/([a-z]+)\//.exec(location.pathname);
+  if (v && ADDRESS_VERSIONS.includes(v[1])) send(`version ${v[1].toUpperCase()}`);
   if (c >= 0) send(`place ${c} 0 0`);
   // (The panel beside the page always fits: at its right on a wide
   // window, under it on a narrow one.)
@@ -3330,6 +4060,10 @@ panel.init();
 tray.init();
 capsule.init();
 player.init();
+// (Which hand moved last, the keys or a pointer: the panel's Back focused
+// by the page itself as a sheet opens shows its ring only to the keys.)
+addEventListener("keydown", () => document.documentElement.classList.add("keys"), true);
+addEventListener("pointerdown", () => document.documentElement.classList.remove("keys"), true);
 // (The panel's entries are the browser's Back; the reader's place is
 // core's, never the browser's restoring.)
 history.scrollRestoration = "manual";

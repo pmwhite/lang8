@@ -84,6 +84,9 @@ final class Reader extends ListView {
 
     // A finger, a fling or a key's page let it rest.
     void rested(Reader r);
+
+    // Core sent it somewhere (`go`): a jump, which the other makes too.
+    void jumped(Reader r);
   }
 
   final int pane;
@@ -168,6 +171,10 @@ final class Reader extends ListView {
     int parts;
     int runFrom = -1, runTo = -1;
     int[] verses = new int[0], verseParts = new int[0];
+    // How many bytes into its part each anchor is, and how many bytes each
+    // part is (core's `anchor V K AT` and `sizes`: following guesses where
+    // parts not laid out would be by them; empty: not told).
+    int[] verseOffsets = new int[0], sizes = new int[0];
   }
 
   // A place in the document (SKINS.md, Panes: Places): a chapter, an
@@ -210,7 +217,7 @@ final class Reader extends ListView {
 
   // A spot in the window that stays as parts come and go about it: a part
   // and how far down it (pixels).
-  private static final class Spot {
+  static final class Spot {
     final long key;
     final double into;
 
@@ -391,6 +398,7 @@ final class Reader extends ListView {
   void go(int c, int i, int frac, int mode) {
     if (touching || c < 0 || c >= chapters) return;
     goTo(new Target(c, i, 0, Math.max(0, Math.min(999, frac)), mode == 1, false));
+    if (moves != null) moves.jumped(this);
   }
 
   // `halt P`: its glide (or fling) stopped where it is, as the other pane
@@ -417,6 +425,8 @@ final class Reader extends ListView {
       store.clear();
       chapterInfo.clear();
       asked.clear();
+      measuredHeight = 0;
+      measuredBytes = 0;
     } else {
       store.keySet().removeIf(key -> (int) (key >> 32) == c);
       asked.keySet().removeIf(key -> (int) (key >> 32) == c);
@@ -516,7 +526,8 @@ final class Reader extends ListView {
     int[] vs = new int[lines.size() * 3];
     int nv = 0;
     ArrayList<long[]> links = new ArrayList<>();
-    ArrayList<Integer> anchorVerses = new ArrayList<>(), anchorParts = new ArrayList<>();
+    ArrayList<Integer> anchorVerses = new ArrayList<>(), anchorParts = new ArrayList<>(),
+        anchorOffsets = new ArrayList<>(), partSizes = new ArrayList<>();
     int runFrom = -1, runTo = -1;
     boolean coming = false, rtl = false;
     int paraEnd = -1;
@@ -556,6 +567,10 @@ final class Reader extends ListView {
         case "anchor":
           anchorVerses.add(w.num(1));
           anchorParts.add(w.num(2));
+          anchorOffsets.add(w.num(3));
+          break;
+        case "sizes":
+          for (int i = 1; !w.word(i).isEmpty(); i++) partSizes.add(w.num(i));
           break;
         case "gap":
           runFrom = w.num(1);
@@ -578,10 +593,14 @@ final class Reader extends ListView {
     ch.parts = parts;
     ch.verses = new int[anchorVerses.size()];
     ch.verseParts = new int[anchorParts.size()];
+    ch.verseOffsets = new int[anchorOffsets.size()];
+    ch.sizes = new int[partSizes.size()];
+    for (int i = 0; i < ch.sizes.length; i++) ch.sizes[i] = partSizes.get(i);
     int first = 0;
     for (int i = 0; i < ch.verses.length; i++) {
       ch.verses[i] = anchorVerses.get(i);
       ch.verseParts[i] = anchorParts.get(i);
+      ch.verseOffsets[i] = anchorOffsets.get(i);
       if (ch.verseParts[i] < k) first = i + 1;
     }
     Part p = new Part(c, k, parts, runTo, coming, rtl, s, java.util.Arrays.copyOf(vs, nv * 3),
@@ -840,6 +859,12 @@ final class Reader extends ListView {
     measurer.measure(MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY),
         MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED));
     p.height = measurer.getMeasuredHeight();
+    // (How tall a byte of its source is, for guessing: guessParts.)
+    int bytes = partBytes(p.c, p.k);
+    if (bytes > 0 && p.runTo < 0 && !p.coming) {
+      measuredHeight += p.height;
+      measuredBytes += bytes;
+    }
     p.laidWidth = w;
     p.laidHolding = holdingHeight;
     p.laidLook = lookGeneration;
@@ -1083,11 +1108,15 @@ final class Reader extends ListView {
     return p == null ? OptionalDouble.empty() : OptionalDouble.of(p.top);
   }
 
+  // (A chapter of a commentary's run without comments ends at the run's
+  // part's top, but for the run's last, which ends at its end:
+  // core/follow.l8's ChapterShape.)
   private OptionalDouble chapterEnd(int c) {
     Chapter ch = chapterInfo.get(c);
     if (ch == null) return OptionalDouble.empty();
     Part p = ch.runFrom >= 0 ? inWindow(ch.runFrom, 0) : inWindow(c, Math.max(ch.parts, 1) - 1);
-    return p == null ? OptionalDouble.empty() : OptionalDouble.of(p.bottom());
+    if (p == null) return OptionalDouble.empty();
+    return OptionalDouble.of(ch.runFrom >= 0 && c != ch.runTo ? p.top : p.bottom());
   }
 
   // Where a place is in the window (empty: its part isn't here). Its span's
@@ -1152,6 +1181,232 @@ final class Reader extends ListView {
     return false;
   }
 
+  // ---- following (Linking's) ----
+  // A spot at y in the window (null: none), and where a spot is now.
+  Spot followSpot(double y) {
+    return spotAt(y);
+  }
+
+  OptionalDouble followSpotY(Spot s) {
+    return spotY(s);
+  }
+
+  // Every part of chapters fromC to toC past the window's measured ones,
+  // where it would begin and how tall it would be: as tall for its length
+  // as the measured ones are on average (core's `sizes`, each part's bytes;
+  // a chapter's not told yet, their mean height), the parts between it and
+  // the window counted too, however many (a commentary's chapter may be
+  // hundreds; at most GUESS_WALK_MOST walked each way). Following goes by
+  // anchors not laid out as well (core/follow.l8; how far a guess was out
+  // is closed as the leader moves).
+  static final int GUESS_WALK_MOST = 4000;
+
+  static final class Guess {
+    final java.util.ArrayList<long[]> parts = new java.util.ArrayList<>();
+    final java.util.ArrayList<double[]> spans = new java.util.ArrayList<>();
+    double mean, perByte;
+  }
+
+  // How tall every part of its document measured so far is in all, and how
+  // many bytes of source they are (a few parts' say varies).
+  private double measuredHeight;
+  private long measuredBytes;
+
+  private int partBytes(int c, int k) {
+    Chapter ch = chapterInfo.get(c);
+    return ch == null || k < 0 || k >= ch.sizes.length ? 0 : ch.sizes[k];
+  }
+
+  private double guessHeight(Guess g, int c, int k) {
+    Part known = measuredAhead(c, k);
+    if (known != null) return known.height;
+    int b = partBytes(c, k);
+    return b > 0 && g.perByte > 0 ? b * g.perByte : g.mean;
+  }
+
+  Guess guessParts(int fromC, int toC) {
+    Guess g = new Guess();
+    g.mean = visibleHeight();
+    Part first = null, last = null;
+    double total = 0;
+    int counted = 0;
+    for (Part p : window) {
+      if (p.stale || p.laidWidth < 0) continue;
+      if (first == null) first = p;
+      last = p;
+      if (p.runTo < 0 && !p.coming) {
+        total += p.height;
+        counted++;
+      }
+    }
+    if (last == null) return g;
+    if (counted > 0) g.mean = total / counted;
+    if (measuredBytes > 0) g.perByte = measuredHeight / measuredBytes;
+    int c = last.runTo >= 0 ? last.runTo : last.c, k = last.k;
+    double y = last.bottom();
+    for (int n = 0; n < GUESS_WALK_MOST; n++) {
+      Chapter ch = chapterInfo.get(c);
+      if (ch != null && ch.runFrom < 0 && k + 1 < ch.parts) k++;
+      else {
+        if (c + 1 >= chapters || c + 1 > toC) break;
+        c++;
+        k = 0;
+        Chapter next = chapterInfo.get(c);
+        if (next != null && next.runFrom >= 0) c = next.runFrom;
+      }
+      double h = guessHeight(g, c, k);
+      if (c >= fromC) {
+        g.parts.add(new long[] {c, k});
+        g.spans.add(new double[] {y, h});
+      }
+      y += h;
+      Chapter at = chapterInfo.get(c);
+      if (at != null && at.runTo >= 0) c = at.runTo;
+    }
+    c = first.c;
+    k = first.k;
+    y = first.top;
+    for (int n = 0; n < GUESS_WALK_MOST; n++) {
+      if (k > 0) k--;
+      else {
+        if (c <= 0 || c - 1 < fromC) break;
+        c--;
+        Chapter ch = chapterInfo.get(c);
+        if (ch != null && ch.runFrom >= 0) {
+          c = ch.runFrom;
+          k = 0;
+        } else k = ch == null ? 0 : Math.max(ch.parts, 1) - 1;
+      }
+      double h = guessHeight(g, c, k);
+      y -= h;
+      if (c <= toC) {
+        g.parts.add(new long[] {c, k});
+        g.spans.add(new double[] {y, h});
+      }
+    }
+    return g;
+  }
+
+  // Chapter c as following takes it: its anchors not laid out where they
+  // would be by guess (their bytes into their part, or spread through it),
+  // its top and end too (not a run of chapters without comments: one part,
+  // there or not).
+  Follow.ChapterShape shapeGuessed(int c, Guess g) {
+    Follow.ChapterShape laid = shape(c);
+    Chapter ch = chapterInfo.get(c);
+    if (ch == null || ch.runFrom >= 0) return laid;
+    int n = laid.starts.length;
+    double[] starts = laid.starts.clone();
+    boolean[] known = laid.known.clone();
+    double top = laid.top, end = laid.end;
+    boolean topKnown = laid.topKnown, endKnown = laid.endKnown;
+    // (Each part's first anchor, at once: a long chapter has many.)
+    int parts = Math.max(ch.parts, 1);
+    int[] firstOf = new int[parts + 1];
+    java.util.Arrays.fill(firstOf, n);
+    for (int i = n - 1; i >= 0; i--) if (ch.verseParts[i] >= 0 && ch.verseParts[i] < parts) firstOf[ch.verseParts[i]] = i;
+    for (int k = parts - 1; k >= 0; k--) firstOf[k] = Math.min(firstOf[k], firstOf[k + 1]);
+    for (int x = 0; x < g.parts.size(); x++) {
+      if (g.parts.get(x)[0] != c) continue;
+      int k = (int) g.parts.get(x)[1];
+      double y = g.spans.get(x)[0], h = g.spans.get(x)[1];
+      int bytes = partBytes(c, k);
+      if (k == 0 && !topKnown) {
+        top = y;
+        topKnown = true;
+      }
+      if (k + 1 >= Math.max(ch.parts, 1) && !endKnown) {
+        end = y + h;
+        endKnown = true;
+      }
+      int from = k < parts ? firstOf[k] : n;
+      int to = k + 1 < parts ? firstOf[k + 1] : n;
+      Part measured = measuredAhead(c, k);
+      for (int i = from; i < to; i++) {
+        if (known[i]) continue;
+        if (measured != null && i - measured.firstAnchor >= 0 && i - measured.firstAnchor < measured.anchorY.length) {
+          starts[i] = y + measured.anchorY[i - measured.firstAnchor];
+          known[i] = true;
+          continue;
+        }
+        double into = bytes > 0 && i < ch.verseOffsets.length ? Math.min(1.0, ch.verseOffsets[i] / (double) bytes)
+            : (i - from) / (double) (to - from);
+        starts[i] = y + h * into;
+        known[i] = true;
+      }
+    }
+    return new Follow.ChapterShape(starts, known, top, topKnown, end, endKnown, laid.em);
+  }
+
+  // ---- parts measured ahead ----
+  // While the panes rest, the parts of the chapters following goes by that
+  // aren't in the window are measured out of sight, nearest first (each
+  // asked for first if it isn't here), so that a flick finds them known,
+  // not guessed. Nothing shown moves: only the guesses change.
+  Part measuredAhead(int c, int k) {
+    Part p = store.get(key(c, k));
+    return p != null && !p.stale && p.laidWidth == contentWidth() && p.laidLook == lookGeneration ? p : null;
+  }
+
+  // The nearest part of chapters fromC to toC not in the window nor
+  // measured, measured (or asked for); whether one was.
+  boolean aheadNext(int fromC, int toC) {
+    Part first = null, last = null;
+    for (Part p : window) {
+      if (p.stale || p.laidWidth < 0) continue;
+      if (first == null) first = p;
+      last = p;
+    }
+    if (last == null || contentWidth() <= 0) return false;
+    int onC = last.runTo >= 0 ? last.runTo : last.c, onK = last.k, backC = first.c, backK = first.k;
+    boolean on = true, back = true;
+    for (int n = 0; n < GUESS_WALK_MOST && (on || back); n++) {
+      if (on) {
+        Chapter ch = chapterInfo.get(onC);
+        if (ch != null && ch.runFrom < 0 && onK + 1 < ch.parts) onK++;
+        else if (onC + 1 >= chapters || onC + 1 > toC) on = false;
+        else {
+          onC++;
+          onK = 0;
+        }
+        if (on && onC >= fromC && aheadWanted(onC, onK)) return true;
+      }
+      if (back) {
+        if (backK > 0) backK--;
+        else if (backC <= 0 || backC - 1 < fromC) back = false;
+        else {
+          backC--;
+          Chapter ch = chapterInfo.get(backC);
+          backK = ch == null || ch.runFrom >= 0 ? 0 : Math.max(ch.parts, 1) - 1;
+        }
+        if (back && backC <= toC && aheadWanted(backC, backK)) return true;
+      }
+    }
+    return false;
+  }
+
+  // Part k of chapter c measured now (or asked for), if it is to be: not in
+  // the window, not measured, not a run's or one still coming.
+  private boolean aheadWanted(int c, int k) {
+    Chapter ch = chapterInfo.get(c);
+    if (ch != null && ch.runFrom >= 0 || indexOf(c, k) >= 0 || measuredAhead(c, k) != null) return false;
+    Part p = store.get(key(c, k));
+    if (p == null || p.stale) {
+      Long at = asked.get(key(c, k));
+      if (at != null && SystemClock.uptimeMillis() - at < ASK_AGAIN_MS) return true;
+      want(c, k);
+      return true;
+    }
+    if (p.coming || p.runTo >= 0) return false;
+    measure(p);
+    return true;
+  }
+
+  // Whether it is still (no finger, glide or following under way).
+  boolean resting() {
+    return motion == Motion.STILL && !touching;
+  }
+
   // Chapter c as it is laid out here, for following.
   Follow.ChapterShape shape(int c) {
     Chapter ch = chapterInfo.get(c);
@@ -1169,7 +1424,7 @@ final class Reader extends ListView {
   }
 
   // ---- going somewhere ----
-  private static boolean animatorsOn() {
+  static boolean animatorsOn() {
     return ValueAnimator.areAnimatorsEnabled();
   }
 
@@ -1264,14 +1519,26 @@ final class Reader extends ListView {
   }
 
   // ---- following (Linking's) ----
-  // Whether it is moved by a finger, a fling or a key: it leads.
-  boolean leads() {
-    return motion == Motion.DRAGGED || motion == Motion.FLUNG || motion == Motion.PAGED;
+  // The top of what of it is in sight, down the window, and how tall that
+  // is (following's sight: SKINS.md, Panes: Linked).
+  double sightTop() {
+    return viewTop() + getPaddingTop();
   }
 
-  // Whether it is flung (gliding after a finger): a commentary waits.
-  boolean flung() {
-    return motion == Motion.FLUNG;
+  double sightHeight() {
+    return visibleHeight();
+  }
+
+  // Its sight's top put at top, following (a frame of a glide, or at once).
+  void followSight(double top) {
+    followTo(top - getPaddingTop() + lineOffset());
+  }
+
+  // The chapter at the top of its sight (-1: none here).
+  int chapterAtSight() {
+    if (window.isEmpty()) return -1;
+    Part p = window.get(indexAt(sightTop()));
+    return p.c;
   }
 
   // Its reading line to y, following, at once.

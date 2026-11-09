@@ -6,10 +6,9 @@ import java.util.OptionalDouble;
 
 // The two panes linked (SKINS.md, Panes: Linked): the pane a finger last
 // moved leads, and on each frame it moves the other is placed by core's
-// link map of the leader's chapter and the rules core/follow.l8 writes
-// (Follow): a version continuously, verse by verse; a commentary at a
-// comment's border, waiting while the page leading it is flung and
-// settling when it rests.
+// link maps of the chapters about the leader's and the rules core/follow.l8
+// writes (Follow): a version smoothly, verse by verse; a commentary held
+// at a comment's start, then travelling to the next.
 final class Linking implements Reader.Moves {
   private final Reader page, panel;
   // Each chapter's link map as core last sent it (`link C MODE`, `match`
@@ -71,107 +70,169 @@ final class Linking implements Reader.Moves {
   // ---- the panes ----
   @Override
   public void moving(Reader r) {
+    held = false;
+    if (r == panel && fills) fullReadOn = true;
+    if (gliding == r) stopGlide();
     leader = r;
   }
 
   @Override
   public void moved(Reader r) {
-    if (r == leader && r.leads() && linked()) follow(r, false);
+    if (linked() && r == leader) follow(leader);
   }
 
+  // (At rest the parts following goes by are measured ahead, and the rule
+  // kept as what they tell changes: ahead.)
   @Override
   public void rested(Reader r) {
-    if (r == leader && linked()) follow(r, true);
+    aheadSoon();
   }
 
-  // The follower placed for the leader where it is now (resting: it has
-  // just come to rest).
-  private void follow(Reader lead, boolean resting) {
-    Reader.Place at = lead.placeAtLine();
+  // While both rest, linked: a part measured ahead a turn, the follower's
+  // first (Reader.aheadNext).
+  private static final long AHEAD_MS = 40;
+
+  private final Runnable aheadTurn = this::ahead;
+
+  private void aheadSoon() {
+    page.removeCallbacks(aheadTurn);
+    page.postDelayed(aheadTurn, AHEAD_MS);
+  }
+
+  private void ahead() {
+    if (!linked()) return;
+    if (!page.resting() || !panel.resting()) {
+      aheadSoon();
+      return;
+    }
+    Reader.Place at = leader.placeAtLine();
     if (at == null) return;
-    Follow.LinkMap map = maps.get(at.c);
-    if (map == null) return;
-    if (map.mode == Follow.BY_VERSE) {
-      byVerse(lead, at, map);
+    Reader other = leader == page ? panel : page;
+    int from = at.c - FOLLOW_CHAPTERS, to = at.c + FOLLOW_CHAPTERS;
+    if (other.aheadNext(from, to) || leader.aheadNext(from, to)) aheadSoon();
+    // (Both at rest: the rule kept as what has been measured tells more.)
+    follow(leader);
+  }
+
+  // A jump (either pane's `go`: Go To, a link, Swap Panes): both panes held
+  // where it puts them until a hand moves either.
+  @Override
+  public void jumped(Reader r) {
+    held = true;
+    stopGlide();
+  }
+
+  // From a jump until a hand moves either pane, both panes are held where
+  // the jump put them (core's `go` for each, as a `go` holds its pane's
+  // place): the rule doesn't move either, so that Swap Panes and the way
+  // back leave both where they were.
+  private boolean held;
+
+  // `beside OPEN FULL`: whether the panel fills the screen. Beside the page
+  // again, the page follows the panel only if a hand moved the panel while
+  // it filled the screen (else the page leads, and stays).
+  void filling(boolean full) {
+    if (fills && !full) leader = fullReadOn ? panel : page;
+    if (!fills && full) fullReadOn = false;
+    fills = full;
+  }
+
+  private boolean fills, fullReadOn;
+
+  // The chapters either side of each pane's at its sight's top whose maps
+  // following goes by (core sends those of two either side as the place
+  // comes near them).
+  private static final int FOLLOW_CHAPTERS = 2;
+
+  // The links of the chapters about both panes' sights.
+  private Follow.Links links() {
+    int from = Integer.MAX_VALUE, to = Integer.MIN_VALUE;
+    for (Reader r : new Reader[] {page, panel}) {
+      int c = r.chapterAtSight();
+      if (c < 0) continue;
+      from = Math.min(from, c - FOLLOW_CHAPTERS);
+      to = Math.max(to, c + FOLLOW_CHAPTERS);
+    }
+    Follow.Links links = new Follow.Links();
+    if (from > to) return links;
+    Reader.Guess pageGuess = page.guessParts(from, to), panelGuess = panel.guessParts(from, to);
+    for (int c = from; c <= to; c++) {
+      Follow.LinkMap map = maps.get(c);
+      if (map != null) links.add(map, page.shapeGuessed(c, pageGuess), panel.shapeGuessed(c, panelGuess));
+    }
+    return links;
+  }
+
+  // A pane moved by a hand (or a jump): the other moved by the rule, if it
+  // doesn't hold (SKINS.md, Panes: Linked; Follow, core/follow.l8's rules):
+  // the section at the page's top edge has one linked with it as much in
+  // sight in the panel as can be. The page moved, the panel moves; the
+  // panel moved, the page. Gliding there (at once where animations are
+  // off). Not while a jump holds both panes.
+  private void follow(Reader lead) {
+    if (following || held) return;
+    following = true;
+    try {
+      Follow.Links links = links();
+      boolean pageLeads = lead == page;
+      Reader moving = pageLeads ? panel : page;
+      OptionalDouble to = pageLeads
+          ? Follow.bottomMove(links, page.sightTop(), panel.sightTop(), panel.sightHeight())
+          : Follow.topMove(links, page.sightTop(), page.sightHeight(), panel.sightTop(), panel.sightHeight());
+      // (The page isn't moved while the panel fills the screen over it: it
+      // is where it was when the panel is beside it again.)
+      if (!to.isPresent() || Math.abs(to.getAsDouble() - moving.sightTop()) < 1 || (moving == page && fills)) return;
+      if (!Reader.animatorsOn()) {
+        stopGlide();
+        moving.followSight(to.getAsDouble());
+      } else glideTo(moving, to.getAsDouble());
+    } finally {
+      following = false;
+    }
+  }
+
+  private boolean following;
+
+  // The pane following glides (its sight's top going to glideAim), a frame
+  // at a time by Follow.glide; a new place mid-glide is glided to from
+  // where it is.
+  private Reader gliding;
+  private double glideAim;
+  // When it last stepped, and when its place was last new (there at most
+  // Follow.GLIDE_MOST after).
+  private long glideAt, glideNew;
+
+  private void glideTo(Reader r, double to) {
+    if (gliding != null && gliding != r) stopGlide();
+    long now = android.os.SystemClock.uptimeMillis();
+    if (gliding == null || Math.abs(to - glideAim) > Follow.SLACK) glideNew = now;
+    glideAim = to;
+    if (gliding != null) return;
+    gliding = r;
+    // (Its first step now, in the frame the rule broke in.)
+    glideAt = now - 16;
+    glideFrame.run();
+  }
+
+  private final Runnable glideFrame = () -> {
+    Reader r = gliding;
+    if (r == null) return;
+    long now = android.os.SystemClock.uptimeMillis();
+    double from = r.sightTop();
+    double seconds = Math.min(0.1, (now - glideAt) / 1000.0);
+    double next = Follow.glide(from, glideAim, seconds, Follow.GLIDE_MOST - ((now - glideNew) / 1000.0 - seconds));
+    glideAt = now;
+    r.followSight(next);
+    double at = r.sightTop();
+    if (Math.abs(at - glideAim) <= 0.5 || Math.abs(next - from) >= 0.1 && Math.abs(at - from) < 0.05) {
+      gliding = null;
       return;
     }
-    // (By comment: the commentary in the map's pane, the version in the
-    // other, whichever leads.)
-    Reader commentary = map.comments == 0 ? page : panel;
-    Reader version = map.comments == 0 ? panel : page;
-    // (In the commentary's run of chapters without comments.)
-    int runFrom = commentary.runFrom(at.c);
-    if (runFrom >= 0) {
-      if (lead == version) commentaryInRun(version, commentary, runFrom, resting);
-      else versionInRun(version, runFrom, commentary.runTo(at.c));
-      return;
-    }
-    if (lead == version) commentaryFollows(version, commentary, at, map, resting);
-    else versionFollows(version, at, map);
-  }
+    r.postOnAnimation(this.glideFrame);
+  };
 
-  // A version following the other, its reading line by the rules; where
-  // the follower hasn't the leader's chapter laid out, brought to the
-  // leader's verse at once (it follows frame by frame once it has).
-  private void byVerse(Reader lead, Reader.Place at, Follow.LinkMap map) {
-    Reader other = lead == page ? panel : page;
-    boolean pageLeads = lead == page;
-    Follow.Pairs pairs = Follow.pairs(map, page.shape(at.c), panel.shape(at.c), pageLeads);
-    OptionalDouble y = Follow.byVerse(pairs, lead.lineY(), lead.em(), other.em());
-    if (y.isPresent()) other.followTo(y.getAsDouble());
-    else if (!other.hasChapter(at.c)) other.bring(at.c, matched(map, at.i, pageLeads), false);
-  }
-
-  // The other pane's anchor that goes with the leader's anchor i (the last
-  // matched at or before it; -1: the chapter's top).
-  private static int matched(Follow.LinkMap map, int i, boolean pageLeads) {
-    int best = -1;
-    for (int k = 0; k < map.j.length; k++) {
-      int from = pageLeads ? map.i0[k] : map.j[k];
-      if (from <= i) best = pageLeads ? map.j[k] : map.i0[k];
-    }
-    return best;
-  }
-
-  // The version leading a commentary in its run of chapters without
-  // comments (waiting while the version is flung): the run's part is its
-  // place.
-  private void commentaryInRun(Reader version, Reader commentary, int runFrom, boolean resting) {
-    if (version.flung() && !resting) return;
-    Reader.Place aim = commentary.aim();
-    if (aim == null || aim.c != runFrom) commentary.bring(runFrom, -1, true);
-  }
-
-  // A commentary in its run leading the version: by Follow.runChapter (no
-  // place yet: the run's first).
-  private void versionInRun(Reader version, int runFrom, int runTo) {
-    Reader.Place aim = version.aim();
-    int to = aim == null ? runFrom : Follow.runChapter(runFrom, runTo, aim.c);
-    if (to >= 0) version.bring(to, -1, true);
-  }
-
-  // The version leading a commentary (in either pane): it waits while the
-  // version is flung; it stays while its comment covers the version's
-  // verse, and goes to the comment covering it nearest its reading line.
-  private void commentaryFollows(Reader version, Reader commentary, Reader.Place at,
-      Follow.LinkMap map, boolean resting) {
-    if (version.flung() && !resting) return;
-    Reader.Place aim = commentary.aim();
-    boolean same = aim != null && aim.c == at.c;
-    Follow.CommentStep step = Follow.commentFromVerses(map, at.i, same ? aim.i : -1,
-        commentary.shape(at.c), commentary.lineY());
-    if (!step.stays) commentary.bring(at.c, step.anchor, true);
-    else if (!same && at.i < 0) commentary.bring(at.c, -1, true);
-  }
-
-  // A commentary leading the version (in either pane): it stays while a
-  // verse the comment at the commentary's reading line covers is at its
-  // own, and goes to the comment's first verse.
-  private void versionFollows(Reader version, Reader.Place at, Follow.LinkMap map) {
-    Reader.Place aim = version.aim();
-    boolean same = aim != null && aim.c == at.c;
-    Follow.CommentStep step = Follow.versesFromComment(map, at.i, same ? aim.i : -1);
-    if (!step.stays) version.bring(at.c, step.anchor, true);
-    else if (!same && at.i < 0) version.bring(at.c, -1, true);
+  private void stopGlide() {
+    if (gliding != null) gliding.removeCallbacks(glideFrame);
+    gliding = null;
   }
 }

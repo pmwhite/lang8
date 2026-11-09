@@ -2,15 +2,27 @@ tag bible;
 
 use_tag std, sword, builder;
 
-// The bookshelf: Bibles, commentaries, dictionaries, devotionals and books
-// downloaded from CrossWire's SWORD library (https://crosswire.org/sword/)
-// and kept on the device to read offline. Core keeps what is installed,
+// The Bookshelf: Bibles, commentaries, dictionaries, devotionals and books
+// from CrossWire's SWORD library (https://crosswire.org/sword/), fetched
+// when one is first opened and kept on the device to read offline. It has
+// no screen of its own: Go To lists its modules with the catalog's others,
+// as documents wherever they are kept (core/documents.l8). (Not the
+// reader's Library of highlights, notes, bookmarks and Memory.) Core keeps
+// what is installed,
 // fetches each module's package with the platform's HostIO.fetch and reads
 // it back with HostIO.read_kept, as it needs it:
 //
 //   shelf.tsv             what is installed or asked for, a line each
 //   shelf-catalog.tar.gz  the library's catalog (its mods.d.tar.gz)
 //   shelf-NAME.zip        a module's package, as the library serves it
+//   shelf-NAME.folio      a module made (a Bible's version, another's
+//   shelf-NAME.2.folio    folio): one of the two, its line says which
+//   shelf-NAME.next.zip   an update's package, while it is made
+//
+// An update is downloaded and made beside the copy read (into the other
+// of its two names), and the module's line switched to it once it is
+// kept: what reads the module reads the copy before until then, and is
+// sent to the same place in the new one (shelf_update_swap).
 //
 // What is installed is a dataset (its own arena, made again whole from
 // shelf.tsv's lines when it changes); so are the catalog and each module
@@ -81,8 +93,46 @@ type ShelfItem = {
     // When it was last read (seconds; 0 never), and where in it: a book's
     // part (its node), a dictionary's entry (its index); 0 its start.
     used: int;
-    place: int
+    place: int;
+    // Which of its two names its made file has (shelf_copy_ending).
+    copy: int;
+    // Its update, as it goes (this session's: not kept in shelf.tsv).
+    update: ShelfUpdate
 }
+
+// An update of a module here: none asked for; its package wanted
+// (waiting its turn or downloading); downloaded, being made beside the
+// copy read (or waiting its turn); failed, the copy before kept (not
+// tried again this session, unless for want of a connection); or done,
+// the module up to date. An update the app closes
+// before it is made is let go: the copy before is read, and the catalog
+// still says there is one (what came of it is replaced by the next
+// update's, or deleted with the module).
+type ShelfUpdate =
+    | Current
+    | Wanted
+    | Fetched
+    | Failed { offline: bool }
+    | Done
+
+// A made file's two names: shelf-NAME.folio (copy 0) and
+// shelf-NAME.2.folio (copy 1), by their ending after shelf-NAME. (as a
+// span of a file read names it: TextSpan's).
+SHELF_COPIES: int = 2;
+
+shelf_copy_endings: []str = ["folio", "2.folio"];
+
+shelf_copy_ending(copy: int): str {
+    shelf_copy_endings[if (copy > 0 && copy < SHELF_COPIES) copy else 0]
+}
+
+// The other copy (an update's).
+shelf_other_copy(copy: int): int {
+    if (copy == 0) 1 else 0
+}
+
+// An update's package, as it is fetched and until it is made.
+SHELF_UPDATE_PACKAGE: str = ".next.zip";
 
 // What a module downloaded is kept as: its package as it came (packaged:
 // the library's zip), or made: a Bible a version (its folio read as a
@@ -113,8 +163,9 @@ shelf_list: ?owned *ShelfList = null;
 // shelf.tsv's fields: name, slot, state, kind, size, version, language,
 // added, abbreviation, title; then a made Bible's red letters (1) and
 // report (missing books, chapters outside, extra books, verses), zeros for
-// another; then when it was last read and its place there.
-SHELF_FIELDS: int = 17;
+// another; then when it was last read and its place there; then which of
+// its made file's names it has (none: the first).
+SHELF_FIELDS: int = 18;
 
 shelf_loaded: bool = false;
 
@@ -316,6 +367,42 @@ shelf_report_at(i: int): BibleReport {
     report
 }
 
+// Which of its made file's names item i's has (0 no such item).
+shelf_copy_at(i: int): int {
+    if (i < 0 || shelf_list == null) return 0;
+    copy: int = 0;
+    borrow shelf_list as list {
+        if (i < list.count) copy = list.items[i].copy
+    }
+    copy
+}
+
+// Item i's update, as it goes (Current: no such item).
+shelf_update_at(i: int): ShelfUpdate {
+    if (i < 0 || shelf_list == null) return ShelfUpdate.Current;
+    update: ShelfUpdate = ShelfUpdate.Current;
+    borrow shelf_list as list {
+        if (i < list.count) update = list.items[i].update
+    }
+    update
+}
+
+shelf_set_update(i: int, update: ShelfUpdate) {
+    if (i < 0 || shelf_list == null) return;
+    borrow shelf_list as list {
+        if (i < list.count) list.items[i].update = update
+    }
+}
+
+// Whether item i's update is coming: its package wanted or being made.
+shelf_updating_at(i: int): bool {
+    match shelf_update_at(i) {
+        Wanted -> true;
+        Fetched -> true;
+        _ -> false
+    }
+}
+
 // Item i's short name, title (its description), name, onto fbuf.
 fput_shelf_abbreviation(i: int) {
     if (i < 0 || shelf_list == null) return;
@@ -329,6 +416,85 @@ fput_shelf_title(i: int) {
     borrow shelf_list as list {
         if (i < list.count) fput_str(list.items[i].title)
     }
+}
+
+// Item i's title made short for a bar (the panel's reader's), onto fbuf:
+// an author's first names and initials left out, the surname kept as its
+// possessive within the first three words ("C. H. Spurgeon's Treasury of
+// David": Spurgeon's Treasury of David; Matthew Henry's: Henry's), and
+// what follows a comma, a parenthesis or " on the " ("Henry's Concise
+// Commentary on the Whole Bible": Henry's Concise Commentary). A title
+// beginning "The" keeps its words. Go To's rows and a module's page show
+// the whole.
+fput_shelf_short_title(i: int) {
+    if (i < 0 || shelf_list == null) return;
+    borrow shelf_list as list {
+        if (i < list.count) fput_short_title(list.items[i].title)
+    }
+}
+
+fput_short_title(title: str) {
+    n: int = len(title);
+    from: int = 0;
+    // (The first three words' possessive, unless it begins "The ".)
+    if (!(n > 4 && title[0] as int == 'T' as int && title[1] as int == 'h' as int && title[2] as int == 'e' as int && title[3] as int == 32)) {
+        word: int = 0;
+        at: int = 0;
+        found: bool = false;
+        while (!found && word < 3 && at < n) {
+            end: int = at;
+            while (end < n && title[end] as int != 32) end = end + 1;
+            possessive: bool = end - at >= 3 && (title[end - 2] as int == 39 && title[end - 1] as int == 's' as int || title[end - 2] as int == 's' as int && title[end - 1] as int == 39);
+            if (possessive && end < n) {
+                from = at;
+                found = true
+            }
+            at = end + 1;
+            word = word + 1
+        }
+    }
+    to: int = n;
+    k: int = from + 1;
+    while (k < to) {
+        if (title[k] as int == 44 || title[k] as int == 40 && title[k - 1] as int == 32 || shelf_text_at(title,
+            k, " on the ")) to = k;
+        k = k + 1
+    }
+    while (to > from && (title[to - 1] as int == 32 || title[to - 1] as int == 46)) to = to - 1;
+    for x in from..to fput(title[x] as int & 255)
+}
+
+// Item i's name for the reader's bar after the chapter, where a version's
+// short name goes, onto fbuf: its short title's first word (its second
+// after "The"), a possessive dropped ("Spurgeon", "Henry", "Barnes"),
+// shortened to 10 letters with an ellipsis.
+fput_shelf_bar_name_shortened(i: int) {
+    if (i < 0 || shelf_list == null) return;
+    from: int = fbuf_n;
+    fput_shelf_short_title(i);
+    end: int = fbuf_n;
+    b: int = from;
+    // (Past "The ".)
+    if (end - b > 4 && fbuf[b] as int == 'T' as int && fbuf[b + 1] as int == 'h' as int && fbuf[b + 2] as int == 'e' as int && fbuf[b + 3] as int == 32) b = b + 4;
+    e: int = b;
+    while (e < end && fbuf[e] as int != 32) e = e + 1;
+    if (e - b > 2 && fbuf[e - 2] as int == 39 && fbuf[e - 1] as int == 's' as int) e = e - 2 else if (e - b > 1 && fbuf[e - 1] as int == 39) e = e - 1;
+    n: int = e - b;
+    shortened: bool = n > SHELF_BAR_NAME_MOST;
+    if (shortened) n = SHELF_BAR_NAME_MOST - 1;
+    for k in 0..n fbuf[from + k] = fbuf[b + k];
+    fbuf_n = from + n;
+    if (shortened) fput_str("\â\€\¦")
+}
+
+SHELF_BAR_NAME_MOST: int = 10;
+
+// Whether text holds part at byte at.
+shelf_text_at(text: str, at: int, part: str): bool {
+    if (at + len(part) > len(text)) return false;
+    for j in 0..len(part)
+        if (text[at + j] != part[j]) return false;
+    true
 }
 
 // Item i's language, its name, onto fbuf.
@@ -398,8 +564,8 @@ shelf_text_of(i: int): int {
     TEXT_SHELF_FIRST + shelf_slot_at(i)
 }
 
-// Item i's form, kept in shelf.tsv (made as part of its download: said
-// ready to read).
+// Item i's form, kept in shelf.tsv (made as part of its download: no
+// longer coming).
 shelf_save_form(i: int, form: ShelfForm) {
     if (shelf_list != null) {
         borrow shelf_list as list {
@@ -408,11 +574,10 @@ shelf_save_form(i: int, form: ShelfForm) {
     }
     shelf_format(-1);
     shelf_keep_fbuf();
-    if (shelf_slot_at(i) == shelf_making_announced) {
-        shelf_making_announced = -1;
+    if (shelf_slot_at(i) == shelf_making_download) {
         match form {
             Packaged -> { }
-            _ -> shelf_toast_ready(i)
+            _ -> shelf_making_download = -1
         }
     }
 }
@@ -461,6 +626,7 @@ shelf_list_from_fbuf() {
                     for k in 0..old.count {
                         if (old.items[k].slot == fresh.items[i].slot) {
                             fresh.items[i].broken = old.items[k].broken;
+                            fresh.items[i].update = old.items[k].update;
                             // (A Bible opened this time, not made: what it said.)
                             if (old.items[k].report.verses >= 0) {
                                 fresh.items[i].red = old.items[k].red;
@@ -496,7 +662,9 @@ shelf_list_made(): *ShelfList@new {
         red: false,
         report: no_report,
         used: 0,
-        place: 0
+        place: 0,
+        copy: 0,
+        update: ShelfUpdate.Current
     });
     count: int = 0;
     fields: []int = new int[SHELF_FIELDS](0);
@@ -541,7 +709,9 @@ shelf_list_made(): *ShelfList@new {
                     verses: sk_num(fbuf, fields[14], ends[14])
                 } else no_report,
                 used: sk_num(fbuf, fields[15], ends[15]),
-                place: sk_num(fbuf, fields[16], ends[16])
+                place: sk_num(fbuf, fields[16], ends[16]),
+                copy: if (sk_num(fbuf, fields[17], ends[17]) == 1) 1 else 0,
+                update: ShelfUpdate.Current
             };
             count = count + 1
         }
@@ -561,6 +731,20 @@ shelf_format(skip: int) {
 }
 
 shelf_format_item(item: *ShelfItem) {
+    shelf_format_line(item, item.size, item.version, item.language, item.abbreviation,
+        item.title)
+}
+
+// Item's line, with these words for its version (its size, version,
+// language, short name and title).
+shelf_format_line(
+    item: *ShelfItem,
+    size: int,
+    version: str,
+    language: str,
+    abbreviation: str,
+    title: str
+) {
     fput_tsv(item.name);
     fput(9);
     fput_int(item.slot);
@@ -574,17 +758,17 @@ shelf_format_item(item: *ShelfItem) {
     fput(9);
     fput_str(shelf_kind_names[shelf_kind_code(item.kind)]);
     fput(9);
-    fput_int(item.size);
+    fput_int(size);
     fput(9);
-    fput_tsv(item.version);
+    fput_tsv(version);
     fput(9);
-    fput_tsv(item.language);
+    fput_tsv(language);
     fput(9);
     fput_int(item.added);
     fput(9);
-    fput_tsv(item.abbreviation);
+    fput_tsv(abbreviation);
     fput(9);
-    fput_tsv(item.title);
+    fput_tsv(title);
     // (A Bible made a version: what it said; another module's, zeros.)
     made: bool = match item.form {
         Made -> true;
@@ -600,6 +784,8 @@ shelf_format_item(item: *ShelfItem) {
     fput_int(item.used);
     fput(9);
     fput_int(item.place);
+    fput(9);
+    fput_int(item.copy);
     fput(10)
 }
 
@@ -705,15 +891,16 @@ shelf_catalog_day(): int {
     pref_get("shelfCatalogDay")
 }
 
-// The catalog wanted (a screen that lists it is open): read from where it
-// is kept, or fetched if it is not, or a week old and online.
+// The catalog wanted (Go To opened, a screen that lists it open): read
+// from where it is kept, or fetched if it is not, or, online, if it wasn't
+// fetched today: checked quietly at most once a day.
 shelf_want_catalog() {
     match shelf_catalog_state {
         Coming -> return;
         _ -> { }
     }
     day: int = sk_local_day(time(0));
-    old: bool = shelf_catalog_day() <= 0 || day - shelf_catalog_day() >= 7;
+    old: bool = shelf_catalog_day() <= 0 || day != shelf_catalog_day();
     if (shelf_catalog != null && !(old && hd_network != NET_NONE && shelf_fetch_id < 0)) return;
     if (shelf_catalog == null && shelf_catalog_day() > 0 && !old) {
         shelf_read_catalog();
@@ -726,18 +913,19 @@ shelf_want_catalog() {
     if (shelf_catalog_day() > 0) shelf_read_catalog() else shelf_catalog_state = CatalogState.Failed { offline: true }
 }
 
+// Whether the first catalog is on its way (being fetched or read, or
+// waiting to be fetched), none here yet.
+shelf_catalog_awaited(): bool {
+    if (shelf_catalog != null) return false;
+    match shelf_catalog_state {
+        Coming -> true;
+        _ -> shelf_catalog_wanted
+    }
+}
+
 shelf_read_catalog() {
     shelf_catalog_state = CatalogState.Coming;
     shelf_read_kept(SHELF_READ_CATALOG_ID, SHELF_CATALOG_FILE)
-}
-
-// "Check for Updates": the catalog fetched again now.
-shelf_refresh_catalog() {
-    match shelf_catalog_state {
-        Coming -> return;
-        _ -> { }
-    }
-    shelf_fetch_catalog()
 }
 
 // The catalog's bytes (a tar.gz of confs) made into a catalog of its own:
@@ -754,8 +942,6 @@ shelf_catalog_came(data: []i8, size: int): bool {
         drop shelf_catalog;
         shelf_catalog = move next;
         shelf_catalog_state = CatalogState.Here;
-        // (Its entries are numbered anew.)
-        shelf_browse_language_at = -1;
         true
     } with archive::ArchiveError _error -> {
         false
@@ -804,9 +990,21 @@ catalog_made(data: []i8, size: int) raises archive::ArchiveError, deflate::Defla
                 conf_bytes: []i8 = new i8[member.size](0i8);
                 memcpy(conf_bytes, 0, tar, member.offset, member.size);
                 conf: *ModuleConf = conf_parse(conf_bytes, member.size);
-                entries[count].info = module_info(conf);
-                entries[count].support = module_support(&entries[count].info);
-                count = count + 1
+                info: ModuleInfo = module_info(conf);
+                // (A module listed once, by its name, as SWORD's installers
+                // key them: where two confs name one module (CrossWire's
+                // lists BulCarigradNT twice), the one whose file is named
+                // for it, else the first.)
+                same: int = -1;
+                for j in 0..count
+                    if (entries[j].info.name == info.name) same = j;
+                at: int = if (same < 0) count else if (conf_named_for(member.name,
+                    info.name)) same else -1;
+                if (at >= 0) {
+                    entries[at].info = info;
+                    entries[at].support = module_support(&entries[at].info);
+                    if (at == count) count = count + 1
+                }
             } with SwordError _error -> { }
         }
     }
@@ -821,6 +1019,24 @@ catalog_made(data: []i8, size: int) raises archive::ArchiveError, deflate::Defla
         }
     }
     new ShelfCatalog { entries: entries, count: count }
+}
+
+// Whether a catalog's member at path is module name's own conf:
+// mods.d/NAME.conf, its name in lower case as the catalog writes it.
+conf_named_for(path: str, name: str): bool {
+    folder: str = "mods.d/";
+    end: str = ".conf";
+    if (len(path) != len(folder) + len(name) + len(end) || !shelf_ends_with(path,
+        end)) return false;
+    for i in 0..len(folder)
+        if (path[i] != folder[i]) return false;
+    for i in 0..len(name) {
+        x: int = path[len(folder) + i] as int & 255;
+        y: int = name[i] as int & 255;
+        if (y >= 'A' as int && y <= 'Z' as int) y = y + 32;
+        if (x != y) return false
+    }
+    true
 }
 
 catalog_empty_info(): ModuleInfo {
@@ -855,14 +1071,14 @@ catalog_empty_info(): ModuleInfo {
 }
 
 catalog_group(kind: ModuleKind): int {
-    segment: int = shelf_segment_of(kind);
-    if (segment >= 0) segment else SHELF_SEGMENTS + shelf_kind_code(kind)
+    group: int = doc_group_of(kind);
+    if (group >= 0) group else DOC_GROUPS + shelf_kind_code(kind)
 }
 
-// Whether a comes before b: by Browse's segment (the kinds it doesn't
-// show after, by kind), then English before other languages, then
-// language name, then description. (Each segment's languages are then
-// together, though it shows two kinds.)
+// Whether a comes before b: by the group its kind is listed in (the kinds
+// not listed after, by kind), then English before other languages, then
+// language name, then description (its title, as titles sort:
+// title_compare).
 catalog_before(a: *CatalogEntry, b: *CatalogEntry): bool {
     ka: int = catalog_group(a.info.kind);
     kb: int = catalog_group(b.info.kind);
@@ -872,21 +1088,85 @@ catalog_before(a: *CatalogEntry, b: *CatalogEntry): bool {
     if (ea != eb) return ea;
     c: int = text_compare_folded(language_name(a.info.language), language_name(b.info.language));
     if (c != 0) return c < 0;
-    text_compare_folded(a.info.description, b.info.description) < 0
+    title_compare(a.info.description, b.info.description) < 0
 }
 
 // Two texts compared as a reader would sort them: letters without regard
 // to case (bytes past ASCII as they are).
 text_compare_folded(a: str, b: str): int {
-    n: int = if (len(a) < len(b)) len(a) else len(b);
+    text_compare_folded_from(a, 0, b, 0)
+}
+
+// a from a_from and b from b_from compared as text_compare_folded does.
+text_compare_folded_from(
+    a: str,
+    a_from: int,
+    b: str,
+    b_from: int
+): int {
+    na: int = len(a) - a_from;
+    nb: int = len(b) - b_from;
+    n: int = if (na < nb) na else nb;
     for i in 0..n {
-        x: int = a[i] as int & 255;
-        y: int = b[i] as int & 255;
+        x: int = a[a_from + i] as int & 255;
+        y: int = b[b_from + i] as int & 255;
         if (x >= 65 && x <= 90) x = x + 32;
         if (y >= 65 && y <= 90) y = y + 32;
         if (x != y) return x - y
     }
-    len(a) - len(b)
+    na - nb
+}
+
+// Two titles compared as a list of titles sorts them: from the words
+// that name each (title_sort_start), then whole, so that "1949/1964 Bible
+// in Basic English" sorts as "Bible in Basic English" and "A Faithful
+// Version" as "Faithful Version". The titles are shown as they are.
+title_compare(a: str, b: str): int {
+    c: int = text_compare_folded_from(a, title_sort_start(a), b, title_sort_start(b));
+    if (c != 0) c else text_compare_folded(a, b)
+}
+
+// Where a title's sorting words begin: past a leading number or year (a
+// run of digits not followed by a letter: "1770", "1949/1964", but not
+// "1st"), any punctuation and spaces after it, and a leading article (A,
+// An, The); its start if that would leave nothing.
+title_sort_start(title: str): int {
+    n: int = len(title);
+    at: int = 0;
+    digits: int = 0;
+    while (digits < n && title_digit(title[digits] as int)) digits = digits + 1;
+    if (digits > 0 && !(digits < n && title_letter(title[digits] as int))) {
+        at = digits;
+        // (Its punctuation and spaces, and the years that run on: "/1964".)
+        while (at < n && !title_letter(title[at] as int) && (title[at] as int & 255) < 128) at = at + 1
+    }
+    skipped: bool = false;
+    for article in ["A ", "An ", "The "] {
+        k: int = len(article);
+        if (!skipped && at + k < n) {
+            same: bool = true;
+            for j in 0..k {
+                x: int = title[at + j] as int;
+                if (x >= 65 && x <= 90) x = x + 32;
+                y: int = article[j] as int;
+                if (y >= 65 && y <= 90) y = y + 32;
+                if (x != y) same = false
+            }
+            if (same) {
+                at = at + k;
+                skipped = true
+            }
+        }
+    }
+    if (at >= n) 0 else at
+}
+
+title_digit(x: int): bool {
+    x >= 48 && x <= 57
+}
+
+title_letter(x: int): bool {
+    x >= 65 && x <= 90 || x >= 97 && x <= 122 || (x & 255) >= 128
 }
 
 // The catalog's entry named (-1: none; no catalog).
@@ -915,6 +1195,8 @@ type ShelfFetch =
     | Idle
     | FetchingCatalog { id: int }
     | FetchingPackage { id: int, slot: int }
+    // An update's package (SHELF_UPDATE_PACKAGE), its module read meanwhile.
+    | FetchingUpdate { id: int, slot: int }
 
 shelf_fetch: ShelfFetch = ShelfFetch.Idle;
 
@@ -932,10 +1214,8 @@ shelf_fetch_total: int = 0;
 shelf_fetch_shown: int = 0;
 
 // The last fetch that failed (its slot, -1 none), so it is not tried
-// again until asked, and why.
+// again until asked (opened again, or the connection back).
 shelf_failed_slot: int = -1;
-
-shelf_failed_offline: bool = false;
 
 shelf_catalog_wanted: bool = false;
 
@@ -1006,41 +1286,63 @@ shelf_pump() {
         shelf_fetch_catalog();
         return
     }
-    for i in 0..shelf_count() {
-        slot: int = shelf_slot_at(i);
-        if (!shelf_ready_at(i) && slot != shelf_failed_slot) {
-            started: bool = false;
-            if (shelf_kept_at(i, ".zip") && shelf_list != null) {
-                borrow shelf_list as list {
-                    started = shelf_fetch_start(SHELF_PACKAGES_PATH, list.items[i].name,
-                        true)
+    // (What is on its way to a pane first: core/documents.l8's arrivals.)
+    for pass in 0..2 {
+        for i in 0..shelf_count() {
+            slot: int = shelf_slot_at(i);
+            update_wanted: bool = match shelf_update_at(i) {
+                Wanted -> true;
+                _ -> false
+            };
+            if (pass == 0 && !doc_arriving_any(slot))
+                continue;
+            if (!shelf_ready_at(i) && slot != shelf_failed_slot || update_wanted) {
+                source: MakingSource = if (update_wanted) MakingSource.Update else MakingSource.Download;
+                started: bool = false;
+                if (shelf_kept_package_at(i, source) && shelf_list != null) {
+                    borrow shelf_list as list {
+                        started = shelf_fetch_start(SHELF_PACKAGES_PATH, list.items[i].name,
+                            true)
+                    }
                 }
-            }
-            if (!started) {
-                // (A name too long to keep: it can't be downloaded.)
-                shelf_failed_slot = slot;
-                shelf_failed_offline = false;
+                if (!started) {
+                    // (A name too long to keep: it can't be downloaded.)
+                    if (update_wanted) shelf_update_failed(i, false) else shelf_failed_slot = slot;
+                    shelf_screens_changed();
+                    return
+                }
+                if (update_wanted) {
+                    shelf_fetch = ShelfFetch.FetchingUpdate { id: shelf_fetch_id, slot: slot };
+                    at: int = shelf_catalog_find_item(i);
+                    shelf_fetch_total = shelf_size_at(i);
+                    if (at >= 0) {
+                        borrow shelf_catalog as catalog {
+                            shelf_fetch_total = catalog.entries[at].info.install_size
+                        }
+                    }
+                } else {
+                    shelf_fetch = ShelfFetch.FetchingPackage { id: shelf_fetch_id, slot: slot };
+                    shelf_fetch_total = shelf_size_at(i)
+                }
                 shelf_screens_changed();
                 return
             }
-            shelf_fetch = ShelfFetch.FetchingPackage { id: shelf_fetch_id, slot: slot };
-            shelf_fetch_total = shelf_size_at(i);
-            shelf_screens_changed();
-            return
         }
     }
 }
 
-// The platform's lines about a fetch (core/held.l8's, for ids of ours).
+// The platform's lines about a fetch (core/held.l8's, for ids of ours):
+// what is on its way to a pane told how far it has come (no screen shows
+// a fetch's progress).
 shelf_fetching(id: int, got: int, total: int) {
     if (id != shelf_fetch_id) return;
     shelf_fetch_got = got;
     if (total > 0) shelf_fetch_total = total;
     if (shelf_fetch_total <= 0) return;
     shown: int = got * 100 / shelf_fetch_total;
-    if (shown < shelf_fetch_shown + 5) return;
+    if (shown < shelf_fetch_shown + 2) return;
     shelf_fetch_shown = shown;
-    shelf_screens_changed()
+    doc_arrivals_check()
 }
 
 shelf_fetched(id: int, status: int, bytes: int) {
@@ -1067,10 +1369,17 @@ shelf_fetched(id: int, status: int, bytes: int) {
                     shelf_save_with(i, true, bytes);
                     shelf_to_make_add(p.slot);
                     shelf_prepare_next()
-                } else {
-                    shelf_failed_slot = p.slot;
-                    shelf_failed_offline = status == 0
-                }
+                } else shelf_failed_slot = p.slot
+            }
+        }
+        FetchingUpdate p -> {
+            i: int = shelf_find_slot(p.slot);
+            if (i >= 0) {
+                if (ok) {
+                    shelf_set_update(i, ShelfUpdate.Fetched);
+                    shelf_to_make_add(p.slot);
+                    shelf_prepare_next()
+                } else shelf_update_failed(i, status == 0)
             }
         }
         Idle -> { }
@@ -1079,29 +1388,50 @@ shelf_fetched(id: int, status: int, bytes: int) {
     shelf_pump()
 }
 
-// A module ready: said in a toast.
-shelf_toast_ready(i: int) {
-    fbuf_n = 0;
-    fput_shelf_abbreviation(i);
-    fput_str(" is ready to read");
-    ui_toast(TOAST_CHECK)
-}
-
 // A Bible that couldn't be made a version: marked broken (until it is
-// downloaded again, or the app opens again), the version asked for no
-// longer waited for, and the reader told.
+// fetched again, or the app opens again), the version asked for no longer
+// waited for, and the reader told (by core/documents.l8's arrival, if it
+// was on its way to a pane).
 shelf_bible_failed(i: int, t: int) {
     shelf_set_broken(i, true);
     hs_missing(t);
+    if (doc_arriving_any(shelf_slot_at(i))) return;
     fbuf_n = 0;
-    fput_shelf_abbreviation(i);
-    fput_str(" couldn\â\€\™t be opened. Remove it, then download it again.");
+    fput_str("Couldn\â\€\™t open ");
+    fput_shelf_short_title(i);
+    fput(46);
     ui_toast(TOAST_WARNING)
 }
 
-// The network came back (or changed): a failed fetch tried again.
+// The network came back (or changed): a failed fetch tried again, and an
+// update that failed for want of a connection. Lost: what is on its way to
+// a pane and not here failed (doc_arrivals_offline).
 shelf_network_changed() {
-    if (hd_network != NET_NONE) shelf_failed_slot = -1;
+    if (hd_network != NET_NONE) {
+        shelf_failed_slot = -1;
+        for i in 0..shelf_count() {
+            match shelf_update_at(i) {
+                Failed f -> if (f.offline) shelf_set_update(i, ShelfUpdate.Wanted);
+                _ -> { }
+            }
+        }
+    } else doc_arrivals_offline();
+    shelf_pump()
+}
+
+// The modules here whose catalog entry is newer begun updating, quietly,
+// while the connection isn't metered (the catalog read again, at most once
+// a day): one that failed this session isn't tried again until the app
+// opens again.
+shelf_updates_begin() {
+    if (hd_network != NET_FREE) return;
+    for i in 0..shelf_count() {
+        current: bool = match shelf_update_at(i) {
+            Current -> true;
+            _ -> false
+        };
+        if (current && shelf_update_entry(i) >= 0) shelf_set_update(i, ShelfUpdate.Wanted)
+    }
     shelf_pump()
 }
 
@@ -1123,6 +1453,36 @@ shelf_free_slot(bible: bool): int {
 // Bible's slot is taken.
 shelf_full_for(kind: ModuleKind): bool {
     shelf_kind_code(kind) == SHELF_KIND_BIBLE && shelf_free_slot(true) < 0
+}
+
+// A Bible's slot made free, every one being taken: the Bible here read
+// longest ago that no pane shows nor waits for let go (it is a copy of
+// what is online, fetched again when it is next opened). Whether one is
+// free now.
+shelf_free_bible_slot(): bool {
+    if (shelf_free_slot(true) >= 0) return true;
+    oldest: int = -1;
+    for i in 0..shelf_count() {
+        if (shelf_kind_at(i) == SHELF_KIND_BIBLE && shelf_here_at(i) && !shelf_doc_shown(i) && (oldest < 0 || shelf_used_at(i) < shelf_used_at(oldest))) oldest = i
+    }
+    if (oldest < 0) return false;
+    shelf_remove(oldest);
+    shelf_free_slot(true) >= 0
+}
+
+// Item i, which couldn't be opened, fetched anew: let go and asked for
+// again from the catalog (its new item; i itself where the catalog read
+// doesn't have it, which then says it couldn't be opened).
+shelf_fetch_again(i: int): int {
+    at: int = shelf_catalog_find_item(i);
+    if (at < 0 || shelf_doc_shown(i)) return i;
+    shelf_remove(i);
+    again: int = -1;
+    borrow shelf_catalog as catalog {
+        shelf_add(&catalog.entries[at]);
+        again = shelf_find(catalog.entries[at].info.name)
+    }
+    again
 }
 
 // The catalog's entry asked for (not if the shelf has no room for it:
@@ -1190,8 +1550,10 @@ shelf_remove_kept(i: int) {
             }
         }
     }
-    for suffix in [".files", ".conf", ".zip", ".folio", ".txt"]
-        if (shelf_kept_at(i, suffix)) f()
+    for suffix in [".files", ".conf", ".zip", SHELF_UPDATE_PACKAGE, ".txt"]
+        if (shelf_kept_at(i, suffix)) f();
+    for copy in 0..SHELF_COPIES
+        if (shelf_kept_copy_at(i, copy)) f()
 }
 
 shelf_remove(i: int) {
@@ -1207,28 +1569,134 @@ shelf_remove(i: int) {
                 shelf_fetch_id = -1
             }
         }
+        FetchingUpdate p -> {
+            if (p.slot == slot) {
+                shelf_fetch = ShelfFetch.Idle;
+                shelf_fetch_id = -1
+            }
+        }
         _ -> { }
     }
+    if (shelf_rereading == slot) shelf_rereading = -1;
     // (What is kept of it deleted first: its files are named after it.)
     shelf_remove_kept(i);
     shelf_format(i);
     shelf_keep_fbuf();
     shelf_close_slot(slot);
-    if (kind == SHELF_KIND_BIBLE) {
-        t: int = TEXT_SHELF_FIRST + slot;
-        if (text_cur == t) sk_use_version(TEXT_BSB);
-        if (t < len(texts)) {
-            drop texts[t];
-            texts[t] = text_empty(t)
-        }
-        if (pref_get("version") == t) set_pref("version", TEXT_BSB)
-    }
+    if (kind == SHELF_KIND_BIBLE) shelf_text_let_go(slot);
     if (pref_get("studyCommentary") == slot + 1) set_pref("studyCommentary", 0);
     sk_save();
     shelf_pump();
     shelf_prepare_next();
     shelf_screens_changed();
     sk_update_all()
+}
+
+// The version a Bible in slot was made, let go (removed, or downloaded
+// again): the reader in the BSB if it read it.
+shelf_text_let_go(slot: int) {
+    t: int = TEXT_SHELF_FIRST + slot;
+    if (text_cur == t) sk_use_version(TEXT_BSB);
+    if (t < len(texts)) {
+        drop texts[t];
+        texts[t] = text_empty(t)
+    }
+    if (pref_get("version") == t) set_pref("version", TEXT_BSB)
+}
+
+// Item i's update failed (offline: for want of a connection): what came
+// of it deleted, the copy read kept; tried again when the app next opens
+// (or, for want of a connection, once it is back).
+shelf_update_failed(i: int, offline: bool) {
+    shelf_set_update(i, ShelfUpdate.Failed { offline: offline });
+    f: fn() = kept_store.remove;
+    if (shelf_kept_at(i, SHELF_UPDATE_PACKAGE)) f();
+    if (shelf_kept_copy_at(i, shelf_other_copy(shelf_copy_at(i)))) f()
+}
+
+// Item i's update kept as its other copy, made as form (a Bible's what
+// it said as it was made): its line switched to that copy, with the
+// catalog's words for it now (its version, size, title), kept first; then
+// the copy before and the update's package deleted (so that, stopped
+// between, the line names a copy that is there); up to date. The caller
+// lets go of what read the copy before and sends what reads the module to
+// the same place in the new one.
+shelf_update_swap(i: int, form: ShelfForm, opened: BibleOpened) {
+    slot: int = shelf_slot_at(i);
+    old_copy: int = shelf_copy_at(i);
+    made: bool = match form {
+        Made -> true;
+        _ -> false
+    };
+    if (shelf_list != null) {
+        borrow shelf_list as list {
+            if (i < list.count) {
+                item: *ShelfItem = &list.items[i];
+                item.copy = shelf_other_copy(old_copy);
+                item.form = form;
+                item.ready = true;
+                item.broken = false;
+                item.red = made && opened.red;
+                item.report = (if (made) opened.report else no_report)
+            }
+        }
+    }
+    shelf_format_updated(i, shelf_catalog_find_item(i));
+    shelf_keep_fbuf();
+    j: int = shelf_find_slot(slot);
+    f: fn() = kept_store.remove;
+    // (The copy before: its made file, a package not yet made, or records
+    // kept before folios.)
+    if (shelf_kept_copy_at(j, old_copy)) f();
+    for suffix in [".zip", SHELF_UPDATE_PACKAGE, ".txt"]
+        if (shelf_kept_at(j, suffix)) f();
+    shelf_set_update(j, ShelfUpdate.Done)
+}
+
+// The list as shelf.tsv's lines, into fbuf, item i's with the catalog's
+// entry at's words (its version, size, title; -1: its own kept).
+shelf_format_updated(i: int, at: int) {
+    fbuf_n = 0;
+    if (shelf_list == null) return;
+    borrow shelf_list as list {
+        for k in 0..list.count {
+            item: *ShelfItem = &list.items[k];
+            if (k == i && at >= 0) {
+                borrow shelf_catalog as catalog {
+                    info: *ModuleInfo = &catalog.entries[at].info;
+                    shelf_format_line(item, info.install_size, info.version, info.language,
+                        shelf_short_name(info), info.description)
+                }
+            } else shelf_format_item(item)
+        }
+    }
+}
+
+// The module (its slot) whose new copy what reads it is to be sent to,
+// once the copy is open and the parts at their places are here (-1:
+// none): until then it shows the copy before, so no pane is ever empty.
+shelf_rereading: int = -1;
+
+// What reads the module shelf_rereading names sent to its new copy, at
+// the same places (pane_reread), once every pane reading it can be shown
+// there at once: the copy opened, then the parts at each pane's place,
+// and those beside them, read (each asked for in turn, as the bookshelf
+// rests).
+shelf_reread_when_ready() {
+    slot: int = shelf_rereading;
+    if (slot < 0 || shelf_busy()) return;
+    // (A new copy that can't be opened: shown now, saying so, not waited
+    // for.)
+    i: int = shelf_find_slot(slot);
+    if (i >= 0 && !shelf_broken_at(i)) {
+        for p in 0..PANES {
+            if (pane_reads_commentary(p, slot) && pane_places[p].c >= 0 && !shelf_comment_place_ready(slot,
+                pane_places[p].c, pane_places[p].i)) return
+        }
+    }
+    shelf_rereading = -1;
+    for p in 0..PANES
+        if (pane_reads_commentary(p, slot)) pane_reread(p)
 }
 
 // ---- reading what is kept ----
@@ -1249,6 +1717,23 @@ shelf_kept_at(i: int, suffix: str): bool {
         if (i < list.count) ok = shelf_kept_name_with(list.items[i].name, suffix)
     }
     ok
+}
+
+// Item i's made file's name, copy's (shelf_copy_ending), into kp_name.
+shelf_kept_copy_at(i: int, copy: int): bool {
+    if (!shelf_kept_at(i, ".")) return false;
+    ending: str = shelf_copy_ending(copy);
+    if (kp_name_n + len(ending) > len(kp_name)) return false;
+    for c in ending {
+        kp_name[kp_name_n] = c;
+        kp_name_n = kp_name_n + 1
+    }
+    true
+}
+
+// Item i's made file read now (the copy its line names), into kp_name.
+shelf_kept_made_at(i: int): bool {
+    shelf_kept_copy_at(i, shelf_copy_at(i))
 }
 
 shelf_kept_name_with(name: str, suffix: str): bool {
@@ -1339,7 +1824,7 @@ shelf_ask_text(t: int) {
     }
     match shelf_form_at(i) {
         Made -> shelf_bible_load(i, t);
-        _ -> shelf_bible_make(i, t)
+        _ -> shelf_bible_make(i, t, MakingSource.Download)
     }
 }
 
@@ -1355,6 +1840,7 @@ shelf_got(id: int, size: int) {
                 came = shelf_catalog_came(data, size)
             }
         }
+        if (came) shelf_updates_begin();
         if (!came) {
             // (What is kept is damaged or gone: fetched again, online.)
             set_pref("shelfCatalogDay", 0);
@@ -1370,8 +1856,8 @@ shelf_got(id: int, size: int) {
         return
     }
     match shelf_work {
-        MakingBible w -> shelf_bible_got(i, id, size, w.t);
-        MakingDocument _w -> shelf_document_got(i, id, size);
+        MakingBible w -> shelf_bible_got(i, id, size, w.t, w.source);
+        MakingDocument w -> shelf_document_got(i, id, size, w.source);
         OpeningFolio w -> shelf_folio_got(i, id, size, w.use, w.head);
         LoadingBible w -> shelf_bible_loaded(i, id, size, w.t, w.kept);
         ReadingText _w -> shelf_text_got(i, id, size);
@@ -1385,8 +1871,8 @@ shelf_kept(id: int, ok: bool) {
     i: int = shelf_find_slot(id - SHELF_READ_ID_FIRST);
     if (i < 0 || shelf_work_slot() != id - SHELF_READ_ID_FIRST) return;
     match shelf_work {
-        MakingBible w -> shelf_bible_kept(i, ok, w.t);
-        MakingDocument _w -> shelf_document_kept(i, ok);
+        MakingBible w -> shelf_bible_kept(i, ok, w.t, w.source);
+        MakingDocument w -> shelf_document_kept(i, ok, w.source);
         LoadingBible w -> shelf_bible_records_packed(i, ok, w.t);
         _ -> { }
     }
@@ -1412,10 +1898,10 @@ type ShelfWork =
     | Resting
     // Its package read and taken out, a chapter of records made each
     // step, the records kept.
-    | MakingBible { slot: int, t: int }
+    | MakingBible { slot: int, t: int, source: MakingSource }
     // Its package read and taken out, a commentary's chapters made into
     // a folio some each step, the folio kept.
-    | MakingDocument { slot: int }
+    | MakingDocument { slot: int, source: MakingSource }
     // Its folio's head read: the first bytes, which say how long it is
     // (head 0), then the head (head its size).
     | OpeningFolio { slot: int, use: int, head: int }
@@ -1426,6 +1912,30 @@ type ShelfWork =
     | ReadingText { slot: int }
 
 shelf_work: ShelfWork = ShelfWork.Resting;
+
+// What a making reads and where it keeps what it makes: a download's
+// package (shelf-NAME.zip), made into the copy the module's line names;
+// or an update's (SHELF_UPDATE_PACKAGE), made into the other copy while
+// the one before is read, the line switched to it once it is kept.
+type MakingSource =
+    | Download
+    | Update
+
+// The package a making reads, into kp_name.
+shelf_kept_package_at(i: int, source: MakingSource): bool {
+    match source {
+        Download -> shelf_kept_at(i, ".zip");
+        Update -> shelf_kept_at(i, SHELF_UPDATE_PACKAGE)
+    }
+}
+
+// The file a making keeps what it made as, into kp_name.
+shelf_kept_making_at(i: int, source: MakingSource): bool {
+    match source {
+        Download -> shelf_kept_made_at(i);
+        Update -> shelf_kept_copy_at(i, shelf_other_copy(shelf_copy_at(i)))
+    }
+}
 
 // How much of it is done, in thousandths, as the screens show it.
 shelf_work_done: int = 0;
@@ -1469,8 +1979,8 @@ shelf_work_next() {
 shelf_work_step() {
     stepping: bool = true;
     match shelf_work {
-        MakingBible w -> shelf_bible_step(w.slot, w.t);
-        MakingDocument _w -> shelf_document_step();
+        MakingBible w -> shelf_bible_step(w.slot, w.t, w.source);
+        MakingDocument w -> shelf_document_step(w.source);
         _ -> stepping = false
     }
     if (!stepping) return;
@@ -1481,20 +1991,14 @@ shelf_work_step() {
     }
 }
 
-// How far it has come (thousandths): the screens that show it made again
-// when it shows a percent more. (Never less: a work's measure of itself
+// How far it has come (thousandths): what is on its way to a pane told,
+// at each percent more. (Never less: a work's measure of itself
 // may step back a little, as a large block's decoding gives way to the
 // comments made from it.)
 shelf_work_shown(done: int) {
     if (done / 10 <= shelf_work_done / 10) return;
     shelf_work_done = done;
-    for k in 0..sk_n {
-        kind: int = sk_kinds[k];
-        if (kind == SCR_SHELF_BROWSE || kind == SCR_SHELF_ITEM || kind == SCR_SHELF_COMMENTARY || kind == SCR_SHELF_ENTRIES || kind == SCR_SHELF_ENTRY || kind == SCR_SHELF_BOOK || kind == SCR_VERSE_STUDY) {
-            sk_build(k);
-            ui_effect("update", sk_ids[k], -1)
-        }
-    }
+    doc_arrivals_check()
 }
 
 // The work done (or given up): what waited for it asked for again.
@@ -1505,14 +2009,17 @@ shelf_work_rests() {
     shelf_text_waiting = -1;
     if (t >= 0) shelf_ask_text(t);
     shelf_open_settled();
-    shelf_making_announced = -1;
+    shelf_making_download = -1;
+    // (An update swapped in shown before another module is made.)
+    shelf_reread_when_ready();
     shelf_prepare_next()
 }
 
 // ---- a module made as it downloads ----
 // A module downloaded is made (a Bible a version, any other a folio) as
-// part of its download: shown coming until it is made, then said ready in
-// a toast, so that it opens quickly. Those downloaded this session wait
+// part of its download: still coming until it is made (a pane it is on its
+// way to changes to it then), so that it opens quickly. Those downloaded
+// this session wait
 // here (their slots, in the order they came) while the bookshelf is busy,
 // and are made one after another as it rests. (Not across launches: one
 // that couldn't be made isn't tried each time the app opens; it is made
@@ -1523,9 +2030,9 @@ shelf_to_make: []int = new int[SHELF_TO_MAKE_MOST](0);
 
 shelf_to_make_n: int = 0;
 
-// The slot being made as part of its download (-1: none): said ready once
-// it is made.
-shelf_making_announced: int = -1;
+// The slot being made as part of its download (-1: none): coming until it
+// is made.
+shelf_making_download: int = -1;
 
 // Of a download's progress, the share that fetching its package is (the
 // rest: making it), in thousandths.
@@ -1568,7 +2075,7 @@ shelf_coming_at(i: int): bool {
     if (!shelf_ready_at(i) || shelf_broken_at(i)) return !shelf_ready_at(i);
     slot: int = shelf_slot_at(i);
     match shelf_form_at(i) {
-        Packaged -> shelf_to_make_has(slot) || shelf_making_slot(slot) && shelf_making_announced == slot;
+        Packaged -> shelf_to_make_has(slot) && !shelf_updating_at(i) || shelf_making_slot(slot) && shelf_making_download == slot;
         _ -> false
     }
 }
@@ -1580,17 +2087,26 @@ shelf_here_at(i: int): bool {
 }
 
 // The next module downloaded and waiting begun being made, if the
-// bookshelf rests (those removed, broken or made already let go).
+// bookshelf rests: an update's package beside the copy read, else a
+// download (those removed, broken or made already let go).
 shelf_prepare_next() {
     while (!shelf_busy() && shelf_to_make_n > 0) {
         slot: int = shelf_to_make_take();
         i: int = shelf_find_slot(slot);
-        if (i >= 0 && shelf_ready_at(i) && !shelf_broken_at(i)) {
+        updating: bool = match shelf_update_at(i) {
+            Fetched -> true;
+            _ -> false
+        };
+        if (updating) {
+            if (shelf_kind_at(i) == SHELF_KIND_BIBLE) shelf_bible_make(i, shelf_text_of(i),
+                MakingSource.Update) else shelf_document_make(i, MakingSource.Update)
+        } else if (i >= 0 && shelf_ready_at(i) && !shelf_broken_at(i)) {
             match shelf_form_at(i) {
                 Packaged -> {
-                    shelf_making_announced = slot;
+                    shelf_making_download = slot;
                     if (shelf_kind_at(i) == SHELF_KIND_BIBLE) shelf_bible_make(i,
-                        shelf_text_of(i)) else shelf_document_make(i)
+                        shelf_text_of(i), MakingSource.Download) else shelf_document_make(i,
+                        MakingSource.Download)
                 }
                 _ -> { }
             }
@@ -1631,27 +2147,45 @@ shelf_bible_job: ?owned *BibleJob = null;
 // The version being made (core/shelf_bible.l8's bible_text_).
 shelf_bible_next: ?owned *TextData = null;
 
-shelf_bible_make(i: int, t: int) {
+shelf_bible_make(i: int, t: int, source: MakingSource) {
     // (A slot past the versions' (a damaged shelf.tsv): damaged too.)
-    if (t >= len(texts) || !shelf_kept_at(i, ".zip")) {
-        shelf_bible_failed(i, t);
+    if (t >= len(texts) || !shelf_kept_package_at(i, source)) {
+        shelf_making_failed(i, t, source);
         shelf_open_settled();
         return
     }
-    shelf_work = ShelfWork.MakingBible { slot: shelf_slot_at(i), t: t };
+    shelf_work = ShelfWork.MakingBible { slot: shelf_slot_at(i), t: t, source: source };
     shelf_work_done = 0;
     shelf_read_named(i)
+}
+
+// A Bible that couldn't be made: a download's marked broken
+// (shelf_bible_failed); an update's let go, the copy before still read.
+shelf_making_failed(i: int, t: int, source: MakingSource) {
+    match source {
+        Download -> shelf_bible_failed(i, t);
+        Update -> shelf_update_failed(i, false)
+    }
 }
 
 shelf_bible_got(
     i: int,
     id: int,
     size: int,
-    t: int
+    t: int,
+    source: MakingSource
 ) {
     if (size <= 0) {
-        hs_missing(t);
-        shelf_file_gone(i);
+        match source {
+            Download -> {
+                hs_missing(t);
+                shelf_file_gone(i)
+            }
+            Update -> {
+                shelf_update_failed(i, false);
+                shelf_work_rests()
+            }
+        }
         return
     }
     try {
@@ -1662,7 +2196,7 @@ shelf_bible_got(
         shelf_bible_job = move next;
         shelf_work_next()
     } with SwordError _error -> {
-        shelf_bible_failed(i, t);
+        shelf_making_failed(i, t, source);
         shelf_work_rests()
     }
 }
@@ -1702,7 +2236,7 @@ shelf_bible_stepping(): bool {
 // A step of a Bible's making: its package's files taken out, then a
 // chapter of its records made, then a part of them packed into its folio;
 // at the end, the folio kept.
-shelf_bible_step(slot: int, t: int) {
+shelf_bible_step(slot: int, t: int, source: MakingSource) {
     i: int = shelf_find_slot(slot);
     if (i < 0 || shelf_bible_job == null) {
         shelf_bible_given_up();
@@ -1716,7 +2250,7 @@ shelf_bible_step(slot: int, t: int) {
         }
     }
     if (packing) {
-        shelf_bible_pack_step(i, t);
+        shelf_bible_pack_step(i, t, source);
         return
     }
     done: bool = false;
@@ -1751,7 +2285,7 @@ shelf_bible_step(slot: int, t: int) {
         }
     } with SwordError _error -> {
         shelf_bible_given_up();
-        shelf_bible_failed(i, t);
+        shelf_making_failed(i, t, source);
         return
     }
     if (done) bible_text_finish();
@@ -1767,10 +2301,10 @@ SHELF_PACK_BYTES: int = 262144;
 // A step of packing a made Bible's records into its folio (whole records
 // each step); the last keeps the folio, to be read back as a bundled
 // version's is.
-shelf_bible_pack_step(i: int, t: int) {
+shelf_bible_pack_step(i: int, t: int, source: MakingSource) {
     if (shelf_bible_next == null) {
         shelf_bible_given_up();
-        shelf_bible_failed(i, t);
+        shelf_making_failed(i, t, source);
         return
     }
     finished: bool = false;
@@ -1795,7 +2329,7 @@ shelf_bible_pack_step(i: int, t: int) {
                     finished = true;
                     allocate job {
                         packed: []i8 = folio::folio_finish(job.writer);
-                        if (shelf_kept_at(i, ".folio")) shelf_keep_named(i, packed,
+                        if (shelf_kept_making_at(i, source)) shelf_keep_named(i, packed,
                             len(packed)) else unkept = true
                     }
                 }
@@ -1803,20 +2337,46 @@ shelf_bible_pack_step(i: int, t: int) {
         }
     } with folio::FolioError _error -> {
         shelf_bible_given_up();
-        shelf_bible_failed(i, t);
+        shelf_making_failed(i, t, source);
         return
     }
-    if (unkept) shelf_bible_kept(i, false, t) else if (!finished) shelf_work_shown(progress)
+    if (unkept) shelf_bible_kept(i, false, t, source) else if (!finished) shelf_work_shown(progress)
 }
 
-// Its records kept (or not: made again when it is next opened): the
-// version in its slot's place.
-shelf_bible_kept(i: int, ok: bool, t: int) {
+// Its records kept (or not): a download's version in its slot's place
+// (not kept, made again when it is next opened); an update's swapped in
+// for the version read (shelf_update_swap), or, not kept, let go.
+shelf_bible_kept(
+    i: int,
+    ok: bool,
+    t: int,
+    source: MakingSource
+) {
     opened: BibleOpened = BibleOpened { red: false, report: no_report };
     if (shelf_bible_job != null) {
         borrow shelf_bible_job as job {
             opened = job.opened
         }
+    }
+    match source {
+        Update -> {
+            if (!ok) {
+                shelf_update_failed(i, false);
+                shelf_bible_given_up();
+                return
+            }
+            shelf_update_swap(i, ShelfForm.Made, opened);
+            // (In place of the version before, let go: what reads it is
+            // sent its parts again.)
+            drop texts[t];
+            texts[t] = move shelf_bible_next;
+            drop shelf_bible_job;
+            shelf_work_rests();
+            hs_version_arrived(t);
+            pane_reread_version(t);
+            return
+        }
+        Download -> { }
     }
     shelf_set_opened(i, opened.red, opened.report);
     if (ok) {
@@ -1844,7 +2404,7 @@ shelf_bible_given_up() {
 
 // A made Bible's folio read back, as a bundled version's is.
 shelf_bible_load(i: int, t: int) {
-    if (!shelf_kept_at(i, ".folio")) {
+    if (!shelf_kept_made_at(i)) {
         hs_missing(t);
         return
     }
@@ -1940,7 +2500,7 @@ shelf_bible_records_read(
                 folio::folio_append_records(writer, text.data, 0, text.size)
             }
             packed: []i8 = folio::folio_finish(writer);
-            if (shelf_kept_at(i, ".folio")) {
+            if (shelf_kept_made_at(i)) {
                 shelf_keep_named(i, packed, len(packed));
                 kept = true
             }
@@ -2010,7 +2570,7 @@ shelf_ensure_open(slot: int): bool {
             shelf_remove_kept(i);
             shelf_file_gone(i)
         }
-        _ -> shelf_document_make(i)
+        _ -> shelf_document_make(i, MakingSource.Download)
     }
     false
 }

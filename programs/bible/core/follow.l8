@@ -2,22 +2,49 @@ tag bible;
 
 use_tag std;
 
-// Following, frame by frame (SKINS.md, Panes: Linked): where the follower's
-// reading line goes for the leader's, by a chapter's link map and the two
-// panes' own geometry. The rules are the skins' (each moves its own panes),
-// written here once: the L8 skins (the iPhone's, the terminal's) call them,
-// and tools/link_cases.l8 writes cases from them that the others' tests
-// must match. Nothing here knows a platform: positions are numbers down
-// each pane's own content, in its own unit.
+// Following (SKINS.md, Panes: Linked): which of the two panes moves, and
+// to where, so that what the top pane shows at its top edge has what is
+// linked with it in sight in the bottom pane. The rules are the skins'
+// (each moves its own panes), written here once: the L8 skins (the
+// iPhone's, the terminal's) call them, and tools/link_cases.l8 writes cases
+// from them that the others' tests must match. Nothing here knows a
+// platform: positions are numbers down each pane's own content, in its own
+// unit.
+//
+// The page is the top pane (beside the panel, the left one), the panel the
+// bottom. A chapter's link map ties sections of one to sections of the
+// other: a verse to the other version's verse; a verse to each comment on
+// it, a comment to the run of verses it is on. It is symmetric: whichever
+// pane a hand moves, and whatever either reads, the one rule holds: the
+// section under the top pane's top edge (or, if nothing is linked with it,
+// the linked section nearest the edge) has a section linked with it as
+// much in sight in the bottom pane as can be (wholly, if it is shorter than
+// the pane; filling the pane, if it is taller). While it does, nothing
+// moves. When it doesn't, the pane the hand isn't moving moves by as
+// little as makes it so (follow_bottom_move, follow_top_move), gliding
+// there at once (follow_glide).
+
+// The two panes: the page (the top one) and the panel's reader (the bottom
+// one).
+PANE_PAGE: int = 0;
+
+PANE_PANEL: int = 1;
+
+PANES: int = 2;
 
 // How a pane moved, as the rules take it: by the app (a jump, a scroll of
-// its own), by a finger or a key, or gliding after a finger (a commentary
-// waits while the page leading it glides).
+// its own), by a finger or a key, or gliding after a finger.
 PANE_MOVED_BY_APP: int = 0;
 
 PANE_DRAGGED: int = 1;
 
 PANE_GLIDING: int = 2;
+
+// How a chapter's anchors go with the other pane's (`link C MODE`): verse
+// by verse (two versions), or comment by comment (a commentary in either).
+LINK_BY_VERSE: int = 0;
+
+LINK_BY_COMMENT: int = 1;
 
 // A chapter's link map (core's `link C MODE COMMENTS` and its `match I0
 // I1 J` lines): by verse, the page's anchors i0 (i1 the same) go with the
@@ -32,8 +59,10 @@ type LinkMap = {
 }
 
 // One pane's chapter as it is laid out: where each of its anchors begins
-// (known: whether it is laid out), where the chapter begins and ends (each,
-// known or not), and its em.
+// (known: whether it is laid out, or where it would be guessed), where the
+// chapter begins and ends (each, known or not), and its em. A
+// commentary's chapter in its run of chapters without comments (one part
+// for them all) is that part, top to end.
 type ChapterShape = {
     starts: []f64;
     known: []bool;
@@ -44,216 +73,353 @@ type ChapterShape = {
     em: f64
 }
 
-// Where the follower's reading line goes (ok: whether it can be told from
-// what is laid out).
-type FollowPlace = {
-    y: f64;
-    ok: bool
-}
-
-// The pairs a version follows by: the leader's and the follower's
-// positions of each matched pair's first anchors, the chapter's top and
-// its end, in order and each going forward on both sides (one that
-// doesn't, as a verse moved by versification, left out).
-type FollowPairs = {
-    x: []f64;
-    y: []f64;
+// The links following goes by: pairs of a section of the top pane (from
+// its start to where the next begins) and a section of the bottom pane
+// linked with it, in the order the maps give them.
+type FollowLinks = {
+    top_from: []f64;
+    top_to: []f64;
+    bottom_from: []f64;
+    bottom_to: []f64;
     n: int
 }
 
-// The pairs, the page leading (page_leads) or the panel.
-follow_pairs(
+// Room for the links of chapters whose maps make most in all.
+follow_links_new(most: int): FollowLinks@new {
+    FollowLinks {
+        top_from: new f64[most](0.0f64),
+        top_to: new f64[most](0.0f64),
+        bottom_from: new f64[most](0.0f64),
+        bottom_to: new f64[most](0.0f64),
+        n: 0
+    }
+}
+
+// How many links a chapter's map can make: a match each, or, a version on
+// the page beside a commentary, one for each verse of each comment's run
+// (and one for a chapter without comments).
+follow_links_room(map: *LinkMap): int {
+    if (map.mode != LINK_BY_COMMENT || map.comments != PANE_PANEL) return len(map.j) + 1;
+    n: int = 1;
+    for k in 0..len(map.j)
+        if (map.i1[k] >= map.i0[k]) n = n + map.i1[k] - map.i0[k] + 1;
+    n
+}
+
+// A chapter's links added, from both panes' shapes of it (each where both
+// sections are laid out or guessed). By verse, each match's two verses. By
+// comment, a version on the page: each verse a comment is on with that
+// comment (a verse a commentator comes back to, with each comment on it); a
+// commentary on the page: each comment with the run of verses it is on. A
+// chapter of a commentary's run without comments: the version's chapter
+// with the run's part.
+follow_links_add(
+    links: *FollowLinks,
     map: *LinkMap,
     page: *ChapterShape,
-    panel: *ChapterShape,
-    page_leads: bool
-): FollowPairs@new {
-    most: int = len(map.j) + 2;
-    pairs: FollowPairs = FollowPairs { x: new f64[most](0.0f64), y: new f64[most](0.0f64), n: 0 };
-    if (page.top_known && panel.top_known) {
-        if (page_leads) follow_pair_add(&pairs, page.top, panel.top) else follow_pair_add(&pairs,
-            panel.top, page.top)
+    panel: *ChapterShape
+) {
+    if (map.mode == LINK_BY_VERSE) {
+        for k in 0..len(map.j) follow_link_add(links, page, map.i0[k], map.i0[k],
+            panel, map.j[k], map.j[k]);
+        return
     }
+    if (len(map.j) == 0) {
+        if (page.top_known && page.end_known && panel.top_known && panel.end_known && page.end > page.top && panel.end > panel.top) follow_link_put(links,
+            page.top, page.end, panel.top, panel.end);
+        return
+    }
+    version_on_page: bool = map.comments == PANE_PANEL;
     for k in 0..len(map.j) {
-        a: int = map.i0[k];
-        b: int = map.j[k];
-        if (a >= 0 && a < len(page.known) && b >= 0 && b < len(panel.known) && page.known[a] && panel.known[b]) {
-            if (page_leads) follow_pair_add(&pairs, page.starts[a], panel.starts[b]) else follow_pair_add(&pairs,
-                panel.starts[b], page.starts[a])
+        if (version_on_page) {
+            for i in map.i0[k]..map.i1[k] + 1 follow_link_add(links, page, i, i, panel,
+                map.j[k], map.j[k])
+        } else follow_link_add(links, page, map.j[k], map.j[k], panel, map.i0[k],
+            map.i1[k])
+    }
+}
+
+// The link of the page's anchors i0 to i1 with the panel's j0 to j1, if
+// both are known.
+follow_link_add(
+    links: *FollowLinks,
+    page: *ChapterShape,
+    i0: int,
+    i1: int,
+    panel: *ChapterShape,
+    j0: int,
+    j1: int
+) {
+    top: FollowSection = follow_section(page, i0, i1);
+    bottom: FollowSection = follow_section(panel, j0, j1);
+    if (top.known && bottom.known) follow_link_put(links, top.from, top.to, bottom.from,
+        bottom.to)
+}
+
+follow_link_put(
+    links: *FollowLinks,
+    top_from: f64,
+    top_to: f64,
+    bottom_from: f64,
+    bottom_to: f64
+) {
+    n: int = links.n;
+    if (n >= len(links.top_from)) return;
+    links.top_from[n] = top_from;
+    links.top_to[n] = top_to;
+    links.bottom_from[n] = bottom_from;
+    links.bottom_to[n] = bottom_to;
+    links.n = n + 1
+}
+
+// A section of a pane: anchors i0 to i1, from the first's start to where
+// the one after the last begins (the chapter's end, after its last); known:
+// whether both are.
+type FollowSection = {
+    from: f64;
+    to: f64;
+    known: bool
+}
+
+follow_section(shape: *ChapterShape, i0: int, i1: int): FollowSection {
+    n: int = len(shape.starts);
+    none: FollowSection = FollowSection { from: 0.0f64, to: 0.0f64, known: false };
+    if (i0 < 0 || i1 < i0 || i1 >= n || !shape.known[i0]) return none;
+    to_known: bool = if (i1 + 1 < n) shape.known[i1 + 1] else shape.end_known;
+    to: f64 = if (i1 + 1 < n) shape.starts[i1 + 1] else shape.end;
+    if (!to_known || to <= shape.starts[i0]) return none;
+    FollowSection { from: shape.starts[i0], to: to, known: true }
+}
+
+// ---- which pane moves, and to where ----
+// What following does: nothing, or the pane that is to move scrolled so
+// that the top of what of it is in sight is at top.
+type FollowMove =
+    | Stay
+    | ScrollTo { top: f64 }
+
+// How far from where it should be a pane may be and still count as there
+// (half a point, as offsets round); and how near two sections' distances
+// from the edge are to be the same section's.
+FOLLOW_SLACK: f64 = 0.5f64;
+
+FOLLOW_SAME: f64 = 0.001f64;
+
+// The tops of a pane's sight, height tall, that show a section from to to
+// as much as can be (wholly, if it is shorter; filling the sight, if it is
+// taller): from least to most.
+type FollowRange = {
+    least: f64;
+    most: f64
+}
+
+follow_range(from: f64, to: f64, height: f64): FollowRange {
+    a: f64 = to - height;
+    if (a < from) FollowRange { least: a, most: from } else FollowRange { least: from, most: a }
+}
+
+// Top, moved as little as puts it in range.
+follow_clamp(top: f64, range: FollowRange): f64 {
+    if (top < range.least) range.least else if (top > range.most) range.most else top
+}
+
+// The links of the top pane's section at its top edge (or, if none is
+// linked with what is there, of the linked section nearest the edge): how
+// far that section is from the edge (0: under it).
+follow_nearest(links: *FollowLinks, edge: f64): f64 {
+    best: f64 = -1.0f64;
+    for k in 0..links.n {
+        d: f64 = follow_distance(links.top_from[k], links.top_to[k], edge);
+        if (best < 0.0f64 || d < best) best = d
+    }
+    best
+}
+
+follow_distance(from: f64, to: f64, at: f64): f64 {
+    if (at < from) from - at else if (at >= to) at - to + FOLLOW_SLACK else 0.0f64
+}
+
+// The top pane moved by a hand (or a jump): where the bottom pane goes,
+// its sight bottom_height tall, its top now at bottom_top. Of the sections
+// linked with the top pane's section at its edge (top_edge), the one the
+// bottom pane needs to move least for; nothing if that is not at all.
+follow_bottom_move(
+    links: *FollowLinks,
+    top_edge: f64,
+    bottom_top: f64,
+    bottom_height: f64
+): FollowMove {
+    nearest: f64 = follow_nearest(links, top_edge);
+    if (nearest < 0.0f64) return FollowMove.Stay;
+    best: f64 = bottom_top;
+    found: bool = false;
+    for k in 0..links.n {
+        if (follow_distance(links.top_from[k], links.top_to[k], top_edge) <= nearest + FOLLOW_SAME) {
+            to: f64 = follow_clamp(bottom_top, follow_range(links.bottom_from[k],
+                links.bottom_to[k], bottom_height));
+            if (!found || follow_abs(to - bottom_top) < follow_abs(best - bottom_top)) best = to;
+            found = true
         }
     }
-    if (page.end_known && panel.end_known) {
-        if (page_leads) follow_pair_add(&pairs, page.end, panel.end) else follow_pair_add(&pairs,
-            panel.end, page.end)
+    if (follow_abs(best - bottom_top) <= FOLLOW_SLACK) FollowMove.Stay else FollowMove.ScrollTo { top: best }
+}
+
+// The bottom pane moved by a hand: where the top pane goes, its sight
+// top_height tall and its top (its edge) at top_top. Nowhere while its
+// section at the edge has one linked with it in sight below as it should
+// be; else the least move that puts at its edge a section with one linked
+// in sight below (its start at the edge, if it is shorter than the pane;
+// the pane filled with it, if it is taller); none being so, one whose
+// linked section shows most below; none showing at all, nowhere.
+follow_top_move(
+    links: *FollowLinks,
+    top_top: f64,
+    top_height: f64,
+    bottom_top: f64,
+    bottom_height: f64
+): FollowMove {
+    nearest: f64 = follow_nearest(links, top_top);
+    if (nearest < 0.0f64) return FollowMove.Stay;
+    for k in 0..links.n {
+        if (follow_distance(links.top_from[k], links.top_to[k], top_top) <= nearest + FOLLOW_SAME && follow_in_sight(links,
+            k, bottom_top, bottom_height)) return FollowMove.Stay
     }
-    pairs
-}
-
-follow_pair_add(pairs: *FollowPairs, x: f64, y: f64) {
-    n: int = pairs.n;
-    if (n > 0 && (x <= pairs.x[n - 1] || y < pairs.y[n - 1])) return;
-    pairs.x[n] = x;
-    pairs.y[n] = y;
-    pairs.n = n + 1
-}
-
-// A version following, the leader's reading line at line (in the leader's
-// positions): through each pair, between them along a monotone cubic
-// (Fritsch and Carlson's, its slope at each pair the harmonic mean of the
-// ratios either side), then steadied: a line fitted through the pairs
-// about the leader's (weighted 1 / (1 + (x / 9 em))², x from the line, em
-// the leader's), the follower placed d / (1 + |d| / (0.5 em)) from the
-// curve, d the line's distance from it, em the follower's.
-FOLLOW_FIT_PAIRS: int = 5;
-
-FOLLOW_REACH_EM: f64 = 9.0f64;
-
-FOLLOW_SLACK_EM: f64 = 0.5f64;
-
-follow_by_verse(
-    pairs: *FollowPairs,
-    line: f64,
-    leader_em: f64,
-    follower_em: f64
-): FollowPlace {
-    n: int = pairs.n;
-    // (The pair at or before the line, with one after it.)
-    k: int = -1;
-    for x in 0..n
-        if (pairs.x[x] <= line) k = x;
-    if (k < 0 || k + 1 >= n) return FollowPlace { y: 0.0f64, ok: false };
-    exact: f64 = follow_curve(pairs, k, line);
-    // (The steady line: weighted least squares, its value at the line.)
-    reach: f64 = leader_em * FOLLOW_REACH_EM;
-    sw: f64 = 0.0f64;
-    sx: f64 = 0.0f64;
-    sy: f64 = 0.0f64;
-    sxx: f64 = 0.0f64;
-    sxy: f64 = 0.0f64;
-    from: int = if (k - FOLLOW_FIT_PAIRS < 0) 0 else k - FOLLOW_FIT_PAIRS;
-    to: int = if (k + FOLLOW_FIT_PAIRS + 2 > n) n else k + FOLLOW_FIT_PAIRS + 2;
-    for x in from..to {
-        d: f64 = pairs.x[x] - line;
-        u: f64 = d / reach;
-        w: f64 = 1.0f64 / ((1.0f64 + u * u) * (1.0f64 + u * u));
-        sw = sw + w;
-        sx = sx + w * d;
-        sy = sy + w * pairs.y[x];
-        sxx = sxx + w * d * d;
-        sxy = sxy + w * d * pairs.y[x]
+    best: f64 = top_top;
+    found: bool = false;
+    for k in 0..links.n {
+        if (follow_in_sight(links, k, bottom_top, bottom_height)) {
+            to: f64 = follow_top_for(links, k, top_top, top_height);
+            if (!found || follow_abs(to - top_top) < follow_abs(best - top_top)) best = to;
+            found = true
+        }
     }
-    det: f64 = sw * sxx - sx * sx;
-    if (sw <= 0.0f64 || det <= 0.000001f64 * sw * sw) return FollowPlace { y: exact, ok: true };
-    slope: f64 = (sw * sxy - sx * sy) / det;
-    if (slope <= 0.0f64) return FollowPlace { y: exact, ok: true };
-    steady: f64 = (sy - slope * sx) / sw;
-    slack: f64 = follower_em * FOLLOW_SLACK_EM;
-    d: f64 = steady - exact;
-    far: f64 = if (d < 0.0f64) -d else d;
-    FollowPlace { y: exact + d / (1.0f64 + far / slack), ok: true }
-}
-
-// The monotone cubic between pairs k and k + 1, at line.
-follow_curve(pairs: *FollowPairs, k: int, line: f64): f64 {
-    x1: f64 = pairs.x[k];
-    x2: f64 = pairs.x[k + 1];
-    y1: f64 = pairs.y[k];
-    y2: f64 = pairs.y[k + 1];
-    h: f64 = x2 - x1;
-    m: f64 = (y2 - y1) / h;
-    d1: f64 = if (k > 0) follow_mean(follow_ratio(pairs, k - 1), m) else m;
-    d2: f64 = if (k + 2 < pairs.n) follow_mean(m, follow_ratio(pairs, k + 1)) else m;
-    t: f64 = (line - x1) / h;
-    t2: f64 = t * t;
-    t3: f64 = t2 * t;
-    (2.0f64 * t3 - 3.0f64 * t2 + 1.0f64) * y1 + (t3 - 2.0f64 * t2 + t) * h * d1 + (-2.0f64 * t3 + 3.0f64 * t2) * y2 + (t3 - t2) * h * d2
-}
-
-// The ratio of the follower's span to the leader's between pairs k and
-// k + 1.
-follow_ratio(pairs: *FollowPairs, k: int): f64 {
-    (pairs.y[k + 1] - pairs.y[k]) / (pairs.x[k + 1] - pairs.x[k])
-}
-
-// The harmonic mean of two slopes (0 if either isn't forward).
-follow_mean(a: f64, b: f64): f64 {
-    if (a <= 0.0f64 || b <= 0.0f64) 0.0f64 else 2.0f64 * a * b / (a + b)
-}
-
-// ---- by comment ----
-// What a follower moving by comment does: stays, or goes to an anchor of
-// its (-1: its chapter's top).
-type CommentStep =
-    | Stay
-    | GoTo { anchor: int }
-
-// A version leading a commentary (in either pane): the version's anchor at
-// its reading line (verse_i, -1 above the first) and the commentary's at
-// its own (comment_j, -1 above the first; comments its chapter as laid
-// out, comment_line its reading line): it stays while a comment there
-// covers the version's verse; else it goes to the comment covering it
-// nearest its reading line (by its laid-out starts; one not laid out, as
-// far as its index is from comment_j), or to its chapter's top above the
-// version's first verse.
-follow_comment_from_verses(
-    map: *LinkMap,
-    verse_i: int,
-    comment_j: int,
-    comments: *ChapterShape,
-    comment_line: f64
-): CommentStep {
-    if (verse_i < 0) return if (comment_j < 0) CommentStep.Stay else CommentStep.GoTo { anchor: -1 };
-    if (follow_covers(map, comment_j, verse_i)) return CommentStep.Stay;
-    best: int = -1;
-    best_d: f64 = 0.0f64;
-    for k in 0..len(map.j) {
-        j: int = map.j[k];
-        if (map.i0[k] <= verse_i && verse_i <= map.i1[k]) {
-            // (One laid out by how far it is; any not, after them all, by
-            // how many anchors away.)
-            d: f64 = 0.0f64;
-            if (j < len(comments.known) && comments.known[j]) {
-                d = comments.starts[j] - comment_line;
-                if (d < 0.0f64) d = -d
-            } else d = FOLLOW_UNLAID + (if (j > comment_j) j - comment_j else comment_j - j) as f64;
-            if (best < 0 || d < best_d) {
-                best = j;
-                best_d = d
+    if (!found) {
+        // (None as it should be: of those showing most below, the nearest.)
+        most: f64 = 0.0f64;
+        for k in 0..links.n {
+            shown: f64 = follow_overlap(links.bottom_from[k], links.bottom_to[k],
+                bottom_top, bottom_top + bottom_height);
+            if (shown > most) most = shown
+        }
+        for k in 0..links.n {
+            shown: f64 = follow_overlap(links.bottom_from[k], links.bottom_to[k],
+                bottom_top, bottom_top + bottom_height);
+            if (most > 0.0f64 && shown >= most - FOLLOW_SLACK) {
+                to: f64 = follow_top_for(links, k, top_top, top_height);
+                if (!found || follow_abs(to - top_top) < follow_abs(best - top_top)) best = to;
+                found = true
             }
         }
     }
-    // (No comment on the verse: it stays where it is.)
-    if (best < 0) CommentStep.Stay else CommentStep.GoTo { anchor: best }
+    if (!found || follow_abs(best - top_top) <= FOLLOW_SLACK) FollowMove.Stay else FollowMove.ScrollTo { top: best }
 }
 
-FOLLOW_UNLAID: f64 = 1.0e12f64;
-
-// A commentary leading a version from a run of chapters it says nothing on
-// (run_from to run_to, shown as one part): the version in one of them
-// stays (-1); one outside goes to the run's chapter nearest it, the one
-// the commentary came into the run from (its first coming from before it,
-// its last coming back from after it).
-follow_run_chapter(run_from: int, run_to: int, verse_c: int): int {
-    if (verse_c >= run_from && verse_c <= run_to) -1 else if (verse_c < run_from) run_from else run_to
+// Whether link k's bottom section is in the bottom pane's sight as it
+// should be.
+follow_in_sight(
+    links: *FollowLinks,
+    k: int,
+    bottom_top: f64,
+    bottom_height: f64
+): bool {
+    to: f64 = follow_clamp(bottom_top, follow_range(links.bottom_from[k], links.bottom_to[k],
+        bottom_height));
+    follow_abs(to - bottom_top) <= FOLLOW_SLACK
 }
 
-// Whether the commentary's anchor j covers the version's anchor i.
-follow_covers(map: *LinkMap, j: int, i: int): bool {
-    if (j < 0) return false;
-    for k in 0..len(map.j)
-        if (map.j[k] == j && map.i0[k] <= i && i <= map.i1[k]) return true;
-    false
+// The top pane's top moved as little as puts link k's top section at its
+// edge and as much of it in sight as can be.
+follow_top_for(
+    links: *FollowLinks,
+    k: int,
+    top_top: f64,
+    top_height: f64
+): f64 {
+    from: f64 = links.top_from[k];
+    to: f64 = links.top_to[k];
+    most: f64 = if (to - top_height > from) to - top_height else from;
+    follow_clamp(top_top, FollowRange { least: from, most: most })
 }
 
-// A commentary leading a version (in either pane): the commentary's anchor
-// at its reading line (comment_j, -1 above the first) and the version's at
-// its own (verse_i): the version stays on a verse that comment covers;
-// else it goes to the first verse the comment covers (its chapter's top
-// above the commentary's first, or for a comment covering none).
-follow_verses_from_comment(map: *LinkMap, comment_j: int, verse_i: int): CommentStep {
-    if (comment_j < 0) return if (verse_i < 0) CommentStep.Stay else CommentStep.GoTo { anchor: -1 };
-    if (verse_i >= 0 && follow_covers(map, comment_j, verse_i)) return CommentStep.Stay;
-    for k in 0..len(map.j)
-        if (map.j[k] == comment_j) return CommentStep.GoTo { anchor: map.i0[k] };
-    CommentStep.Stay
+follow_overlap(
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64
+): f64 {
+    low: f64 = if (a > c) a else c;
+    high: f64 = if (b < d) b else d;
+    if (high > low) high - low else 0.0f64
+}
+
+follow_abs(x: f64): f64 {
+    if (x < 0.0f64) -x else x
+}
+
+// ---- gliding ----
+// A pane gliding to its place: where it is after seconds more, from at
+// toward to, quickly and slowing (closing all but e^(-t / 0.05 s) of the
+// way; the last half point at once), and there by left seconds from now
+// at the latest (FOLLOW_GLIDE_MOST after its place was last new: the way
+// still to go shrinking at least as the cube of the time left, so that a
+// long way slows smoothly to its end in time). A new place mid-glide is
+// glided to from where the pane is, so nothing jumps.
+FOLLOW_GLIDE_SECONDS: f64 = 0.05f64;
+
+FOLLOW_GLIDE_MOST: f64 = 0.3f64;
+
+follow_glide(
+    at: f64,
+    to: f64,
+    seconds: f64,
+    left: f64
+): f64 {
+    dt: f64 = if (seconds < 0.0f64) 0.0f64 else seconds;
+    if (left <= dt) return to;
+    x: f64 = dt / FOLLOW_GLIDE_SECONDS;
+    // (e^x, near enough for a frame's x.)
+    grown: f64 = 1.0f64 + x + x * x / 2.0f64 + x * x * x / 6.0f64;
+    after: f64 = (left - dt) / left;
+    kept: f64 = after * after * after;
+    if (1.0f64 / grown < kept) kept = 1.0f64 / grown;
+    next: f64 = to + (at - to) * kept;
+    if (follow_abs(next - to) <= FOLLOW_SLACK) to else next
+}
+
+// ---- a pane's place ----
+// A place (SKINS.md, Panes: `C I FRAC`) and the reading line's position in
+// a pane's chapter, each way, as every skin turns them (a `go` puts the
+// line where the place is; `at` names the place the line is at), so that a
+// pane sent somewhere tells that same place back, and two Swap Panes leave
+// each document where it was. Anchor i's span runs from its start to the
+// next's (the chapter's top before the first; its end after the last).
+
+// How far below the line an anchor's start may be and still be the one
+// the line is at: a fraction of a point, as a pane's offset moves when
+// parts come in above it.
+FOLLOW_PLACE_SLACK: f64 = 1.0f64;
+
+// The position of anchor i's span frac thousandths through it (i -1: the
+// span above the chapter's first anchor).
+follow_place_y(shape: *ChapterShape, i: int, frac: int): f64 {
+    a: f64 = if (i < 0) shape.top else shape.starts[i];
+    b: f64 = if (i + 1 < len(shape.starts)) shape.starts[i + 1] else shape.end;
+    a + (b - a) * frac as f64 / 1000.0f64
+}
+
+// The place at position line: its anchor (-1: above the first) and how
+// far through its span, in thousandths, rounded.
+type LinePlace = {
+    i: int;
+    frac: int
+}
+
+follow_line_place(shape: *ChapterShape, line: f64): LinePlace {
+    i: int = -1;
+    for k in 0..len(shape.starts)
+        if (shape.starts[k] <= line + FOLLOW_PLACE_SLACK) i = k;
+    a: f64 = if (i < 0) shape.top else shape.starts[i];
+    b: f64 = if (i + 1 < len(shape.starts)) shape.starts[i + 1] else shape.end;
+    frac: int = if (b - a < 1.0f64) 0 else ((line - a) / (b - a) * 1000.0f64 + 0.5f64) as int;
+    LinePlace { i: i, frac: if (frac < 0) 0 else if (frac > 999) 999 else frac }
 }

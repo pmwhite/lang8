@@ -79,6 +79,9 @@ final class Panel extends FrameLayout {
   // A screen that takes letters (Practice's typing: keys ACTION): the
   // keyboard up for this, each letter typed sent as its action.
   private final EditText trap;
+  // A document on its way to the panel's reader: its hairline along the
+  // row's foot (SKINS.md, Panes: Arriving).
+  final Hairline hairline;
 
   Panel(Context c, Look look, HashMap<Integer, Screen> screens, int group, Reader reader) {
     super(c);
@@ -204,6 +207,10 @@ final class Panel extends FrameLayout {
     foot.setPadding(dp(8), 0, dp(8), 0);
     page.addView(foot, new LinearLayout.LayoutParams(-1, -2));
     addView(page, new LayoutParams(-1, -1));
+    hairline = new Hairline(c, look);
+    LayoutParams line = new LayoutParams(-1, Math.max(1, dp(1)), Gravity.TOP);
+    line.topMargin = dp(56) - Math.max(1, dp(1));
+    addView(hairline, line);
     trap = new EditText(c);
     trap.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
@@ -705,6 +712,8 @@ final class Panel extends FrameLayout {
         return "⌃";
       case "chevron.down":
         return "⌄";
+      case "ellipsis":
+        return "⋯";
       default:
         return label.isEmpty() ? icon : label;
     }
@@ -1044,8 +1053,10 @@ final class Panel extends FrameLayout {
         if (!off) ci.setOnClickListener(v -> Native.send("act " + screen.id + " " + r.circleAction
             + " " + r.arg + " 0"));
         line.addView(ci);
-      } else if (!r.icon.isEmpty()) {
-        String g = icon(r.icon);
+      } else if (!r.icon.isEmpty() || r.custom == CUSTOM_DOWNLOAD) {
+        // (Something coming: its progress as a circle filling, in the
+        // icon's place, so its words never move.)
+        String g = r.custom == CUSTOM_DOWNLOAD ? ring(r.value) : icon(r.icon);
         if (!g.isEmpty()) {
           TextView ic = new TextView(c);
           ic.setText(g);
@@ -1604,10 +1615,24 @@ final class Panel extends FrameLayout {
     }
   }
 
+  // A download's progress (thousandths) as a circle filling: empty, a
+  // quarter, a half, three quarters, full.
+  private static String ring(int value) {
+    String[] quarters = {"○", "◔", "◑", "◕", "●"};
+    int q = Math.max(0, Math.min(4, (value + 125) / 250));
+    return quarters[q];
+  }
+
   // An icon core names (the iPhone's symbol) as a character, where one
   // reads as it ("" for those left out).
   private static String icon(String name) {
     switch (name) {
+      case "arrow.down.circle":
+        return "↓";
+      case "checkmark.circle":
+        return "✓";
+      case "exclamationmark.circle":
+        return "!";
       case "ribbon":
         return "▮";
       case "plus":
@@ -1622,6 +1647,7 @@ final class Panel extends FrameLayout {
         return "↺";
       case "globe":
         return "⊕";
+      case "arrow.right":
       case "arrow.right.circle.fill":
         return "→";
       case "square.and.arrow.up":
@@ -1669,7 +1695,8 @@ final class Panel extends FrameLayout {
   // core/skin.l8's CUSTOM_FONT (a font, in its own face), CUSTOM_HIT (a
   // verse a search found), CUSTOM_SWATCHES (colors to choose) and
   // CUSTOM_CARD (Share as Image's card).
-  static final int CUSTOM_FONT = 4, CUSTOM_HIT = 5, CUSTOM_SWATCHES = 6, CUSTOM_CARD = 11;
+  static final int CUSTOM_FONT = 4, CUSTOM_HIT = 5, CUSTOM_SWATCHES = 6, CUSTOM_DOWNLOAD = 7,
+      CUSTOM_CARD = 11;
 
   private static final class Hero {}
 

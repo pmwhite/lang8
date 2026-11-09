@@ -29,7 +29,8 @@ What `core/skin.l8` imports, besides the screens' own files
 | `esv_client.l8` | Asking for the ESV's chapters (one at a time, the client's limit, resting, the reader's window) and taking them |
 | `words.l8` | Words no one screen owns: counts, labels, toasts, the controls' titles |
 | `kept.l8` | What is kept: the files (as the iPhone names them), what goes in each, saving and loading them; a host only reads, writes, adds to and deletes one by name (`kept_store`) |
-| `shelf.l8`, `shelf_screens.l8`, `shelf_bible.l8` | The Bookshelf: modules from CrossWire's SWORD library (`programs/sword`), what is installed, the catalog, downloads, their screens, and a Bible made a version |
+| `shelf.l8`, `shelf_screens.l8`, `shelf_bible.l8` | The Bookshelf: modules from CrossWire's SWORD library (`programs/sword`), what is installed, the catalog, downloads, a document's page and a module's screens, and a Bible made a version |
+| `documents.l8` | What can be read as Go To lists it, wherever it is kept: one row model, how a query finds documents and orders them, Documents and Browse, where a pick lands (the page or the panel), and a document on its way to a pane (an arrival) |
 
 A skin decides **how** things look and move (a sheet or a pushed screen, a
 switch or a checkbox, the platform's fonts and icons). Core decides **what**
@@ -99,17 +100,27 @@ a concrete implementation: `web/main.l8` (the platform) and
   kinds where the plain row won't do: `CUSTOM_SWATCHES` (colors to choose),
   `CUSTOM_CARD` (Share as Image's card, drawn at its pixels),
   `CUSTOM_FONT` (each font in its own face), `CUSTOM_HIT` (a verse found;
-  its value `HIT_GREEK` or `HIT_HEBREW` for the original's words).
+  its value `HIT_GREEK` or `HIT_HEBREW` for the original's words),
+  `CUSTOM_DOWNLOAD` (a book of recordings coming, Voice's Downloaded
+  Books: its value the thousandths come, drawn as a ring in the row's
+  leading slot, in place of its icon and as wide, with nothing at its
+  end; a terminal's circle ○ ◔ ◑ ◕ ●).
   The others may show as their kind's row. Their placement: `present`,
   `push`, `present_over`, `panel`, `update`, `refill`, `retext`, `blur`,
   `focus`, `reveal`, `pop`, `pop_to`, `close`, `dismiss`; the skin's own
-  Back says `closed ID`. `reveal ID` brings the focus row's words (`focus
+  Back says `closed ID`. A screen made again as data comes (the catalog,
+  a count, the panel's chapter) is sent as an `update` only if its lines
+  changed; the skin keeps the rows and buttons that are the same (the
+  web's `morphChildren`), so nothing in sight is taken out and put back.
+  `reveal ID` brings the focus row's words (`focus
   N 4 FROM TO`) into sight, scrolling as little as it can: none if they
   are in sight already.
 - The two panes (below): `reader`, `line`, then `part` lines as it asks
   (`want`), `go`, `halt`, `forget`, `link`; it says where each is read
   (`at`, `rest`, `moving`), and moves the one not led itself.
-  With them `look`, `title`, `version`, `goto`, `page`; `selection`,
+  A document on its way to a pane: `arriving`, `arrived` (a hairline
+  under that pane's bar). With them `look`, `title`, `version`, `goto`,
+  `page`; `selection`,
   `carried`, `hearing`, `back`, `wake`, `tick`, `jumped`.
 - The tray (`tray`, `tray_away`: screen 0), the title's menu
   (`titlemenu`, `menuact`), toasts (`toast`), the small player (`player`).
@@ -202,7 +213,9 @@ build them). It is a title, sections, and rows, and what is around them:
 - **Text** is plain UTF-8, or set by runs: `END:STYLE` pairs (UTF-16 places)
   using the reader's styles (`STYLE_*`, text.l8) or core's own (`RUN_*`,
   ui.l8: a verse's number, Greek and Hebrew, a transliteration, faint,
-  strong, plain, small, italic, the accent). A row's title, detail and side
+  strong, plain, small, small and underlined (a quiet link:
+  `RUN_SMALL_UNDERLINED`, drawn as small where a skin has no underline),
+  italic, the accent). A row's title, detail and side
   words, the intro and the hero's line may have runs; a detail may have
   marks instead (the words a search found).
 - **Icons** are named as Apple's SF Symbols name them (`book`,
@@ -220,18 +233,30 @@ up (a note over the Library), which stays. A skin with a panel shows it at
 the reader's right where a column fits and under the reader elsewhere,
 the reader still scrolling, and says so (`panelfits 1`); the panel's
 screens are a stack of their own, a `push` of a group 1 screen going on it
-whichever screen acted. Every skin has one; one whose window is too small
-for it at times says `panelfits 0` then, and the Bookshelf opens over the
-reader as any screen does.
+whichever screen acted: its reader, and Study over it. Every skin has
+one; one whose window is too small for it at times says `panelfits 0`
+then, and the bar's panel button opens Go To aimed at the page.
 
 ## Panes
 
 The page and the panel's reader are two panes: pane 0 the page, pane 1 the
 panel's reader (the screen whose `reader` line says so). Each reads a
 document a part at a time: the page the Bible, or a commentary (Swap Panes,
-the reader screen's tool, trades what the two read, each going to the
+in the reader screen's menu, trades what the two read, each going to the
 other's place; the bar's `version` then names the commentary); the panel a
-version or a commentary. A commentary on the page has no verses to select:
+version or a commentary. The reader screen is one row of chrome: its
+`left` the document's name (a version's; a commentary's title without
+its author's first names and initials, nor what follows " on the ":
+Spurgeon's Treasury of David), whose tap presents Go To aimed at the
+panel (below); its title the chapter at its reading line only while that
+isn't the page's. Filling the screen, `left` is the bar's short name (a
+version's abbreviation, KJV; a commentary's first word, Spurgeon) and
+the title always the chapter. A skin draws the title after the name, a
+faint middot between ("Spurgeon · Psalm 147"), the chevron after both,
+the chapter cut short before the name is. Its tools are Link (prominent
+while linked) and a menu (`ellipsis`: Swap Panes, Full Screen or Beside
+the Page, Close Panel), each skin drawing them as glyphs without fills.
+The reader is the panel's first screen: it has no Back. A commentary on the page has no verses to select:
 core lets a `tapverse` on it go. Core and the skin divide the work by what each
 knows best, and speak across the line in the document's terms, never in
 pixels:
@@ -240,7 +265,7 @@ pixels:
 |---|---|
 | What a part holds: its words, runs, anchors; a commentary's runs of chapters without comments | Laying a part out and measuring it: fonts, the text's size, right to left, line breaking |
 | Which place in one document is which in the other (verses, versification, which comment covers which verses): the *link map* | Which parts exist as views, kept in place as others come and go above them |
-| Who may lead, linked or not, how each document follows (verse by verse, comment by comment), when to wait | Scrolling, its physics and glides, Reduce Motion, telling a finger from an animation, the frame clock |
+| Who may lead, linked or not, how each document follows (verse by verse, comment by comment) | Scrolling, its physics and glides, Reduce Motion, telling a finger from an animation, the frame clock |
 | Where a jump goes (Go To, a link, the way back, a ribbon), history, reading counted, the place kept | Following frame by frame, by the link map, at its own geometry |
 | Where each pane is read (its reading line) | Selection, the text's menus, VoiceOver and TalkBack, copying |
 
@@ -252,7 +277,14 @@ lines, in order: a version's verses; a commentary's comments' first verses
 An anchor's span runs from the top of the line its words begin on to the
 next anchor's (the chapter's top before its first; the next chapter's top
 after its last). Every skin turns its own layout into places and places
-into its layout; no length crosses the line.
+into its layout; no length crosses the line. Both ways are one rule,
+core/follow.l8's `follow_place_y` and `follow_line_place` (an anchor
+whose start is within a point below the line is the one the line is at;
+thousandths rounded), checked by `link_cases`' `place` and `at` cases:
+a pane sent to a place tells that place back, and a `go` is held as
+parts come in about it until a hand moves the pane, so that Swap Panes
+(each document to its own place, anchor and thousandths, in the other
+pane) leaves both where they were after any number of round trips.
 
 **Parts.** A skin asks for the parts near what a pane shows, `want P C K`,
 and core answers each:
@@ -263,12 +295,18 @@ and core answers each:
   again when it has), `name` TITLE, `span A B STYLE PARA`, `verse V A B`,
   `link A B KIND ARG`, `gloss A B`, `mark V HEX BOOKMARK NOTE`, `gap C0 C1`
   (a commentary's run of chapters it says nothing on: this one part stands
-  for them all, sent as C0's to a `want` of any of them), then `anchor V K`
-  for every anchor of the chapter in order with the part it is in, then
-  `end`. Places A, B are UTF-16 units of the part's words.
+  for them all, sent as C0's to a `want` of any of them), then `anchor V K
+  AT` for every anchor of the chapter in order with the part it is in and
+  how many bytes of the part's source it begins after, then `sizes B...`,
+  how many bytes of source each of the chapter's parts is (a part's words
+  are about as long as its bytes: following guesses by them where parts
+  not laid out would be, below), then `end`. Places A, B are UTF-16 units
+  of the part's words.
 - `forget P C`: pane P's parts of chapter C (-1: every chapter) are to be
-  asked for again (the look, the version, what the panel reads changed);
-  those shown stay until the new ones come.
+  asked for again (the look, the version, what the panel reads changed,
+  or an update of its document swapped in: then a `go P C I FRAC 0` to
+  the place it said last follows, and its parts come as they are asked
+  for, none `coming`); those shown stay until the new ones come.
 
 A part sent again replaces the one shown where it is; a part coming in, or
 changing height, above what is in sight never moves what is in sight.
@@ -289,13 +327,54 @@ once (a jump: Go To, the way back), 1 brought there (the skin glides if it
 is near, else is there at once, at once where motion is reduced). A pane
 not laid out yet keeps it until it is. `halt P`: its glide stopped.
 
-**Linked.** Linked (`reader 1`), the pane a finger last moved leads, and
-the skin moves the other each frame by the link map. Core sends a chapter's
-map as the panel's document or the chapters near the place change:
+**Arriving.** A document picked for a pane that isn't on the device yet
+(Go To lists what can be read wherever it is kept) is fetched and made
+while the pane goes on showing what it shows, and changes to the new one
+only once it can be read there at once:
 
-- `link C MODE COMMENTS`, then `match I0 I1 J` lines, then `end` (a skin
-  keeps the maps of at least the eight chapters said latest: core says a
-  map again as its chapter comes near again): in chapter C, MODE 0, two
+- `arriving P THOUSANDTHS`: a document is on its way to pane P, THOUSANDTHS
+  of it come (0 to 1000; it may stand still, and it is said again as it
+  grows, about a fiftieth at a time). Said at once as it is picked, before
+  any other line about it. From then the pane's name already names the new
+  document (the page's `version`; the panel reader's `left`), but the pane
+  still shows, scrolls and follows by the link map the document it showed:
+  no `forget` or `go` comes for it until it has arrived. The skin draws one
+  hairline, 1 point, along the bottom edge of that pane's bar (the page's
+  top bar; the panel's one row), in ink at 30% (not the accent), filled
+  from the leading edge to THOUSANDTHS of the bar's width. It is the only
+  progress shown, and only while something arrives.
+- `arrived P`: nothing is on its way to pane P now: the hairline fades out
+  over 0.2 s (gone at once where motion is reduced). Arrived, the change has
+  come just before it, as for any pick of a document here: `forget P -1`
+  and a `go P C I FRAC 0` at the place it was sent (the parts there
+  already read, so they come as they are asked for), and, for the panel,
+  its reader screen made again (`panel`, or `update`); for the page's
+  Bible, `reader`, `look` and `version` as a version changes. Failed (the
+  connection lost, the server's error), the pane's name is said again as
+  it was (`version`, the panel's `update`), and one `toast` says
+  "Couldn’t open TITLE."; nothing else changes.
+- A second pick for the pane meanwhile sends it there (a document here, at
+  once, then `arrived P`; another on its way, `arriving P` again with its
+  own share); the first goes on arriving out of sight, unsaid.
+- The panel sent a document while it showed none (closed, or nothing read
+  there) opens at once as its reader, named for it, and its pane's one
+  part is a faint line, "Opening…", at its reading line (its top), in the
+  style of a commentary's "No comments on Genesis to Job": a `part 1 0 0
+  1` standing for every chapter (`gap 0 LAST`), with no anchors. The skin
+  needs nothing of its own for it; `at` lines while it shows are let go.
+  Arrived, `forget 1 -1` and `go` bring the document's own parts.
+
+**Linked.** Linked (`reader 1`), the pane a hand last moved leads, and
+the skin keeps the other's linked section in sight by the link maps
+(below).
+Core sends a chapter's map as the panel's document or the chapters near
+the place change:
+
+- `link C MODE COMMENTS`, then `match I0 I1 J` lines, then `end` (core
+  says the maps of the place's chapter and two either side, as the place
+  comes near them; a skin keeps the maps of at least the eight chapters
+  said latest: core says a map again as its chapter comes near again): in
+  chapter C, MODE 0, two
   versions, the page's anchor I0 (I1 the same) goes with the panel's
   anchor J, verse by verse (a verse one side lacks has no line); MODE 1,
   a version and a commentary (COMMENTS the pane the commentary is in, the
@@ -306,37 +385,84 @@ map as the panel's document or the chapters near the place change:
   place wherever the leader is in its chapters. Two commentaries have no
   map.
 
-Following, MODE 0: the follower's reading line goes through each matched
-pair's span starts (anchor I0's on the leader, J's on the follower), and
-between them along a monotone cubic (Fritsch and Carlson's: at each start
-the harmonic mean of the two neighbouring ratios of the follower's span to
-the leader's, 0 if either isn't forward), so that its speed changes
-gradually and never against the leader; the chapter's top and its end are
-pairs too. Then it is steadied: a line fitted by weighted least squares
-through the pairs from five before to five after the leader's (x the
-leader's start less its reading line, weight 1 / (1 + (x / 9 em))², em the
-leader's), its value at 0 taken, and the follower placed d / (1 + |d| /
-(0.5 em)) from the curve, d the line's distance from it (em the
-follower's): no verse is ever more than half a line from its place.
+Following goes by *sections* linked by the maps, and is symmetric: which
+pane a hand moves, and whether either reads a Bible or a commentary, makes
+no difference. The page is the top pane (beside the panel, the left one),
+the panel the bottom. A section is a verse, or a comment; a match links a
+verse to the other version's verse, a verse to each comment on it (a
+commentator going through the verses again links a verse to several), a
+comment to the run of verses it is on, and a chapter of a commentary's run
+without comments to that run's part. The rule (core/follow.l8, the same on
+every skin; web/page/follow.js and Android's Follow.java are its ports):
+the section under the top pane's top edge (the top of what of it is in
+sight), or, if nothing is linked with it, the linked section nearest the
+edge, has a section linked with it as much in sight in the bottom pane as
+can be: wholly, if it is shorter than the pane; filling the pane, if it is
+taller (any one of several will do). While that holds, nothing moves: no
+proportion through a verse is kept.
 
-Following, MODE 1: the follower moves only at a comment's border,
-whichever pane the commentary is in. Led by the version, the commentary
-stays while one of its comments at its reading line covers the version's
-verse there; else it goes to the comment covering that verse nearest its
-reading line, its start at the reading line, brought there as `go` MODE 1
-is. While the version glides after a flick it waits, and settles when the
-version rests. Led by the commentary, the version goes to the first verse
-of the comment at the commentary's reading line as that comment changes
-(it stays while a verse that comment covers is at its reading line). A
-commentary leading from its run of chapters without comments leaves the
-version where it is in them; the version outside them goes to the run's
-chapter nearest it (the run's first coming from before it, its last coming
-back from after it).
+When it doesn't, the pane the hand isn't moving moves by as little as
+makes it hold, starting in the frame it broke in:
+
+- The page moved (`follow_bottom_move`): the panel brings the linked
+  section into sight with the least scroll, of several the nearest (a
+  short one wholly in sight; a tall one filling it: going on, its start at
+  the top; coming back, its end at the foot).
+- The panel moved (`follow_top_move`): the page stays while its section at
+  its top edge has one linked in sight below; else it moves the least that
+  puts at its top edge a section with one linked in sight below (that
+  section's start at the edge, if it is shorter than the page; the page
+  filled with it, if taller). None being in sight as it should be, the one
+  whose linked section shows most below is taken; none showing at all, the
+  page stays.
+
+The moving pane glides there quickly (`follow_glide`: each frame closing
+all but e^(−t / 50 ms) of the way, so most of it at once and slowing; about
+a quarter of a second), a new place mid-glide glided to from where it is.
+However far it has to go, it is there 0.3 s (`FOLLOW_GLIDE_MOST`) after its
+place was last new: the way left shrinks at least as the cube of the time
+left, so a long glide slows smoothly to its end in time;
+where motion is reduced it is there at once. Every skin steps the glide
+itself, a frame at a time, by `follow_glide` (not a platform's scroll
+animation), so that the follower keeps up while the hand's pane moves
+and is done soon after it stops. The positions of sections not laid out yet
+are guessed: an anchor whose part isn't laid out counts where it would be
+were each part between it and what is laid out as tall for its bytes
+(`sizes`) as the parts of its document measured so far are on average (a
+chapter whose sizes aren't known yet: as tall as the laid-out parts are on
+average), every part of the chapters following goes by guessed however
+long they are, and the anchor as far down its part as its bytes into it
+(`AT`). While the panes rest, a skin measures those parts out of sight,
+nearest first, asking for them as it needs, so that a section a pane must
+glide to is known, not guessed; measuring moves nothing shown.
+
+A jump (Go To, a link, the way back, Swap Panes) moves both panes: core
+sends a `go` for each, and each is held where its `go` puts it (as a `go`
+holds a pane's place as parts come in about it). The rule moves neither
+until a hand moves either pane, so Swap Panes and the way back leave
+both panes where they were. A pane moved by the app (the status bar, a
+key's page) leads as a hand's move does.
+
+Once both panes rest (and no jump holds them), the rule is checked
+again, and again as parts measured ahead tell where sections are: the
+pane that didn't lead moves if the rule doesn't hold.
+
+While the panel fills the screen, the page is not moved: it is where it
+was when the panel is beside it again. If a hand moved the panel while
+it filled the screen, the page then follows the panel; otherwise the
+page leads, and the panel follows it.
+
+The reading line (`line`) is what `at` and `go` place and what Go To
+leaves a verse at; following doesn't use it: it goes by the top edge.
+
+Linked, the panel's title names its chapter only once the hand lets the
+panes rest: the two cross a chapter's border a frame or a line apart.
 
 These rules are the skins' each, so each is checked against core's: core's
-`link_cases` tool writes cases (a map, both panes' anchor positions, the
-leader's line, the follower's place) that every skin's tests read and must
-match to within a hundredth of a point.
+`link_cases` tool writes cases (a chapter's map or several, both panes'
+anchor positions, where each pane's sight is, and which pane moves to
+where; a glide's frames) that every skin's tests read and must match to
+within a hundredth of a point (`make bible-follow-test`).
 
 **How each skin draws a pane.** With its platform's own tools wherever they
 measure exactly:
@@ -392,6 +518,62 @@ A reference's preview is core's (`core/preview.l8`: its verses, each
 chapter's first and last, at most 80, the words around them): a screen, a
 page of the verses in the reader's styles and Open in Reader.
 
+## Go To and what can be read
+
+Go To (`SCR_GOTO`) is one screen wherever it opens: the same title (Go
+To, no subtitle), sections, rows and marks, always presented (a sheet,
+group 0; never pushed, so it has no Back) and opened at its top (no
+`focus`). Its screen's argument says only where a pick lands: `GOTO_PAGE`
+(0: the bar's title, `tap goto`) or `GOTO_PANEL` (1: the panel reader's
+name, or `tap shelf` with nothing read there yet). In a wide window a
+skin may anchor it, as a popover, to what opened it (the page's title or
+the panel's name, by the argument); nothing else differs. Its rows, and
+those of the screens pushed over it (a book's chapters, a document's
+page), act for where a pick lands; core works that out, and the skin
+hands the actions back as for any screen.
+
+- Nothing typed: Ribbons and Reading Plan, Recent, Documents (what is
+  read: the page's document, the panel's, then the others read, the
+  latest first, up to six with the Bibles that come with the app), Browse
+  (a row a kind with documents, and Languages, each with a count at its
+  right; a tap puts its word in the field, `refill` then `retext`, as if
+  it was typed), then the books.
+- Typed: the reference (a row to go there), Books of the Bible, then the
+  documents by kind (Bibles, Commentaries, Dictionaries, Devotionals,
+  Books), ordered open in a pane, read, coming with the app, in the
+  reader's language, the others; three a kind then `Show All N` (five for
+  a language named; twelve for a kind named alone, then its other
+  languages, rows refining the query); for "languages", a row a language
+  (its own name; its English name and a count). A section's `Show All N`
+  makes the screen again with every row, sent as `refill ID 0`: the list
+  keeps its offset. Nothing found: the screen's `empty` (No Matches; its
+  line "More is found when you’re online." where only the connection
+  stands in the way).
+- Its documents are rows of one model, wherever they are kept: no icon,
+  the title (two lines at most), a small line (`BSB · Modern,
+  word-for-word and readable`, `RomCor · Romanian`, in Documents
+  `Commentary`), a check on what the page and the panel show (the same
+  whichever opened Go To), a ⓘ to the document's page; a tap opens it.
+  Nothing on a row says whether it is on the device, how large it is or
+  how its download goes, and Go To lists only what can be opened now
+  (offline, what is here).
+- A document's page (kind 62, a bundled version's 68) is pushed over Go
+  To: the title and what it is (`Commentary · English · Version 2.1`, its
+  own line), Read (as a pick in that Go To), why it can't be read if it
+  can't, About, Details, License, then a page's paragraph of small faint
+  words: where it is from and, while it is kept here and no pane shows it,
+  `Kept on this iPhone · 5 MB · Remove`, Remove a link in
+  `RUN_SMALL_UNDERLINED` (nothing asks first; the page then says
+  `Removed.`).
+- A document not on the device opens all the same: the pane it lands in
+  keeps showing what it shows until the new one can be read, then changes
+  to it at the same place (Panes: Arriving). A dictionary or a book not
+  here opens its screen in the sheet, which says "Opening…" until it has
+  come.
+- `tap shelf` opens or closes the panel; with nothing to read there it
+  presents Go To aimed at the panel (no `beside` line), and the panel
+  opens (`beside 1 0`) only when a document is picked. Without a panel
+  that fits, it presents Go To aimed at the page.
 ## Practice
 
 `core/practice.l8` is Practice apart from any platform: a session's queue
@@ -503,7 +685,10 @@ FIELD_KIND LEAD LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS LINKS CAPS.
   CAPS, in a scripture row's detail, the divine name's letters to set in
   small capitals (LORD's ORD: pairs of UTF-16 places, as MARKS). In runs,
   the Bible's words (`RUN_SCRIPTURE`) have the same letters as runs of
-  their own, `RUN_DIVINE`.
+  their own, `RUN_DIVINE`. A commentary's paragraph that opens with bold
+  words ("Verse 12.") has them as a run of `STYLE_LABEL`: a small sans
+  label run into the paragraph, faint, with room above the paragraph, so
+  that each comment's start is found without reading.
 
 Other lines from core:
 
@@ -515,9 +700,10 @@ Other lines from core:
 | `reader N` | the Bible has N chapters (each pane's) |
 | `part P C K N` TEXT | part K of chapter C of pane P's document, the chapter in N parts (0: not known yet, a commentary still opening), and the panes' other lines: see Panes above |
 | `go P C I FRAC MODE`, `halt P`, `forget P C`, `line P THOUSANDTHS`, `link C MODE` | a pane to a place, its glide stopped, its parts to be asked for again, its reading line; a chapter's link map: see Panes above |
+| `arriving P THOUSANDTHS`, `arrived P` | a document on its way to pane P, so much come (a hairline along the foot of that pane's bar, ink at 30%); nothing on its way any more (the hairline fades out): see Panes, Arriving |
 | `goto` | the sheets away, as the platform puts them away (a `go 0` follows) |
 | `highlights SWATCH WASH STRENGTH...`, `themes DAY NIGHT PAGE INK...`, then `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT THEME CHOSEN HAIRLINE SELECTION SHEET CELL` | all a skin needs of look.l8. `highlights`: each of the five by the color its `mark` lines name it with, and the wash a highlighted verse shows now (STRENGTH, like GLOSS, HAIRLINE and SELECTION, in thousandths). `themes`: the themes Auto follows by day and at night, then each theme's page and ink, in the Theme setting's order (for its swatches). `look`: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument); THEME the theme it is and CHOSEN the one chosen (0 Auto), of `themes`; HAIRLINE a rule's strength (RULE's color), SELECTION a selection's (ACCENT's); SHEET and CELL a sheet's color and its rows' (`-`: the platform's grouped colors) |
-| `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation, shown faint after the title (which opens Go To); the version is chosen in Go To or the Library, not from the bar |
+| `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation (or the commentary the page reads; while a document is on its way to the page, its name), shown faint after the title (which opens Go To); the version is chosen in Go To, not from the bar or the settings |
 | `url` ADDRESS | a page outside the app to open |
 | `back` WORDS | the capsule's words (none: away); the way back and a ribbon move the page with `go 0` |
 | `next` | core has work going on a step at a time (the Bookshelf opening a module, making a Bible a version, decoding a commentary's block): the skin answers `next` on its next turn, once it has drawn and taken input, so the app answers its reader between steps however slow it runs |
@@ -537,16 +723,18 @@ symbol's name, `-` for the ribbon's glyph in the carried ribbon's color), `study
 `study_moved C V` (Study in the panel moved to another verse: the reader
 follows), `beside OPEN FULL` (whether the panel beside the reader is wanted
 open: at `start` as it was left, then as core opens or closes it: `tap
-shelf`, its key, the tray's Study, its close; and whether it fills the
-screen, the reader hidden under it: `tap full`, or beside the reader
-again, as a reference tapped in it puts it. A skin opening it asks for
-its screens, `panelmake`, which come as `panel ID` (its first, the
-Bookshelf) and `push ID` (the module read beside the reader, at its
-place; Study at its verse), each of group 1; it lets them go with
-`closegroup 1`), `command K MENU NAME MODS` TITLE (each of the keyboard's
-commands, at `start` and again as its title changes: its menu, 0 Go, 1
-View, 2 none; its key and modifiers, as `key` sends them; Show Study or
-Hide Study), `commands MASK` (those that act now, bit K, written as that
+shelf`, its key, the tray's Study, a document picked in Go To aimed at
+the panel, its close; and whether it fills the screen, the reader hidden
+under it: `tap full`, or beside the reader again, as a reference tapped
+in it puts it. A skin opening it asks for its screens, `panelmake`, which
+come as `panel ID` (its first: the reader of what it reads beside the
+page, at its place, or Study) and `push ID` (Study at its verse, over the
+reader), each of group 1; with nothing to show, core answers `beside 0
+0`, and the skin closes it, asking again the next time it opens; it lets
+them go with `closegroup 1`), `command K MENU NAME MODS` TITLE (each of
+the keyboard's commands, at `start` and again as its title changes: its
+menu, 0 Go, 1 View, 2 none; its key and modifiers, as `key` sends them;
+Show Panel or Hide Panel), `commands MASK` (those that act now, bit K, written as that
 changes), `credit K` WORDS LINK ADDRESS LABEL (at `start`: a section's
 credit K, its words then a link to ADDRESS, and what a screen reader
 says of it), `editcommand K` TITLE (at `start`: the text's own menu's
@@ -562,7 +750,7 @@ From the skin:
 | Line | Meaning |
 |---|---|
 | `start W H DENSITY DARK TZ` | the app begun: the window (points), its scale (hundredths), the system's appearance, its time zone (seconds east of UTC: the day turns at its midnight) |
-| `tap goto`, `tap settings`, `tap history`, `tap search`, `tap library`, `tap shelf` | the bar's buttons (`goto`: its title; `shelf`: the panel beside the reader opened or closed; without one, the Bookshelf over the reader) |
+| `tap goto`, `tap settings`, `tap history`, `tap search`, `tap library`, `tap shelf` | the bar's buttons (`goto`: its title; `shelf`: the panel beside the reader opened or closed, or with nothing read there yet Go To aimed at it; without a panel that fits, Go To aimed at the page) |
 | `act ID ACTION ARG VALUE` | an action (VALUE: a toggle's 1 or 0, a choice's, segment's, filter's or sort's index, a slider's value, a time's minutes, a swatch's color). An action on a screen means those over it have gone |
 | `query ID TEXT` | screen ID's field typed in (TEXT to the line's end), once typing has rested |
 | `scope ID N` | scope N chosen in screen ID's field |
@@ -573,7 +761,7 @@ From the skin:
 | `openplan PLAN DAY SELECT PUSH` | open a plan's days at DAY, with that day selected when SELECT is 1 |
 | `anchor ID` | keep the navigation stack through ID, closing screens above it before pushing from that controller |
 | `tap full` | the panel's button: it fills the screen, or is beside the reader again |
-| `panelmake` | the panel beside the reader opening: core makes its screens (`panel`, then `push`es of group 1) as it was left |
+| `panelmake` | the panel beside the reader opening: core makes its screens (`panel`, then a `push` of Study, group 1) as it was left, or says `beside 0 0` when there is nothing to show |
 | `panelanchor ID` | the panel's Back (or a swipe) shows ID on top: core lets the panel's screens above it go, any sheet's kept |
 | `closegroup GROUP` | close the sheet's screens (0) or the side panel's screens (1) |
 | `panelfits 0/1`, `panelvisible 0/1` | tell core whether the skin has a panel beside the reader (at its right or under it), and whether it is currently visible, including when the platform temporarily detaches it |
@@ -647,7 +835,7 @@ Search (the ESV's results too: the iPhone asks its server, core keeps and
 shows them), History, the reading settings, Glosses, Voice and the
 voices, Downloads, the Manual's list, Acknowledgements and Changes, Reading
 Plans, a plan's days and its Daily Reminder, A Chapter a Day, Begin At, New
-Ribbon and a ribbon's screen, the Bookshelf, the Library and Memory (Add Passage, a
+Ribbon and a ribbon's screen, a document's page, the Library and Memory (Add Passage, a
 passage, its versions, Memory's reminder), Compare, a word's study, its
 grammar and concordance, the language page and what it pushes (Sounds
 Written As, the Alphabet, Your Words, Add Words and its preview, Verses You
@@ -670,7 +858,25 @@ parts' anchors' lines, and tells core as its anchor changes and at rest.
 A `go` waits for its pane's table to be on the screen, and is carried to
 a new table as what the panel reads changes. Linked, the pane a finger
 last moved leads and the other follows each frame by core/follow.l8's
-rules (a commentary waiting while the page decelerates).
+rules (a commentary waiting while the page decelerates). The panel opened
+(or its grabber dragged) makes the page shorter under a place core sent
+the panel to: once the panel's reader is laid out, the page's place is
+told again and the panel brought to it by the same rules.
+
+The panel's reader has no navigation bar (`ios/beside.l8`): a row of its
+own, 48 points, the grabber over its top, core's `left` as the
+document's name, then "· " and the chapter faint after it while core's
+title names one (the chapter at most half the row, cut at its end), then
+a small chevron, all one button; Link (the accent while linked, else
+faint) and the menu as glyphs; its words a short fade under it, and at 0.9 of the
+page's size (the page's look made again at that size, `look_swap`). Its
+other screens keep the system's bar under the same grabber. The page's
+last 24 points over the panel fade into the page's color, as its top
+bar's do, over one hairline. A sheet's Done is a check on the bar's plain
+glass, not the system's filled Done; a row's ⓘ is faint, a check in the
+accent; a field floating at a list's foot is marked an element of its
+bottom edge (`UIScrollEdgeElementContainerInteraction`), so the rows
+soften under it.
 
 ## Moving the iPhone
 
@@ -757,7 +963,7 @@ shows (`panelvisible`), and its Back says `panelanchor`, or on its first
 screen closes it (`tap shelf`); the system's Back closes a sheet, then
 puts a full panel beside the page, then goes back in the panel. A screen
 that says `reader` shows pane 1 in place of its rows, under its title and
-subtitle, with its link button at its foot. Checked on the emulator
+subtitle, with its tools (Link, the menu) at its foot. Checked on the emulator
 (2026-11-04, the panes as lists): the page dragged and flung, Go To and
 the way back, a key's page; the KJV beside the page under it following
 verse by verse with either leading, dragged and flung both ways (each
@@ -849,7 +1055,7 @@ called but through the wire. Its own parts:
   columns and wider) or under it, the rows split, so that it always fits
   (`panelfits 1`), or filling the screen (`f`). The panel's reader (a
   screen with a `reader` line) is the reader's pane 1, drawn in place of
-  rows under the screen's title, its link button at its foot. Each
+  rows under the screen's title, its tools (Link, the menu) at its foot. Each
   screen's lines are kept as they came and read when shown; what can be
   done is a ring of focus items (rows, a grid's squares, a page's links,
   tiles, swatches, segments, sort, filter, scopes, the bar's buttons, those
