@@ -179,6 +179,22 @@ final class Linking implements Reader.Moves {
     return links;
   }
 
+  // Whether each pane's chapter at its top edge, linked (its map said, with
+  // matches: the other document has it), has its anchors known in the other
+  // pane (Reader.chapterKnown asks for them): a chapter not known there has
+  // no links, and the rule would take another chapter's section for the
+  // nearest linked one.
+  private boolean edgesKnown() {
+    boolean known = true;
+    for (Reader r : new Reader[] {page, panel}) {
+      int c = r.chapterAtSight();
+      Follow.LinkMap map = c >= 0 ? maps.get(c) : null;
+      Reader other = r == page ? panel : page;
+      if (map != null && map.j.length > 0 && !other.chapterKnown(c)) known = false;
+    }
+    return known;
+  }
+
   // A pane moved by a hand (or a jump): the other moved by the rule, if it
   // doesn't hold (SKINS.md, Panes: Linked; Follow, core/follow.l8's rules):
   // the section at the page's top edge has one linked with it as much in
@@ -187,6 +203,12 @@ final class Linking implements Reader.Moves {
   // off). Not while a jump holds both panes.
   private void follow(Reader lead) {
     if (following || held && !ruled) return;
+    // (Nothing moves until the chapters at the top edges are known in both
+    // panes: following again a turn later.)
+    if (!edgesKnown()) {
+      aheadSoon();
+      return;
+    }
     following = true;
     try {
       Follow.Links links = links();

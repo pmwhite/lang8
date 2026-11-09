@@ -1041,6 +1041,9 @@ function makeReader(p, main, view, opts) {
   // part]) and, for a run of chapters without comments, the run.
   chapters: new Map(),
   asked: new Set(),
+  // The chapter at the other pane's top edge, asked for so that following
+  // knows its anchors (edgesKnown), or null.
+  edgeWanted: null,
   // Every part measured since its document came, and how many bytes it is
   // (guessParts).
   measured: new Map(),
@@ -1156,6 +1159,11 @@ function makeReader(p, main, view, opts) {
     }
     if (n > 0) this.chapters.set(c, { n, anchors, gap, sizes });
     if (gap) for (let x = gap[0]; x <= gap[1]; x++) if (x !== c) this.chapters.set(x, { n: 1, anchors: [], gap });
+    // (Following waited for it: the rule taken now it is known.)
+    if (this.edgeWanted !== null && this.chapters.has(this.edgeWanted)) {
+      this.edgeWanted = null;
+      requestAnimationFrame(() => follow(panes[leader]));
+    }
     // (Its place: held for it, or for its chapter's last part, or for a
     // chapter of its run.)
     let s = this.findPart(c, k);
@@ -1932,6 +1940,26 @@ function followChapters() {
   return [from, to];
 }
 
+// Whether each pane's chapter at its top edge, linked (its map said, with
+// matches: the other document has it), has its anchors known in the other
+// pane, its first part asked for if not (which says them; following again
+// as it comes): a chapter not known there has no links, and the rule would
+// take another chapter's section for the nearest linked one.
+function edgesKnown() {
+  let known = true;
+  for (const r of panes) {
+    const c = r.chapterAt(r.view.inset());
+    const map = linkMaps.get(c);
+    const other = panes[1 - r.p];
+    if (c >= 0 && map && map.j.length > 0 && !other.chapters.has(c)) {
+      other.edgeWanted = c;
+      other.want(c, 0);
+      known = false;
+    }
+  }
+  return known;
+}
+
 // A pane moved by a hand (or a jump): the other moved by the rule, at once
 // if the rule doesn't hold (SKINS.md, Panes: Linked; follow.js's rules, the
 // same as core/follow.l8's): the section at the top pane's top edge has
@@ -1956,7 +1984,7 @@ function followNow(lead) {
   const page = panes[0];
   const panel = panes[1];
   const [from, to] = followChapters();
-  if (from > to) return;
+  if (from > to || !edgesKnown()) return;
   const pageGuess = page.guessParts(from, to);
   const panelGuess = panel.guessParts(from, to);
   const links = newLinks();

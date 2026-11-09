@@ -123,6 +123,9 @@ Commentary:
                         one ("Verse 3."), an earlier one too where its
                         author goes through the verses again
     O<text>\t<v>[-<v2>] a line of a chapter's outline, and its verses
+    E<label>            a note's mark (b, 12), raised, where the comment's
+                        words mark a note it holds itself; the note's
+                        paragraph begins with the same mark
 
 In a Bible, words have no space at their end, and at their start only
 where they follow other words or a footnote's mark in the same line of

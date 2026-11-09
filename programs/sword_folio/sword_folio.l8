@@ -46,10 +46,12 @@ book_usfm_code(osis: str): str {
 // ---- metadata ----
 // Which making of this library's a folio is (`importer`), counted up as
 // what it makes of a module changes (2: a table's cells apart, its rows a
-// line each), so that a reader can make again a folio made before (one
-// made before it was said is the first).
+// line each; 3: notes marked by letter, as the Geneva notes mark them, an
+// E record each mark and a paragraph each note), so that a reader can
+// make again a folio made before (one made before it was said is the
+// first).
 tag sword_folio
-SWORD_FOLIO_IMPORTER: int = 2;
+SWORD_FOLIO_IMPORTER: int = 3;
 
 // The making a folio says it is of.
 tag sword_folio
@@ -128,7 +130,9 @@ type CommentaryImport = tag sword_folio_internal {
     // uncompressed module's) and start, for saying how far it has come.
     last_testament: int;
     last_block: int;
-    last_start: int
+    last_start: int;
+    // How its comments mark their notes, as far as it has been read.
+    marking: NoteMarking
 }
 
 // A block of a module larger than this is a book's (the Treasury of
@@ -151,7 +155,8 @@ commentary_import_new(module: *VerseModule@new): *CommentaryImport@new {
         decoding_block: -1,
         last_testament: 0,
         last_block: -1,
-        last_start: 0
+        last_start: 0,
+        marking: NoteMarking.Unmarked
     }
 }
 
@@ -352,14 +357,15 @@ import_chapter_records(
             markup_convert(rich, &state, verse_module_info(module).markup, markup,
                 0, len(markup));
             if (rich_has_words(rich)) {
-                if (chapter == 0) _anchored: int = import_comment_body_records(out,
-                    rich, ImportCommentPlace {
+                making.marking = import_note_marking(making.marking, rich);
+                if (chapter == 0) _made: ImportCommentBody = import_comment_body_records(out,
+                    rich, making.marking, ImportCommentPlace {
                     book: book_entry,
                     chapter: 0,
                     from: 0,
                     through: 0,
                     reach: 0
-                }) else import_comment_records(out, rich, ImportCommentPlace {
+                }) else import_comment_records(out, rich, making.marking, ImportCommentPlace {
                     book: book_entry,
                     chapter: chapter,
                     from: v,
@@ -425,7 +431,34 @@ type ImportCommentWriting = {
     // not go on with a sentence a line break cut.
     sentence_ended: bool;
     // It labels its verses itself (references then begin none).
-    by_labels: bool
+    by_labels: bool;
+    // Where the open paragraph's P record begins in out, and whether words
+    // have been written in it.
+    paragraph_at: int;
+    paragraph_has_words: bool;
+    // How it marks its notes, and the labels its words marked so far
+    // (import_label_bit's bits).
+    marking: NoteMarking;
+    marked: int;
+    // How many notes have begun, and where those on words before the
+    // comment's first verse begin and end in out (from == to: none; see
+    // ImportCommentBody), the last of them still going on.
+    notes_begun: int;
+    title_notes_from: int;
+    title_notes_to: int;
+    title_notes_open: bool
+}
+
+// What a comment's records after its K made: the last verse its labels
+// turned to (its first, if none), and where its notes on a psalm's title
+// are among them (from == to: none). The Geneva notes, keyed by verse,
+// put the notes on a psalm's title (verse 0 in the KJV's numbering, which
+// its entries leave empty) with verse 1's: its leading notes, whose labels
+// verse 1's words don't mark.
+type ImportCommentBody = {
+    anchored: int;
+    title_notes_from: int;
+    title_notes_to: int
 }
 
 // A comment as records into out: its K, then its words, a paragraph's
@@ -433,10 +466,33 @@ type ImportCommentWriting = {
 // verse there, again if its labels start over (a commentary's notes after
 // its exposition, each "Verse 3." in turn), but not the same one twice in
 // a row (several notes on one verse). Its K's verses reach as far as its
-// labels turn to.
-import_comment_records(out: *ByteBuilder@new, rich: *RichText, place: ImportCommentPlace) {
+// labels turn to. Notes on a psalm's title are a comment on verse 0 before
+// it, headed "Title".
+import_comment_records(
+    out: *ByteBuilder@new,
+    rich: *RichText,
+    marking: NoteMarking,
+    place: ImportCommentPlace
+) {
     body: *ByteBuilder = builder_new(256);
-    anchored: int = import_comment_body_records(body, rich, place);
+    made: ImportCommentBody = import_comment_body_records(body, rich, marking, place);
+    anchored: int = made.anchored;
+    if (made.title_notes_to > made.title_notes_from) {
+        builder_str(out, "K");
+        builder_int(out, place.chapter);
+        builder_str(out, ":0-");
+        builder_int(out, place.chapter);
+        builder_str(out, ":0");
+        builder_byte(out, 10i8);
+        builder_str(out, "STitle");
+        builder_byte(out, 10i8);
+        builder_bytes(out, body.data, made.title_notes_from, made.title_notes_to);
+        // (The rest is verse 1's.)
+        rest: *ByteBuilder = builder_new(body.size);
+        builder_bytes(rest, body.data, 0, made.title_notes_from);
+        builder_bytes(rest, body.data, made.title_notes_to, body.size);
+        body = rest
+    }
     builder_str(out, "K");
     builder_int(out, place.chapter);
     builder_byte(out, ':' as i8);
@@ -449,9 +505,13 @@ import_comment_records(out: *ByteBuilder@new, rich: *RichText, place: ImportComm
     builder_bytes(out, body.data, 0, body.size)
 }
 
-// A comment's records after its K, into out: the last verse its labels
-// turned to (its first, if none).
-import_comment_body_records(out: *ByteBuilder@new, rich: *RichText, place: ImportCommentPlace): int {
+// A comment's records after its K, into out, and what they made.
+import_comment_body_records(
+    out: *ByteBuilder@new,
+    rich: *RichText,
+    marking: NoteMarking,
+    place: ImportCommentPlace
+): ImportCommentBody {
     writing: ImportCommentWriting = ImportCommentWriting {
         paragraph_open: false,
         paragraph_kind: "m",
@@ -464,7 +524,15 @@ import_comment_body_records(out: *ByteBuilder@new, rich: *RichText, place: Impor
         anchored: place.from,
         last: place.from,
         sentence_ended: true,
-        by_labels: import_has_verse_labels(rich)
+        by_labels: import_has_verse_labels(rich),
+        paragraph_at: 0,
+        paragraph_has_words: false,
+        marking: marking,
+        marked: 0,
+        notes_begun: 0,
+        title_notes_from: 0,
+        title_notes_to: 0,
+        title_notes_open: false
     };
     // (A comment that labels its verses itself ("Verse 3.") is followed by
     // its labels alone: its references may be an outline's, ahead of them.)
@@ -541,15 +609,184 @@ import_comment_body_records(out: *ByteBuilder@new, rich: *RichText, place: Impor
                             &writing, place, reference_label_at(data, w.from, w.to,
                             place.book, place.chapter))
                     }
-                    builder_str(out, import_style_letter(w.style));
-                    import_plain_words(out, data, w.from, w.to);
-                    builder_byte(out, 10i8);
-                    import_note_sentence(&writing, data, w.from, w.to)
+                    match writing.marking {
+                        ByLabel -> import_marked_words(out, &writing, place, data,
+                            w.from, w.to, import_style_letter(w.style));
+                        Unmarked -> import_words_line(out, &writing, data, w.from,
+                            w.to, import_style_letter(w.style))
+                    }
                 }
             }
         }
     }
-    writing.anchored
+    if (writing.title_notes_open) writing.title_notes_to = out.size;
+    ImportCommentBody { anchored: writing.anchored, title_notes_from: writing.title_notes_from, title_notes_to: writing.title_notes_to }
+}
+
+// Words as a record in the style letter says (none if there are none).
+import_words_line(
+    out: *ByteBuilder@new,
+    writing: *ImportCommentWriting,
+    data: []i8,
+    from: int,
+    to: int,
+    letter: str
+) {
+    if (to == from) return;
+    builder_str(out, letter);
+    import_plain_words(out, data, from, to);
+    builder_byte(out, 10i8);
+    if (!import_spaces_only(data, from, to)) writing.paragraph_has_words = true;
+    import_note_sentence(writing, data, from, to)
+}
+
+// A note's mark in a comment's words ("{b}" where its words are, "(b)"
+// where the note on them begins, or, in some, the words again) and its
+// label: a lowercase letter, or a number of one or two digits once the
+// letters have run out ("{12}").
+type NoteMark =
+    | NoMark
+    | Braced { label_from: int, label_to: int }
+    | Parenthesized { label_from: int, label_to: int }
+
+// The mark at data[at] (before to); a parenthesized one is followed by a
+// space or its words' end.
+import_note_mark_at(data: []i8, at: int, to: int): NoteMark {
+    open: int = data[at] as int;
+    if (open != '{' as int && open != '(' as int) return NoteMark.NoMark;
+    label_to: int = at + 1;
+    if (label_to < to && data[label_to] as int >= 'a' as int && data[label_to] as int <= 'z' as int) label_to = label_to + 1 else {
+        while (label_to < to && label_to - at <= 2 && label_digit(data[label_to])) label_to = label_to + 1
+    }
+    if (label_to == at + 1 || label_to >= to) return NoteMark.NoMark;
+    if (open == '{' as int && data[label_to] == '}') return NoteMark.Braced { label_from: at + 1, label_to: label_to };
+    if (open == '(' as int && data[label_to] == ')' && (label_to + 1 == to || data[label_to + 1] == ' ')) return NoteMark.Parenthesized { label_from: at + 1, label_to: label_to };
+    NoteMark.NoMark
+}
+
+// How a commentary's comments mark their notes in their words.
+type NoteMarking =
+    | Unmarked
+    // As the Geneva notes do: "{b}" in its words, "(b)" beginning the note
+    // on them (import_note_mark_at), a comment's notes after its words.
+    | ByLabel
+
+// How a commentary marks its notes, known so far, after a comment read: by
+// label once one holds a braced mark ("{b}"). (Some of its comments lack
+// the braces, their marks parenthesized or left out: they mark them too.)
+import_note_marking(known: NoteMarking, rich: *RichText): NoteMarking {
+    match known {
+        ByLabel -> return known;
+        Unmarked -> { }
+    }
+    if (import_marks_notes(rich)) NoteMarking.ByLabel else NoteMarking.Unmarked
+}
+
+// Whether a comment's words hold a braced mark.
+import_marks_notes(rich: *RichText): bool {
+    data: []i8 = rich.text.data;
+    for i in 0..rich.count {
+        match rich.pieces[i] {
+            Words w -> {
+                for at in w.from..w.to {
+                    match import_note_mark_at(data, at, w.to) {
+                        Braced _b -> return true;
+                        _ -> { }
+                    }
+                }
+            }
+            _ -> { }
+        }
+    }
+    false
+}
+
+// Words of a comment that marks its notes by label, as records into out:
+// each mark an E record of its label, the space after it left out. A
+// parenthesized mark beginning a paragraph or following a sentence's end
+// begins a note, a paragraph of its own.
+import_marked_words(
+    out: *ByteBuilder@new,
+    writing: *ImportCommentWriting,
+    place: ImportCommentPlace,
+    data: []i8,
+    from: int,
+    to: int,
+    letter: str
+) {
+    written: int = from;
+    at: int = from;
+    while (at < to) {
+        label_from: int = 0;
+        label_to: int = 0;
+        parenthesized: bool = false;
+        match import_note_mark_at(data, at, to) {
+            NoMark -> {
+                at = at + 1;
+                continue
+            }
+            Braced b -> {
+                label_from = b.label_from;
+                label_to = b.label_to
+            }
+            Parenthesized p -> {
+                label_from = p.label_from;
+                label_to = p.label_to;
+                parenthesized = true
+            }
+        }
+        // (Spaces before a note: not words of the paragraph it ends.)
+        if (!parenthesized || !import_spaces_only(data, written, at)) import_words_line(out,
+            writing, data, written, at, letter);
+        begins_note: bool = parenthesized && (!writing.paragraph_has_words || writing.sentence_ended);
+        if (begins_note && writing.paragraph_has_words) {
+            import_paragraph_ends(writing, "m");
+            import_paragraph_begins(out, writing)
+        }
+        if (begins_note) import_note_begun(writing, place, data, label_from, label_to) else writing.marked = writing.marked | import_label_bit(data,
+            label_from, label_to);
+        builder_str(out, "E");
+        builder_bytes(out, data, label_from, label_to);
+        builder_byte(out, 10i8);
+        at = label_to + 1;
+        if (at < to && data[at] == ' ') at = at + 1;
+        written = at
+    }
+    import_words_line(out, writing, data, written, to, letter)
+}
+
+// A label's bit in a set of them: a letter's 1 to 2^25, a number's (1 to
+// 37) 2^26 to 2^62; 0 for a number past them (the Geneva notes' reach 35).
+import_label_bit(data: []i8, from: int, to: int): int {
+    first: int = data[from] as int;
+    if (first >= 'a' as int && first <= 'z' as int) return 1 << first - 'a' as int;
+    n: int = 0;
+    for k in from..to n = n * 10 + data[k] as int - 48;
+    if (n >= 1 && n <= 37) 1 << 25 + n else 0
+}
+
+// A note begun, in the paragraph open: in a comment on a psalm's verse 1,
+// the notes before the first whose label its words mark are on its title.
+import_note_begun(
+    writing: *ImportCommentWriting,
+    place: ImportCommentPlace,
+    data: []i8,
+    label_from: int,
+    label_to: int
+) {
+    if (place.from == 1 && place.chapter > 0 && place.book.osis == "Ps") {
+        // (A label without a bit is taken as marked: its note stays.)
+        bit: int = import_label_bit(data, label_from, label_to);
+        marked: bool = bit == 0 || (writing.marked & bit) != 0;
+        if (writing.notes_begun == 0 && !marked) {
+            writing.title_notes_from = writing.paragraph_at;
+            writing.title_notes_open = true
+        } else if (writing.title_notes_open && marked) {
+            writing.title_notes_to = writing.paragraph_at;
+            writing.title_notes_open = false
+        }
+    }
+    writing.notes_begun = writing.notes_begun + 1
 }
 
 // A paragraph ended: the next one's kind.
@@ -559,6 +796,8 @@ import_paragraph_ends(writing: *ImportCommentWriting, kind: str@writing) {
 }
 
 import_paragraph_begins(out: *ByteBuilder@new, writing: *ImportCommentWriting) {
+    writing.paragraph_at = out.size;
+    writing.paragraph_has_words = false;
     builder_str(out, "P");
     builder_str(out, writing.paragraph_kind);
     builder_byte(out, 10i8);
@@ -770,6 +1009,7 @@ import_link_line(out: *ByteBuilder@new, writing: *ImportCommentWriting, place: I
     builder_byte(out, 9i8);
     builder_bytes(out, writing.gathered.data, 0, writing.gathered.size);
     builder_byte(out, 10i8);
+    writing.paragraph_has_words = true;
     import_note_sentence(writing, writing.gathered.data, 0, writing.gathered.size)
 }
 
@@ -914,7 +1154,8 @@ import_text_records(out: *ByteBuilder@new, markup: Markup, text: []i8) {
     state: MarkupState = markup_state_new();
     markup_convert(rich, &state, markup, text, 0, len(text));
     if (!rich_has_words(rich)) return;
-    _anchored: int = import_comment_body_records(out, rich, ImportCommentPlace {
+    _made: ImportCommentBody = import_comment_body_records(out, rich, import_note_marking(NoteMarking.Unmarked,
+        rich), ImportCommentPlace {
         book: &no_book,
         chapter: 0,
         from: 0,

@@ -404,6 +404,14 @@ can be: wholly, if it is shorter than the pane; filling the pane, if it is
 taller (any one of several will do). While that holds, nothing moves: no
 proportion through a verse is kept.
 
+The rule is taken only with the sections it is about known: while the
+chapter at either pane's top edge has a map with matches, and the other
+pane doesn't know that chapter's anchors yet, nothing moves, and the
+other pane asks for its first part (which says them), following again as
+it comes. Else the chapter would have no links, and the nearest linked
+section would be another chapter's: the panel brought to Psalm 30 while
+the page's top edge is in 29:8.
+
 When it doesn't, the pane the hand isn't moving moves by as little as
 makes it hold, starting in the frame it broke in:
 

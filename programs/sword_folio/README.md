@@ -48,6 +48,16 @@ The records are folio/README.md's.
   just begun begins nothing (several notes on one verse). The `K` reaches
   as far as its labels do. Bare numbers ("3.")
   are not labels: they number sections and points as often as verses.
+- **Notes marked by label**: a commentary that marks a note in its words
+  by a braced label (`{b}`, a lowercase letter or a number of one or two
+  digits), as the Geneva notes do, is read so from that comment on: each
+  mark (braced, or parenthesized, `(b)`, as some of its comments write
+  them) an `E`, the space after it left out, and a parenthesized one that
+  begins a paragraph or follows a sentence's end begins a note, a
+  paragraph of its own. A psalm's verse-1 comment's leading notes whose
+  labels its words don't mark are on the psalm's title (verse 0 in the
+  KJV's numbering, which such a commentary leaves empty): they are a
+  comment on verse 0, headed `Title`, before it.
 - **A dictionary**: an entry a division, keyed by the module's key (an
   introduction, the empty key, is the folio's own records); its metadata
   says how keys are kept (`keys`: `capitals` or `as-written`;

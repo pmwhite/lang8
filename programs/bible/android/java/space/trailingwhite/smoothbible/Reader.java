@@ -1535,6 +1535,15 @@ final class Reader extends ListView {
     followTo(top - getPaddingTop() + lineOffset());
   }
 
+  // Whether chapter c's anchors are known (its parts said), its first part
+  // asked for if not (which says them).
+  boolean chapterKnown(int c) {
+    Chapter ch = chapterInfo.get(c);
+    if (ch != null && ch.parts > 0) return true;
+    want(c, 0);
+    return false;
+  }
+
   // The chapter at the top of its sight (-1: none here).
   int chapterAtSight() {
     if (window.isEmpty()) return -1;
