@@ -2,55 +2,214 @@ tag ios;
 
 use_tag std;
 
-// The one block an app may make (Smooth Bible's DESIGN.md §10.2.3): a
-// global block, as the compiler makes for a block that captures nothing,
-// built by hand in memory that is never freed. Its invoke is an L8
-// function (called through its C-entry stub, so from any thread), which is
-// given the block and then the block's own arguments. A global block is
-// never copied or freed by the runtime (_Block_copy returns it as it is).
-// Nothing else in an app should take this path without a design change.
+// ---- blocks ----
+// Blocks (Objective-C's closures) for UIKit and Foundation, made by hand as
+// the compiler makes a global block, so the runtime never copies or frees
+// one: its record is ours (block_make), and is let go when nothing is given
+// it any more (block_free). Its code is a shim in blocks.arm64-darwin.s,
+// which calls an L8 function, the handler, with the block's context word
+// and then the block's own arguments (up to four, whole numbers or objects;
+// floating-point arguments are not passed on). So one handler serves many
+// blocks (a menu's actions, each its row in its context), and the handler
+// is an ordinary L8 function: under hot reload, a trampoline into the
+// module (RELOAD.md).
+//
+// The app's code runs on the main thread only. UIKit calls the blocks it
+// is given there (actions, menus, detents, animations); a framework's
+// completion handler may be called on a queue of its own: made with
+// block2_main, the call goes to the main thread first.
 import "objc.l8";
 
-extern fn_address3(f: fn(block: int, a: int, b: int): int): int = l8_as_int;
+native "blocks.s";
 
-extern fn_address1(f: fn(block: int): int): int = l8_as_int;
+extern fn_value1(f: fn(context: int): int): int = l8_as_int;
 
-// The blocks made (four words each: isa; flags and reserved; invoke;
-// descriptor), and their descriptor (reserved, size).
-block_words: []int = new int[32](0);
+extern fn_value2(f: fn(context: int, a: int): int): int = l8_as_int;
 
-block_descriptor: []int = [0, 32];
+extern fn_value3(f: fn(context: int, a: int, b: int): int): int = l8_as_int;
 
-blocks_made: int = 0;
+extern fn_value4(f: fn(context: int, a: int, b: int, c: int): int): int = l8_as_int;
 
-// BLOCK_IS_GLOBAL.
-BLOCK_GLOBAL: int = 268435456;
+// A double's bits as a whole number: what a double block's handler returns
+// (block1_double).
+extern l8_block_f64_bits(x: f64): int;
 
-block_of(invoke: int): int {
-    if (blocks_made * 4 >= len(block_words)) return 0;
-    i: int = blocks_made * 4;
-    blocks_made = blocks_made + 1;
-    block_words[i] = dlsym(-2, "_NSConcreteGlobalBlock");
-    block_words[i + 1] = BLOCK_GLOBAL;
-    block_words[i + 2] = invoke;
-    block_words[i + 3] = ints_address(block_descriptor);
-    ints_address(block_words) + i * 8
+// A block called as C calls it (a block given to the app, or one of its
+// own, tried): up to three whole-number or object arguments, its result a
+// whole number or an object; or one argument and a double result.
+extern l8_block_invoke(
+    block: int,
+    a: int,
+    b: int,
+    c: int
+): int;
+
+extern l8_block_invoke_double(block: int, a: int): f64;
+
+// A record's words: isa, flags, invoke, descriptor, handler, context,
+// objects, and its descriptor (reserved, size, signature);
+// blocks.arm64-darwin.s says what each is.
+BLOCK_WORDS: int = 10;
+
+// How many blocks the app may hold at once.
+BLOCKS_MOST: int = 1024;
+
+block_records: []int = new int[BLOCK_WORDS * BLOCKS_MOST](0);
+
+block_held: []bool = new bool[BLOCKS_MOST](false);
+
+// BLOCK_IS_GLOBAL | BLOCK_HAS_SIGNATURE.
+BLOCK_FLAGS: int = 1342177280;
+
+// The size the descriptor says: the record's words 0 to 6.
+BLOCK_SIZE: int = 56;
+
+// The shims, by kind: a whole number, an object or nothing returned; a
+// double returned; called on the main thread (nothing returned).
+BLOCK_CALL: int = 0;
+
+BLOCK_DOUBLE: int = 1;
+
+BLOCK_MAIN: int = 2;
+
+block_shim_names: []str = ["l8_block_call", "l8_block_call_double", "l8_block_call_main"];
+
+block_shims: []int = new int[3](0);
+
+// The type encodings blocks are made with ("v16@?0@8", say), each once and
+// ended by a zero byte, so a descriptor can point at it.
+block_signatures: []i8 = new i8[4096](0i8);
+
+block_signatures_n: int = 0;
+
+block_signature_address(signature: str): int {
+    // (One already kept: its place.)
+    at: int = 0;
+    while (at < block_signatures_n) {
+        end: int = at;
+        while (block_signatures[end] as int != 0) end = end + 1;
+        same: bool = end - at == len(signature);
+        k: int = 0;
+        while (same && k < len(signature)) {
+            if (block_signatures[at + k] != signature[k] as i8) same = false;
+            k = k + 1
+        }
+        if (same) return bytes_address(block_signatures) + at;
+        at = end + 1
+    }
+    if (block_signatures_n + len(signature) + 1 > len(block_signatures)) return 0;
+    at = block_signatures_n;
+    for k in 0..len(signature) block_signatures[at + k] = signature[k] as i8;
+    block_signatures[at + len(signature)] = 0i8;
+    block_signatures_n = at + len(signature) + 1;
+    bytes_address(block_signatures) + at
 }
 
-// A block of two arguments (void (^)(BOOL, NSError *), say): its address, to
-// pass where a block is wanted.
-global_block(f: fn(block: int, a: int, b: int): int): int {
-    block_of(fn_address3(f))
+// A block of kind whose code calls handler (an L8 function's C entry) with
+// context first, its arguments' objects (bit k for argument k) kept while
+// it waits for the main thread, typed as signature says: its address, to
+// give where a block is wanted (0: BLOCKS_MOST held already, no room for
+// its signature, or no shims linked: none made).
+block_make(
+    kind: int,
+    handler: int,
+    context: int,
+    objects: int,
+    signature: str
+): int {
+    slot: int = -1;
+    for i in 0..BLOCKS_MOST {
+        if (slot < 0 && !block_held[i]) slot = i
+    }
+    if (slot < 0) return 0;
+    types: int = block_signature_address(signature);
+    if (types == 0) return 0;
+    if (block_shims[kind] == 0) block_shims[kind] = dlsym(-2, block_shim_names[kind]);
+    // (A hot reload host built before the shims were: no block.)
+    if (block_shims[kind] == 0) return 0;
+    block_held[slot] = true;
+    w: int = slot * BLOCK_WORDS;
+    address: int = ints_address(block_records) + w * 8;
+    block_records[w] = dlsym(-2, "_NSConcreteGlobalBlock");
+    block_records[w + 1] = BLOCK_FLAGS;
+    block_records[w + 2] = block_shims[kind];
+    block_records[w + 3] = address + 7 * 8;
+    block_records[w + 4] = handler;
+    block_records[w + 5] = context;
+    block_records[w + 6] = objects;
+    block_records[w + 7] = 0;
+    block_records[w + 8] = BLOCK_SIZE;
+    block_records[w + 9] = types;
+    address
 }
 
-// A block of none (void (^)(void)).
-global_block0(f: fn(block: int): int): int {
-    block_of(fn_address1(f))
+// A block made here let go, once nothing it was given to will call it
+// again (the menu it acted for gone, say); a block not made here, nothing.
+block_free(b: int) {
+    first: int = ints_address(block_records);
+    if (b < first || b >= first + BLOCKS_MOST * BLOCK_WORDS * 8) return;
+    slot: int = (b - first) / (BLOCK_WORDS * 8);
+    block_held[slot] = false
+}
+
+// How many blocks are held (a leak shows here).
+blocks_held(): int {
+    n: int = 0;
+    for i in 0..BLOCKS_MOST
+        if (block_held[i]) n = n + 1;
+    n
+}
+
+// ---- the kinds of block ----
+// Each handler is given the block's context, then its arguments; its
+// signature is the block's type encoding (the result's type and the
+// arguments', with their offsets, as clang writes them).
+
+// No arguments (an animation, an action of no sender): "v8@?0".
+block0(f: fn(context: int): int, context: int, signature: str): int {
+    block_make(BLOCK_CALL, fn_value1(f), context, 0, signature)
+}
+
+// One argument (a UIAction's handler, given the action: "v16@?0@8").
+block1(f: fn(context: int, a: int): int, context: int, signature: str): int {
+    block_make(BLOCK_CALL, fn_value2(f), context, 0, signature)
+}
+
+// Two (a context menu's provider: "@16@?0@8", one; a list's cell
+// provider: three).
+block2(f: fn(context: int, a: int, b: int): int, context: int, signature: str): int {
+    block_make(BLOCK_CALL, fn_value3(f), context, 0, signature)
+}
+
+block3(f: fn(context: int, a: int, b: int, c: int): int, context: int, signature: str): int {
+    block_make(BLOCK_CALL, fn_value4(f), context, 0, signature)
+}
+
+// One argument, a double returned (a sheet's detent resolver, given its
+// context: "d16@?0@8"): the handler returns block_double(x).
+block1_double(f: fn(context: int, a: int): int, context: int, signature: str): int {
+    block_make(BLOCK_DOUBLE, fn_value2(f), context, 0, signature)
+}
+
+block_double(x: f64): int {
+    l8_block_f64_bits(x)
+}
+
+// Two arguments, nothing returned, called on any thread (a completion
+// handler: "v20@?0B8@12" for (BOOL, NSError *)), the handler called on the
+// main thread; objects says which arguments are objects (bit 0 the first),
+// kept until it has been.
+block2_main(
+    f: fn(context: int, a: int, b: int): int,
+    context: int,
+    objects: int,
+    signature: str
+): int {
+    block_make(BLOCK_MAIN, fn_value3(f), context, objects, signature)
 }
 
 // A block given to us (a completion handler), called with no arguments:
-// sent -invoke, which every block (an NSBlock) answers, rather than called
-// through its invoke pointer, which L8 cannot call as C.
+// sent -invoke, which every block (an NSBlock) answers.
 call_block(b: int) {
     if (b != 0) msg(b, sel("invoke"))
 }

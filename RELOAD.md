@@ -227,8 +227,9 @@ search's scopes), `!record on` and `!record off` record the app's screen
 (ReplayKit, which asks the person holding the phone to allow it the first
 time after a launch) and post the movie to the server's `/video`, saved
 as `.build/dev/videos/N.mov`, every animation in it at the display's rate,
-`!where` writes each pane's place at its reading line and its anchors'
-distances from it, and `!state` writes the wire's flags). While it is connected the app keeps the
+`!blocks` makes each kind of block (`programs/ios/block.l8`) and calls it,
+the results written to the log, `!where` writes each pane's place at its
+reading line and its anchors' distances from it, and `!state` writes the wire's flags). While it is connected the app keeps the
 screen on and writes its diagnostics, among them each frame drawn late
 while the page or panel moves (`frame late ms N`) and, at a flick's end,
 how many were (`flick ended late N worst ms M`). A build without a
@@ -243,7 +244,11 @@ observers use the persistent delegate's identity, so rebuilding the reader
 replaces their registrations instead of accumulating callbacks.
 
 App changes reload as modules; changes to the native host itself require
-rebuilding and reinstalling its executable. On an older host, avoid
+rebuilding and reinstalling its executable. The blocks' shims
+(`programs/ios/blocks.arm64-darwin.s`) are native: the host links them and a
+module finds them by name, so a host older than they are makes no blocks. A
+block's record is in the module's memory: a reload makes the app's views,
+and the blocks they hold, again. On an older host, avoid
 requesting screenshots during a reload: its screenshot and module download
 share a buffer. The current host keeps those separate and cancels replaced
 requests, ignoring their late callbacks.
