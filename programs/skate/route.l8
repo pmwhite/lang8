@@ -7,9 +7,11 @@ import "../../stdlib/print.l8";
 import "game.l8";
 
 // The best line down a slopestyle course: where to ride, when to jump, and
-// which trick to do in each air, for the most points a run can score.
+// which trick to do in each air, for the most points a run can score in
+// one of two styles: wild, doing anything the game allows; or human
+// (--human), keeping to what a person could do (see Style).
 //
-//     skate-route COURSE [--keep N] [--out FILE]
+//     skate-route COURSE [--human] [--seconds N] [--out FILE]
 //
 // It rides the course by the game's own rules (slope.l8, judge.l8), so
 // what it finds is a run the game itself scores the same. The run it finds
@@ -23,32 +25,60 @@ import "game.l8";
 // a rail): ride toward a lane across the run for a while, then either jump
 // into a trick, or just go on and choose again. What makes the search
 // small is that a trick does not change where he flies: the air is the
-// same whatever he does in it. So each takeoff is flown once with no
-// trick, and the tricks that fit that air are scored as the judge would
-// score them, counting what he has already done this run. The runs are
-// kept by how far down the hill they have come, in stretches of STRETCH
-// metres: in each stretch only the highest-scoring few (--keep) go on, no
-// two too alike (where across the run he is, how fast, which way round he
-// stands, whether on a rail). A run reached by a trick is kept on what the
-// trick should score; it is flown for real only if it is one of the few
-// that go on. It is a beam search, not an exhaustive one: a wider beam
-// searches more and takes longer.
+// same whatever he does in it. So at each takeoff he lets go with no trick,
+// the rest of the air is foreseen, and the tricks that fit it are scored
+// as the judge would score them, counting what he has already done this
+// run. The runs are kept by how far down the hill they have come, in
+// stretches of STRETCH metres; a run is kept on what its last trick should
+// score, and its move is made for real only when the search goes on from
+// it. In each stretch only the highest-scoring go on, as many as the time
+// the search is given (--seconds) pays for, no two too alike (where across
+// the run he is, how fast, which way round he stands, whether on a rail).
+// It is a beam search, not an exhaustive one: given longer, it searches
+// wider.
 const STRETCH: f32 = 1.0;
 
-const DEFAULT_KEEP: int = 24;
+// How many runs are kept in each stretch, at the most; and how long a
+// search takes, by default.
+const KEEP: int = 64;
+
+const DEFAULT_SECONDS: int = 10;
 
 // How long a move may ride before its ending, in steps (see STEP_DT): the
 // steps at which it may jump, and those at which it may stop to choose
 // again.
-jump_steps: []int = [0, 12, 24, 36, 48, 60, 78, 96, 120, 150, 180, 240, 300, 360];
+jump_steps: []int = [0, 12, 24, 36, 48, 60, 78, 96, 120];
 
-go_on_steps: []int = [60, 120, 240, 360];
+go_on_steps: []int = [60, 120];
 
 // How far ahead a move looks for things to ride to.
 const LANE_REACH: f32 = 60.0;
 
 // How many of the tricks that fit an air are offered, beyond the plain one.
 const TRICKS_TRIED: int = 4;
+
+// ---- styles ----
+// What a run is held to. A wild run may do anything the game allows. A
+// human run keeps to what a person could do:
+// - It keeps moving: it comes to each metre down the hill no later than
+//   PACE times as long as riding straight down takes, and PACE_SPARE more.
+// - It keeps to the run, off the grassy banks.
+// - It pops no jump of its own (from the ground or a rail) sooner than
+//   SET_UP after coming down. (Riding off a lip or a cliff it may let go
+//   at once.)
+// - Its tricks finish with SLACK to spare, beyond what the game asks: a
+//   person lets go a little early or late.
+type Style =
+    | Wild
+    | Human
+
+const PACE: f32 = 1.25;
+
+const PACE_SPARE: f32 = 2.0;
+
+const SET_UP: f32 = 1.0;
+
+const SLACK: f32 = 0.15;
 
 // ---- moves ----
 // A grab: none, held all the air, or taken once the trick has turned all
@@ -235,6 +265,10 @@ coast_out(m: *Mover, keys: *Keys, told: *Telling) raises IoError {
 // judge looks back at: its points, the tricks done and how often, and the
 // latest hit, which a grind adds to).
 type Planner = {
+    style: Style;
+    // For a human run: how long it may take to come to each metre down
+    // the hill (see PACE).
+    pace: []f32;
     keep: int;
     stretches: int;
     // The kept moments: `keep` slots for each stretch, then the scratch
@@ -259,6 +293,8 @@ type Planner = {
     parent: []int;
     made: []bool;
     made_from: []int;
+    // When, in the run, he last came down (see SET_UP).
+    landed: []f32;
     // The records of moments gone on from: each the record before it and
     // the move from there to it (the first, the start, has none: -1).
     record_parent: []int;
@@ -286,11 +322,13 @@ slot_release(p: *Planner): int {
     p.stretches * p.keep + 1
 }
 
-new_planner(keep: int): *Planner@new {
+new_planner(style: Style, pace: []f32@new, keep: int): *Planner@new {
     stretches: int = (course_finish / STRETCH) as int + 2;
     slots: int = stretches * keep + 2;
     records: int = stretches * keep + 1;
     new Planner {
+        style: style,
+        pace: pace,
         keep: keep,
         stretches: stretches,
         movers: new Mover[slots](new_mover().*),
@@ -308,6 +346,7 @@ new_planner(keep: int): *Planner@new {
         parent: new int[slots](-1),
         made: new bool[slots](true),
         made_from: new int[slots](-1),
+        landed: new f32[slots](0.0),
         record_parent: new int[records](-1),
         record_move: new Move[records](no_move()),
         records: 0,
@@ -376,6 +415,37 @@ likeness_of(m: *Mover, fakie: bool): int {
     k
 }
 
+// Whether he may be at x across the run and d down it at time t in the
+// run (a human run keeps to the run, and keeps pace).
+keeps_rules(
+    p: *Planner,
+    x: f32,
+    d: f32,
+    t: f32
+): bool {
+    match p.style {
+        Wild -> true;
+        Human -> absf(x) <= COURSE_HALF && t <= p.pace[clampi(floorf(d) as int, 0,
+            len(p.pace) - 1)]
+    }
+}
+
+// Whether he may pop a jump now, having last come down at `landed`.
+may_pop(p: *Planner, m: *Mover, landed: f32): bool {
+    match p.style {
+        Wild -> true;
+        Human -> m.run_t - landed >= SET_UP
+    }
+}
+
+// How much sooner than the game asks his tricks must finish.
+slack_of(p: *Planner): f32 {
+    match p.style {
+        Wild -> 0.0;
+        Human -> SLACK
+    }
+}
+
 // A slot for a run that has come to d down the hill, with points, alike
 // to others as `like` says: in its stretch (after the one it came from),
 // if it is among the best there; or -1.
@@ -415,8 +485,10 @@ offer(
     keys: *Keys,
     from_stretch: int,
     parent: int,
-    move: Move
+    move: Move,
+    landed: f32
 ) raises IoError {
+    if (!keeps_rules(p, m.x, -m.z, m.run_t)) return;
     if (m.finished) {
         finish(p, m, keys, parent, move);
         return
@@ -428,13 +500,14 @@ offer(
     p.likeness[slot] = like;
     p.led_by[slot] = move;
     p.parent[slot] = parent;
-    p.made[slot] = true
+    p.made[slot] = true;
+    p.landed[slot] = landed
 }
 
 // A run not yet made: move, from the moment in slot `from` (of record
-// parent), should come down as m did with no trick, but standing as
-// fakie says, and with points. Kept, unmade, if that would be among the
-// best in its stretch.
+// parent), should come down as m does, at m.run_t, but standing as fakie
+// says, and with points. Kept, unmade, if that would be among the best in
+// its stretch.
 offer_unmade(
     p: *Planner,
     m: *Mover,
@@ -445,6 +518,7 @@ offer_unmade(
     parent: int,
     move: Move
 ) {
+    if (!keeps_rules(p, m.x, -m.z, m.run_t)) return;
     like: int = likeness_of(m, fakie);
     slot: int = claim_slot(p, from_stretch, -m.z, like, points);
     if (slot < 0) return;
@@ -453,11 +527,14 @@ offer_unmade(
     p.led_by[slot] = move;
     p.parent[slot] = parent;
     p.made[slot] = false;
-    p.made_from[slot] = from
+    p.made_from[slot] = from;
+    p.landed[slot] = m.run_t
 }
 
-// A run over the finish line: on to its end, and the best so far if it
-// is.
+// A run over the finish line: the best so far if it is. Past the line, he
+// scores only what he is in the air for or grinding (the pad let go there
+// starts no trick: see step_course), so the run is ridden on only until he
+// is down, and off any rail.
 finish(
     p: *Planner,
     m: *Mover,
@@ -466,7 +543,12 @@ finish(
     move: Move
 ) raises IoError {
     told: Telling = quiet();
-    coast_out(m, keys, &told);
+    k: int = 0;
+    while (!run.closed && (m.air || m.grinding) && k < COAST_MOST) {
+        set_coast(keys);
+        take_step(m, keys, &told);
+        k = k + 1
+    }
     if (run.points > p.best_points) {
         p.best_points = run.points;
         p.best_record = parent;
@@ -570,13 +652,32 @@ grab_share(air: Air, trick: Trick): f32 {
 }
 
 // Whether the trick should land clean: it turns all it must before he is
-// down (grabbing all the air, it turns slower).
-fits(air: Air, trick: Trick): bool {
-    if (trick_fit(trick.flips, trick.halves, air.foreseen) > 1.0) return false;
+// down, with `slack` to spare (grabbing all the air, it turns slower).
+fits(air: Air, trick: Trick, slack: f32): bool {
+    if (trick_fit(trick.flips, trick.halves, air.foreseen - slack) > 1.0) return false;
     match trick.grab {
-        WholeAir -> turning_time(trick.flips, trick.halves, air.foreseen) / GRAB_SLOW <= air.after_release - STEP_DT;
+        WholeAir -> turning_time(trick.flips, trick.halves, air.foreseen) / GRAB_SLOW <= air.after_release - STEP_DT - slack;
         _ -> true
     }
+}
+
+// What a trick scores in this air before it is repeated: its flips',
+// spins' and grab's points, as the judge would score them (see judge_air).
+// Whether its grab counts is `grabbed`, held for `share` of the air.
+worth(
+    air: Air,
+    trick: Trick,
+    grabbed: bool,
+    share: f32
+): f32 {
+    gp: f32 = 0.0;
+    if (grabbed) gp = 300.0 + 200.0 * share;
+    kind: int = HIT_AIR;
+    if (air.item < 0) kind = HIT_FLAT;
+    // (A plain air scores only off a kicker, and only if long enough.)
+    if (trick.flips == 0 && trick.halves == 0 && !grabbed && (kind != HIT_AIR || air.total < 0.6)) return 0.0;
+    air_points(kind, air.item, absi(trick.flips), absi(trick.halves), gp, air.total,
+        air.sw)
 }
 
 // What the trick should score in this air, in the run whose repeats are
@@ -584,25 +685,19 @@ fits(air: Air, trick: Trick): bool {
 candidate(p: *Planner, air: Air, trick: Trick): Candidate {
     share: f32 = grab_share(air, trick);
     grabbed: bool = share > 0.25;
-    gp: f32 = 0.0;
-    if (grabbed) gp = 300.0 + 200.0 * share;
-    kind: int = HIT_AIR;
-    if (air.item < 0) kind = HIT_FLAT;
     index: int = air_key_index(air.item < 0, trick.flips, trick.halves, grabbed, air.sw);
-    points: f32 = air_points(kind, air.item, absi(trick.flips), absi(trick.halves),
-        gp, air.total, air.sw);
-    // (A plain air scores only off a kicker, and only if long enough: see
-    // judge_air.)
-    if (trick.flips == 0 && trick.halves == 0 && !grabbed && (kind != HIT_AIR || air.total < 0.6)) points = 0.0;
-    Candidate { trick: trick, key: index, points: points * powf(0.5, p.repeats[index] as f32) }
+    Candidate { trick: trick, key: index, points: worth(air, trick, grabbed, share) * powf(0.5,
+        p.repeats[index] as f32) }
 }
 
 // The best few tricks for this air (but the plain one), best first: no two
-// the same trick to the judge. How many there are.
+// the same trick to the judge. How many there are. (A trick flipped back
+// instead of forward, or spun left instead of right, scores the same but
+// for repeats: of each shape, the way it has been done least is tried.)
 best_tricks(p: *Planner, air: Air, best: []Candidate): int {
     n: int = 0;
-    for flips in -3..4 {
-        for halves in -6..7 {
+    for flips in 0..4 {
+        for halves in 0..7 {
             for g in 0..3 {
                 grab: Grab = Grab.NoGrab;
                 if (g == 1) grab = Grab.WholeAir;
@@ -610,15 +705,51 @@ best_tricks(p: *Planner, air: Air, best: []Candidate): int {
                 plain: bool = flips == 0 && halves == 0;
                 // (Taken after turning, a grab of no turn is one held all
                 // the air.)
-                trick: Trick = Trick { flips: flips, halves: halves, grab: grab };
-                if (!(plain && g != 1) && fits(air, trick)) {
-                    c: Candidate = candidate(p, air, trick);
-                    if (c.points > 0.0) n = rank(best, n, c)
+                shape: Trick = Trick { flips: flips, halves: halves, grab: grab };
+                if (!(plain && g != 1) && fits(air, shape, slack_of(p))) {
+                    share: f32 = grab_share(air, shape);
+                    grabbed: bool = share > 0.25;
+                    points: f32 = worth(air, shape, grabbed, share);
+                    if (points > 0.0) n = rank(best, n, least_done(p, air, shape,
+                        grabbed, points))
                 }
             }
         }
     }
     n
+}
+
+// Of the ways a trick of this shape can go (flipping forward or back,
+// spinning right or left), the one done least in the run, and what it
+// should score.
+least_done(
+    p: *Planner,
+    air: Air,
+    shape: Trick,
+    grabbed: bool,
+    points: f32
+): Candidate {
+    least: Candidate = Candidate { trick: shape, key: -1, points: 0.0 };
+    least_times: int = 0;
+    flip_ways: int = 1;
+    if (shape.flips != 0) flip_ways = 2;
+    spin_ways: int = 1;
+    if (shape.halves != 0) spin_ways = 2;
+    for f in 0..flip_ways {
+        for h in 0..spin_ways {
+            trick: Trick = shape;
+            if (f == 1) trick.flips = -shape.flips;
+            if (h == 1) trick.halves = -shape.halves;
+            index: int = air_key_index(air.item < 0, trick.flips, trick.halves, grabbed,
+                air.sw);
+            if (least.key < 0 || p.repeats[index] < least_times) {
+                least = Candidate { trick: trick, key: index, points: points * powf(0.5,
+                    p.repeats[index] as f32) };
+                least_times = p.repeats[index]
+            }
+        }
+    }
+    least
 }
 
 // best, holding n candidates best first, with c among them if it is good
@@ -695,15 +826,51 @@ add_lane(lanes: []f32, n: int, x: f32): int {
 // the tricks it tries.
 type Going = {
     slot: int;
+    // When he last came down, at the moment in slot.
+    landed: f32;
     stretch: int;
     record: int;
     lanes: []f32;
     best: []Candidate
 }
 
+// How long until he comes down, flying as he is: as predict_air (in
+// slope.l8) foresees it, in its steps of a sixtieth of a second, but
+// looking at the ground only every FORESEE_STRIDE steps, and then for the
+// first step under it between. (Each of its steps is found from the first
+// at once: he falls as a stone does.)
+const FORESEE_STRIDE: int = 4;
+
+const FORESEE_MOST: int = 300;
+
+foresee(m: *Mover): f32 {
+    h: f32 = 1.0 / 60.0;
+    after: int = FORESEE_MOST;
+    k: int = FORESEE_STRIDE;
+    while (k <= FORESEE_MOST) {
+        if (down_by(m, k, h)) {
+            after = k;
+            k = FORESEE_MOST + 1
+        } else k = k + FORESEE_STRIDE
+    }
+    first: int = maxi(after - FORESEE_STRIDE + 1, 1);
+    while (first < after && !down_by(m, first, h)) first = first + 1;
+    first as f32 * h
+}
+
+// Whether he is down on the ground (or under it) k steps of h on.
+down_by(m: *Mover, k: int, h: f32): bool {
+    t: f32 = k as f32 * h;
+    y: f32 = m.y + h * (k as f32 * m.vy - SLOPE_G * h * (k * (k + 1) / 2) as f32);
+    y <= course_height(m.x + m.vx * t, m.z + m.vz * t)
+}
+
 // From where the run is now, about to let go at the end of a move's ride:
-// the plain jump flown and offered, and the best tricks for its air
-// offered too.
+// each jump worth trying, offered. One step is taken, to let go with no
+// trick (the air is the same whatever he does in it); the rest of the air
+// is foreseen as the game foresees it (see foresee), and each jump is
+// kept unmade on where he should come down and what it should score. (Over
+// the finish, where the run is done, the jumps are flown.)
 try_jumps(
     p: *Planner,
     m: *Mover,
@@ -712,43 +879,50 @@ try_jumps(
     lane: f32,
     wait: int
 ) raises IoError {
-    held: int = slot_release(p);
-    save_moment(p, held, m, keys);
+    // (Letting go changes him and the keys, not the run's score.)
+    before: Mover = m.*;
+    before_keys: Keys = keys.*;
+    points: f32 = run.points;
     told: Telling = quiet();
-    // Flown with no trick, as it would be with any.
-    set_release(keys, Trick { flips: 0, halves: 0, grab: Grab.NoGrab });
+    plain: Trick = Trick { flips: 0, halves: 0, grab: Grab.NoGrab };
+    set_release(keys, plain);
     take_step(m, keys, &told);
+    if (!m.air) return;
+    ahead: f32 = foresee(m);
     air: Air = Air {
         item: m.air_from,
         sw: m.air_switch,
-        after_release: STEP_DT,
-        total: 0.0,
-        foreseen: predict_air(m) + STEP_DT
+        after_release: ahead + STEP_DT,
+        total: m.air_time + ahead + STEP_DT,
+        foreseen: ahead + STEP_DT
     };
-    k: int = 0;
-    while (m.air && k < AIR_MOST) {
-        set_air(keys, false);
-        take_step(m, keys, &told);
-        air.after_release = air.after_release + STEP_DT;
-        k = k + 1
+    // Where he should come down, how fast, and which way round.
+    down: Mover = m.*;
+    down.x = clampf(m.x + m.vx * ahead, -COURSE_HALF - 6.0, COURSE_HALF + 6.0);
+    down.z = m.z + m.vz * ahead;
+    down.speed = sqrtf(m.vx * m.vx + m.vz * m.vz);
+    down.grinding = false;
+    down.run_t = m.run_t + ahead;
+    over: bool = m.finished || -down.z >= course_finish;
+    held: int = slot_release(p);
+    if (over) {
+        save_moment(p, held, m, keys);
+        p.movers[held] = before;
+        p.keys[held] = before_keys
     }
-    air.total = m.air_time;
-    offer(p, m, keys, going.stretch, going.record, Move { lane: lane, wait: wait, ending: plain_jump() });
     n: int = best_tricks(p, air, going.best);
-    // Down on the ground before the finish, each trick comes down where the
-    // plain jump did, and is kept unmade on what it should score. (Onto a
-    // rail, a trick still turning would miss it; and over the finish, the
-    // run is done: so these are flown.)
-    flown: bool = m.finished || m.grinding;
-    for i in 0..n {
-        c: Candidate = going.best[i];
+    // (The plain jump too: it may score, off a kicker, and it lands on
+    // rails that a trick still turning would miss.)
+    for i in 0..n + 1 {
+        c: Candidate = candidate(p, air, plain);
+        if (i < n) c = going.best[i];
         move: Move = Move { lane: lane, wait: wait, ending: Ending.Jump { trick: c.trick } };
-        if (flown) {
+        if (over) {
             load_moment(p, held, m, keys);
             fly(m, keys, c.trick, &told);
-            offer(p, m, keys, going.stretch, going.record, move)
-        } else offer_unmade(p, m, m.fakie != (absi(c.trick.halves) % 2 == 1), p.points[held] + c.points,
-            going.stretch, going.slot, going.record, move)
+            offer(p, m, keys, going.stretch, going.record, move, m.run_t)
+        } else offer_unmade(p, &down, down.fakie != (absi(c.trick.halves) % 2 == 1),
+            points + c.points, going.stretch, going.slot, going.record, move)
     }
 }
 
@@ -766,13 +940,16 @@ go_on_from(
     if (!p.made[slot]) {
         load_moment(p, p.made_from[slot], m, keys);
         perform(m, keys, p.led_by[slot], &told);
+        if (!keeps_rules(p, m.x, -m.z, m.run_t)) return;
         if (m.finished) {
             finish(p, m, keys, p.parent[slot], p.led_by[slot]);
             return
         }
         save_moment(p, slot, m, keys);
-        p.made[slot] = true
+        p.made[slot] = true;
+        p.landed[slot] = m.run_t
     }
+    going.landed = p.landed[slot];
     going.record = p.records;
     p.records = p.records + 1;
     p.record_parent[going.record] = p.parent[slot];
@@ -788,22 +965,32 @@ go_on_from(
         step: int = 0;
         jump_i: int = 0;
         go_on_i: int = 0;
+        // (Whether he may pop yet: the moment he first may is a time to try
+        // a jump too.)
+        ready: bool = may_pop(p, m, going.landed);
         riding: bool = true;
         while (riding) {
             if (m.finished) {
                 // (Over the line on the ground: the run is done.)
-                offer(p, m, keys, going.stretch, going.record, Move { lane: lane, wait: step, ending: Ending.GoOn });
+                offer(p, m, keys, going.stretch, going.record, Move { lane: lane, wait: step, ending: Ending.GoOn },
+                    going.landed);
                 riding = false
             } else {
-                if (jump_i < len(jump_steps) && jump_steps[jump_i] == step) {
-                    save_moment(p, hold, m, keys);
-                    try_jumps(p, m, keys, going, lane, step);
-                    load_moment(p, hold, m, keys);
-                    jump_i = jump_i + 1
+                now_ready: bool = may_pop(p, m, going.landed);
+                at_step: bool = jump_i < len(jump_steps) && jump_steps[jump_i] == step;
+                if (at_step || now_ready && !ready) {
+                    if (now_ready) {
+                        save_moment(p, hold, m, keys);
+                        try_jumps(p, m, keys, going, lane, step);
+                        load_moment(p, hold, m, keys)
+                    }
+                    if (at_step) jump_i = jump_i + 1
                 }
+                ready = now_ready;
                 if (go_on_i < len(go_on_steps) && go_on_steps[go_on_i] == step) {
                     save_moment(p, hold, m, keys);
-                    offer(p, m, keys, going.stretch, going.record, Move { lane: lane, wait: step, ending: Ending.GoOn });
+                    offer(p, m, keys, going.stretch, going.record, Move { lane: lane, wait: step, ending: Ending.GoOn },
+                        going.landed);
                     load_moment(p, hold, m, keys);
                     go_on_i = go_on_i + 1
                 }
@@ -811,9 +998,12 @@ go_on_from(
                     set_ride(m, keys, lane);
                     take_step(m, keys, &told);
                     step = step + 1;
+                    // (Off the run, or behind pace, a human run goes no
+                    // farther this way.)
+                    if (!keeps_rules(p, m.x, -m.z, m.run_t)) riding = false;
                     // Thrown into the air by the ground (off a lip, a
                     // cliff, a rail's end): he lets go there, into a trick.
-                    if (m.air) {
+                    if (riding && m.air) {
                         if (!m.finished) try_jumps(p, m, keys, going, lane, step);
                         riding = false
                     }
@@ -823,10 +1013,19 @@ go_on_from(
     }
 }
 
-// Search the course as it is laid out; the best run's points.
-search(p: *Planner, m: *Mover, keys: *Keys) raises IoError: f32 {
+// Search the course as it is laid out, within `budget` nanoseconds; the
+// best run's points. Each stretch has an even share of the time left: as
+// many of its best runs are gone on from as that pays for, at what one has
+// cost so far (all of them, at first; and never more than are kept).
+search(
+    p: *Planner,
+    m: *Mover,
+    keys: *Keys,
+    budget: int
+) raises IoError: f32 {
     going: Going = Going {
         slot: 0,
+        landed: 0.0,
         stretch: 0,
         record: -1,
         lanes: new f32[MAX_LANES](0.0),
@@ -837,13 +1036,23 @@ search(p: *Planner, m: *Mover, keys: *Keys) raises IoError: f32 {
     save_moment(p, 0, m, keys);
     p.filled[0] = 1;
     p.parent[0] = -1;
+    order: []int = new int[p.keep](0);
+    started: int = mono_ns();
+    gone_on: int = 0;
     report_every: int = (40.0 / STRETCH) as int;
     for at in 0..p.stretches {
         going.stretch = at;
-        for i in 0..p.filled[at] {
-            going.slot = at * p.keep + i;
+        n: int = best_first(p, at, order);
+        spent: int = mono_ns() - started;
+        if (gone_on > 0) {
+            share: int = (budget - spent) / (p.stretches - at);
+            n = clampi(share / (spent / gone_on), 1, n)
+        }
+        for i in 0..n {
+            going.slot = order[i];
             go_on_from(p, m, keys, &going)
         }
+        gone_on = gone_on + n;
         if (at % report_every == report_every - 1) {
             write(2, "  ");
             write_int(2, ((at + 1) as f32 * STRETCH) as int);
@@ -854,7 +1063,27 @@ search(p: *Planner, m: *Mover, keys: *Keys) raises IoError: f32 {
             write(2, " points so far at best\n")
         }
     }
+    write(2, "  ");
+    write_int(2, gone_on);
+    write(2, " moments gone on from, in ");
+    write_int(2, (mono_ns() - started) / 1000000);
+    write(2, " ms\n");
     p.best_points
+}
+
+// The slots of stretch `at` into order, highest-scoring first; how many.
+best_first(p: *Planner, at: int, order: []int): int {
+    n: int = p.filled[at];
+    for i in 0..n {
+        slot: int = at * p.keep + i;
+        j: int = i;
+        while (j > 0 && p.points[order[j - 1]] < p.points[slot]) {
+            order[j] = order[j - 1];
+            j = j - 1
+        }
+        order[j] = slot
+    }
+    n
 }
 
 // The best run's moves, first to last, into moves; how many.
@@ -927,14 +1156,41 @@ played_back(m: *Mover, keys: *Keys, path: str): int {
 }
 
 // Ride the course with no hands, for something to measure the best
-// against. (Its points are the run's; see finish_time for its time.)
-ride_hands_off(m: *Mover, keys: *Keys) {
+// against. (Its points are the run's; see finish_time for its time.) When
+// he came to each metre down the hill, into reached (and to those past the
+// finish, when he stopped).
+ride_hands_off(m: *Mover, keys: *Keys, reached: []f32) {
     enter_course(m);
     keys.* = no_keys();
     k: int = 0;
+    metre: int = 0;
     while (!run.closed && k < MAX_REC) {
         step_course(m, keys, STEP_DT);
+        while (metre < len(reached) && -m.z >= metre as f32) {
+            reached[metre] = m.run_t;
+            metre = metre + 1
+        }
         k = k + 1
+    }
+    while (metre < len(reached)) {
+        reached[metre] = m.run_t;
+        metre = metre + 1
+    }
+}
+
+// How long a human run may take to come to each metre, riding straight
+// down having come to them as `reached` says.
+pace_from(reached: []f32): []f32@new {
+    pace: []f32 = new f32[len(reached)](0.0);
+    for i in 0..len(reached) pace[i] = PACE * reached[i] + PACE_SPARE;
+    pace
+}
+
+// What a style is called in a replay's name, and to people.
+style_name(style: Style): str {
+    match style {
+        Wild -> "WILD_LINE";
+        Human -> "HUMAN_LINE"
     }
 }
 
@@ -978,7 +1234,7 @@ const OPEN_WRITE: int = 577;
 
 const OPEN_MODE: int = 420;
 
-write_replay(path: str) raises IoError: bool {
+write_replay(path: str, style: Style) raises IoError: bool {
     fd: int = open(path, OPEN_WRITE, OPEN_MODE);
     if (fd < 0) return false;
     write_int(fd, REPLAY_VERSION);
@@ -986,7 +1242,9 @@ write_replay(path: str) raises IoError: bool {
     write_int(fd, rec_seed[REC_NOW]);
     write(fd, " ");
     write_int(fd, rec_score[REC_NOW]);
-    write(fd, " BEST_LINE ");
+    write(fd, " ");
+    write(fd, style_name(style));
+    write(fd, " ");
     rec_write(fd, REC_NOW);
     write(fd, "\n");
     close(fd);
@@ -995,9 +1253,11 @@ write_replay(path: str) raises IoError: bool {
 
 // ---- the command ----
 usage() raises IoError {
-    eprint("usage: skate-route COURSE [--keep N] [--out FILE]");
+    eprint("usage: skate-route COURSE [--human] [--seconds N] [--out FILE]");
     eprint("  COURSE  a slopestyle's number, as the game shows it");
-    eprint("  --keep  runs kept in each metre of the hill (default 24): more searches wider, slower");
+    eprint("  --human  keep to what a person could do: keep moving, stay on the run,");
+    eprint("           a second to set up each jump, tricks with time to spare");
+    eprint("  --seconds  how long to search (default 10): longer searches wider");
     eprint("  --out   where to write the replay (default watch.txt, which the game plays on V)")
 }
 
@@ -1016,18 +1276,22 @@ count_of(text: str): int {
 
 main(argc: int, argv: []str) raises IoError: int {
     course: int = 0;
-    keep: int = DEFAULT_KEEP;
+    seconds: int = DEFAULT_SECONDS;
+    style: Style = Style.Wild;
     out: str = "watch.txt";
     i: int = 1;
     while (i < argc) {
         a: str = argv[i];
-        if (a == "--keep" && i + 1 < argc) {
-            keep = count_of(argv[i + 1]);
-            if (keep == 0) {
-                eprint("skate-route: --keep wants a whole number of at least 1");
+        if (a == "--seconds" && i + 1 < argc) {
+            seconds = count_of(argv[i + 1]);
+            if (seconds == 0) {
+                eprint("skate-route: --seconds wants a whole number of at least 1");
                 return 2
             }
             i = i + 2
+        } else if (a == "--human") {
+            style = Style.Human;
+            i = i + 1
         } else if (a == "--out" && i + 1 < argc) {
             out = argv[i + 1];
             i = i + 2
@@ -1048,7 +1312,8 @@ main(argc: int, argv: []str) raises IoError: int {
     load_course();
     m: *Mover = new_mover();
     keys: Keys = no_keys();
-    ride_hands_off(m, &keys);
+    reached: []f32 = new f32[course_finish as int + 2](0.0);
+    ride_hands_off(m, &keys, reached);
     plain: int = run.total;
     plain_time: int = finish_time(m);
     write(1, "course ");
@@ -1056,15 +1321,19 @@ main(argc: int, argv: []str) raises IoError: int {
     write(1, ": ridden with no hands, ");
     write_int(1, plain);
     write(1, " points\n");
-    p: *Planner = new_planner(keep);
-    found: f32 = search(p, m, &keys);
+    p: *Planner = new_planner(style, pace_from(reached), KEEP);
+    found: f32 = search(p, m, &keys, seconds * 1000000000);
     if (p.best_record < 0) {
         eprint("skate-route: no run reached the finish");
         return 1
     }
     moves: []Move = new Move[p.records + 1](no_move());
     n: int = best_moves(p, moves);
-    write(1, "the best line found:\n");
+    write(1, "the best ");
+    match style {
+        Wild -> write(1, "line found, anything the game allows:\n");
+        Human -> write(1, "line found that a person could ride:\n")
+    }
     ride_moves(m, &keys, moves, n);
     write(1, "in all ");
     write_int(1, run.total);
@@ -1078,7 +1347,7 @@ main(argc: int, argv: []str) raises IoError: int {
         write(1, ": riding it again came out differently)\n")
     }
     found_total: int = run.total;
-    if (!write_replay(out)) {
+    if (!write_replay(out, style)) {
         write(2, "skate-route: could not write ");
         write(2, out);
         write(2, "\n");

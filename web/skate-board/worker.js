@@ -11,8 +11,8 @@
 //   GET  /me                                  who I am, and the scores of those I see  (a person)
 //   POST /score  {course, score, version, replay}   a run of mine              (a person)
 //   GET  /replay?person=&course=              a best run, of someone I see
-//   GET  /line?course=                        the best line found down a place     (anyone)
-//   POST /admin/line {course, score, version, replay}   a line found: kept if it is the best
+//   GET  /lines?course=                       a place's best lines, wild and human      (anyone)
+//   POST /admin/line {course, style, score, version, replay}   a line found: kept if it is the best
 //   GET  /admin/last                          when each person last rode: {id: at}  (the admin)
 //   POST /admin/unscore  {person, course?}    delete a person's runs (on one course, or all)
 //   POST /report {kind, session, data}        how the game went on a device          (anyone)
@@ -22,9 +22,11 @@
 //
 // Scores are taken as sent: nothing here rides the replay to check it.
 //
-// A place's best line is no one's run: it is the best run a search of the
-// game's own rules has found down it (see programs/skate/route.l8), posted
-// by the admin, to watch. It is on no leaderboard.
+// A place's best lines are no one's runs: each is the best run a search of
+// the game's own rules has found down it (see programs/skate/route.l8),
+// posted by the admin, to watch: one "wild", doing anything the game
+// allows, and one "human", keeping to what a person could do. They are on
+// no leaderboard.
 //
 // A report is what a device has to say of how the game went on it: an
 // error, or how fast its frames came (see report, in web/skate/skate.js).
@@ -151,24 +153,34 @@ async function replay(env, who, url) {
   return reply(200, { course, name: rider.name, score: row.score, version: row.version, replay: row.replay });
 }
 
-// A place's best line (see the top of this file).
-async function line(env, url) {
+// The styles of line there are (see the top of this file).
+const STYLES = ["wild", "human"];
+
+// A place's best lines (see the top of this file): {course, wild, human},
+// each {score, version, replay, at}, or null if there is none.
+async function lines(env, url) {
   const course = Number(url.searchParams.get("course"));
   if (!validCourse(course)) return fail(400, "bad request");
-  const row = await env.DB.prepare("SELECT score, version, replay, at FROM lines WHERE course = ?").bind(course).first();
-  if (!row) return fail(404, "no line");
-  return reply(200, { course, score: row.score, version: row.version, replay: row.replay, at: row.at });
+  const rows = await env.DB.prepare("SELECT style, score, version, replay, at FROM place_lines WHERE course = ?").bind(course).all();
+  const found = { course };
+  for (const style of STYLES) {
+    const row = rows.results.find((r) => r.style === style);
+    found[style] = row ? { score: row.score, version: row.version, replay: row.replay, at: row.at } : null;
+  }
+  return reply(200, found);
 }
 
-// A line found down a place: kept if it scores more than the one kept, or
-// the one kept was found under older rules (a newer game's replaces it).
+// A line found down a place: kept if it scores more than the one of its
+// style kept, or that was found under older rules (a newer game's
+// replaces it).
 async function postLine(env, body) {
-  const { course, score, version, replay } = body ?? {};
-  if (!validCourse(course) || !whole(score, 1, 10000000) || !whole(version, 1, 100000)) return fail(400, "bad line");
+  const { course, style, score, version, replay } = body ?? {};
+  if (!validCourse(course) || !STYLES.includes(style) || !whole(score, 1, 10000000) || !whole(version, 1, 100000)) return fail(400, "bad line");
   if (typeof replay !== "string" || replay.length === 0 || replay.length > MAX_REPLAY || !/^[0-9a-z. ]+$/.test(replay)) return fail(400, "bad replay");
-  const kept = await env.DB.prepare("SELECT score, version FROM lines WHERE course = ?").bind(course).first();
+  const kept = await env.DB.prepare("SELECT score, version FROM place_lines WHERE course = ? AND style = ?").bind(course, style).first();
   if (kept && (kept.version > version || (kept.version === version && kept.score >= score))) return reply(200, { kept: false, score: kept.score, version: kept.version });
-  await env.DB.prepare("INSERT OR REPLACE INTO lines (course, score, version, replay, at) VALUES (?, ?, ?, ?, ?)").bind(course, score, version, replay, Date.now()).run();
+  await env.DB.prepare("INSERT OR REPLACE INTO place_lines (course, style, score, version, replay, at) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(course, style, score, version, replay, Date.now()).run();
   return reply(200, { kept: true, score, version });
 }
 
@@ -549,8 +561,8 @@ export default {
       // (A report is taken from anyone: something may go wrong for someone
       // with no link.)
       if (request.method === "POST" && parts[0] === "report") return await report(env, request, body);
-      // (A best line is anyone's to watch.)
-      if (request.method === "GET" && parts[0] === "line") return await line(env, url);
+      // (A place's best lines are anyone's to watch.)
+      if (request.method === "GET" && parts[0] === "lines") return await lines(env, url);
       const who = await personOf(env, request);
       if (!who) return fail(401, "no such link");
       if (request.method === "GET" && parts[0] === "me") return await me(env, who);

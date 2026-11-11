@@ -192,7 +192,7 @@ const present = () => {
   }
   if (id === "place") {
     visit((placeOf = of));
-    fetchLine(of);
+    fetchLines(of);
   }
   if (id === "person") personOf = of;
   const motion = trail.length > shownLength ? "push" : trail.length < shownLength ? "pop" : "swap";
@@ -704,25 +704,28 @@ const watchRun = async (person, id) => {
   }
 };
 // ---- best lines ----
-// A place's best line: the best run a search of the game's own rules has
+// A place's best lines: the best runs a search of the game's own rules has
 // found down it (see programs/skate/route.l8), which the leaderboards'
-// worker keeps for anyone to watch. It is no one's run. Each place's, as
-// fetched ({score, version, replay}), or null if it has none (or it could
-// not be fetched): once a visit to the page.
+// worker keeps for anyone to watch: a human one, keeping to what a person
+// could do, and a wild one, doing anything the game allows. They are no
+// one's runs. Each place's, as fetched ({course, human, wild}, each
+// {score, version, replay} or null), or null if none could be fetched:
+// once a visit to the page.
+const LINE_NAMES = { human: "Human line", wild: "Wild line" };
 const lines = new Map();
-const fetchLine = async (id) => {
+const fetchLines = async (id) => {
   if (lines.has(id)) return;
   lines.set(id, null);
   try {
-    const r = await fetch(`${api}/line?course=${id}`);
+    const r = await fetch(`${api}/lines?course=${id}`);
     if (!r.ok) return;
     lines.set(id, await r.json());
     if (sheetNow() === "place" && placeOf === id) showPage();
   } catch {}
 };
-const watchLine = (id) => {
-  const run = lines.get(id);
-  if (run && sendKey) watchReplay(run, "Best line");
+const watchLine = (style, id) => {
+  const run = lines.get(id)?.[style];
+  if (run && sendKey) watchReplay({ ...run, course: id }, LINE_NAMES[style]);
 };
 // ---- riding together ----
 // Riding together is one endless run, the same for everyone at once: a
@@ -1118,7 +1121,7 @@ const onTap = (name) => {
     calendarMonth = m + by < 1 ? (y - 1) * 100 + 12 : m + by > 12 ? (y + 1) * 100 + 1 : y * 100 + m + by;
     showPage();
   } else if (what === "watch") watchRun(rest[0], Number(rest[1]));
-  else if (what === "line") watchLine(Number(arg));
+  else if (what === "line") watchLine(rest[0], Number(rest[1]));
 };
 let toggleStats = null;
 
@@ -1296,10 +1299,12 @@ const showPlace = () => {
     rows = runs.map((run, i) => row("", false, ...(best ? [["n", "", `${i + 1}.`]] : []), ["what", "", ago(run.at)], ["score", "", run.score], ...(run.top ? watchCell(run, id) : [])));
   } else if (best) rows = bestsOn(id).map((run, i) => row("", run.name === account?.name, ["n", "", `${i + 1}.`], nameCell(run), ["score", "", run.score], ...watchCell(run, id)));
   else rows = recentOn(id).map((run) => row("", run.name === account?.name, nameCell(run), ["when", "", ago(run.at)], ["score", "", run.score]));
-  // Above the best, the place's best line, if this game can play it.
-  const line = lines.get(id);
-  const lineRow = best && line && line.version === gameVersion ? [row("", false, ["what", "", "Best line"], ["score", "", line.score], ["watch", `line:${id}`, ""])] : [];
-  blocks.push(["gap", 4], ...lineRow, ...(rows.length ? rows : [["empty", "No runs yet"]]), listRoom([...lineRow, ...rows]));
+  // Above the best, the place's best lines, those this game can play.
+  const found = best ? lines.get(id) : null;
+  const lineRows = ["human", "wild"]
+    .filter((style) => found?.[style]?.version === gameVersion)
+    .map((style) => row("", false, ["what", "", LINE_NAMES[style]], ["score", "", found[style].score], ["watch", `line:${style}:${id}`, ""]));
+  blocks.push(["gap", 4], ...lineRows, ...(rows.length ? rows : [["empty", "No runs yet"]]), listRoom([...lineRows, ...rows]));
   return { place: "dock", wide: 440, blocks };
 };
 

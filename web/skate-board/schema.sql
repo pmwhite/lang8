@@ -22,17 +22,20 @@ CREATE TABLE IF NOT EXISTS log (
   at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS log_latest ON log (person, course, at);
--- The best line found down each place: the best run a search of the
+-- The best lines found down each place: the best runs a search of the
 -- game's own rules has found there (see programs/skate/route.l8), posted by
--- the admin. Its score, the version of the game it was found on, the run
--- itself (as the game writes a replay), and when it was posted. It is no
--- one's run, and on no leaderboard.
-CREATE TABLE IF NOT EXISTS lines (
-  course INTEGER PRIMARY KEY,
+-- the admin, one of each style: "wild" (anything the game allows) and
+-- "human" (what a person could do). Each with its score, the version of
+-- the game it was found on, the run itself (as the game writes a replay),
+-- and when it was posted. They are no one's runs, and on no leaderboard.
+CREATE TABLE IF NOT EXISTS place_lines (
+  course INTEGER NOT NULL,
+  style TEXT NOT NULL CHECK (style IN ('wild', 'human')),
   score INTEGER NOT NULL,
   version INTEGER NOT NULL,
   replay TEXT NOT NULL,
-  at INTEGER NOT NULL
+  at INTEGER NOT NULL,
+  PRIMARY KEY (course, style)
 );
 -- What a device has to say of how the game went on it: an error, or how
 -- fast its frames came (data, as JSON: see report, in ../skate/skate.js).
