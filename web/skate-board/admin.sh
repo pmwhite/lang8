@@ -10,7 +10,7 @@
 #   ./admin.sh report ID   one report in full (or SESSION, for all of a visit)
 #   ./admin.sh line FILE STYLE   post a replay (as .build/skate-route writes
 #                       one) as its place's best line of STYLE (wild or human),
-#                       kept if it beats the one there
+#                       kept if it scores at least as much as the one there
 #   ./admin.sh lines [PLACE...]   search each place (by default slopestyles
 #                       1-5, today's, and big air) for its best wild and human
 #                       lines, and post them; each search takes ROUTE_SECONDS

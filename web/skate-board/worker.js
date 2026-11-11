@@ -15,7 +15,7 @@
 //   POST /share {course, score, version, replay}   a run of mine, to share: its id      (a person)
 //   POST /share {person, course}              a best run of someone I see, to share: its id
 //   GET  /run?id=                             a shared run                              (anyone)
-//   POST /admin/line {course, style, score, version, replay}   a line found: kept if it is the best
+//   POST /admin/line {course, style, score, version, replay}   a line found: kept if it is the best (or as good)
 //   GET  /admin/last                          when each person last rode: {id: at}  (the admin)
 //   POST /admin/unscore  {person, course?}    delete a person's runs (on one course, or all)
 //   POST /report {kind, session, data}        how the game went on a device          (anyone)
@@ -175,15 +175,15 @@ async function lines(env, url) {
   return reply(200, found);
 }
 
-// A line found down a place: kept if it scores more than the one of its
-// style kept, or that was found under older rules (a newer game's
-// replaces it).
+// A line found down a place: kept if it scores at least as much as the
+// one of its style kept (the same line, written anew, replaces it), or
+// that was found under older rules (a newer game's replaces it).
 async function postLine(env, body) {
   const { course, style, score, version, replay } = body ?? {};
   if (!validCourse(course) || !STYLES.includes(style) || !whole(score, 1, 10000000) || !whole(version, 1, 100000)) return fail(400, "bad line");
   if (typeof replay !== "string" || replay.length === 0 || replay.length > MAX_REPLAY || !/^[0-9a-z. ]+$/.test(replay)) return fail(400, "bad replay");
   const kept = await env.DB.prepare("SELECT score, version FROM place_lines WHERE course = ? AND style = ?").bind(course, style).first();
-  if (kept && (kept.version > version || (kept.version === version && kept.score >= score))) return reply(200, { kept: false, score: kept.score, version: kept.version });
+  if (kept && (kept.version > version || (kept.version === version && kept.score > score))) return reply(200, { kept: false, score: kept.score, version: kept.version });
   await env.DB.prepare("INSERT OR REPLACE INTO place_lines (course, style, score, version, replay, at) VALUES (?, ?, ?, ?, ?, ?)")
     .bind(course, style, score, version, replay, Date.now()).run();
   return reply(200, { kept: true, score, version });

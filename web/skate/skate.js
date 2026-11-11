@@ -35,13 +35,14 @@ for (const name of ["touchstart", "touchmove"]) {
     if (!e.target.closest?.("a")) e.preventDefault();
   }, { passive: false });
 }
-// (Back is to the address the page was opened at, and steps forward again
-// to that of the page showing: see addressNow. Another address come to,
-// one given while the page is open, is that page: see openAddress.)
-const openedAt = location.href;
+// (Back is to the place in history the page was opened at, marked so,
+// and steps forward again to the address of the page showing: see
+// addressNow. An address come to while the page is open, even the one it
+// was opened at, is that page: see openAddress.)
+history.replaceState({ opened: true }, "", location.href);
 history.pushState({ stay: true }, "", location.href);
 addEventListener("popstate", () => {
-  if (location.href === openedAt) history.pushState({ stay: true }, "", addressNow());
+  if (history.state?.opened) history.pushState({ stay: true }, "", addressNow());
 });
 
 // (?touch has a desktop browser be one, to try the game as a phone has it.)
@@ -1235,8 +1236,9 @@ const gameSays = (line) => {
   else if (words[0] === "L8HANDS") hands = Number(words[1]);
   else if (words[0] === "L8RIDE") {
     // What he is doing: riding (0), at the end of a run (1), or watching
-    // one, his own (2) or someone's (3). The thumb panels show only while
-    // he rides; a run being watched has a button to go back from it, and
+    // one, his own (2) or someone's (3). The thumb panels show while he
+    // rides, and with the thumbs of a run watched on them (see
+    // syncChrome); a run being watched has a button to go back from it, and
     // one of someone's ends back on the sheet it was picked from.
     const ride = Number(words[1]);
     document.body.classList.toggle("done", ride === 1);
@@ -1615,8 +1617,10 @@ const syncChrome = () => {
   // (Of the tutorial's words, only how a lesson went: nothing is said over
   // the course as he rides it himself.)
   chrome("teach", sheet || teach.kind !== 4 ? 0 : 4, teach.text, teach.ok);
-  chrome("caps", !touch && !sheet && teach.kind === 1, hands);
-  chrome("pads", touch && !sheet && !replaying && !body.contains("done"), body.contains("watching"));
+  // (The thumbs, or on a keyboard its keys, of a run the game rides, and
+  // of a run watched: so whoever watches it sees how it was ridden.)
+  chrome("caps", !touch && !sheet && (teach.kind === 1 || replaying), hands);
+  chrome("pads", touch && !sheet && !body.contains("done"), body.contains("watching"));
   // (Under a sheet, that a place is loading matters only where the sheet
   // shows the place off: there, out of the way at the bottom.)
   chrome("load", sheet ? (sheetNow() === "place" ? 2 : 0) : 1);
