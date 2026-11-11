@@ -91,13 +91,16 @@ final class Follow {
     // comment with its run of verses; a chapter of a commentary's run
     // without comments: the version's chapter with the run's part.
     void add(LinkMap map, ChapterShape page, ChapterShape panel) {
-      if (map.mode == BY_VERSE) {
-        for (int k = 0; k < map.j.length; k++) link(page, map.i0[k], map.i0[k], panel, map.j[k], map.j[k]);
-        return;
-      }
-      if (map.j.length == 0) {
+      if (map.mode != BY_VERSE && map.j.length == 0) {
         if (page.topKnown && page.endKnown && panel.topKnown && panel.endKnown && page.end > page.top
             && panel.end > panel.top) put(page.top, page.end, panel.top, panel.end);
+        return;
+      }
+      // (The chapters' tops, above their first anchors, with each other.)
+      double[] top = topSection(page), bottom = topSection(panel);
+      if (top != null && bottom != null) put(top[0], top[1], bottom[0], bottom[1]);
+      if (map.mode == BY_VERSE) {
+        for (int k = 0; k < map.j.length; k++) link(page, map.i0[k], map.i0[k], panel, map.j[k], map.j[k]);
         return;
       }
       boolean versionOnPage = map.comments == PANEL;
@@ -111,6 +114,13 @@ final class Follow {
       double[] top = section(page, i0, i1), bottom = section(panel, j0, j1);
       if (top != null && bottom != null) put(top[0], top[1], bottom[0], bottom[1]);
     }
+  }
+
+  // A chapter's top: from its top to its first anchor (null: not known, or
+  // no height).
+  private static double[] topSection(ChapterShape s) {
+    if (s.starts.length == 0 || !s.topKnown || !s.known[0] || s.starts[0] <= s.top) return null;
+    return new double[] {s.top, s.starts[0]};
   }
 
   private static double[] section(ChapterShape s, int i0, int i1) {

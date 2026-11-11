@@ -394,8 +394,10 @@ no difference. The page is the top pane (beside the panel, the left one),
 the panel the bottom. A section is a verse, or a comment; a match links a
 verse to the other version's verse, a verse to each comment on it (a
 commentator going through the verses again links a verse to several), a
-comment to the run of verses it is on, and a chapter of a commentary's run
-without comments to that run's part. The rule (core/follow.l8, the same on
+comment to the run of verses it is on, a chapter of a commentary's run
+without comments to that run's part, and a chapter's top (above its first
+anchor: its number and headings, a psalm's title, a commentary's
+introduction) to the other's. The rule (core/follow.l8, the same on
 every skin; web/page/follow.js and Android's Follow.java are its ports):
 the section under the top pane's top edge (the top of what of it is in
 sight), or, if nothing is linked with it, the linked section nearest the

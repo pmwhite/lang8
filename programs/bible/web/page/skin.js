@@ -2052,9 +2052,16 @@ function followGlideFrame(now) {
   const moved = sightTop(r);
   r.extend();
   r.tell(false);
-  // (There, or held at its content's end: over.)
+  // (There, or held at its content's end: over. There, the rule checked
+  // again once both rest, by the parts the glide laid out, where it went
+  // by guess.)
   const at = sightTop(r);
-  if (Math.abs(at - (r.spotY(g.to) ?? at)) <= 0.5 || (Math.abs(next - from) >= 0.1 && Math.abs(at - from) < 0.05)) {
+  if (Math.abs(at - (r.spotY(g.to) ?? at)) <= 0.5) {
+    followGlide = null;
+    followAheadSoon();
+    return;
+  }
+  if (Math.abs(next - from) >= 0.1 && Math.abs(at - from) < 0.05) {
     followGlide = null;
     return;
   }

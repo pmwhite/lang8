@@ -262,7 +262,14 @@ final class Linking implements Reader.Moves {
     glideAt = now;
     r.followSight(next);
     double at = r.sightTop();
-    if (Math.abs(at - glideAim) <= 0.5 || Math.abs(next - from) >= 0.1 && Math.abs(at - from) < 0.05) {
+    // (There: the rule checked again once both rest, by the parts the glide
+    // laid out, where it went by guess. Held at its content's end: over.)
+    if (Math.abs(at - glideAim) <= 0.5) {
+      gliding = null;
+      aheadSoon();
+      return;
+    }
+    if (Math.abs(next - from) >= 0.1 && Math.abs(at - from) < 0.05) {
       gliding = null;
       return;
     }

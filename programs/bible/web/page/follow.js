@@ -33,6 +33,13 @@ function section(shape, i0, i1) {
   return [shape.starts[i0], to];
 }
 
+// A chapter's top: from its top to its first anchor (null: not known, or no
+// height).
+function topSection(shape) {
+  if (!shape.starts.length || shape.top == null || shape.starts[0] == null || shape.starts[0] <= shape.top) return null;
+  return [shape.top, shape.starts[0]];
+}
+
 function put(links, top, bottom) {
   links.topFrom.push(top[0]);
   links.topTo.push(top[1]);
@@ -50,14 +57,18 @@ function link(links, page, i0, i1, panel, j0, j1) {
 // verses; by comment, a version on the page: each verse a comment is on
 // with that comment; a commentary on the page: each comment with its run of
 // verses; a chapter of a commentary's run without comments: the version's
-// chapter with the run's part.
+// chapter with the run's part. Either way, the chapters' tops (above their
+// first anchors) with each other.
 export function addLinks(links, map, page, panel) {
-  if (map.mode === BY_VERSE) {
-    for (let k = 0; k < map.j.length; k++) link(links, page, map.i0[k], map.i0[k], panel, map.j[k], map.j[k]);
+  if (map.mode !== BY_VERSE && map.j.length === 0) {
+    if (page.top != null && page.end != null && panel.top != null && panel.end != null && page.end > page.top && panel.end > panel.top) put(links, [page.top, page.end], [panel.top, panel.end]);
     return;
   }
-  if (map.j.length === 0) {
-    if (page.top != null && page.end != null && panel.top != null && panel.end != null && page.end > page.top && panel.end > panel.top) put(links, [page.top, page.end], [panel.top, panel.end]);
+  const top = topSection(page);
+  const bottom = topSection(panel);
+  if (top && bottom) put(links, top, bottom);
+  if (map.mode === BY_VERSE) {
+    for (let k = 0; k < map.j.length; k++) link(links, page, map.i0[k], map.i0[k], panel, map.j[k], map.j[k]);
     return;
   }
   const versionOnPage = map.comments === PANEL;
