@@ -244,18 +244,21 @@ panel's reader (the screen whose `reader` line says so). Each reads a
 document a part at a time: the page the Bible, or a commentary (Swap Panes,
 in the reader screen's menu, trades what the two read, each going to the
 other's place; the bar's `version` then names the commentary); the panel a
-version or a commentary. The reader screen is one row of chrome: its
-`left` the document's name (a version's; a commentary's title without
-its author's first names and initials, nor what follows " on the ":
-Spurgeon's Treasury of David), whose tap presents Go To aimed at the
-panel (below); its title the chapter at its reading line only while that
-isn't the page's. Filling the screen, `left` is the bar's short name (a
-version's abbreviation, KJV; a commentary's first word, Spurgeon) and
-the title always the chapter. A skin draws the title after the name, a
-faint middot between ("Spurgeon · Psalm 147"), the chevron after both,
-the chapter cut short before the name is. Its tools are Link (prominent
-while linked) and a menu (`ellipsis`: Swap Panes, Full Screen or Beside
-the Page, Close Panel), each skin drawing them as glyphs without fills.
+version or a commentary. The reader screen is one row of chrome, drawn
+as the page's bar is on that skin, so that the two panes are named
+alike: its title is always the chapter at its reading line, and its
+`left` the document's short name (as the page's bar names its version: a
+version's abbreviation, KJV; a commentary's first word, Spurgeon), whose
+tap presents Go To aimed at the panel (below). A skin draws them as the
+page's title and version: the chapter in the title's type, the name
+faint and smaller after it ("Psalm 147 Spurgeon"), the name cut short
+before the chapter is; a chevron after them where the page's title has
+one. Its tools are Link (prominent while linked) and a menu (`ellipsis`:
+Swap Panes, Full Screen or Beside the Page, Close Panel), drawn as the
+page's bar's glyphs are, Link lit while linked as the page's panel
+button is while the panel shows; where the page's bar puts glyphs at
+both sides (the iPhone's), Link takes the outer left place and the menu
+the outer right.
 The reader is the panel's first screen: it has no Back. A commentary on the page has no verses to select:
 core lets a `tapverse` on it go. Core and the skin divide the work by what each
 knows best, and speak across the line in the document's terms, never in

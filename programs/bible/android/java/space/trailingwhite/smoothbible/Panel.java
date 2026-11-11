@@ -542,9 +542,24 @@ final class Panel extends FrameLayout {
     }
     subtitle.setText(s.subtitle);
     subtitle.setVisibility(s.subtitle.isEmpty() ? GONE : VISIBLE);
-    back.setText(!s.left.isEmpty() ? s.left : stack.size() > 1 ? "‹" : "✕");
-    back.setTextSize(TypedValue.COMPLEX_UNIT_SP, s.left.isEmpty() ? 22 : 17);
-    back.setContentDescription(!s.left.isEmpty() ? s.left : stack.size() > 1 ? "Back" : "Close");
+    // (The panel's reader's title, drawn as the page's bar's is: the
+    // chapter, the document's name faint and smaller after it, its tap Go
+    // To aimed at the panel.)
+    boolean named = s.reader && !s.left.isEmpty();
+    if (named) {
+      String tail = "  " + s.left;
+      android.text.SpannableString t = new android.text.SpannableString(s.title + tail);
+      int from = t.length() - tail.length();
+      t.setSpan(new android.text.style.ForegroundColorSpan(look.faint), from, t.length(),
+          android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+      t.setSpan(new android.text.style.RelativeSizeSpan(0.75f), from, t.length(),
+          android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+      back.setText(t);
+      title.setText("");
+    } else back.setText(!s.left.isEmpty() ? s.left : stack.size() > 1 ? "‹" : "✕");
+    back.setTextSize(TypedValue.COMPLEX_UNIT_SP, named ? 18 : s.left.isEmpty() ? 22 : 17);
+    back.setTypeface(named ? Typeface.create(Typeface.SERIF, Typeface.BOLD) : Typeface.DEFAULT);
+    back.setContentDescription(named ? s.title + ", " + s.left : !s.left.isEmpty() ? s.left : stack.size() > 1 ? "Back" : "Close");
     rows.set(s);
     restyle();
     keys(s);

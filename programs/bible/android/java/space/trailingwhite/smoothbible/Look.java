@@ -99,7 +99,7 @@ final class Look {
       TITLE = 7, MAJOR = 8, RANGE = 9, ACROSTIC = 10, NOTE = 11, BOOKLABEL = 12, CAPS = 13,
       RULE = 14, NUMERAL1 = 15, JESUS = 16, JESUS_CAPS = 17, XREF = 18, SUPPLIED = 19,
       JESUS_SUPPLIED = 20, PASSAGE = 21, ORIG = 22, ORIG_GL = 23, OTITLE = 24, OTITLE_GL = 25,
-      QERE = 26, APPARATUS = 27, APP_ENTRY = 28, LABEL = 29;
+      QERE = 26, APPARATUS = 27, APP_ENTRY = 28, LABEL = 29, COMMENT = 30;
   static final int PROSE = 0, Q1 = 1, Q2 = 2, L1 = 3, L2 = 4, CENTER = 5, RIGHT = 6, VERSE_LINE = 7;
 
   private static void span(SpannableStringBuilder s, Object o, int a, int b) {
@@ -189,6 +189,13 @@ final class Look {
         break;
       case OTITLE:
         span(s, new ForegroundColorSpan(heading), a, b);
+        break;
+      case COMMENT:
+        // (A comment's label, "Verse 8": small tracked capitals, faint.)
+        span(s, new RelativeSizeSpan(0.8f), a, b);
+        span(s, new TypefaceSpan("sans-serif-medium"), a, b);
+        span(s, new ForegroundColorSpan(faint), a, b);
+        span(s, new Tracked(0.07f), a, b);
         break;
       case LABEL:
         // (A commentary's label for its paragraph, "Verse 12.": small,
@@ -441,6 +448,26 @@ final class Look {
 
   // The divider between chapters (an object character in the text): a
   // short line across the middle of its line.
+  // Small capitals, tracked by em of the type's size (a comment's label).
+  static final class Tracked extends android.text.style.MetricAffectingSpan {
+    final float em;
+
+    Tracked(float em) {
+      this.em = em;
+    }
+
+    @Override
+    public void updateDrawState(android.text.TextPaint tp) {
+      updateMeasureState(tp);
+    }
+
+    @Override
+    public void updateMeasureState(android.text.TextPaint tp) {
+      tp.setLetterSpacing(em);
+      tp.setFontFeatureSettings("smcp");
+    }
+  }
+
   static final class Glossed extends android.text.style.CharacterStyle {
     final int color;
 

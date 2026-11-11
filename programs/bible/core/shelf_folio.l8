@@ -762,7 +762,7 @@ lay_comment_opener(c: int, ctx: *ChapterLayout) {
 lay_comments(data: []i8, c: int, ctx: *ChapterLayout) {
     comment: CommentSpan = first_comment(data);
     first: int = if (comment.from >= 0) comment.start else len(data);
-    cut: bool = first > 0 && lay_comment_lines(data, 0, first, c, ctx);
+    cut: bool = first > 0 && lay_comment_lines(data, 0, first, c, comment_plain, ctx);
     while (!cut && comment.from >= 0) {
         out_n: int = ctx.out_n;
         runs: int = ctx.runs;
@@ -798,23 +798,64 @@ lay_comment(
         verse_here(ctx)
     }
     if (!comment_has_sections(data, comment)) {
-        lay_begin(ctx, STYLE_HEAD, PARA_PROSE, 0);
+        lay_begin(ctx, STYLE_COMMENT, PARA_PROSE, 0);
         fbuf_n = 0;
         fput_comment_verses(comment);
         for k in 0..fbuf_n lay_byte(ctx, fbuf[k] as int);
         lay_byte(ctx, 10)
     }
     lay_comment_lines(data, record_line(data, comment.start).next, comment.end, named,
-        ctx)
+        comment_setting(data, comment), ctx)
 }
 
-// A comment's records from from to to laid out (its K's after); whether
-// they were cut short. The verse open at their end ends there.
+// How a comment's records are set beyond their own styles: where its words
+// stop being the passage it quotes (a comment that marks its notes, as the
+// Geneva notes do, quotes its verse in its first paragraph, each paragraph
+// after it a note beginning with its mark: E records, folio/README.md; its
+// verse may begin with a mark too; 0: it quotes none), set in italic so
+// that Scripture and note read apart; and the heading that labels it (a chapter's
+// introduction headed by its own one heading, the Geneva notes' "Title":
+// set as a comment's label; -1: none).
+type CommentSetting = {
+    quote_to: int;
+    label_at: int
+}
+
+comment_plain: CommentSetting = CommentSetting { quote_to: 0, label_at: -1 };
+
+comment_setting(data: []i8, comment: CommentSpan): CommentSetting {
+    body: int = record_line(data, comment.start).next;
+    made: CommentSetting = comment_plain;
+    if (comment.from == 0 && body < comment.end && (data[body] == 'S' || data[body] == 's')) made.label_at = body;
+    // (Its second paragraph's start, if it and each after it begin with a
+    // note's mark.)
+    second: int = 0;
+    paragraphs: int = 0;
+    at: int = body;
+    while (at < comment.end) {
+        line: RecordLine = record_line(data, at);
+        if (data[at] == 'P') {
+            paragraphs = paragraphs + 1;
+            if (paragraphs >= 2) {
+                if (line.next >= comment.end || data[line.next] != 'E') return made;
+                if (paragraphs == 2) second = at
+            }
+        }
+        at = line.next
+    }
+    made.quote_to = second;
+    made
+}
+
+// A comment's records from from to to laid out (its K's after), as setting
+// says; whether they were cut short. The verse open at their end ends
+// there.
 lay_comment_lines(
     data: []i8,
     from: int,
     to: int,
     named: int,
+    setting: CommentSetting,
     ctx: *ChapterLayout
 ): bool {
     line_open: bool = false;
@@ -834,7 +875,8 @@ lay_comment_lines(
         }
         if (kind == 'P') line_open = shelf_lay_line_end(ctx, line_open) else if (kind == 'S' || kind == 's') {
             line_open = shelf_lay_line_end(ctx, line_open);
-            lay_begin(ctx, STYLE_HEAD, PARA_PROSE, 0);
+            lay_begin(ctx, if (line.from == setting.label_at) STYLE_COMMENT else STYLE_HEAD,
+                PARA_PROSE, 0);
             for k in line.from + 1..line.to lay_byte(ctx, data[k] as int);
             lay_byte(ctx, 10)
         } else if (kind == 'V') {
@@ -857,16 +899,21 @@ lay_comment_lines(
         } else if (kind == 'L') {
             tab: int = line.from + 1;
             while (tab < line.to && data[tab] as int != 9) tab = tab + 1;
-            lay_begin(ctx, STYLE_BODY, PARA_PROSE, 0);
-            for k in tab + 1..line.to lay_byte(ctx, data[k] as int);
+            if (line.from < setting.quote_to) lay_quoted_words(ctx, data, tab + 1,
+                line.to, STYLE_SUPPLIED) else lay_comment_words(ctx, data, tab + 1,
+                line.to, STYLE_BODY);
             line_open = true
         } else if (kind == 'T' || kind == 'I' || kind == 'G' || kind == 'U' || kind == 'W' || kind == 'J') {
             // (Bold words opening a paragraph: the commentator's label for
             // it, "Verse 12.", a label's run; bold words within it, the
             // body's.)
-            lay_begin(ctx, if (kind == 'G' && !line_open) STYLE_LABEL else record_style(kind),
-                PARA_PROSE, 0);
-            for k in line.from + 1..line.to lay_byte(ctx, data[k] as int);
+            style: int = if (kind == 'G' && !line_open) STYLE_LABEL else record_style(kind);
+            // (The passage a comment quotes, in italic: the divine name in
+            // its capitals still.)
+            quoted: bool = line.from < setting.quote_to;
+            if (quoted) style = (if (style == STYLE_JESUS) STYLE_JESUS_SUPPLIED else if (style == STYLE_CAPS) STYLE_CAPS else STYLE_SUPPLIED);
+            if (quoted) lay_quoted_words(ctx, data, line.from + 1, line.to, style) else lay_comment_words(ctx,
+                data, line.from + 1, line.to, style);
             line_open = true
         }
         at = line.next
@@ -874,6 +921,64 @@ lay_comment_lines(
     _closed: bool = shelf_lay_line_end(ctx, line_open);
     if (ctx.verse_count > 0 && ctx.verse_end[ctx.verse_count - 1] < 0) verse_on(ctx);
     cut
+}
+
+// A comment's words data[from..to) laid out in style, LORD and GOD (the
+// divine name, as a KJV quoted prints it) as the page sets the BSB's: its
+// first letter in style, the rest in small capitals; in a label's or
+// heading's style, as they are.
+lay_comment_words(
+    ctx: *ChapterLayout,
+    data: []i8,
+    from: int,
+    to: int,
+    style: int
+) {
+    lay_begin(ctx, style, PARA_PROSE, 0);
+    named: bool = style == STYLE_BODY || style == STYLE_SUPPLIED || style == STYLE_JESUS || style == STYLE_JESUS_SUPPLIED;
+    at: int = from;
+    while (at < to) {
+        n: int = if (named) record_divine_at(data, at, to) else 0;
+        if (n > 0) {
+            lay_byte(ctx, data[at] as int);
+            lay_begin(ctx, if (style == STYLE_JESUS || style == STYLE_JESUS_SUPPLIED) STYLE_JESUS_CAPS else STYLE_CAPS,
+                PARA_PROSE, 0);
+            for k in at + 1..at + n lay_byte(ctx, data[k] as int);
+            lay_begin(ctx, style, PARA_PROSE, 0);
+            at = at + n
+        } else {
+            lay_byte(ctx, data[at] as int);
+            at = at + 1
+        }
+    }
+}
+
+// The words of a passage a comment quotes, in style (italic): the words its
+// translators supplied, which the KJV's modules bracket ("say [so]"),
+// upright and unbracketed, as an italic page sets them; a bracket not
+// closed in its words, as it is.
+lay_quoted_words(
+    ctx: *ChapterLayout,
+    data: []i8,
+    from: int,
+    to: int,
+    style: int
+) {
+    upright: int = if (style == STYLE_JESUS_SUPPLIED) STYLE_JESUS else STYLE_BODY;
+    at: int = from;
+    while (at < to) {
+        open: int = at;
+        while (open < to && data[open] != '[') open = open + 1;
+        close: int = open;
+        while (close < to && data[close] != ']') close = close + 1;
+        if (open >= to || close >= to) {
+            lay_comment_words(ctx, data, at, to, style);
+            return
+        }
+        if (open > at) lay_comment_words(ctx, data, at, open, style);
+        if (close > open + 1) lay_comment_words(ctx, data, open + 1, close, upright);
+        at = close + 1
+    }
 }
 
 // ---- a chapter in parts ----

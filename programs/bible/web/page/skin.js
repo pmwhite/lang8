@@ -2874,8 +2874,9 @@ const panel = {
     const list = $(".plist", p);
     const scroll = fresh ? 0 : list.scrollTop;
     // (Its title, and under it what it is of.)
-    // (The panel's reader's name and chapter: one quiet title that opens Go
-    // To, "Spurgeon · Psalm 147 ⌄", in the left button.)
+    // (The panel's reader's chapter and name: one title that opens Go To,
+    // drawn as the page's bar's is, "Psalm 147 Spurgeon ⌄", in the left
+    // button.)
     const named = !!(s.left && s.reader);
     const title = $(".ptitle", p);
     title.textContent = named ? "" : s.title;
@@ -2885,12 +2886,13 @@ const panel = {
     // (Its words in spans of their own, cut short with an ellipsis where
     // they don't fit (read.css: the name first); the icon after them
     // always shown.)
-    back.replaceChildren(s.left ? el("span", "pname", s.left) : icon(depth > 1 ? "chevron-left" : "x"));
-    if (named && s.title) back.append(el("span", "pmid", "·"), el("span", "pchapter", s.title));
-    if (s.left && s.leftIcon) back.appendChild(symbol(s.leftIcon) ?? document.createTextNode(""));
+    if (named) back.replaceChildren(el("span", "pchapter", s.title), el("span", "pname", s.left));
+    else back.replaceChildren(s.left ? el("span", "pname", s.left) : icon(depth > 1 ? "chevron-left" : "x"));
+    // (The reader's title has no chevron, as the page's has none.)
+    if (s.left && s.leftIcon && !named) back.appendChild(symbol(s.leftIcon) ?? document.createTextNode(""));
     back.classList.toggle("named", named);
     $(".pbar", p).classList.toggle("reading", !!s.reader);
-    back.setAttribute("aria-label", named && s.title ? `${s.left}, ${s.title}` : s.left || (depth > 1 ? "Back" : "Close"));
+    back.setAttribute("aria-label", named && s.title ? `${s.title}, ${s.left}` : s.left || (depth > 1 ? "Back" : "Close"));
     const bt = s.confirm || s.button;
     const button = $(".pbutton", p);
     button.hidden = !bt;
