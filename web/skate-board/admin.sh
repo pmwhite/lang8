@@ -13,7 +13,8 @@
 #                       kept if it beats the one there
 #   ./admin.sh lines [PLACE...]   search each place (by default slopestyles
 #                       1-5, today's, and big air) for its best wild and human
-#                       lines, ten seconds each, and post them
+#                       lines, and post them; each search takes ROUTE_SECONDS
+#                       (default 10)
 set -eu
 site=${SKATE_API:-https://trailingwhite.space/skate}
 secret=${SKATE_ADMIN:-$(cat "$HOME/.config/skate-board/admin-secret")}
@@ -54,9 +55,9 @@ case "${1:-}" in
         flag=""
         [ "$style" = human ] && flag=--human
         echo "place $place, $style:"
-        if "$route" "$place" $flag --out "$out/line" 2>/dev/null | grep '^in all'; then post_line "$out/line" "$style"; fi
+        if "$route" "$place" $flag --seconds "${ROUTE_SECONDS:-10}" --out "$out/line" 2>/dev/null | grep '^in all'; then post_line "$out/line" "$style"; fi
       done
     done
     rm -r "$out" ;;
-  *) sed -n '2,16p' "$0" ;;
+  *) sed -n '2,17p' "$0" ;;
 esac
