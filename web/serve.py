@@ -2,7 +2,7 @@
 """Serve the web site for development, collect the game's telemetry, and
 relay commands to open game pages.
 
-    python3 web/serve.py [port] [directory]
+    python3 web/serve.py [port] [directory] [--relay /PREFIX=PORT ...]
 
 Serves `directory` (default .build/web) on all interfaces at `port` (default
 8765), like `python3 -m http.server`. A POST of JSON to /telemetry is
@@ -15,12 +15,20 @@ commands, run them, and post their results to /telemetry. GET /clients lists
 the pages that polled recently. A capture command's frames arrive as POSTs
 to /capture and are saved as captures/ID/INDEX-MSms.jpg beside the log. Anyone who can reach the server can run
 code in those pages, so serve it only on a private network.
+
+--relay /PREFIX=PORT passes every request under /PREFIX, WebSockets too, on
+to a server on this machine at PORT, the prefix taken off: so that a page
+and a Worker run here (`npx wrangler dev`) can be tried from a phone through
+the HTTPS that fronts this server (as `tailscale serve` does), where a
+plain ws:// or http:// address would be refused.
 """
 import base64
 import functools
 import http.server
 import json
 import os
+import selectors
+import socket
 import sys
 import threading
 import time
@@ -37,6 +45,63 @@ LOCK = threading.Lock()
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     log_path = ""
+    relays = {}  # "/prefix" -> port
+
+    def relay_port(self):
+        path = urllib.parse.urlsplit(self.path).path
+        for prefix, port in self.relays.items():
+            if path == prefix or path.startswith(prefix + "/"):
+                return prefix, port
+        return None
+
+    def relay(self, prefix, port):
+        """Pass this request on to the server at port, and its answer back,
+        byte for byte until either side closes (a WebSocket's frames as well
+        as an ordinary answer)."""
+        try:
+            upstream = socket.create_connection(("127.0.0.1", port))
+        except OSError:
+            self.send_error(502, f"nothing on port {port}")
+            return
+        upgrade = self.headers.get("Upgrade", "").lower() == "websocket"
+        lines = [f"{self.command} {self.path[len(prefix):] or '/'} HTTP/1.1"]
+        for name, value in self.headers.items():
+            if name.lower() in ("host", "connection") or (name.lower() == "upgrade" and not upgrade):
+                continue
+            lines.append(f"{name}: {value}")
+        lines.append(f"Host: 127.0.0.1:{port}")
+        lines.append("Connection: Upgrade" if upgrade else "Connection: close")
+        upstream.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > 0:
+            upstream.sendall(self.rfile.read(length))
+        self.wfile.flush()
+        client = self.connection
+        pipes = selectors.DefaultSelector()
+        pipes.register(client, selectors.EVENT_READ, upstream)
+        pipes.register(upstream, selectors.EVENT_READ, client)
+        try:
+            open_ends = 2
+            while open_ends == 2:
+                for key, _ in pipes.select():
+                    data = key.fileobj.recv(65536)
+                    if not data:
+                        open_ends = 1
+                        break
+                    key.data.sendall(data)
+        except OSError:
+            pass
+        finally:
+            pipes.close()
+            upstream.close()
+            self.close_connection = True
+
+    def do_OPTIONS(self):
+        relayed = self.relay_port()
+        if relayed:
+            self.relay(*relayed)
+            return
+        self.send_error(405)
 
     def send_json(self, value, status=200):
         body = json.dumps(value).encode()
@@ -47,6 +112,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        relayed = self.relay_port()
+        if relayed:
+            self.relay(*relayed)
+            return
         url = urllib.parse.urlsplit(self.path)
         query = urllib.parse.parse_qs(url.query)
         if url.path == "/control":
@@ -73,6 +142,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
+        relayed = self.relay_port()
+        if relayed:
+            self.relay(*relayed)
+            return
         if self.path == "/control":
             length = int(self.headers.get("Content-Length") or 0)
             try:
@@ -134,12 +207,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
-    root = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else ".build/web")
+    args = sys.argv[1:]
+    while "--relay" in args:
+        at = args.index("--relay")
+        prefix, port = args[at + 1].split("=")
+        Handler.relays["/" + prefix.strip("/")] = int(port)
+        del args[at : at + 2]
+    port = int(args[0]) if len(args) > 0 else 8765
+    root = os.path.abspath(args[1] if len(args) > 1 else ".build/web")
     Handler.log_path = os.path.join(os.path.dirname(root), "telemetry.jsonl")
     handler = functools.partial(Handler, directory=root)
     server = http.server.ThreadingHTTPServer(("", port), handler)
     print(f"serving {root} on port {port}; telemetry to {Handler.log_path}", flush=True)
+    for prefix, to in Handler.relays.items():
+        print(f"relaying {prefix} to port {to}", flush=True)
     server.serve_forever()
 
 

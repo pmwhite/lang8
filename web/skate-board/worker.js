@@ -11,13 +11,20 @@
 //   GET  /me                                  who I am, and the scores of those I see  (a person)
 //   POST /score  {course, score, version, replay}   a run of mine              (a person)
 //   GET  /replay?person=&course=              a best run, of someone I see
+//   GET  /line?course=                        the best line found down a place     (anyone)
+//   POST /admin/line {course, score, version, replay}   a line found: kept if it is the best
 //   GET  /admin/last                          when each person last rode: {id: at}  (the admin)
 //   POST /admin/unscore  {person, course?}    delete a person's runs (on one course, or all)
 //   POST /report {kind, session, data}        how the game went on a device          (anyone)
 //   GET  /admin/reports?kind=&person=&session=&limit=   the latest of those, newest first
 //   POST /admin/unreport {before?}            delete them (those before a time, or all)
+//   GET  /live   (a WebSocket)                riding together: see Live, below
 //
 // Scores are taken as sent: nothing here rides the replay to check it.
+//
+// A place's best line is no one's run: it is the best run a search of the
+// game's own rules has found down it (see programs/skate/route.l8), posted
+// by the admin, to watch. It is on no leaderboard.
 //
 // A report is what a device has to say of how the game went on it: an
 // error, or how fast its frames came (see report, in web/skate/skate.js).
@@ -25,7 +32,8 @@
 // the device has, if any; not its address. They are for finding out what
 // went wrong for someone, and are dropped after a while.
 
-import { bearer, personOf, seenBy } from "../people-api/people.js";
+import { DurableObject } from "cloudflare:workers";
+import { bearer, personOf, personWith, seenBy } from "../people-api/people.js";
 
 // The courses scores are kept for, and as many parks (and each day's course
 // and park: see dayOf); how long a replay may be; and how many of a
@@ -143,6 +151,27 @@ async function replay(env, who, url) {
   return reply(200, { course, name: rider.name, score: row.score, version: row.version, replay: row.replay });
 }
 
+// A place's best line (see the top of this file).
+async function line(env, url) {
+  const course = Number(url.searchParams.get("course"));
+  if (!validCourse(course)) return fail(400, "bad request");
+  const row = await env.DB.prepare("SELECT score, version, replay, at FROM lines WHERE course = ?").bind(course).first();
+  if (!row) return fail(404, "no line");
+  return reply(200, { course, score: row.score, version: row.version, replay: row.replay, at: row.at });
+}
+
+// A line found down a place: kept if it scores more than the one kept, or
+// the one kept was found under older rules (a newer game's replaces it).
+async function postLine(env, body) {
+  const { course, score, version, replay } = body ?? {};
+  if (!validCourse(course) || !whole(score, 1, 10000000) || !whole(version, 1, 100000)) return fail(400, "bad line");
+  if (typeof replay !== "string" || replay.length === 0 || replay.length > MAX_REPLAY || !/^[0-9a-z. ]+$/.test(replay)) return fail(400, "bad replay");
+  const kept = await env.DB.prepare("SELECT score, version FROM lines WHERE course = ?").bind(course).first();
+  if (kept && (kept.version > version || (kept.version === version && kept.score >= score))) return reply(200, { kept: false, score: kept.score, version: kept.version });
+  await env.DB.prepare("INSERT OR REPLACE INTO lines (course, score, version, replay, at) VALUES (?, ?, ?, ?, ?)").bind(course, score, version, replay, Date.now()).run();
+  return reply(200, { kept: true, score, version });
+}
+
 // A device's report, kept (see the top of this file).
 async function report(env, request, body) {
   const { kind, session, data } = body ?? {};
@@ -216,6 +245,280 @@ async function admin(env, action, body) {
   return fail(404, "no such action");
 }
 
+// ---- riding together ----
+// Riders at the same place see each other ride, live (see "together" in
+// web/skate/skate.js). Each page keeps a WebSocket open to Live, one
+// Durable Object for everyone (enough for a few friends at once), and says
+// who it is and where it rides; Live passes each rider's state on to the
+// others riding the same place who share a group with them, and tells
+// everyone who is riding where. Nothing of it is kept.
+//
+// What a page says, each a message:
+//   {"t":"hi","secret":S}      who it is (a person's secret: see ../people-api)
+//   {"t":"at","place":N}       where it rides now (0: nowhere)
+//   s FIELDS                   its rider's state, as its game says it (see
+//                              say_state, in programs/skate/together.l8)
+//   {"t":"score","round":K,"score":N,"full":B}   its score for a round of
+//                              the place's (see rounds.l8), and whether it
+//                              rode the whole of it
+//   ping                       (answered pong, without waking Live)
+// And what Live says to it:
+//   {"t":"you","id":ID,"now":MS}                taken in, as this rider; and
+//                              the time here, for all to keep rounds by
+//   {"t":"no"}                                  its secret is nobody's
+//   {"t":"room","place":N,"slot":S,"riders":[{id,name,slot}],"full"?}   where it now
+//                              rides, its slot there, and who is there
+//                              (nowhere, and full, if as many as can are)
+//   {"t":"standings","riders":[{id,name,slot,last,avg}]}   the standings of
+//                              those riding there, best average first
+//   {"t":"join","id","name","slot"}             someone has come to ride there
+//   {"t":"leave","id"}                          they have gone
+//   {"t":"lobby","places":[{place,names}]}      who is riding where, of those it sees
+//   s ID FIELDS                                 a rider's state
+// A rider's slot is the least number no one else at that place has: it
+// picks their color, the same on every page (see rider_color, in
+// programs/skate/together.l8).
+const LIVE_STATE = /^s [-0-9 ]{1,400}$/;
+// (At most this many riders at a place, and states a second from one. And
+// a socket that has said nothing, not even ping, for LIVE_QUIET ms is taken
+// to be gone, whether or not its close has come: a phone put to sleep may
+// never send one.)
+const LIVE_ROOM = 16;
+const LIVE_RATE = 40;
+const LIVE_QUIET = 70000;
+// Standings: each rider's last round, and an average of their whole rounds
+// weighted to the latest by STANDING_WEIGHT (each new round counts for that
+// share of it), begun at their first; so steady riding keeps a lead, and
+// someone new is ranked from their first whole round. Kept only while
+// Live is awake (riders riding keep it so), and someone's for a while
+// after they were last at the place, in case they come back.
+const STANDING_WEIGHT = 0.3;
+const STANDING_KEEP = 15 * 60000;
+
+export class Live extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    // Each socket's rider, as kept with it (which lasts while Live sleeps
+    // between messages): {id, person, name, sees, place, slot, since}; and
+    // states lately passed on from it, against LIVE_RATE, and when it was
+    // last heard from (not kept: a fresh count after a sleep does no harm,
+    // and a ping is answered without waking Live, and noted by the socket).
+    this.riders = new Map();
+    this.sent = new Map();
+    this.heard = new Map();
+    // place -> person -> {name, last, round, avg, at}
+    this.standings = new Map();
+    // (What each was last told of who is riding where: not told it again.)
+    this.told = new Map();
+    this.nextId = 1;
+    for (const ws of ctx.getWebSockets()) {
+      const rider = ws.deserializeAttachment();
+      this.riders.set(ws, rider);
+      this.nextId = Math.max(this.nextId, rider.id + 1);
+    }
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+  }
+
+  async fetch(request) {
+    if (request.headers.get("upgrade") !== "websocket") return fail(426, "a WebSocket");
+    const [client, server] = Object.values(new WebSocketPair());
+    this.ctx.acceptWebSocket(server);
+    this.keep(server, { id: this.nextId++, name: null, sees: [], place: 0, slot: 0, since: Date.now() });
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  keep(ws, rider) {
+    this.riders.set(ws, rider);
+    ws.serializeAttachment(rider);
+  }
+
+  // (A socket's rider, once it has said who it is.)
+  known(ws) {
+    const rider = this.riders.get(ws);
+    return rider?.name ? rider : null;
+  }
+
+  // Whether a sees b: they share a group (or are one).
+  sees(a, b) {
+    return a.id === b.id || a.sees.includes(b.person);
+  }
+
+  async webSocketMessage(ws, message) {
+    if (typeof message !== "string") return;
+    const rider = this.riders.get(ws);
+    if (!rider) return;
+    const now = Date.now();
+    this.heard.set(ws, now);
+    if (message.startsWith("s ")) {
+      if (!rider.place || !LIVE_STATE.test(message)) return;
+      const sent = (this.sent.get(ws) ?? []).filter((at) => now - at < 1000);
+      if (sent.length >= LIVE_RATE) return;
+      sent.push(now);
+      this.sent.set(ws, sent);
+      const out = `s ${rider.id} ${message.slice(2)}`;
+      for (const [other, them] of this.riders) {
+        if (other !== ws && them.place === rider.place && this.sees(them, rider)) this.send(other, out);
+      }
+      return;
+    }
+    let said;
+    try {
+      said = JSON.parse(message);
+    } catch {
+      return;
+    }
+    if (said?.t === "hi") {
+      if (rider.name) return;
+      const person = await personWith(this.env, said.secret);
+      // (It may have gone, or said who it is twice, while that was asked.)
+      if (this.riders.get(ws)?.name !== null) return;
+      if (!person) {
+        this.send(ws, JSON.stringify({ t: "no" }));
+        ws.close(4001, "no such link");
+        return;
+      }
+      const sees = (await seenBy(this.env, person.id)).map((p) => p.id);
+      if (this.riders.get(ws)?.name !== null) return;
+      this.keep(ws, { ...rider, person: person.id, name: person.name, sees });
+      this.send(ws, JSON.stringify({ t: "you", id: rider.id, now: Date.now() }));
+      this.forgetQuiet();
+      const lobby = this.lobbyFor(this.known(ws));
+      this.told.set(ws, lobby);
+      this.send(ws, lobby);
+    } else if (said?.t === "at" && this.known(ws)) {
+      const place = Number.isInteger(said.place) && Math.abs(said.place) < 2 ** 31 ? said.place : 0;
+      this.moveTo(ws, place);
+    } else if (said?.t === "score" && this.known(ws)?.place) {
+      if (!Number.isInteger(said.round) || !Number.isInteger(said.score) || said.score < 0 || said.score > 10000000) return;
+      this.scored(this.known(ws), said.round, said.score, said.full === true);
+    }
+  }
+
+  // A rider goes to ride somewhere else (or nowhere): those at the place
+  // left are told they have gone, and those at the new one that they have
+  // come; and everyone, who is riding where.
+  moveTo(ws, place) {
+    this.forgetQuiet();
+    const rider = this.known(ws);
+    if (!rider || rider.place === place) return;
+    this.leave(ws, rider);
+    const there = [...this.riders].filter(([other, them]) => other !== ws && them.name && them.place === place);
+    const full = place !== 0 && there.length >= LIVE_ROOM;
+    if (full) place = 0;
+    const taken = new Set(there.map(([, them]) => them.slot));
+    let slot = 0;
+    while (taken.has(slot)) slot++;
+    this.keep(ws, { ...rider, place, slot });
+    // (Those left behind have one fewer in their standings.)
+    if (rider.place) this.tellStandings(rider.place);
+    const now = this.riders.get(ws);
+    if (place !== 0) {
+      const seen = there.filter(([, them]) => this.sees(now, them)).map(([, them]) => ({ id: them.id, name: them.name, slot: them.slot }));
+      this.send(ws, JSON.stringify({ t: "room", place, slot, riders: seen }));
+      const join = JSON.stringify({ t: "join", id: now.id, name: now.name, slot });
+      for (const [other, them] of there) if (this.sees(them, now)) this.send(other, join);
+      // (Everyone's standings there, his own among them if he has one.)
+      this.tellStandings(place);
+    } else this.send(ws, JSON.stringify({ t: "room", place: 0, riders: [], full }));
+    this.tellLobby();
+  }
+
+  // A rider's score for a round of the place they ride: their standing
+  // brought up to date (once a round), and told to those there.
+  scored(rider, round, score, full) {
+    const place = this.standings.get(rider.place) ?? this.standings.set(rider.place, new Map()).get(rider.place);
+    const now = Date.now();
+    for (const [person, s] of place) if (now - s.at > STANDING_KEEP) place.delete(person);
+    const was = place.get(rider.person);
+    if (was && round <= was.round) return;
+    const avg = !full ? (was?.avg ?? null) : was?.avg == null ? score : STANDING_WEIGHT * score + (1 - STANDING_WEIGHT) * was.avg;
+    place.set(rider.person, { name: rider.name, last: score, round, avg, at: now });
+    this.tellStandings(rider.place);
+  }
+
+  // The standings at a place, of those riding there that each sees.
+  tellStandings(place) {
+    const kept = this.standings.get(place);
+    if (!kept) return;
+    const there = [...this.riders].filter(([, them]) => them.name && them.place === place);
+    for (const [ws, rider] of there) {
+      const riders = there
+        .filter(([, them]) => this.sees(rider, them) && kept.has(them.person))
+        .map(([, them]) => ({ id: them.id, name: them.name, slot: them.slot, last: kept.get(them.person).last, avg: kept.get(them.person).avg }))
+        .sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1) || b.last - a.last);
+      this.send(ws, JSON.stringify({ t: "standings", riders: riders.map((r) => ({ ...r, avg: r.avg === null ? null : Math.round(r.avg) })) }));
+    }
+  }
+
+  leave(ws, rider) {
+    if (!rider.place) return;
+    const gone = JSON.stringify({ t: "leave", id: rider.id });
+    for (const [other, them] of this.riders) {
+      if (other !== ws && them.place === rider.place && this.sees(them, rider)) this.send(other, gone);
+    }
+  }
+
+  lobbyFor(rider) {
+    const places = new Map();
+    for (const them of this.riders.values()) {
+      if (them.name && them.place && this.sees(rider, them)) (places.get(them.place) ?? places.set(them.place, []).get(them.place)).push(them.name);
+    }
+    return JSON.stringify({ t: "lobby", places: [...places].map(([place, names]) => ({ place, names })) });
+  }
+
+  tellLobby() {
+    for (const [ws, rider] of this.riders) {
+      if (!rider.name) continue;
+      const lobby = this.lobbyFor(rider);
+      if (this.told.get(ws) === lobby) continue;
+      this.told.set(ws, lobby);
+      this.send(ws, lobby);
+    }
+  }
+
+  // (A socket closing as it is written to is no matter: it is let go of
+  // when its close comes.)
+  send(ws, text) {
+    try {
+      ws.send(text);
+    } catch {}
+  }
+
+  gone(ws) {
+    const rider = this.riders.get(ws);
+    this.riders.delete(ws);
+    this.sent.delete(ws);
+    this.heard.delete(ws);
+    this.told.delete(ws);
+    if (!rider?.name) return;
+    this.leave(ws, rider);
+    if (!rider.place) return;
+    this.tellLobby();
+    this.tellStandings(rider.place);
+  }
+
+  // Let go of the sockets that have gone quiet (see LIVE_QUIET).
+  forgetQuiet() {
+    const now = Date.now();
+    for (const [ws, rider] of [...this.riders]) {
+      const pinged = this.ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0;
+      if (now - Math.max(rider.since ?? 0, this.heard.get(ws) ?? 0, pinged) < LIVE_QUIET) continue;
+      this.gone(ws);
+      try {
+        ws.close(4000, "quiet");
+      } catch {}
+    }
+  }
+
+  async webSocketClose(ws) {
+    this.gone(ws);
+  }
+
+  async webSocketError(ws) {
+    this.gone(ws);
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -226,6 +529,8 @@ export default {
       const { success } = await env.LIMIT.limit({ key: request.headers.get("cf-connecting-ip") ?? "" });
       if (!success) return fail(429, "slow down");
     }
+    // (Riding together: a WebSocket, to Live, which asks who it is itself.)
+    if (parts[0] === "live" && parts.length === 1) return env.LIVE.get(env.LIVE.idFromName("live")).fetch(request);
     try {
       let body = null;
       if (request.method === "POST") {
@@ -237,12 +542,15 @@ export default {
         if (!env.ADMIN_SECRET || (await sha256(bearer(request))) !== (await sha256(env.ADMIN_SECRET))) return fail(401, "not allowed");
         if (request.method === "GET" && parts[1] === "last") return await last(env);
         if (request.method === "GET" && parts[1] === "reports") return await reports(env, url);
+        if (request.method === "POST" && parts[1] === "line") return await postLine(env, body);
         if (request.method === "POST") return await admin(env, parts[1], body);
         return fail(404, "not found");
       }
       // (A report is taken from anyone: something may go wrong for someone
       // with no link.)
       if (request.method === "POST" && parts[0] === "report") return await report(env, request, body);
+      // (A best line is anyone's to watch.)
+      if (request.method === "GET" && parts[0] === "line") return await line(env, url);
       const who = await personOf(env, request);
       if (!who) return fail(401, "no such link");
       if (request.method === "GET" && parts[0] === "me") return await me(env, who);

@@ -4,12 +4,14 @@
 
 export const bearer = (request) => (request.headers.get("authorization") ?? "").replace(/^Bearer /, "");
 
-// Whose secret the request carries: {id, name}, or null.
-export const personOf = async (env, request) => {
-  const secret = bearer(request);
-  if (!/^[a-z0-9]{24}$/.test(secret)) return null;
+// Whose secret this is: {id, name}, or null.
+export const personWith = async (env, secret) => {
+  if (typeof secret !== "string" || !/^[a-z0-9]{24}$/.test(secret)) return null;
   return await env.PEOPLE.prepare("SELECT id, name FROM people WHERE secret = ?").bind(secret).first();
 };
+
+// Whose secret the request carries.
+export const personOf = (env, request) => personWith(env, bearer(request));
 
 // Those a person sees: themselves, and everyone they share a group with,
 // each {id, name}.

@@ -190,25 +190,33 @@ const present = () => {
     lessonOf = of;
     visit(TUTORIAL + of);
   }
-  if (id === "place") visit((placeOf = of));
+  if (id === "place") {
+    visit((placeOf = of));
+    fetchLine(of);
+  }
   if (id === "person") personOf = of;
   const motion = trail.length > shownLength ? "push" : trail.length < shownLength ? "pop" : "swap";
   shownLength = trail.length;
   showPage(motion);
   holdGame();
+  syncLive();
   if (sheetOpen())
     loadScores().then(() => {
       if (trail.at(-1) === view) showPage();
     });
 };
-const go = (id, of) => {
+// (A ride may be one together with others: see togetherRide.)
+const go = (id, of, how) => {
   if (id === "lesson") {
     reading = true;
     pendingStep = "";
   }
-  trail.push([id, of]);
+  trail.push(how ? [id, of, how] : [id, of]);
   present();
 };
+// (Riding together: the game goes from round to round itself, as the page
+// tells it of each: see flushNet.)
+const goTogether = () => go("ride", ROUND_BASE, "together");
 // (In place of the page showing: on from one lesson to the next, or one
 // ride to another, back from either being to where they were come to
 // from.)
@@ -410,7 +418,7 @@ const randomPlace = (kind) => (kind === "parks" ? -1 : 1) * (PLACES + 1 + Math.f
 // else as this device does. Told as a key, 300000000 and the score, when
 // he arrives, and again when the leaderboards come.
 const tellBest = () => {
-  if (!sendKey || !placeNow || inTutorial(placeNow)) return;
+  if (!sendKey || !placeNow || inTutorial(placeNow) || isRound(placeNow)) return;
   const local = myRuns[placeNow]?.best?.[0]?.[0] ?? 0;
   const posted = account ? (bestsOn(placeNow).find((run) => run.id === account.id)?.score ?? 0) : 0;
   const best = Math.max(local, posted);
@@ -426,8 +434,9 @@ const tellBest = () => {
 // and sees the scores of those they may: each one's best on a place, and
 // their latest runs there. A best run can be watched: the game is handed
 // it as a file, and V.
-// (?api= points a page on localhost at a worker run there, to try one.)
-const localApi = location.hostname === "localhost" && new URLSearchParams(location.search).get("api");
+// (?api= points a page on localhost, or on this machine's tailnet (to try
+// it on a phone), at a worker run there, to try one.)
+const localApi = (location.hostname === "localhost" || location.hostname.endsWith(".ts.net")) && new URLSearchParams(location.search).get("api");
 const api = localApi || (location.hostname.endsWith("trailingwhite.space") ? "/skate/api" : "https://trailingwhite.space/skate/api");
 let mySecret = people.me()?.secret ?? null;
 // Who he is, and the scores of those he sees, as last fetched: kept on the
@@ -626,6 +635,9 @@ const loadScores = () => loadMe(false);
 const playAs = (secret, tell = true) => {
   people.use(secret);
   mySecret = secret && people.me()?.secret === secret ? secret : null;
+  // (Riding together, as whoever now plays.)
+  closeLive();
+  syncLive();
   account = null;
   accountLoaded = 0;
   localStorage.removeItem("skate.account");
@@ -671,21 +683,244 @@ const postRun = async (version, id, score, replay) => {
   }
   showOpen();
 };
+// Watch a run ({version, course, score, replay}), under a name: the game
+// is handed it as watch.txt, and told to play it.
+const watchReplay = (run, name) => {
+  gameFs.writeFile("watch.txt", `${run.version} ${run.course} ${run.score} ${name.replace(/ /g, "_")} ${run.replay}`);
+  // (Going back from the run, or its end, comes back to this sheet: see
+  // L8RIDE.)
+  go("watch");
+  typeKeys([118]);
+};
 const watchRun = async (person, id) => {
   if (!sendKey) return;
   try {
     const r = await fetch(`${api}/replay?person=${person}&course=${id}`, { headers: { authorization: `Bearer ${mySecret}` } });
     const run = await r.json();
     if (!r.ok) throw new Error(run.error);
-    gameFs.writeFile("watch.txt", `${run.version} ${run.course} ${run.score} ${run.name.replace(/ /g, "_")} ${run.replay}`);
-    // (Going back from the run, or its end, comes back to this sheet:
-    // see L8RIDE.)
-    go("watch");
-    typeKeys([118]);
+    watchReplay(run, run.name);
   } catch {
     toast("Couldn't load that run");
   }
 };
+// ---- best lines ----
+// A place's best line: the best run a search of the game's own rules has
+// found down it (see programs/skate/route.l8), which the leaderboards'
+// worker keeps for anyone to watch. It is no one's run. Each place's, as
+// fetched ({score, version, replay}), or null if it has none (or it could
+// not be fetched): once a visit to the page.
+const lines = new Map();
+const fetchLine = async (id) => {
+  if (lines.has(id)) return;
+  lines.set(id, null);
+  try {
+    const r = await fetch(`${api}/line?course=${id}`);
+    if (!r.ok) return;
+    lines.set(id, await r.json());
+    if (sheetNow() === "place" && placeOf === id) showPage();
+  } catch {}
+};
+const watchLine = (id) => {
+  const run = lines.get(id);
+  if (run && sendKey) watchReplay(run, "Best line");
+};
+// ---- riding together ----
+// Riding together is one endless run, the same for everyone at once: a
+// round every ROUND_MS by the worker's clock, each down a new stretch of
+// hill laid out from its number (its place being ROUND_BASE and that
+// number), all starting it together (see programs/skate/rounds.l8). There
+// is nothing to arrange: whoever comes joins the round under way, and
+// sees everyone else riding it (of those they share a group with), live,
+// each in a color of their own with their name over them; and after each
+// round, the standings. The page keeps a WebSocket open to the
+// leaderboards' worker (see Live, in ../skate-board/worker.js) while it is
+// wanted (see wantLive): from home, to say who is riding; and riding. It
+// tells the game each round as it comes, passes the game's word on what
+// its rider is doing (L8NET) on to the others and theirs to the game, and
+// each round's score (L8ROUND) to the worker and the standings back (the
+// game's lines being of net.txt, and NET_KEY: see
+// programs/skate/together.l8).
+const NET_KEY = 65302;
+const ROUND_MS = 45000;
+const ROUND_BASE = 300000000;
+const isRound = (id) => id >= ROUND_BASE && id < ROUND_BASE + 100000000;
+const togetherRide = () => pageNow() === "ride" && trail.at(-1)[2] === "together";
+// The round under way, by the worker's clock (or this device's, until it
+// has that): its number, place, and ms into it.
+const roundNow = () => {
+  const now = Date.now() + live.clock;
+  const number = Math.floor(now / ROUND_MS);
+  return { number, place: ROUND_BASE + (number % 100000000), into: now - number * ROUND_MS };
+};
+const liveUrl = () => {
+  const url = new URL(`${api}/live`, location.href);
+  url.protocol = url.protocol === "http:" ? "ws:" : "wss:";
+  return url.href;
+};
+// The socket, and how it is: off, finding the others (connecting), open,
+// or lost (closed, and trying again). Who he is to the worker, and how far
+// its clock is ahead of this device's; the place asked to ride with others
+// at, and the one ridden at, as it says, and his slot there; who is there
+// with him (id: {name, slot}); who is riding where, of those he sees
+// ([{place, names}]); and the standings there, as last told, and whether
+// the game has them. The round the game was last told of (0: none).
+
+const live = { ws: null, state: "off", you: 0, clock: 0, asked: 0, room: 0, slot: 0, full: false, riders: new Map(), lobby: [], standings: [], standingsSaid: true, roundSaid: 0, retry: 0, timer: null, idle: null, ping: null, ready: false, lines: [] };
+// (Kept open a while after it was last wanted, so that going from page to
+// page does not drop it and find it again each time; and tried again,
+// lost, a little later each time.)
+const LIVE_IDLE = 30000;
+const LIVE_PING = 25000;
+const wantLive = () => !!mySecret && !document.hidden && (sheetNow() === "menu" || togetherRide());
+const liveRoom = () => (togetherRide() ? trail.at(-1)[1] : 0);
+const syncLive = () => {
+  if (wantLive()) {
+    clearTimeout(live.idle);
+    live.idle = null;
+    if (!live.ws && !live.timer) connectLive();
+  } else if (live.ws && !live.idle) live.idle = setTimeout(closeLive, LIVE_IDLE);
+  if (live.ws?.readyState === WebSocket.OPEN && live.you && live.asked !== liveRoom()) {
+    live.asked = liveRoom();
+    live.full = false;
+    live.ws.send(JSON.stringify({ t: "at", place: live.asked }));
+  }
+  syncNet();
+};
+const connectLive = () => {
+  const ws = new WebSocket(liveUrl());
+  Object.assign(live, { ws, state: live.state === "lost" ? "lost" : "off", you: 0, asked: 0 });
+  ws.onopen = () => ws.send(JSON.stringify({ t: "hi", secret: mySecret }));
+  ws.onmessage = (e) => {
+    if (live.ws === ws) liveSays(String(e.data));
+  };
+  ws.onclose = (e) => {
+    if (live.ws !== ws) return;
+    clearInterval(live.ping);
+    Object.assign(live, { ws: null, you: 0, asked: 0, state: "lost" });
+    joinRoom(0, []);
+    showOpen();
+    // (Not with a link that is nobody's; otherwise, again in a while.)
+    if (e.code === 4001 || !wantLive()) return;
+    live.retry = Math.min(15000, live.retry ? live.retry * 2 : 1000);
+    live.timer = setTimeout(() => {
+      live.timer = null;
+      syncLive();
+    }, live.retry);
+  };
+};
+const closeLive = () => {
+  const ws = live.ws;
+  clearInterval(live.ping);
+  clearTimeout(live.idle);
+  Object.assign(live, { ws: null, you: 0, asked: 0, state: "off", idle: null, lobby: [] });
+  joinRoom(0, []);
+  ws?.close(1000);
+};
+document.addEventListener("visibilitychange", syncLive);
+// (Put away, the page says it has gone, rather than leave the worker to
+// find out.)
+addEventListener("pagehide", () => closeLive());
+// The words on the pill over the game (see syncChrome).
+const liveWords = () => {
+  if (live.full) return "Too many riding here";
+  if (live.state !== "open" || live.room !== liveRoom()) return live.state === "lost" ? "Can't reach the others" : "Finding the others";
+  const names = [...live.riders.values()].map((r) => r.name);
+  if (names.length === 0) return "Nobody else here yet";
+  return `With ${names.join(", ").length <= 20 ? names.join(", ") : `${names.length} others`}`;
+};
+const liveSays = (data) => {
+  // A rider's state: for the game, if it is showing them.
+  if (data.startsWith("s ")) {
+    const at = data.indexOf(" ", 2);
+    const id = Number(data.slice(2, at));
+    if (live.ready && live.riders.has(id)) live.lines.push({ came: performance.now(), id, state: data.slice(at + 1) });
+    return;
+  }
+  if (data === "pong") return;
+  let said;
+  try {
+    said = JSON.parse(data);
+  } catch {
+    return;
+  }
+  if (said.t === "you") {
+    Object.assign(live, { you: said.id, state: "open", retry: 0, clock: Number.isFinite(said.now) ? said.now - Date.now() : 0 });
+    clearInterval(live.ping);
+    live.ping = setInterval(() => live.ws?.readyState === WebSocket.OPEN && live.ws.send("ping"), LIVE_PING);
+    syncLive();
+    showOpen();
+  } else if (said.t === "room") {
+    live.full = !!said.full;
+    live.slot = said.slot ?? 0;
+    joinRoom(said.place, said.riders);
+  } else if (said.t === "standings") {
+    live.standings = said.riders;
+    live.standingsSaid = false;
+  }
+  else if (said.t === "join") {
+    live.riders.set(said.id, { name: said.name, slot: said.slot });
+    if (live.ready) live.lines.push(`join ${said.id} ${said.slot} ${clean(said.name)}`);
+    if (togetherRide()) toast(`${said.name} is here`);
+  } else if (said.t === "leave") {
+    const rider = live.riders.get(said.id);
+    live.riders.delete(said.id);
+    if (live.ready) live.lines.push(`leave ${said.id}`);
+    if (rider && togetherRide()) toast(`${rider.name} left`);
+  } else if (said.t === "lobby") {
+    live.lobby = said.places;
+    if (sheetNow() === "menu") showPage();
+  }
+};
+// Where the worker has him riding now, and who is there.
+const joinRoom = (place, riders) => {
+  live.room = place;
+  live.riders = new Map(riders.map((r) => [r.id, { name: r.name, slot: r.slot }]));
+  live.standings = [];
+  live.standingsSaid = false;
+  live.ready = false;
+  syncNet();
+};
+// The game shows those riding with him, and says what he does, once it is
+// at the place they ride (and built), riding it together; and nobody
+// otherwise. It is told so as that changes.
+const syncNet = () => {
+  const ready = live.room !== 0 && live.room === liveRoom() && isRound(placeNow) && headed === null && !document.body.classList.contains("loading") && !document.hidden;
+  if (ready === live.ready) return;
+  live.ready = ready;
+  live.lines = ["clear", `send ${ready ? 1 : 0}`];
+  if (ready) for (const [id, r] of live.riders) live.lines.push(`join ${id} ${r.slot} ${clean(r.name)}`);
+};
+// What the game says of him, on to the others; and his score for a round.
+const sayLive = (state) => {
+  if (live.ready && live.ws?.readyState === WebSocket.OPEN && /^[-0-9 ]+$/.test(state)) live.ws.send(`s ${state}`);
+};
+const scoreRound = (round, score, full) => {
+  if (live.room === ROUND_BASE && live.ws?.readyState === WebSocket.OPEN && Number.isInteger(round) && Number.isInteger(score)) live.ws.send(JSON.stringify({ t: "score", round, score, full }));
+};
+// Told the game once a frame, all together (as the sheets are: see
+// flushUi): the round under way, as each comes (or that there is none,
+// riding together no longer); the standings, as they change; and the
+// rest, each state with how long ago it came.
+const flushNet = () => {
+  if (!gameFs || !sendKey) return;
+  const lines = [];
+  const round = togetherRide() ? roundNow() : null;
+  if ((round?.number ?? 0) !== live.roundSaid) {
+    live.roundSaid = round?.number ?? 0;
+    lines.push(round ? `round ${round.number} ${round.place} ${Math.round(round.into)} ${ROUND_MS} ${live.slot}` : "round 0");
+  }
+  if (!live.standingsSaid && togetherRide()) {
+    live.standingsSaid = true;
+    lines.push("standings", ...live.standings.map((r) => `stand ${r.slot} ${r.last} ${r.avg ?? -1} ${r.id === live.you ? 1 : 0} ${clean(r.name)}`));
+  }
+  if (!lines.length && !live.lines.length) return;
+  const now = performance.now();
+  const text = [...lines, ...live.lines.map((l) => (typeof l === "string" ? l : `state ${l.id} ${Math.round(now - l.came)} ${l.state}`))].join("\n");
+  gameFs.writeFile("net.txt", `${text}\n`);
+  live.lines = [];
+  typeKeys([NET_KEY]);
+};
+
 // The tutorial (see programs/skate/tutorial.l8). The game rides a run of
 // it itself, with thumbs of its own on the controls, and says what it is
 // doing (L8SAY, with what kind of thing it is: a line of that run, 1; its
@@ -765,6 +1000,7 @@ const gameSays = (line) => {
     }
     document.body.classList.toggle("loading", words[1] === "1");
     stepWhenReady();
+    syncNet();
   }
   else if (words[0] === "L8OVER") document.body.classList.toggle("over", words[1] === "1");
   else if (words[0] === "L8SAY") say(Number(words[1]), words.slice(2).join(" "));
@@ -799,6 +1035,8 @@ const gameSays = (line) => {
       present();
     }
   }
+  else if (words[0] === "L8NET") sayLive(line.trim().slice(6));
+  else if (words[0] === "L8ROUND") scoreRound(Number(words[1]), Number(words[2]), words[3] === "1");
   else if (words[0] === "L8REPLAY") postRun(Number(words[1]), Number(words[2]), Number(words[3]), words.slice(4).join(" "));
   else if (words[0] === "L8COURSE") {
     placeNow = Number(words[1]);
@@ -807,7 +1045,10 @@ const gameSays = (line) => {
     document.body.classList.toggle("park", placeNow < 0);
     document.body.classList.toggle("tutorial", inTutorial(placeNow));
     stepWhenReady();
-    if (!inTutorial(placeNow)) {
+    syncNet();
+    // (Where he was last, to start at next time: not a round, long gone by
+    // then.)
+    if (!inTutorial(placeNow) && !isRound(placeNow)) {
       store("skate.course", placeNow);
       store("skate.tutorial", true);
     }
@@ -849,7 +1090,8 @@ const onTap = (name) => {
     else if (page === "place") go("place", Number(of));
     else if (page === "lesson") go("lesson", Number(of));
     else if (page === "person") go("person", of);
-  } else if (what === "random") go("place", randomPlace(arg));
+  } else if (what === "together") goTogether();
+  else if (what === "random") go("place", randomPlace(arg));
   else if (what === "me") {
     // (Where more than one has played here: who plays.)
     if (people.everyone().length > 1) go("players");
@@ -876,6 +1118,7 @@ const onTap = (name) => {
     calendarMonth = m + by < 1 ? (y - 1) * 100 + 12 : m + by > 12 ? (y + 1) * 100 + 1 : y * 100 + m + by;
     showPage();
   } else if (what === "watch") watchRun(rest[0], Number(rest[1]));
+  else if (what === "line") watchLine(Number(arg));
 };
 let toggleStats = null;
 
@@ -930,6 +1173,11 @@ const showMenu = () => {
   blocks.push(["item", "go:places:parks", "Park", "", "plain"]);
   // (One big air is enough.)
   blocks.push(["item", `go:place:${BIG_AIR + 1}`, "Big air", "", "plain"]);
+  // (Riding together is with those he sees, so for someone.)
+  if (mySecret) {
+    const riding = live.lobby.find(({ place }) => place === ROUND_BASE)?.names.length ?? 0;
+    blocks.push(["item", "together", "Together", riding ? `${riding} riding` : "", "plain"]);
+  }
   if (mySecret) {
     blocks.push(["head", "Activity"], ["feed", 4]);
     const runs = feed().slice(0, FEED);
@@ -1048,7 +1296,10 @@ const showPlace = () => {
     rows = runs.map((run, i) => row("", false, ...(best ? [["n", "", `${i + 1}.`]] : []), ["what", "", ago(run.at)], ["score", "", run.score], ...(run.top ? watchCell(run, id) : [])));
   } else if (best) rows = bestsOn(id).map((run, i) => row("", run.name === account?.name, ["n", "", `${i + 1}.`], nameCell(run), ["score", "", run.score], ...watchCell(run, id)));
   else rows = recentOn(id).map((run) => row("", run.name === account?.name, nameCell(run), ["when", "", ago(run.at)], ["score", "", run.score]));
-  blocks.push(["gap", 4], ...(rows.length ? rows : [["empty", "No runs yet"]]), listRoom(rows));
+  // Above the best, the place's best line, if this game can play it.
+  const line = lines.get(id);
+  const lineRow = best && line && line.version === gameVersion ? [row("", false, ["what", "", "Best line"], ["score", "", line.score], ["watch", `line:${id}`, ""])] : [];
+  blocks.push(["gap", 4], ...lineRow, ...(rows.length ? rows : [["empty", "No runs yet"]]), listRoom([...lineRow, ...rows]));
   return { place: "dock", wide: 440, blocks };
 };
 
@@ -1109,6 +1360,8 @@ let statsWords = "";
 let statsRoom = "";
 let statsOn = false;
 const HELP = "Arrows steer · hold Space, tap arrows, let go to jump · Space in the air grabs · R restart · H home";
+// (Riding together, the round goes on as it does: nothing restarts it.)
+const TOGETHER_HELP = "Arrows steer · hold Space, tap arrows, let go to jump · Space in the air grabs · H home";
 const syncChrome = () => {
   const body = document.body.classList;
   const sheet = sheetOpen();
@@ -1131,7 +1384,9 @@ const syncChrome = () => {
   chrome("load", sheet ? (sheetNow() === "place" ? 2 : 0) : 1);
   chrome("overlay", overlayWord);
   // (The keys' help, where there is room for it along the top.)
-  chrome("help", !touch && !sheet && !lesson && innerWidth >= 760, HELP);
+  chrome("help", !touch && !sheet && !lesson && innerWidth >= 760, togetherRide() ? TOGETHER_HELP : HELP);
+  // Who is riding with him, riding together.
+  chrome("together", togetherRide() && !sheet, liveWords(), [...live.riders.values()].map((r) => r.slot).join(" "));
 };
 
 // Where the game starts: the place he was last at (an earlier day's
@@ -1567,6 +1822,7 @@ async function main() {
     // the game, at once.)
     syncChrome();
     flushUi();
+    flushNet();
     const gap = now - pace.last;
     pace.last = now;
     rate.frames++;

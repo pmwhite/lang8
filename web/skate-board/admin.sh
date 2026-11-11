@@ -8,10 +8,25 @@
 #   ./admin.sh reports [query]   the latest reports, a line each, newest first;
 #                       query as kind=error, kind=perf, person=NAME, session=ID, limit=200
 #   ./admin.sh report ID   one report in full (or SESSION, for all of a visit)
+#   ./admin.sh line FILE   post a replay (as .build/skate-route writes one) as
+#                       its place's best line, kept if it beats the one there
+#   ./admin.sh churn [PLACE...]   search each place (by default slopestyles
+#                       1-5, today's, and big air) for its best line, wider
+#                       each round, posting each line found; until stopped
 set -eu
 site=${SKATE_API:-https://trailingwhite.space/skate}
 secret=${SKATE_ADMIN:-$(cat "$HOME/.config/skate-board/admin-secret")}
 get() { curl -sS "$site/api/admin/$1" -H "authorization: Bearer $secret"; }
+root=$(cd "$(dirname "$0")/../.." && pwd)
+route=${SKATE_ROUTE:-$root/.build/skate-route}
+# post_line FILE: a replay file is "version place score name steps...".
+post_line() {
+  read -r version course score name replay < "$1"
+  jq -n --argjson course "$course" --argjson score "$score" --argjson version "$version" --arg replay "$replay" \
+    '{course: $course, score: $score, version: $version, replay: $replay}' |
+    curl -sS "$site/api/admin/line" -H "authorization: Bearer $secret" -H "content-type: application/json" --data-binary @-
+  echo
+}
 case "${1:-}" in
   last) get last; echo ;;
   reports)
@@ -27,5 +42,19 @@ case "${1:-}" in
       *[!0-9]*) get "reports?session=$2&limit=500" | jq '.reports | reverse | .[]' ;;
       *) get "reports?limit=500" | jq --argjson id "$2" '.reports[] | select(.id == $id)' ;;
     esac ;;
-  *) sed -n '2,10p' "$0" ;;
+  line) post_line "$2" ;;
+  churn)
+    [ -x "$route" ] || { echo "no $route: make skate-route first" >&2; exit 1; }
+    shift
+    places=${*:-"1 2 3 4 5 $(TZ=America/New_York date +%Y%m%d) 200000001"}
+    out=$(mktemp -d)
+    keep=24
+    while :; do
+      for place in $places; do
+        echo "place $place, keeping $keep a metre:"
+        if "$route" "$place" --keep "$keep" --out "$out/line" 2>/dev/null | grep '^in all'; then post_line "$out/line"; fi
+      done
+      keep=$((keep * 2))
+    done ;;
+  *) sed -n '2,15p' "$0" ;;
 esac

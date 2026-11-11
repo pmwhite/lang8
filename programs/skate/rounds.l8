@@ -1,0 +1,339 @@
+tag skate;
+
+use_tag std;
+
+// Riding together is one endless run, the same for everyone at once (see
+// "riding together" in web/skate/skate.js): a round every so often, each
+// down a new stretch of hill laid out from the round's number, which the
+// page tells the game as it comes (see round_take). Nobody needs to wait
+// for anybody: whoever comes rides the round under way.
+//
+// A round keeps everyone together. All wait at its top until the gate
+// opens, GATE_TIME into it, and drop in at once. Whoever finishes rolls to
+// a stop past the finish and waits there, the standings up, for the next
+// round; whoever falls far behind the pack's pace (see pace_d) is pushed
+// along (see behind_pace, in slope.l8); and whoever has not finished when
+// the round is over is scored as far as they got. Then everyone goes on to
+// the next stretch together. Someone who comes part way through a round
+// starts with the pack, where its pace has got to; that round does not
+// count toward their average (see round_full).
+//
+// Each round's score is told to the page (L8ROUND), and the worker keeps
+// the standings: each rider's last round and a running average that
+// favors recent rounds (see Live, in web/skate-board/worker.js), told back
+// as lines of net.txt (see stand_line).
+//
+// Whether a round is being ridden; its number, its place (see go_to), how
+// long it has gone on and lasts (s), and his slot (where he stands at the
+// gate: see gate_x). Whether he has been put on it yet, and from its gate
+// (rather than part way through); whether its score has been told.
+round_on: bool = false;
+
+round_number: int = 0;
+
+round_place: int = 0;
+
+round_t: f32 = 0.0;
+
+round_len: f32 = 45.0;
+
+round_slot: int = 0;
+
+round_placed: bool = false;
+
+round_full: bool = false;
+
+round_said: bool = false;
+
+// The gate opens this long into a round; and the pack's pace comes to the
+// finish this share of the way through the time left after that, so that
+// most finish with a little while to wait.
+const GATE_TIME: f32 = 4.0;
+
+const PACE_SHARE: f32 = 0.8;
+
+// How far behind the pace he may fall before he is pushed (m).
+const PACE_SLACK: f32 = 25.0;
+
+// Where the riders stand at the gate (m down the run), and how far apart
+// across it.
+gate_d(): f32 {
+    COURSE_START + 7.0
+}
+
+gate_x(slot: int): f32 {
+    (absi(slot) % 5 - 2) as f32 * 2.0
+}
+
+// How fast the pack's pace goes (m/s), and how far down the run it is t
+// seconds into the round.
+pace_speed(): f32 {
+    (course_finish - gate_d()) / maxf((round_len - GATE_TIME) * PACE_SHARE, 1.0)
+}
+
+pace_d(t: f32): f32 {
+    gate_d() + maxf(t - GATE_TIME, 0.0) * pace_speed()
+}
+
+// The page says a round is under way (round_number, its place, ms into
+// it, its length in ms, his slot), or that he rides no rounds now
+// (number 0). (A round before it, unscored yet, is scored as it stands.)
+round_take(
+    number: int,
+    place: int,
+    into: int,
+    length: int,
+    slot: int
+) raises IoError {
+    if (number != round_number) round_tell();
+    if (number == 0) {
+        round_on = false;
+        round_number = 0;
+        return
+    }
+    if (number != round_number || !round_on) {
+        round_placed = false;
+        round_said = false;
+        round_full = false
+    }
+    round_on = true;
+    round_number = number;
+    round_place = place;
+    round_t = into as f32 / 1000.0;
+    round_len = maxf(length as f32 / 1000.0, GATE_TIME + 10.0);
+    round_slot = slot
+}
+
+// Tell the page the round's score, once: what he has scored so far, and
+// whether he rode it from its gate.
+round_tell() raises IoError {
+    if (!round_on || !round_placed || round_said) return;
+    round_said = true;
+    write(1, "L8ROUND ");
+    write_int(1, round_number);
+    write(1, " ");
+    write_int(1, run.total);
+    write(1, " ");
+    write_int(1, round_full as int);
+    print("")
+}
+
+// Each frame (dt seconds on): the round's time on; the game asked to go to
+// its place, if it is not there; its score told once it is final (he has
+// finished, and the run has closed: see FINISH_TAIL), or the round is
+// over; and how far behind the pace he is, for the pushing.
+round_tick(m: *Mover, dt: f32) raises IoError {
+    behind_pace = 0.0;
+    if (!round_on) return;
+    round_t = round_t + dt;
+    if (run_id() != round_place) {
+        ask_go(round_place);
+        return
+    }
+    if (!round_placed) return;
+    if (run.closed || round_t >= round_len) round_tell();
+    if (!m.finished && round_t > GATE_TIME) behind_pace = maxf(pace_d(round_t) - PACE_SLACK + m.z,
+        0.0)
+}
+
+// Whether he is to be put on the round now: the game is at its place, and
+// he has not been put there yet.
+round_due(): bool {
+    round_on && !round_placed && run_id() == round_place && hud_building == 0
+}
+
+// Put him on the round, at the top of its run (as start_over has him):
+// before the gate opens, at his place at the gate; after, where the pace
+// has got to, going at its speed, on clear ground (not on a jump or in a
+// pipe).
+round_put(m: *Mover) {
+    start_over(m);
+    round_placed = true;
+    round_full = round_t < GATE_TIME;
+    if (round_full) m.x = gate_x(round_slot) else {
+        d: f32 = clampf(pace_d(round_t), gate_d(), course_finish + 20.0);
+        back: int = 0;
+        while (back < 60 && (features_at(0.0, d) != 0.0 || in_pipe(d))) {
+            d = d - 1.0;
+            back = back + 1
+        }
+        m.z = -d;
+        m.speed = pace_speed();
+        m.vz = -m.speed
+    }
+    m.y = course_height(m.x, m.z);
+    m.prev = v3(m.x, m.y, m.z)
+}
+
+// Whether he waits at the gate (and nothing moves him).
+round_held(): bool {
+    round_on && round_placed && round_full && round_t < GATE_TIME
+}
+
+// ---- the standings ----
+// As the worker last told them, best first: each rider's slot, last
+// round's score, average (or -1, none yet), whether it is him, and name.
+const MAX_STANDING: int = 17;
+
+stand_n: int = 0;
+
+stand_slot: []int = new int[MAX_STANDING](0);
+
+stand_last: []int = new int[MAX_STANDING](0);
+
+stand_avg: []int = new int[MAX_STANDING](0);
+
+stand_mine: []bool = new bool[MAX_STANDING](false);
+
+stand_names: []i8 = new i8[MAX_STANDING * NAME_MAX](0i8);
+
+stand_name_n: []int = new int[MAX_STANDING](0);
+
+// How far the standings have come up (0 to 1).
+stand_a: f32 = 0.0;
+
+// A line of net.txt for them (see net_line): `standings` starts them
+// afresh; each `stand SLOT LAST AVG MINE NAME` is the next.
+stand_clear() {
+    stand_n = 0
+}
+
+stand_line(
+    slot: int,
+    last: int,
+    avg: int,
+    mine: bool,
+    name: []i8,
+    from: int,
+    to: int
+) {
+    if (stand_n >= MAX_STANDING) return;
+    k: int = stand_n;
+    stand_slot[k] = slot;
+    stand_last[k] = last;
+    stand_avg[k] = avg;
+    stand_mine[k] = mine;
+    n: int = mini(to - from, NAME_MAX);
+    for i in 0..n stand_names[k * NAME_MAX + i] = name[from + i];
+    stand_name_n[k] = n;
+    stand_n = k + 1
+}
+
+// A whole number's digits, for the standings' columns.
+num_buf: []i8 = new i8[16](0i8);
+
+num_n: int = 0;
+
+num_set(v: int) {
+    num_n = 0;
+    if (v < 0) {
+        num_buf[0] = 45i8;
+        num_n = 1;
+        return
+    }
+    digits: int = 1;
+    while (digits * 10 <= v) digits = digits * 10;
+    while (digits > 0) {
+        num_buf[num_n] = (v / digits % 10 + 48) trunc i8;
+        num_n = num_n + 1;
+        digits = digits / 10
+    }
+}
+
+// ---- over the scene ----
+// The round's clock: before the gate opens, how long until it does, large
+// in the middle; riding, the time left, at the top right (as a park's),
+// large and red at the last. And finished, the standings, along the
+// bottom (where nothing else is then), with how long until the next
+// round.
+put_round_hud(w: f32, finished: bool) {
+    if (!round_on || !round_placed) return;
+    px: f32 = hud_scale(w as int);
+    hud_px = px;
+    top: f32 = corner_top(px);
+    left: int = maxi((round_len - round_t + 0.99) as int, 0);
+    if (round_t < GATE_TIME) {
+        hud_px = px * 2.5;
+        text_len = 0;
+        append_int(maxi((GATE_TIME - round_t + 0.99) as int, 1));
+        put_text(floorf((w - text_width()) * 0.5), floorf(screen_h as f32 * 0.22),
+            1.0, 0.98, 0.92, 0.9);
+        hud_px = px
+    } else if (!finished) {
+        text_len = 0;
+        append("TIME ");
+        append_int(left);
+        if (left <= 10) {
+            hud_px = px * 2.0;
+            put_text(floorf((w - text_width()) * 0.5), floorf(screen_h as f32 * 0.22),
+                1.0, 0.45, 0.38, 0.9 * smoothstepf(10.0, 9.5, round_len - round_t));
+            hud_px = px
+        } else put_text(w - text_width() - 3.0 * px - 10.0, 36.0 * px + top, 1.0,
+            0.84, 0.32, 0.9)
+    }
+    stand_a = step_to(stand_a, b01(finished), ui_dt / 0.3);
+    if (stand_a > 0.0) put_standings(w, left)
+}
+
+// The standings: a dark card along the bottom, above the page's buttons
+// in its corner, a row each, best first: place, a dot in their color (his
+// own red), name, last round, average; and at its foot, how many seconds
+// are left until the next round.
+put_standings(w: f32, left: int) {
+    ts: f32 = U(13.0);
+    row: f32 = U(24.0);
+    head: f32 = U(26.0);
+    padx: f32 = U(14.0);
+    cw: f32 = minf(U(340.0), w - edge_l() - edge_r());
+    foot: f32 = U(30.0);
+    ch: f32 = head + row * stand_n as f32 + foot;
+    x: f32 = (w - cw) * 0.5;
+    y: f32 = screen_h as f32 - edge_b() - 2.0 * round_r() - U(12.0) - ch + U(10.0) * (1.0 - smooth(stand_a));
+    col_avg: f32 = x + cw - padx;
+    col_last: f32 = col_avg - U(64.0);
+    paint_alpha = stand_a;
+    paint_shadow(x, y, cw, ch, U(12.0), U(4.0), U(12.0), 0.35);
+    paint_edge(maxf(1.0, U(1.0)), false, 0.14);
+    paint_box(x, y, cw, ch, U(12.0), 0.09, 0.08, 0.075, 0.9);
+    hy: f32 = y + head * 0.5 + U(10.0) * 0.36 + U(3.0);
+    hs: f32 = U(10.5);
+    paint_str(BOLD, hs, 0.08, x + padx, hy, "STANDINGS", GOLD_R, GOLD_G, GOLD_B, 0.9);
+    paint_str(BOLD, hs, 0.08, col_last - text_wide_str(BOLD, hs, 0.08, "ROUND"), hy,
+        "ROUND", 0.6, 0.64, 0.71, 1.0);
+    paint_str(BOLD, hs, 0.08, col_avg - text_wide_str(BOLD, hs, 0.08, "AVERAGE"),
+        hy, "AVERAGE", 0.6, 0.64, 0.71, 1.0);
+    for k in 0..stand_n {
+        ry: f32 = y + head + row * k as f32 + row * 0.5;
+        by: f32 = ry + ts * 0.36;
+        r: f32 = INK_R;
+        g: f32 = INK_G;
+        b: f32 = INK_B;
+        if (stand_mine[k]) {
+            r = GOLD_R;
+            g = GOLD_G;
+            b = GOLD_B
+        }
+        num_set(k + 1);
+        paint_text(READ, ts, 0.0, true, x + padx, by, num_buf, 0, num_n, SEMI, 0.0,
+            0.6, 0.64, 0.71, 1.0);
+        c: V3 = rider_color(stand_slot[k]);
+        if (stand_mine[k]) c = body_color;
+        paint_disc(x + padx + U(24.0), ry, U(4.5), c.x, c.y, c.z, 1.0);
+        paint_text(READ, ts, 0.0, false, x + padx + U(36.0), by, stand_names, k * NAME_MAX,
+            k * NAME_MAX + stand_name_n[k], SEMI, 0.0, r, g, b, 1.0);
+        num_set(stand_last[k]);
+        paint_text(READ, ts, 0.0, true, col_last - text_wide(READ, ts, 0.0, true,
+            num_buf, 0, num_n), by, num_buf, 0, num_n, SEMI, 0.0, r, g, b, 0.75);
+        num_set(stand_avg[k]);
+        paint_text(BOLD, ts, 0.0, true, col_avg - text_wide(BOLD, ts, 0.0, true, num_buf,
+            0, num_n), by, num_buf, 0, num_n, SEMI, 0.0, r, g, b, 1.0)
+    }
+    text_len = 0;
+    append("Next round in ");
+    append_int(left);
+    fy: f32 = y + ch - foot * 0.5 + ts * 0.36;
+    paint_text(READ, ts, 0.0, true, x + (cw - text_wide(READ, ts, 0.0, true, text_buf,
+        0, text_len)) * 0.5, fy, text_buf, 0, text_len, SEMI, 0.0, 0.6, 0.64, 0.71,
+        1.0);
+    paint_alpha = 1.0
+}

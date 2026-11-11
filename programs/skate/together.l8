@@ -1,0 +1,748 @@
+tag skate;
+
+use_tag std;
+
+// Riding together: others riding the same place as he is, live, each
+// drawn as he is (in a color of their own, with their name over them) and
+// riding as they rode a moment ago. The page (see "together" in
+// web/skate/skate.js) carries what this game says of him to the others'
+// games, through the leaderboards' worker (see Live, in
+// web/skate-board/worker.js), and what theirs say back:
+//
+//   game -> page   L8NET and his state (see say_state), NET_HZ times a
+//                  second, while the page wants it
+//   page -> game   the file net.txt, and the key NET_KEY to say it is
+//                  there: a line each, of
+//                    send 0|1              whether to say his state
+//                    clear                 nobody else is here (any more)
+//                    join ID SLOT NAME     someone is here
+//                    leave ID              they have gone
+//                    state ID AGE FIELDS   their state, as their game said
+//                                          it, which came AGE ms ago
+//                    round N PLACE INTO LENGTH SLOT   the round under way
+//                                          (see rounds.l8), or none (N 0)
+//                    standings             the standings, afresh: then
+//                    stand SLOT LAST AVG MINE NAME    each rider's
+//
+// Their states come unevenly, some late and a few together; drawn as they
+// came, they would jerk. So each is shown a little in the past, on a clock
+// of their own that runs far enough behind their latest state to have the
+// one after it in hand nearly always (see Other.delay). Between two
+// states, they move on a curve through both that keeps their speed at each
+// (see sample_other). Their clock never jumps: it runs a little fast or
+// slow to keep its distance, and as it comes near their latest state with
+// no later one come (the way stalls, say), it slows, so that they ride on
+// in slow motion rather than stop dead or go where they did not; when
+// states come again it picks up again (see tick_other). What jump is left
+// (a stall longer than all that) is taken up over a moment (see
+// Other.err).
+const NET_KEY: int = 65302;
+
+// What a state says, in order (all whole numbers): this format's number,
+// NET_FORMAT; when it was so (in the game's milliseconds); the place (see
+// run_id: others' states of another place are not shown); which run it
+// is of (see course_starts); where he is and how fast he goes (mm, and mm
+// a second, each of x, y, z); his heading, speed and how fast he turns
+// (mrad, mm a second, mrad a second); his flip and spin and how fast they
+// turn (mrad, and mrad a second, each); his wind-up (thousandths); since
+// he popped, since a sketchy landing, and how long he has grabbed (ms);
+// and what he is doing (FLAG_ bits).
+const NET_FORMAT: int = 2;
+
+const NET_HZ: f32 = 20.0;
+
+const FLAG_AIR: int = 1;
+
+const FLAG_GRIND: int = 2;
+
+const FLAG_FAKIE: int = 4;
+
+const FLAG_WINDING: int = 8;
+
+// How many others can be shown at once (more than can ride a place with
+// him: see LIVE_ROOM, in the worker; any more are left out), how many of each one's states are kept, and
+// how long a name may be.
+const MAX_OTHERS: int = 16;
+
+const KEEP_MOMENTS: int = 16;
+
+const NAME_MAX: int = 24;
+
+// One of their states.
+type Moment = {
+    t: int;
+    run: int;
+    pos: V3;
+    vel: V3;
+    heading: f32;
+    speed: f32;
+    turn_rate: f32;
+    flip: f32;
+    flip_w: f32;
+    spin: f32;
+    spin_w: f32;
+    wind_x: f32;
+    wind_y: f32;
+    since_hop: f32;
+    sketch_t: f32;
+    grab_t: f32;
+    flags: int
+}
+
+no_moment(): Moment {
+    Moment {
+        t: 0,
+        run: 0,
+        pos: v3(0.0, 0.0, 0.0),
+        vel: v3(0.0, 0.0, 0.0),
+        heading: 0.0,
+        speed: 0.0,
+        turn_rate: 0.0,
+        flip: 0.0,
+        flip_w: 0.0,
+        spin: 0.0,
+        spin_w: 0.0,
+        wind_x: 0.0,
+        wind_y: 0.0,
+        since_hop: 10.0,
+        sketch_t: 10.0,
+        grab_t: 0.0,
+        flags: 0
+    }
+}
+
+// Another rider, as shown.
+type Other = {
+    // The worker's number for them, or 0 where there is nobody; their slot
+    // (their color: see rider_color); how long their name is (its bytes
+    // are in other_names).
+    id: int;
+    slot: int;
+    name_n: int;
+    // How many of their states are kept (oldest first, in moments).
+    n: int;
+    // Their clock: the time of theirs shown now (in their game's
+    // milliseconds), whether it has been set, and how fast it runs: a
+    // little faster or slower than ours to keep its distance (steer), and
+    // slower still running out of states (dry). Against ours: the least
+    // that their states have seemed to take to come (the time one came, by
+    // our clock, less the time it was said, by theirs: the gap between the
+    // clocks is most of it), how much longer than that they have lately
+    // taken, and how far behind their latest the clock is kept for it.
+    // And the longest lately between two states (said a frame of theirs
+    // after they are due, they come a little unevenly).
+    clock: f64;
+    clocked: bool;
+    steer: f32;
+    dry: f32;
+    lag: f64;
+    late: f32;
+    delay: f32;
+    gap: f32;
+    // How far they have come into view, from 0 to 1 (growing as they come,
+    // and come back to the top; shrinking as they go), and whether they
+    // are going.
+    shown: f32;
+    going: bool;
+    // Where the curve put them last frame, how fast it was going, and
+    // whether they were held at their latest state, there being none
+    // later; what is left of a jump in it, being taken up; and which run
+    // they were on, and whether in the air, and how fast they were falling
+    // there.
+    at: V3;
+    at_v: V3;
+    held: bool;
+    err: V3;
+    run: int;
+    air: bool;
+    fall: f32
+}
+
+no_other(): Other {
+    Other {
+        id: 0,
+        slot: 0,
+        name_n: 0,
+        n: 0,
+        clock: 0.0f64,
+        clocked: false,
+        steer: 1.0,
+        dry: 1.0,
+        lag: 0.0f64,
+        late: 0.0,
+        delay: 150.0,
+        gap: 1000.0 / NET_HZ,
+        shown: 0.0,
+        going: false,
+        at: v3(0.0, 0.0, 0.0),
+        at_v: v3(0.0, 0.0, 0.0),
+        held: false,
+        err: v3(0.0, 0.0, 0.0),
+        run: 0,
+        air: false,
+        fall: 0.0
+    }
+}
+
+others: []Other = new Other[MAX_OTHERS](no_other());
+
+moments: []Moment = new Moment[MAX_OTHERS * KEEP_MOMENTS](no_moment());
+
+other_names: []i8 = new i8[MAX_OTHERS * NAME_MAX](0i8);
+
+// What pose() is given for each, as for him (see together_begin).
+other_movers: []*Mover = new *Mover[MAX_OTHERS](new_mover());
+
+other_anims: []*Anim = new *Anim[MAX_OTHERS](new_anim(0.0, 0.0));
+
+together_begin() noregion {
+    for i in 0..MAX_OTHERS {
+        other_movers[i] = new_mover();
+        other_anims[i] = new_anim(0.0, 0.0)
+    }
+}
+
+// Whether the page wants his state said.
+net_send: bool = false;
+
+// ---- reading what the page says ----
+net_in: []i8 = new i8[262144](0i8);
+
+net_n: int = 0;
+
+// Where the line being read is read up to, and where it ends.
+net_at: int = 0;
+
+net_end: int = 0;
+
+// The next word of the line, as a whole number (0 if there is none).
+net_int(): int {
+    while (net_at < net_end && net_in[net_at] == 32i8) net_at = net_at + 1;
+    v: int = 0;
+    sign: int = 1;
+    if (net_at < net_end && net_in[net_at] == 45i8) {
+        sign = -1;
+        net_at = net_at + 1
+    }
+    while (net_at < net_end && net_in[net_at] >= 48i8 && net_in[net_at] <= 57i8) {
+        v = v * 10 + (net_in[net_at] - 48i8) as int;
+        net_at = net_at + 1
+    }
+    sign * v
+}
+
+// Whether the line's first word is w (and if so, past it).
+net_word(w: str): bool {
+    n: int = len(w);
+    if (net_end - net_at < n) return false;
+    for i in 0..n {
+        if (net_in[net_at + i] != w[i]) return false
+    }
+    if (net_at + n < net_end && net_in[net_at + n] != 32i8) return false;
+    net_at = net_at + n;
+    true
+}
+
+// The page has written: read it all, a line at a time. Now is our time,
+// in ms.
+net_read(now: f64) raises IoError {
+    fd: int = open("net.txt", 0, 0);
+    if (fd < 0) return;
+    net_n = 0;
+    more: bool = true;
+    while (more && net_n < len(net_in)) {
+        r: int = read(fd, net_in, net_n, len(net_in) - net_n);
+        if (r <= 0) more = false else net_n = net_n + r
+    }
+    close(fd);
+    i: int = 0;
+    while (i < net_n) {
+        e: int = i;
+        while (e < net_n && net_in[e] != 10i8) e = e + 1;
+        net_at = i;
+        net_end = e;
+        net_line(now);
+        i = e + 1
+    }
+}
+
+net_line(now: f64) raises IoError {
+    if (net_word("send")) {
+        net_send = net_int() == 1;
+        return
+    }
+    if (net_word("round")) {
+        number: int = net_int();
+        place: int = net_int();
+        into: int = net_int();
+        length: int = net_int();
+        round_take(number, place, into, length, net_int());
+        return
+    }
+    if (net_word("standings")) {
+        stand_clear();
+        return
+    }
+    if (net_word("stand")) {
+        slot: int = net_int();
+        last: int = net_int();
+        avg: int = net_int();
+        mine: bool = net_int() == 1;
+        if (net_at < net_end) net_at = net_at + 1;
+        stand_line(slot, last, avg, mine, net_in, net_at, net_end);
+        return
+    }
+    if (net_word("clear")) {
+        for i in 0..MAX_OTHERS others[i] = no_other();
+        return
+    }
+    if (net_word("join")) {
+        id: int = net_int();
+        slot: int = net_int();
+        i: int = other_index(id);
+        if (i < 0) i = other_index(0);
+        if (i < 0) return;
+        others[i] = no_other();
+        others[i].id = id;
+        others[i].slot = slot;
+        // (The rest of the line is the name.)
+        if (net_at < net_end) net_at = net_at + 1;
+        n: int = mini(net_end - net_at, NAME_MAX);
+        for k in 0..n other_names[i * NAME_MAX + k] = net_in[net_at + k];
+        others[i].name_n = n;
+        return
+    }
+    if (net_word("leave")) {
+        i: int = other_index(net_int());
+        if (i >= 0) others[i].going = true;
+        return
+    }
+    if (net_word("state")) {
+        i: int = other_index(net_int());
+        age: int = net_int();
+        if (i < 0 || net_int() != NET_FORMAT) return;
+        mo: Moment = no_moment();
+        mo.t = net_int();
+        if (net_int() != run_id()) return;
+        mo.run = net_int();
+        mo.pos = v3(milli(net_int()), milli(net_int()), milli(net_int()));
+        mo.vel = v3(milli(net_int()), milli(net_int()), milli(net_int()));
+        mo.heading = milli(net_int());
+        mo.speed = milli(net_int());
+        mo.turn_rate = milli(net_int());
+        mo.flip = milli(net_int());
+        mo.flip_w = milli(net_int());
+        mo.spin = milli(net_int());
+        mo.spin_w = milli(net_int());
+        mo.wind_x = milli(net_int());
+        mo.wind_y = milli(net_int());
+        mo.since_hop = milli(net_int());
+        mo.sketch_t = milli(net_int());
+        mo.grab_t = milli(net_int());
+        mo.flags = net_int();
+        take_moment(i, mo, now - age as f64)
+    }
+}
+
+milli(v: int): f32 {
+    v as f32 / 1000.0
+}
+
+// Where the rider the worker numbers id is kept (id 0: a free place), or
+// -1.
+other_index(id: int): int {
+    for i in 0..MAX_OTHERS {
+        if (others[i].id == id && (id != 0 || !others[i].going)) return i
+    }
+    -1
+}
+
+// How much later than the least, at the most, a state is taken to have
+// come, and how fast that is forgotten (a share each state: a stall is
+// remembered for some seconds, in case it was not the last); and how fast
+// the least is let creep up (ms a state), for if the way gets slower.
+const LATE_MAX: f32 = 600.0;
+
+const LATE_KEEP: f32 = 0.995;
+
+const LAG_CREEP: f64 = 0.2f64;
+
+// A state of theirs, come at `came` (our ms).
+take_moment(i: int, mo: Moment, came: f64) {
+    n: int = others[i].n;
+    base: int = i * KEEP_MOMENTS;
+    // (Only ever later than the last: one out of order is no use.)
+    if (n > 0 && mo.t <= moments[base + n - 1].t) return;
+    took: f64 = came - mo.t as f64;
+    if (n == 0 && !others[i].clocked) {
+        others[i].lag = took;
+        others[i].late = 0.0
+    } else {
+        lag: f64 = others[i].lag + LAG_CREEP;
+        if (took < lag) lag = took;
+        others[i].lag = lag;
+        late: f32 = minf((took - lag) as f32, LATE_MAX);
+        others[i].late = maxf(others[i].late * LATE_KEEP, late);
+        if (n > 0) others[i].gap = maxf(others[i].gap * LATE_KEEP, minf((mo.t - moments[base + n - 1].t) as f32,
+            LATE_MAX))
+    }
+    if (n == KEEP_MOMENTS) {
+        for k in 1..KEEP_MOMENTS moments[base + k - 1] = moments[base + k];
+        n = n - 1
+    }
+    moments[base + n] = mo;
+    others[i].n = n + 1
+}
+
+// ---- showing them ----
+// How far behind their latest state the clock is kept: the longest gap
+// between their states lately, how much later than the least they have lately come, and enough more to
+// stay clear of slowing for want of states (see RUN_DRY); within these
+// bounds (ms). It goes back quickly when they come later,
+// and forward slowly as they come on time again.
+const DELAY_LEAST: f32 = 150.0;
+
+const DELAY_MOST: f32 = 700.0;
+
+// How near their latest state (ms) the clock begins to slow, running out
+// of them (in proportion, so that it comes ever nearer and never there);
+// and how far off where it should be it may be before it is put there at
+// once (as when they have said nothing for a while).
+const RUN_DRY: f32 = 120.0;
+
+const CLOCK_FAR: f64 = 1500.0f64;
+
+// A jump further than this between two states is them put somewhere else
+// (as at the top again), not ridden (m).
+const JUMP_FAR: f32 = 6.0;
+
+// How long they take to come into view, and to go.
+const SHOW_TIME: f32 = 0.35;
+
+const GO_TIME: f32 = 0.3;
+
+// Each frame: their clocks on, and each of them where they were then. Now
+// is our time, in ms, and dt the seconds since the last frame.
+others_tick(now: f64, dt: f32) {
+    for i in 0..MAX_OTHERS {
+        if (others[i].id != 0) tick_other(i, now, dt)
+    }
+}
+
+tick_other(i: int, now: f64, dt: f32) {
+    if (others[i].going) {
+        others[i].shown = others[i].shown - dt / GO_TIME;
+        if (others[i].shown <= 0.0) others[i] = no_other();
+        return
+    }
+    if (others[i].n == 0) return;
+    want: f32 = clampf(others[i].gap + others[i].late + RUN_DRY + 15.0, DELAY_LEAST,
+        DELAY_MOST);
+    rate: f32 = 0.5;
+    if (want > others[i].delay) rate = 6.0;
+    others[i].delay = lerpf(others[i].delay, want, ease(rate, dt));
+    aim: f64 = now - others[i].lag - others[i].delay as f64;
+    off: f64 = aim - others[i].clock;
+    put: bool = !others[i].clocked || off > CLOCK_FAR || off < -CLOCK_FAR;
+    if (put) {
+        others[i].clock = aim;
+        others[i].clocked = true;
+        others[i].steer = 1.0;
+        others[i].dry = 1.0
+    } else {
+        others[i].steer = lerpf(others[i].steer, 1.0 + clampf(off as f32 * 0.0015,
+            -0.1, 0.1), ease(3.0, dt));
+        // (Slowing as it runs dry at once, as that comes on smoothly
+        // anyway; picking up again by degrees, as a state's coming would
+        // otherwise be a jolt.)
+        ahead: f32 = (moments[i * KEEP_MOMENTS + others[i].n - 1].t as f64 - others[i].clock) as f32;
+        dry: f32 = clampf(ahead / RUN_DRY, 0.0, 1.0);
+        if (dry < others[i].dry) others[i].dry = dry else others[i].dry = lerpf(others[i].dry,
+            dry, ease(5.0, dt));
+        others[i].clock = others[i].clock + (dt * 1000.0 * pace_of(i)) as f64
+    }
+    m: *Mover = other_movers[i];
+    got: Sampled = sample_other(i, others[i].clock, m);
+    p: V3 = v3(m.x, m.y, m.z);
+    v: V3 = v3(m.vx, m.vy, m.vz);
+    if (got.held) v = v3(0.0, 0.0, 0.0);
+    // Put somewhere else (back at the top, or come in view for the first
+    // time): there at once, coming into view. Otherwise, where the clock
+    // was put, or comes off their latest state onto a later one, the curve
+    // may jump from where it was going: the jump is taken up over a moment.
+    if (got.run != others[i].run || others[i].shown <= 0.0) {
+        others[i].run = got.run;
+        others[i].shown = 0.0;
+        others[i].err = v3(0.0, 0.0, 0.0);
+        others[i].air = m.air;
+        reset_anim(other_anims[i], m)
+    } else if (put || got.held != others[i].held) {
+        jump: V3 = v_sub(v_madd(others[i].at, others[i].at_v, dt * pace_of(i)), p);
+        if (v_len(jump) < JUMP_FAR) others[i].err = v_add(others[i].err, jump)
+    }
+    others[i].at = p;
+    others[i].at_v = v;
+    others[i].held = got.held;
+    others[i].err = v_scale(others[i].err, 1.0 - ease(10.0, dt));
+    m.x = m.x + others[i].err.x;
+    m.y = m.y + others[i].err.y;
+    m.z = m.z + others[i].err.z;
+    // Landing, they squash, as he does (see update_anim).
+    if (others[i].air && !m.air) m.land = maxf(-others[i].fall, 0.0);
+    if (m.air) others[i].fall = m.vy;
+    others[i].air = m.air;
+    others[i].shown = minf(others[i].shown + dt / SHOW_TIME, 1.0);
+    update_anim(other_anims[i], m, dt)
+}
+
+// How fast their clock runs, against ours.
+pace_of(i: int): f32 {
+    others[i].steer * others[i].dry
+}
+
+// An animation as it is for someone just put somewhere.
+reset_anim(a: *Anim, m: *Mover) {
+    a.* = still_anim.*;
+    a.y = m.y;
+    a.board_yaw = m.heading;
+    a.yaw = m.heading - PI * 0.5
+}
+
+still_anim: *Anim = new_anim(0.0, 0.0);
+
+// What sample_other found: which run they were on, and whether they were
+// held at their latest state, the clock being past it.
+type Sampled = {
+    run: int;
+    held: bool
+}
+
+// Set m to how they were at `clock`, on their clock.
+sample_other(i: int, clock: f64, m: *Mover): Sampled {
+    base: int = i * KEEP_MOMENTS;
+    n: int = others[i].n;
+    k: int = -1;
+    for j in 0..n {
+        if (moments[base + j].t as f64 <= clock) k = j
+    }
+    // Before the first kept, or after the last: held there. (Nothing is
+    // guessed of where they went: the clock slows rather than come to the
+    // last, if it can: see tick_other.)
+    if (k < 0) {
+        put_moment(m, moments[base]);
+        return Sampled { run: moments[base].run, held: true }
+    }
+    a: Moment = moments[base + k];
+    if (k == n - 1) {
+        put_moment(m, a);
+        return Sampled { run: a.run, held: true }
+    }
+    b: Moment = moments[base + k + 1];
+    span: f32 = (b.t - a.t) as f32 / 1000.0;
+    // (Put somewhere else between them: where each said.)
+    if (a.run != b.run || v_len(v_sub(b.pos, a.pos)) > JUMP_FAR + v_len(a.vel) * span) {
+        put_moment(m, a);
+        return Sampled { run: a.run, held: false }
+    }
+    s: f32 = clampf((clock - a.t as f64) as f32 / 1000.0 / span, 0.0, 1.0);
+    put_moment(m, a);
+    m.x = curve(a.pos.x, a.vel.x, b.pos.x, b.vel.x, span, s);
+    m.y = curve(a.pos.y, a.vel.y, b.pos.y, b.vel.y, span, s);
+    m.z = curve(a.pos.z, a.vel.z, b.pos.z, b.vel.z, span, s);
+    m.vx = lerpf(a.vel.x, b.vel.x, s);
+    m.vy = lerpf(a.vel.y, b.vel.y, s);
+    m.vz = lerpf(a.vel.z, b.vel.z, s);
+    m.heading = turn_between(a.heading, 0.0, b.heading, 0.0, span, s);
+    m.speed = lerpf(a.speed, b.speed, s);
+    m.turn_rate = lerpf(a.turn_rate, b.turn_rate, s);
+    m.flip = turn_between(a.flip, a.flip_w, b.flip, b.flip_w, span, s);
+    m.spin = turn_between(a.spin, a.spin_w, b.spin, b.spin_w, span, s);
+    m.wind_x = lerpf(a.wind_x, b.wind_x, s);
+    m.wind_y = lerpf(a.wind_y, b.wind_y, s);
+    // (Times since something go on from the first: a new one starts at the
+    // second.)
+    since: f32 = s * span;
+    m.since_hop = a.since_hop + since;
+    m.sketch_t = a.sketch_t + since;
+    Sampled { run: a.run, held: false }
+}
+
+// From p0 going at v0 to p1 going at v1, span seconds later: where it is
+// the share s of the way (a cubic Hermite curve).
+curve(
+    p0: f32,
+    v0: f32,
+    p1: f32,
+    v1: f32,
+    span: f32,
+    s: f32
+): f32 {
+    s2: f32 = s * s;
+    s3: f32 = s2 * s;
+    (2.0 * s3 - 3.0 * s2 + 1.0) * p0 + (s3 - 2.0 * s2 + s) * v0 * span + (3.0 * s2 - 2.0 * s3) * p1 + (s3 - s2) * v1 * span
+}
+
+// From angle a0, turning at w0, to a1, turning at w1, span seconds later:
+// the angle the share s of the way, going round as far as their rates say
+// it went (a whole turn and more, between two states, if it turns that
+// fast), evenly.
+turn_between(
+    a0: f32,
+    w0: f32,
+    a1: f32,
+    w1: f32,
+    span: f32,
+    s: f32
+): f32 {
+    expect: f32 = (w0 + w1) * 0.5 * span;
+    a0 + (wrap_angle(a1 - a0 - expect) + expect) * s
+}
+
+put_moment(m: *Mover, mo: Moment) {
+    m.x = mo.pos.x;
+    m.y = mo.pos.y;
+    m.z = mo.pos.z;
+    m.prev = mo.pos;
+    m.vx = mo.vel.x;
+    m.vy = mo.vel.y;
+    m.vz = mo.vel.z;
+    m.heading = mo.heading;
+    m.speed = mo.speed;
+    m.turn_rate = mo.turn_rate;
+    m.flip = mo.flip;
+    m.spin = mo.spin;
+    m.wind_x = mo.wind_x;
+    m.wind_y = mo.wind_y;
+    m.since_hop = mo.since_hop;
+    m.sketch_t = mo.sketch_t;
+    m.grab_t = mo.grab_t;
+    m.air = (mo.flags & FLAG_AIR) != 0;
+    m.grinding = (mo.flags & FLAG_GRIND) != 0;
+    m.fakie = (mo.flags & FLAG_FAKIE) != 0;
+    m.winding = (mo.flags & FLAG_WINDING) != 0;
+    if (m.air || m.grinding) m.ground_n = v3(0.0, 1.0, 0.0) else m.ground_n = course_normal(mo.pos.x,
+        mo.pos.z)
+}
+
+// Whether anyone else is here (and so the picture moves, if only with
+// them).
+others_here(): bool {
+    for i in 0..MAX_OTHERS {
+        if (others[i].id != 0) return true
+    }
+    false
+}
+
+// How far off they are still drawn (m): further, they are too small to
+// make out.
+const OTHERS_FAR: f32 = 160.0;
+
+// Add them to the draw list (after him: see pose), seen from eye.
+pose_others(eye: V3) {
+    for i in 0..MAX_OTHERS {
+        if (others[i].id != 0 && others[i].n > 0 && others[i].shown > 0.0) {
+            m: *Mover = other_movers[i];
+            p: V3 = v3(m.x, m.y, m.z);
+            if (v_len(v_sub(p, eye)) < OTHERS_FAR) pose_guy(other_anims[i], m, p,
+                other_figure(others[i].slot), smooth(others[i].shown))
+        }
+    }
+}
+
+// Their names over their caps (in the HUD's ink, to be read over anything:
+// they are in their colors below it), fading out with distance.
+put_others_names(eye: V3) {
+    for i in 0..MAX_OTHERS {
+        if (others[i].id != 0 && others[i].n > 0 && others[i].shown > 0.0) {
+            m: *Mover = other_movers[i];
+            p: V3 = v3(m.x, m.y + 1.55, m.z);
+            far: f32 = smoothstepf(70.0, 40.0, v_len(v_sub(p, eye)));
+            if (far > 0.0 && project(p)) {
+                text_len = 0;
+                for k in 0..others[i].name_n {
+                    if (text_len < len(text_buf)) {
+                        text_buf[text_len] = other_names[i * NAME_MAX + k];
+                        text_len = text_len + 1
+                    }
+                }
+                put_text(floorf(proj_x - text_width() * 0.5), floorf(proj_y - 8.0 * hud_px),
+                    1.0, 0.98, 0.92, 0.8 * far * smooth(others[i].shown))
+            }
+        }
+    }
+}
+
+// ---- saying his own ----
+// How long since his state was last said (s).
+net_due: f32 = 0.0;
+
+net_out: []i8 = new i8[512](0i8);
+
+net_out_n: int = 0;
+
+out_byte(c: i8) {
+    if (net_out_n < len(net_out)) {
+        net_out[net_out_n] = c;
+        net_out_n = net_out_n + 1
+    }
+}
+
+out_int(v: int) {
+    out_byte(32i8);
+    if (v < 0) out_byte(45i8);
+    digits: int = 1;
+    rest: int = absi(v);
+    while (rest >= 10) {
+        rest = rest / 10;
+        digits = digits * 10
+    }
+    rest = absi(v);
+    while (digits > 0) {
+        out_byte((rest / digits % 10 + 48) trunc i8);
+        digits = digits / 10
+    }
+}
+
+out_milli(v: f32) {
+    out_int(floorf(v * 1000.0 + 0.5) as int)
+}
+
+// Say his state, if it is time (NET_HZ times a second): `at` is when it
+// was, by our clock, in ms, and dt the seconds since the last frame.
+say_state(m: *Mover, at: f64, dt: f32) raises IoError {
+    net_due = net_due + dt;
+    if (net_due < 1.0 / NET_HZ) return;
+    net_due = minf(net_due - 1.0 / NET_HZ, 1.0 / NET_HZ);
+    net_out_n = 0;
+    for c in "L8NET" out_byte(c);
+    out_int(NET_FORMAT);
+    out_int(at as int);
+    out_int(run_id());
+    out_int(course_starts);
+    out_milli(m.x);
+    out_milli(m.y);
+    out_milli(m.z);
+    out_milli(m.vx);
+    out_milli(m.vy);
+    out_milli(m.vz);
+    out_milli(wrap_angle(m.heading));
+    out_milli(m.speed);
+    out_milli(m.turn_rate);
+    out_milli(m.flip);
+    out_milli(m.flip_w);
+    out_milli(m.spin);
+    out_milli(m.spin_w);
+    out_milli(m.wind_x);
+    out_milli(m.wind_y);
+    out_milli(minf(m.since_hop, 100.0));
+    out_milli(minf(m.sketch_t, 100.0));
+    out_milli(minf(m.grab_t, 100.0));
+    flags: int = 0;
+    if (m.air) flags = flags | FLAG_AIR;
+    if (m.grinding) flags = flags | FLAG_GRIND;
+    if (m.fakie) flags = flags | FLAG_FAKIE;
+    if (m.winding) flags = flags | FLAG_WINDING;
+    out_int(flags);
+    out_byte(10i8);
+    write_bytes_n(1, net_out, net_out_n)
+}

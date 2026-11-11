@@ -49,7 +49,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test game skate race cad recipes better bible-web bible-folios bible-tui bible-follow-test bible-spoken \
+.PHONY: all check fmt selfhost compiler-test game skate skate-route race cad recipes better bible-web bible-folios bible-tui bible-follow-test bible-spoken \
 	terminal callback-test http websocket wasm-test web \
 	profile-explorer \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
@@ -59,7 +59,7 @@ all:
 	@$(MAKE) -s $(OK)/fmt $(OK)/stage1-tests
 	@$(MAKE) -s check
 
-check: $(OK)/stage1-tests l8 $(BUILD)/block-game $(BUILD)/skate $(BUILD)/race $(BUILD)/cad $(BUILD)/recipes \
+check: $(OK)/stage1-tests l8 $(BUILD)/block-game $(BUILD)/skate $(BUILD)/skate-route $(BUILD)/race $(BUILD)/cad $(BUILD)/recipes \
 	$(BUILD)/profile-explorer \
 	$(BUILD)/better $(BUILD)/better-ios.s $(BUILD)/ios-check.s $(BUILD)/better-ios-sim $(BUILD)/better-android.s $(OK)/bible-web $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim $(BUILD)/hot-ios-sim \
 	$(BUILD)/bible-android.s $(BUILD)/skin-text $(BUILD)/smooth-bible
@@ -139,6 +139,11 @@ $(BUILD)/skate: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'skate' sh -c '$(call build,l8c3,programs/skate/main.l8)'
 
 skate: $(BUILD)/skate
+
+$(BUILD)/skate-route: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'skate-route' sh -c '$(call build,l8c3,programs/skate/route.l8)'
+
+skate-route: $(BUILD)/skate-route
 
 $(BUILD)/cad: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'cad' sh -c '$(call build,l8c3,programs/cad/main.l8)'
@@ -479,6 +484,7 @@ help:
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
 	@echo '  game, skate, race, cad, recipes'
+	@echo '  skate-route     the best line down a slopestyle: .build/skate-route COURSE'
 	@echo '  better, bible-web, bible-tui, bible-follow-test'
 	@echo '  terminal, callback-test'
 	@echo '  http, websocket, profile-explorer'
