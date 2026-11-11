@@ -101,15 +101,21 @@ uk_row_at(path: int): int {
     uk_row_of(msg(path, sel("section")), msg(path, sel("row")))
 }
 
-// Row r of section s (made now, a lazy section's), or -1.
+// Row r of section s (a lazy section's: its page asked for unless it is the
+// one decoded), or -1.
 uk_row_of(s: int, r: int): int {
     if (s < 0 || s >= uk_ui.sections_n || r < 0 || r >= uk_ui.sections[s].n) return -1;
     if (uk_ui.sections[s].lazy) {
-        if (uk_ui.window_section != s || uk_ui.window_row != r)
+        if (!uk_window_holds(s, r))
             if (!uk_wire_row_model(uk_ui.id, s, r)) return -1;
-        return uk_ui.sections[s].first
+        if (!uk_window_holds(s, r)) return -1;
+        return uk_ui.sections[s].first + r - uk_ui.window_row
     }
     uk_ui.sections[s].first + r
+}
+
+uk_window_holds(s: int, r: int): bool {
+    uk_ui.window_section == s && r >= uk_ui.window_row && r < uk_ui.window_row + uk_ui.window_n
 }
 
 // A row as the app's lists draw it: its words (a subtitle under, or a value
@@ -2204,6 +2210,13 @@ uk_hex_color(n: int): int {
 uk_segment_chosen(_self: int, _cmd: int, seg: int): int {
     k: int = msg(seg, sel("tag"));
     if (k < 0 || k >= UK_SLOTS || !uk_ensure(k)) return 0;
+    // (A search's scopes as its title, uk_make_search: a scope chosen.)
+    if (uk_ui.scopes.n > 0 && uk_ui.segments.n == 0) {
+        uk_search_flush();
+        uk_wire_pair("scope", uk_ids[k], msg(seg, sel("selectedSegmentIndex")));
+        uk_effects();
+        return 0
+    }
     action: int = uk_ui.segments_action;
     uk_wire_act(uk_ids[k], action, 0, msg(seg, sel("selectedSegmentIndex")));
     uk_effects();
@@ -3213,9 +3226,6 @@ uk_make_search(k: int, item: int) {
     }
     msg1(bar, sel("setDelegate:"), app_obj);
     if (uk_ui.scopes.n > 0) {
-        if ((msg1(sc, sel("respondsToSelector:"), sel("setScopeBarActivation:")) & 255) != 0) msg1(sc,
-            sel("setScopeBarActivation:"), 1);
-        msg1(sc, sel("setAutomaticallyShowsScopeBar:"), 0);
         // (Short titles, so none is cut off; the full names for VoiceOver.)
         n: int = uk_split(uk_ui.scopes, one);
         _l: int = uk_split(uk_ui.scope_labels, uk_labels);
@@ -3226,9 +3236,39 @@ uk_make_search(k: int, item: int) {
                 sel("setAccessibilityLabel:"), uk_labels[i]);
             one[i] = title
         }
-        msg1(bar, sel("setScopeButtonTitles:"), nsarray(one, n));
-        msg1(bar, sel("setSelectedScopeButtonIndex:"), uk_ui.scope);
-        msg1(bar, sel("setShowsScopeBar:"), 1)
+        if (search_floats()) {
+            // (Where the field floats at the foot, the scopes are the
+            // title, as a segmented control: the search bar's own scope bar
+            // is the navigation bar's then, and on a pushed screen comes
+            // only once the push has ended, and stays over the screen below
+            // as it is popped. A title moves with the push.)
+            seg: int = msg(msg1(msg(cls("UISegmentedControl"), sel("alloc")), sel("initWithItems:"),
+                nsarray(one, n)), sel("autorelease"));
+            msg3(seg, sel("addTarget:action:forControlEvents:"), app_obj, sel("coreSegment:"),
+                4096);
+            msg1(seg, sel("setTag:"), k);
+            msg1(seg, sel("setSelectedSegmentIndex:"), uk_ui.scope);
+            // (Each scope as wide as its words and SCOPE_ROOM more, as far
+            // as the bar's buttons leave room: a book's name, the longest,
+            // not up to the control's edge.)
+            if (responds(seg, "setApportionsSegmentWidthsByContent:")) msg1(seg, sel("setApportionsSegmentWidthsByContent:"),
+                1);
+            msg(seg, sel("sizeToFit"));
+            w: f64 = view_width(seg) + SCOPE_ROOM * n as f64;
+            most: f64 = view_width(window) - SCOPE_BUTTONS_W;
+            if (most > 0.0f64 && w > most) w = most;
+            // (A constraint: the bar lays a title out by its own size.)
+            msg_rect(seg, sel("setFrame:"), 0.0f64, 0.0f64, w, view_height(seg));
+            pin_size(seg, "widthAnchor", w);
+            msg1(item, sel("setTitleView:"), seg)
+        } else {
+            if ((msg1(sc, sel("respondsToSelector:"), sel("setScopeBarActivation:")) & 255) != 0) msg1(sc,
+                sel("setScopeBarActivation:"), 1);
+            msg1(sc, sel("setAutomaticallyShowsScopeBar:"), 0);
+            msg1(bar, sel("setScopeButtonTitles:"), nsarray(one, n));
+            msg1(bar, sel("setSelectedScopeButtonIndex:"), uk_ui.scope);
+            msg1(bar, sel("setShowsScopeBar:"), 1)
+        }
     }
     if (uk_ui.search_text.n > 0) msg1(bar, sel("setText:"), uk_text(uk_ui.search_text));
     msg1(item, sel("setSearchController:"), sc);
@@ -3243,12 +3283,23 @@ uk_make_search(k: int, item: int) {
     release(sc)
 }
 
+// The room added to each of a search's scopes as its title, and the bar's
+// width its buttons take (Back, Done, and their margins).
+SCOPE_ROOM: f64 = 20.0f64;
+
+SCOPE_BUTTONS_W: f64 = 140.0f64;
+
+// Whether a search field floats at a list's foot (iOS 26, an iPhone's).
+search_floats(): bool {
+    cls("UIScrollEdgeElementContainerInteraction") != 0 && !is_ipad()
+}
+
 // A field floating at a list's foot (iOS 26, an iPhone's) marked as an
 // element over the list's bottom edge, so that the list's rows soften
 // under it (the system's scroll edge effect) rather than show through it.
 search_edge(bar: int, t: int) {
+    if (!search_floats()) return;
     interaction_class: int = cls("UIScrollEdgeElementContainerInteraction");
-    if (interaction_class == 0 || is_ipad()) return;
     interaction: int = msg(msg(msg(interaction_class, sel("alloc")), sel("init")),
         sel("autorelease"));
     msg1(interaction, sel("setScrollView:"), t);

@@ -562,37 +562,59 @@ hands the actions back as for any screen.
   with the app), Browse (a row a kind with documents, and Languages, each
   with a count at its right; a tap puts its word in the field, `refill`
   then `retext`, as if it was typed).
-- Typed: the reference (a row to go there), Books of the Bible, then the
+- Typed: the reference (a row to go there: also a chapter and verse
+  alone, `3:16`, in the book read, and a book's name misspelt before a
+  chapter, `jhon 3`, `pslam 23`, a letter wrong, missing, extra or two
+  swapped, and numbered books' name without the number before a chapter
+  as the first's, `cor 13` 1 Corinthians 13), Books of the Bible (those
+  whose name, or a short name, the name typed begins, a numbered book's
+  past its number too, `cor` 1 and 2 Corinthians, in the Bible's order,
+  the reference's own among them; none when that is the reference's book
+  alone, `rom`, when a chapter typed chose the book, `john 3:16` but not
+  `cor 13`, or with words after the numbers), then the
   documents by kind (Bibles, Commentaries, Dictionaries, Devotionals,
-  Books), ordered open in a pane, read, coming with the app, in the
-  reader's language, the others; three a kind then `Show All N` (five for
+  Books; each word of the query beginning a word of the title, short
+  name or module's name, an apostrophe in either passed over: `pilgrims
+  progress`, `calvins`), ordered open in a pane, read, coming with the
+  app, in the reader's language, the others; three a kind then `Show All N` (five for
   a language named; twelve for a kind named alone, then its other
   languages, rows refining the query); for "languages", a row a language
   (its own name; its English name and a count); then, for three letters
   or more and no reference to a chapter, what the words find
   (`core/find.l8`, by the documents' word indexes: folio's README), the
-  last word typed taken as a word's beginning. Verses: every version here
-  with an index searched, each verse once (the version read's, else the
-  first other's, named after the reference: `John 4:10 · KJV`), the first
-  three as they rank where the reader is (the words as a phrase there,
-  then the chapter read, its book, its testament; the version read's
-  first at each), the words marked, a tap going there as Go To's places
+  last word typed taken as a word's beginning once it has three letters
+  (shorter, after other words, it is left out until it does), a word also
+  found with an s after it or without the s it ends in (`lords prayer`).
+  Verses: every version here with an index searched, each verse once (the
+  version read's, else the first other's, named after the reference:
+  `John 4:10 · KJV`); a version not open is searched by its index alone,
+  its file kept packed and a chapter decoded only for a verse shown. The
+  first three as they rank: the words in a heading over the verse (more
+  if the heading is the words: `love`, 1 Corinthians 13), as a phrase in
+  it, in the chapter read (else its book, its testament), weighed so that
+  the chapter read with the phrase outweighs a heading elsewhere; the
+  version read's first at each; the words marked, a tap going there as Go To's places
   do, and `All N Verses`, Search pushed over Go To with those words (its
   scopes, recent searches and the ESV's own search there). Commentaries
-  (the app's and the bookshelf's): comments on the chapter read first,
-  then its book, the panel's commentary's first at each; a row says
+  (the app's and the bookshelf's): comments on a chapter of the verses
+  shown first, then on the chapter read, then its book, the panel's
+  commentary's first at each; a row says
   `Psalm 23:1 · Matthew Henry’s Concise Commentary` over the words found;
   a tap goes to the verse and opens the commentary in the panel there.
   Dictionaries and Books: an entry or part titled with the first word
-  first; a tap opens it. Three a section, then `Show All N` in place. While
+  first; a tap opens it. Three a section, then `Show All N`. While
   documents' indexes or other versions are still being read, a faint busy
   row `Searching more documents…` ends the list; each one read makes the
   screen again with what it adds. A search's results are kept for its
   query and where the reader is, so making the screen again (a `model`) is
   quick. The field waits 150 ms after a key
   before it is searched (its screen's search wait). A section's `Show All N`
-  makes the screen again with every row, sent as `refill ID 0`: the list
-  keeps its offset. Nothing found: the screen's `empty` (No Matches; its
+  pushes a screen of that section alone, every row, as All N Verses pushes
+  Search: a documents section's (`SCR_DOCS`, titled as the section), or
+  what the words find in a group's documents (`SCR_FOUND`, Commentaries or
+  Dictionaries and Books, the words under the title, its header the count:
+  `793 matches, the first 500` when more were found than are kept), its
+  rows made as they come into sight (a lazy section). Nothing found: the screen's `empty` (No Matches; its
   line "More is found when you’re online." where only the connection
   stands in the way).
 - Its documents are rows of one model, wherever they are kept: no icon,
@@ -812,7 +834,7 @@ From the skin:
 | `closegroup GROUP` | close the sheet's screens (0) or the side panel's screens (1) |
 | `panelfits 0/1`, `panelvisible 0/1` | tell core whether the skin has a panel beside the reader (at its right or under it), and whether it is currently visible, including when the platform temporarily detaches it |
 | `model ID [SECTION ROW]` | return the screen's current description without a presentation effect; with windowed rows, include the requested lazy row |
-| `windowrows 0/1` | choose full lazy sections (the default) or their counts with rows fetched on demand; available to every skin |
+| `windowrows 0/1` | choose full lazy sections (the default) or their counts with rows fetched on demand, a page at a time (`model ID SECTION ROW`); available to every skin |
 | `editmenu COMMAND` | perform one of core's text-selection menu commands on the current selection |
 | `place C V FRAC` | the page's place as an address names it: where it opens, before `start`; Go To it, after |
 | `want P C K`, `at P C I FRAC`, `rest P ENDS_HI MS`, `moving P MS` | a pane's part wanted, its reading line's place, at rest, a finger on it: see Panes above |
@@ -862,13 +884,23 @@ are the app's own controller class (`L8CoreList`), made again as they come
 back from a screen pushed over them; Go To's and Search's are the app's own
 classes for their focus and keyboard.
 
-For a lazy section, the iPhone requests `windowrows 1`. After the section's
-header, core sends `lazy COUNT ROW`: COUNT is its logical row count; ROW is
--1 when no row was requested, otherwise the zero-based row whose ordinary
+For a lazy section (Search's verses, Show All's finds, the concordance), the
+iPhone sends `windowrows 1` before `start`. After the section's header,
+core sends `lazy COUNT FIRST N`: COUNT is its logical row count; FIRST is
+-1 (and N 0) when no row was requested, otherwise the first of the page of
+N rows (32, fewer at the end) holding the requested row, whose ordinary
 `row` and `cell` lines follow. `model ID SECTION ROW` returns a fresh screen
-with that row included. UIKit can therefore request visible concordance rows
-without calling core's lazy-row builder or retaining its construction buffers.
-Skins that use the default full sections continue receiving every row.
+with that row's page included, and the iPhone reads rows from it until one
+outside it is wanted: a list scrolled makes its screen again once a page,
+and a search of a thousand verses sends only those in sight. Skins that
+use the default full sections continue receiving every row.
+
+On an iPhone with iOS 26, where a screen's search field floats at the
+list's foot, its `scopes` are its title, a segmented control (a choice is
+`scope ID N`, as ever): the search bar's own scope bar belongs to the
+navigation bar there, and on a pushed screen comes only once the push has
+ended and stays over the screen below as it is popped. Elsewhere they are
+the search bar's scope bar.
 
 The iPhone keeps each screen's latest bytes as core sent them (with a
 command's effects, or as a `model`'s answer) and the count of lines core

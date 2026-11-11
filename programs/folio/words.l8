@@ -89,12 +89,15 @@ type FolioWordsMaking = tag folio_internal {
     unit: []int;
     next: []int;
     units: int;
-    // Each unit's place, by its number, and how many have begun; the unit
-    // being read (its number: -1, none yet); whether paragraphs begin
-    // units (not a Bible's), and the words folded from the record being
-    // read.
+    // Each unit's place, by its number, and how many have begun; in a
+    // Bible each unit's verse, and the first unit still waiting for its
+    // (folio_unit_verse_read); the unit being read (its number: -1, none
+    // yet); whether paragraphs begin units (not a Bible's), and the words
+    // folded from the record being read.
     places_of_units: []int;
     unit_count: int;
+    verses: []int;
+    verse_waiting: int;
     current: int;
     by_paragraph: bool;
     folded: *ByteBuilder
@@ -114,6 +117,8 @@ folio_words_making_new(): *FolioWordsMaking@new {
         units: 0,
         places_of_units: new int[4096](0),
         unit_count: 0,
+        verses: new int[4096](0),
+        verse_waiting: 0,
         current: -1,
         by_paragraph: true,
         folded: builder_new(1024)
@@ -156,6 +161,7 @@ folio_words_read(
             kind: i8 = data[line];
             if (making.current < 0 || folio_unit_begins(kind, making.by_paragraph)) folio_unit_begun(making,
                 base + line - from);
+            if (!making.by_paragraph) folio_unit_verse_read(making, data, line, end);
             if (folio_record_words(kind, making.by_paragraph)) {
                 // (A link's words after its tab; an outline's line before
                 // its tab.)
@@ -182,10 +188,37 @@ folio_words_read(
     }
 }
 
+// A Bible's record at data[line..end) read for its units' verses: a
+// unit's verse is the first to begin at or after it in its chapter (a
+// heading's, the verse it heads; a chapter's, its first), so a verse's
+// record gives it to every unit waiting since the last one. A book's unit
+// (before its first chapter) has none (0), nor does one after a chapter's
+// last verse.
+folio_unit_verse_read(
+    making: *FolioWordsMaking,
+    data: []i8,
+    line: int,
+    end: int
+) {
+    kind: i8 = data[line];
+    if (kind == 'V') {
+        n: int = 0;
+        at: int = line + 1;
+        while (at < end && data[at] >= '0' as i8 && data[at] <= '9' as i8) {
+            n = n * 10 + (data[at] as int - '0' as int);
+            at = at + 1
+        }
+        for u in making.verse_waiting..making.unit_count making.verses[u] = n;
+        making.verse_waiting = making.unit_count
+    } else if (kind == 'C') making.verse_waiting = making.unit_count - 1 else if (kind == 'B') making.verse_waiting = making.unit_count
+}
+
 // A unit begun at place in the content.
 folio_unit_begun(making: *FolioWordsMaking@new, place: int) {
-    if (making.unit_count == len(making.places_of_units)) making.places_of_units = folio_ints_grown(making.places_of_units,
-        0);
+    if (making.unit_count == len(making.places_of_units)) {
+        making.places_of_units = folio_ints_grown(making.places_of_units, 0);
+        making.verses = folio_ints_grown(making.verses, 0)
+    }
     making.places_of_units[making.unit_count] = place;
     making.current = making.unit_count;
     making.unit_count = making.unit_count + 1
@@ -268,13 +301,15 @@ folio_ints_grown(a: []int, fill: int): []int@new {
 folio_words_bytes(making: *FolioWordsMaking): []i8@new {
     order: []int = folio_words_sorted(making);
     out: *ByteBuilder = builder_new(making.text.size + 4 * making.units + 2 * making.unit_count + 64);
-    folio_put_varint(out, if (making.by_paragraph) 1 else 0);
+    folio_put_varint(out, if (making.by_paragraph) FOLIO_WORDS_BY_PARAGRAPH else FOLIO_WORDS_VERSES);
     folio_put_varint(out, making.unit_count);
     previous_place: int = 0;
     for u in 0..making.unit_count {
         folio_put_varint(out, making.places_of_units[u] - previous_place);
         previous_place = making.places_of_units[u]
     }
+    if (!making.by_paragraph)
+        for u in 0..making.unit_count folio_put_varint(out, making.verses[u]);
     folio_put_varint(out, making.count);
     // (Each word's units' bytes first, so that its count and size go
     // before them in the table.)
@@ -376,14 +411,23 @@ folio_put_varint(out: *ByteBuilder@new, value: int) {
     builder_byte(out, v trunc i8)
 }
 
+// The index's flags: paragraphs begin units (not a Bible); each unit's
+// verse follows the units' places (a Bible's, made since its index says
+// them).
+FOLIO_WORDS_BY_PARAGRAPH: int = 1;
+
+FOLIO_WORDS_VERSES: int = 2;
+
 // ---- reading it ----
 // A folio's word index, read: each unit's place in the content (by its
-// number), its words (each one's bytes in words, in order), and where each
-// one's units are in units (a span of bytes) and how many there are;
-// whether its paragraphs begin units.
+// number) and, in a Bible, its verse (none: the index doesn't say), its
+// words (each one's bytes in words, in order), and where each one's units
+// are in units (a span of bytes) and how many there are; whether its
+// paragraphs begin units.
 tag folio
 type FolioWords = tag folio_internal {
     places_of_units: []int;
+    verses: []int;
     words: []i8;
     word_at: []int;
     word_length: []int;
@@ -429,11 +473,17 @@ folio_words_open(
         place = place + step;
         places_of_units[u] = place
     }
+    verses: []int = new int[if ((flags & FOLIO_WORDS_VERSES) != 0) unit_count else 0](0);
+    for u in 0..len(verses) {
+        verses[u] = folio_varint(&reading);
+        if (verses[u] < 0) folio_fail(FolioFailure.BadHead)
+    }
     count: int = folio_varint(&reading);
     if (count < 0 || count > size) folio_fail(FolioFailure.BadHead);
     words: *ByteBuilder = builder_new(4 * count + 16);
     made: *FolioWords = new FolioWords {
         places_of_units: places_of_units,
+        verses: verses,
         words: new i8[0](0i8),
         word_at: new int[count](0),
         word_length: new int[count](0),
@@ -442,7 +492,7 @@ folio_words_open(
         units_size: new int[count](0),
         units_count: new int[count](0),
         count: count,
-        by_paragraph: (flags & 1) != 0
+        by_paragraph: (flags & FOLIO_WORDS_BY_PARAGRAPH) != 0
     };
     previous: int = 0;
     for k in 0..count {
@@ -499,6 +549,26 @@ folio_words_count(words: *FolioWords): int {
 tag folio
 folio_words_by_paragraph(words: *FolioWords): bool {
     words.by_paragraph
+}
+
+// Whether the index says each unit's verse (a Bible's, made since it
+// does): then a search needs no content to tell where its units are.
+tag folio
+folio_words_have_verses(words: *FolioWords): bool {
+    len(words.verses) > 0
+}
+
+// The verse of the unit beginning at place (0: none, a book's, or no
+// unit's place; or the index doesn't say).
+tag folio
+folio_unit_verse(words: *FolioWords, place: int): int {
+    low: int = 0;
+    high: int = len(words.verses);
+    while (low < high) {
+        middle: int = (low + high) / 2;
+        if (words.places_of_units[middle] < place) low = middle + 1 else high = middle
+    }
+    if (low < len(words.verses) && words.places_of_units[low] == place) words.verses[low] else 0
 }
 
 // The first word not before w[from..to) (its number; count if none).

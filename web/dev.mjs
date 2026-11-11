@@ -29,6 +29,10 @@
 //                          (Smooth Bible's `!uilog off`), saved as
 //                          .build/dev/uilog/N.jsonl; GET /uilog/latest is
 //                          the latest (programs/bible/tools/uilog)
+//   POST /video            a screen recording (a QuickTime movie) from the
+//                          device (Smooth Bible's `!record off`), saved as
+//                          .build/dev/videos/N.mov; GET /videos/latest says
+//                          which
 //   POST /data             the data files under --data DIR that differ from
 //                          an app's bundle's, a line each: PATH TAB SIZE
 //                          (PATH relative to DIR, as the app asks for it);
@@ -283,6 +287,11 @@ let uilogs = 0;
 try {
   for (const f of fs.readdirSync(uilogDir)) uilogs = Math.max(uilogs, parseInt(f, 10) || 0);
 } catch {}
+const videosDir = path.join(".build", "dev", "videos");
+let videos = 0;
+try {
+  for (const f of fs.readdirSync(videosDir)) videos = Math.max(videos, parseInt(f, 10) || 0);
+} catch {}
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://x");
@@ -419,6 +428,21 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
+  if (url.pathname === "/video" && req.method === "POST") {
+    const parts = [];
+    req.on("data", (d) => parts.push(d));
+    req.on("end", () => {
+      fs.mkdirSync(videosDir, { recursive: true });
+      videos++;
+      const file = path.join(videosDir, `${videos}.mov`);
+      const body = Buffer.concat(parts);
+      fs.writeFileSync(file, body);
+      console.log(`${new Date().toLocaleTimeString()}  video ${videos}: ${file} (${body.length} bytes)`);
+      json({ video: videos, file });
+    });
+    return;
+  }
+  if (url.pathname === "/videos/latest") return json({ video: videos, file: videos ? path.join(videosDir, `${videos}.mov`) : null });
   if (url.pathname === "/uilog/latest") {
     if (!uilogs) return json({ error: "no uilog saved yet" }, 404);
     res.writeHead(200, { ...headers, "Content-Type": "text/plain; charset=utf-8" });

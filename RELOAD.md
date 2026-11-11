@@ -221,8 +221,14 @@ button (the panel reader's name) whose title begins with WORDS, else the
 panel's own Close Panel or Full Screen, `!info WORDS` that row's ⓘ,
 `!flick page DY` or `!flick panel DY` flicks the page or the panel's
 reader DY points, `!scroll DY` scrolls the top sheet's list (else the
-panel's), `!where` writes each pane's place at its reading line and its
-anchors' distances from it, and `!state` writes the wire's flags). While it is connected the app keeps the
+panel's), `!type TEXT` puts TEXT in the top sheet's search field as if it
+was typed, `!segment N` chooses segment N of the top sheet's title (a
+search's scopes), `!record on` and `!record off` record the app's screen
+(ReplayKit, which asks the person holding the phone to allow it the first
+time after a launch) and post the movie to the server's `/video`, saved
+as `.build/dev/videos/N.mov`, every animation in it at the display's rate,
+`!where` writes each pane's place at its reading line and its anchors'
+distances from it, and `!state` writes the wire's flags). While it is connected the app keeps the
 screen on and writes its diagnostics, among them each frame drawn late
 while the page or panel moves (`frame late ms N`) and, at a flick's end,
 how many were (`flick ended late N worst ms M`). A build without a

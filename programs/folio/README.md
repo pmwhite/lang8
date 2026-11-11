@@ -89,9 +89,12 @@ in a Bible are a translator's rather than its text.
 
 The stream holds unsigned LEB128 numbers (varints) and bytes:
 
-1. flags (1: units begin at paragraphs);
+1. flags (1: units begin at paragraphs; 2: each unit's verse follows the
+   places, as a Bible's index has since it said them);
 2. the number of units, then each unit's place as the difference from the
-   one before;
+   one before, then (flag 2) each unit's verse: the first verse to begin
+   at or after it in its chapter (a heading's, the verse it heads), 0 for
+   a book's or one after its chapter's last verse;
 3. the number of words, then for each word in byte order: how many
    leading bytes it shares with the word before, how many follow, those
    bytes, how many units it is in, and how many bytes its units take;
@@ -105,7 +108,10 @@ place and sizes. `folio_words_open(source, at, packed, size)` reads it.
 units that hold the word `w[from..to)`: `Whole`, or with `Beginning` the
 units of the 256 most common words it begins (`FOLIO_BEGINNING_WORDS_MOST`).
 `folio_units_both` intersects two lists, and `folio_unit_end` says where
-a unit ends.
+a unit ends. `folio_words_have_verses` says whether the index gives its
+units' verses, and `folio_unit_verse(words, place)` gives one: with them,
+a reader finds a Bible's verses from its index and head alone, decoding no
+content.
 
 ## Metadata
 

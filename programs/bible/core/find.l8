@@ -28,9 +28,11 @@ fq_open_end: bool = false;
 
 fq_phrase: bool = false;
 
-// A word's beginning shorter than this is looked for whole: one letter
-// begins too many words to be a search.
-FIND_BEGINNING_LEAST: int = 2;
+// A word being typed shorter than this is no word's beginning: one or two
+// letters begin too many words to be a search (and too many to look up
+// quickly). After other words it is left out until it is longer ("living
+// wa" finds what "living" does); alone, it is looked for whole.
+FIND_BEGINNING_LEAST: int = 3;
 
 // The query q's first n bytes, as the indexes take it.
 find_query(q: []i8, n: int) {
@@ -63,14 +65,55 @@ find_units(words: *folio::FolioWords): []int@new {
     while (at < fq_n) {
         space: int = at;
         while (fq[space] != ' ') space = space + 1;
-        open: bool = k == fq_words - 1 && fq_open_end && space - at >= FIND_BEGINNING_LEAST;
-        units: []int = folio::folio_words_units(words, fq, at, space, if (open) folio::WordMatching.Beginning else folio::WordMatching.Whole);
+        typing: bool = k == fq_words - 1 && fq_open_end;
+        if (typing && k > 0 && space - at < FIND_BEGINNING_LEAST) return found;
+        units: []int = if (typing && space - at >= FIND_BEGINNING_LEAST) folio::folio_words_units(words,
+            fq, at, space, folio::WordMatching.Beginning) else find_word_forms(words,
+            at, space);
         found = (if (k == 0) units else folio::folio_units_both(found, units));
         if (len(found) == 0) return found;
         at = space + 1;
         k = k + 1
     }
     found
+}
+
+// The units of the query's word fq[from..to) and of its other forms: with
+// an s after it, and without the one it ends in ("commandment" finds
+// commandments; "lords" finds Lord's, which is folded as lord and s).
+find_word_forms(words: *folio::FolioWords, from: int, to: int): []int@new {
+    found: []int = folio::folio_words_units(words, fq, from, to, folio::WordMatching.Whole);
+    n: int = to - from;
+    form: []i8 = new i8[n + 1](0i8);
+    for k in 0..n form[k] = fq[from + k];
+    form[n] = 's' as i8;
+    found = find_units_union(found, folio::folio_words_units(words, form, 0, n + 1,
+        folio::WordMatching.Whole));
+    if (n >= 4 && fq[to - 1] == 's') found = find_units_union(found, folio::folio_words_units(words,
+        form, 0, n - 1, folio::WordMatching.Whole));
+    found
+}
+
+// Units a and b (each in order, each once) together, in order.
+find_units_union(a: []int, b: []int): []int@new {
+    out: []int = new int[len(a) + len(b)](0);
+    i: int = 0;
+    j: int = 0;
+    n: int = 0;
+    while (i < len(a) || j < len(b)) {
+        if (j >= len(b) || i < len(a) && a[i] < b[j]) {
+            out[n] = a[i];
+            i = i + 1
+        } else {
+            if (i < len(a) && a[i] == b[j]) i = i + 1;
+            out[n] = b[j];
+            j = j + 1
+        }
+        n = n + 1
+    }
+    trimmed: []int = new int[n](0);
+    for k in 0..n trimmed[k] = out[k];
+    trimmed
 }
 
 // ---- the versions searched ----
@@ -97,7 +140,7 @@ find_texts_choose() {
 }
 
 find_text_add(t: int) {
-    if (find_texts_n >= len(find_texts) || !find_text_indexed(t)) return;
+    if (find_texts_n >= len(find_texts) || !find_text_indexed(t) && !find_version_ready(t)) return;
     for k in 0..find_texts_n
         if (find_texts[k] == t) return;
     find_texts[find_texts_n] = t;
@@ -118,6 +161,209 @@ find_indexed(): bool {
     find_text_indexed(quote_base())
 }
 
+// ---- the other versions, by their indexes alone ----
+// One of the app's versions not open (any but the one read, as a rule) is
+// searched without its text decoded: its file is kept as it came, its
+// blocks still packed, with its head and its index, whose units say their
+// verses; a chapter of it is decoded only to show or check a verse found
+// there (find_chapter). Its reads are host.l8's HS_FIND_ID plus its
+// number (a data file's id: a platform keeps those below 128). One whose index doesn't say its units' verses (made before it
+// did) is read whole instead, as Compare reads it.
+FIND_VERSIONS_MOST: int = 8;
+
+type FindVersionData = {
+    file: []i8;
+    folio: *folio::Folio;
+    words: *folio::FolioWords;
+    // Each division's chapter (-1: a book's).
+    chapters: []int
+}
+
+find_version_read: []FindRead = new FindRead[FIND_VERSIONS_MOST](FindRead.NotRead);
+
+find_version_data: []?owned *FindVersionData = find_versions_begin();
+
+find_versions_begin(): []?owned *FindVersionData@new {
+    new ?owned *FindVersionData[FIND_VERSIONS_MOST](null)
+}
+
+// Whether version t is kept for search by its index alone.
+find_version_ready(t: int): bool {
+    if (t < 0 || t >= FIND_VERSIONS_MOST) return false;
+    match find_version_read[t] {
+        Read -> true;
+        _ -> false
+    }
+}
+
+// The app's versions not open with an index asked for, to be searched
+// once each has come (as Go To opens, so that they are ready as words are
+// typed).
+find_versions_want() {
+    for t in 0..TEXT_PIN {
+        if (t != TEXT_ORIG && t != TEXT_ESV && t < FIND_VERSIONS_MOST && t < len(hs_version_files) && !find_text_indexed(t)) {
+            match find_version_read[t] {
+                NotRead -> {
+                    find_version_read[t] = FindRead.ReadingHead;
+                    hs_ask(HS_FIND_ID + t, hs_version_files[t])
+                }
+                _ -> { }
+            }
+        }
+    }
+}
+
+// Version t's file came (size bytes; -1: it could not): kept, with its
+// head and index, if its index says its units' verses; else read whole.
+find_version_got(t: int, id: int, size: int) {
+    find_version_read[t] = FindRead.Unsearchable;
+    if (size <= 0) return;
+    try {
+        next: owned *FindVersionData = own {
+            file: []i8 = new i8[size](0i8);
+            hs_file(id, file);
+            f: *folio::Folio = folio::folio_open(file, size);
+            words: *folio::FolioWords = folio::folio_words_open(file, folio::folio_words_place(f),
+                folio::folio_words_packed(f), folio::folio_words_size(f));
+            chapters: []int = new int[folio::folio_division_count(f)](-1);
+            for d in 0..len(chapters) chapters[d] = find_division_chapter(f, d);
+            new FindVersionData {
+                file: file,
+                folio: f,
+                words: words,
+                chapters: chapters
+            }
+        };
+        drop find_version_data[t];
+        find_version_data[t] = move next;
+        borrow find_version_data[t] as data {
+            if (folio::folio_words_have_verses(data.words)) find_version_read[t] = FindRead.Read
+        }
+    } with folio::FolioError _damaged -> { }
+    if (find_version_ready(t)) find_changes = find_changes + 1 else {
+        drop find_version_data[t];
+        _here: int = hs_text_ready(t)
+    }
+    // (Its results shown, if a search is.)
+    if (sk_q_n > 0) sk_update_all()
+}
+
+// The verses of units in version data's chapters from first_c up to
+// end_c, in order, each once, each as its key four times
+// (find_text_verses'; its headings not told: its content isn't here).
+find_version_verses(
+    data: *FindVersionData,
+    units: []int,
+    first_c: int,
+    end_c: int
+): []int@new {
+    out: []int = new int[len(units)](0);
+    n: int = 0;
+    division: int = 0;
+    count: int = len(data.chapters);
+    for at in units {
+        while (division + 1 < count && folio::folio_division_start(data.folio, division + 1) <= at) division = division + 1;
+        c: int = if (division < count) data.chapters[division] else -1;
+        v: int = folio::folio_unit_verse(data.words, at);
+        key: int = 4 * (c * 1000 + v);
+        if (c >= first_c && c < end_c && v > 0 && (n == 0 || out[n - 1] != key)) {
+            out[n] = key;
+            n = n + 1
+        }
+    }
+    trimmed: []int = new int[n](0);
+    for k in 0..n trimmed[k] = out[k];
+    trimmed
+}
+
+// ---- a chapter of a version kept for search ----
+// Decoded alone (a text of its own that holds only that chapter), to show
+// or check a verse found in it; the last few kept.
+FIND_CHAPTERS_MOST: int = 24;
+
+find_chapters: []?owned *TextData = find_chapters_begin();
+
+find_chapters_begin(): []?owned *TextData@new {
+    new ?owned *TextData[FIND_CHAPTERS_MOST](null)
+}
+
+find_chapter_version: []int = new int[FIND_CHAPTERS_MOST](-1);
+
+find_chapter_number: []int = new int[FIND_CHAPTERS_MOST](-1);
+
+find_chapter_used: []int = new int[FIND_CHAPTERS_MOST](0);
+
+find_chapter_clock: int = 0;
+
+// Chapter c of version t (kept for search): its place in find_chapters
+// (-1: it can't be read).
+find_chapter(t: int, c: int): int {
+    find_chapter_clock = find_chapter_clock + 1;
+    for k in 0..FIND_CHAPTERS_MOST {
+        if (find_chapter_version[k] == t && find_chapter_number[k] == c) {
+            find_chapter_used[k] = find_chapter_clock;
+            return k
+        }
+    }
+    if (!find_version_ready(t) || c < 0 || c >= chapters) return -1;
+    from: int = -1;
+    to: int = -1;
+    borrow find_version_data[t] as data {
+        for d in 0..len(data.chapters) {
+            if (data.chapters[d] == c) {
+                from = folio::folio_division_start(data.folio, d);
+                to = folio::folio_division_end(data.folio, d)
+            }
+        }
+    }
+    if (from < 0) return -1;
+    k: int = 0;
+    for x in 1..FIND_CHAPTERS_MOST
+        if (find_chapter_used[x] < find_chapter_used[k]) k = x;
+    find_chapter_version[k] = -1;
+    try {
+        next: owned *TextData = own {
+            text: *TextData = text_made(t, to - from);
+            borrow find_version_data[t] as data {
+                folio::folio_read_into(data.folio, data.file, from, to, text.data,
+                    0)
+            }
+            text.starts[c] = 0;
+            text.ends[c] = to - from;
+            text
+        };
+        drop find_chapters[k];
+        find_chapters[k] = move next;
+        find_chapter_version[k] = t;
+        find_chapter_number[k] = c;
+        find_chapter_used[k] = find_chapter_clock;
+        k
+    } with folio::FolioError _damaged -> {
+        -1
+    }
+}
+
+// Verse v of chapter c of version t into vt: from its text, if it is open,
+// else from its chapter decoded alone (none: vt empty).
+find_verse_text(t: int, c: int, v: int) {
+    vt_n = 0;
+    if (text_ready(t)) {
+        _n: int = verse_text_of(t, c, v);
+        return
+    }
+    k: int = find_chapter(t, c);
+    if (k >= 0)
+        borrow find_chapters[k] as source {
+            _m: int = source_verse_text(source, c, v)
+        }
+}
+
+// The same, and what the search finds in it marked (mr_begin...).
+find_verse_matches(t: int, c: int, v: int) {
+    find_verse_text(t, c, v);
+    match_in_vt()
+}
+
 // ---- verses ----
 // The verses the query finds in books from to last (inclusive), in every
 // version searched, each once (the first version's of those that have
@@ -134,6 +380,7 @@ find_verses(
     hit_more = false;
     find_query(q, n);
     if (fq_words == 0) return;
+    find_versions_want();
     find_texts_choose();
     first_c: int = book_first[from];
     end_c: int = book_first[last] + book_count[last];
@@ -143,21 +390,31 @@ find_verses(
         for k in 0..find_texts_n {
             t: int = find_texts[k];
             found: []int = new int[0](0);
-            borrow texts[t] as text {
-                w: ?*folio::FolioWords = text.words;
-                if (w != null) found = find_text_verses(text, find_units(w), first_c,
-                    end_c)
-            }
+            if (find_text_indexed(t))
+                borrow texts[t] as text {
+                    w: ?*folio::FolioWords = text.words;
+                    if (w != null) found = find_text_verses(text, find_units(w), first_c,
+                        end_c)
+                } else
+                borrow find_version_data[t] as data {
+                    found = find_version_verses(data, find_units(data.words), first_c,
+                        end_c)
+                }
             // (Merged in: those the versions before had keep theirs.)
             merged: []int = new int[len(keys) + len(found)](0);
             merged_owners: []int = new int[len(keys) + len(found)](0);
             i: int = 0;
             j: int = 0;
             m: int = 0;
+            // (Each a verse's key four times, and how a heading over it has
+            // the words: find_text_verses.)
             while (i < len(keys) || j < len(found)) {
-                if (j >= len(found) || i < len(keys) && keys[i] <= found[j]) {
-                    if (j < len(found) && keys[i] == found[j]) j = j + 1;
+                if (j >= len(found) || i < len(keys) && keys[i] / 4 <= found[j] / 4) {
                     merged[m] = keys[i];
+                    if (j < len(found) && keys[i] / 4 == found[j] / 4) {
+                        merged[m] = keys[i] | found[j] & 3;
+                        j = j + 1
+                    }
                     merged_owners[m] = owners[i];
                     i = i + 1
                 } else {
@@ -177,8 +434,8 @@ find_verses(
         // (Quoted: the phrase looked for in each, as Search reads.)
         if (fq_phrase) search_words(q, n);
         for x in 0..len(keys) {
-            c: int = keys[x] / 1000;
-            v: int = keys[x] % 1000;
+            c: int = keys[x] / 4 / 1000;
+            v: int = keys[x] / 4 % 1000;
             if (!fq_phrase || find_verse_has(owners[x], c, v)) {
                 if (hit_count >= len(hit_chapter)) {
                     hit_more = true;
@@ -187,6 +444,7 @@ find_verses(
                 hit_chapter[hit_count] = c;
                 hit_verse[hit_count] = v;
                 hit_text[hit_count] = owners[x];
+                find_hit_headed[hit_count] = keys[x] & 3;
                 hit_count = hit_count + 1
             }
         }
@@ -196,13 +454,23 @@ find_verses(
 // Whether verse v of chapter c in text t holds what Search's words
 // (search_words) find.
 find_verse_has(t: int, c: int, v: int): bool {
-    _n: int = verse_text_of(t, c, v);
+    find_verse_text(t, c, v);
     vt_found()
 }
 
-// The verses (chapter * 1000 + verse) of units in text's chapters from
-// first_c up to end_c, in order, each once: a verse's unit is its V
-// record's; a heading's (or a psalm's title's) the verse after it.
+// How each hit's words are in a heading over it (find_verses'): 0 not, 1
+// among its words, 3 as all of them (FIND_IN_HEADING, FIND_HEADING_ITSELF).
+FIND_IN_HEADING: int = 1;
+
+FIND_HEADING_ITSELF: int = 3;
+
+find_hit_headed: []int = new int[1000](0);
+
+// The verses of units in text's chapters from first_c up to end_c, in
+// order, each once, each as its key (chapter * 1000 + verse) four times,
+// plus how the unit found is a heading over it (FIND_IN_HEADING,
+// FIND_HEADING_ITSELF): a verse's unit is its V record's; a heading's (or a
+// psalm's title's) the verse after it.
 find_text_verses(
     text: *TextData,
     units: []int,
@@ -218,16 +486,37 @@ find_text_verses(
             break;
         if (at >= text.starts[c]) {
             v: int = find_verse_at(text, c, at);
-            key: int = c * 1000 + v;
-            if (v > 0 && (n == 0 || out[n - 1] != key)) {
-                out[n] = key;
-                n = n + 1
+            kind: int = text.data[at] as int;
+            headed: int = if (kind != 'S' as int && kind != 's' as int && kind != 'M' as int) 0 else if (find_heading_is_query(text,
+                at)) FIND_HEADING_ITSELF else FIND_IN_HEADING;
+            key: int = 4 * (c * 1000 + v) + headed;
+            if (v > 0) {
+                if (n > 0 && out[n - 1] / 4 == key / 4) out[n - 1] = out[n - 1] | key & 3 else {
+                    out[n] = key;
+                    n = n + 1
+                }
             }
         }
     }
     trimmed: []int = new int[n](0);
     for k in 0..n trimmed[k] = out[k];
     trimmed
+}
+
+// Whether the heading at text's offset at is the query (fq) and nothing
+// else, folded, but for a leading "the".
+find_heading_is_query(text: *TextData, at: int): bool {
+    same: bool = false;
+    region {
+        out: *ByteBuilder = builder_new(128);
+        folio::folio_fold_words(out, text.data, at + 1, record_line_end(text.data,
+            text.size, at));
+        from: int = if (out.size > 4 && out.data[0] == 't' && out.data[1] == 'h' && out.data[2] == 'e' && out.data[3] == ' ') 4 else 0;
+        same = out.size - from == fq_n;
+        for k in 0..fq_n
+            if (same && out.data[from + k] != fq[k]) same = false
+    }
+    same
 }
 
 // The verse the record at offset at of chapter c is in or heads (0: none
@@ -243,11 +532,29 @@ find_verse_at(text: *TextData, c: int, at: int): int {
 }
 
 // ---- the order Go To shows them in ----
-// Each hit's place in the order: the words as a phrase there first, then
-// those in the chapter read, its book, its testament, the rest; within
-// each, those in the version read first, then in the Bible's order. (A phrase is told for at most
-// FIND_PHRASE_MOST hits, the rest taken as not: Go To shows only the
-// first few.)
+// Each hit's place in the order, by what it has, each weighed: the words
+// in a heading over it (the passage named: "ten commandments"), as a
+// phrase in it, in the chapter read (or else its book, or its testament).
+// A heading outweighs a phrase alone, and the chapter read with the
+// phrase outweighs a heading elsewhere ("living water" in John 4: its
+// verse, not John 7's heading). At each, those in the version read first,
+// then in the Bible's order.
+FIND_HEADED: int = 9;
+
+FIND_PHRASE: int = 8;
+
+FIND_HERE_CHAPTER: int = 8;
+
+FIND_HERE_BOOK: int = 2;
+
+FIND_HERE_TESTAMENT: int = 1;
+
+// A heading that is the query itself (but for a leading "the": "Love",
+// "The Beatitudes") outweighs one it is only in. A phrase is told for at
+// most FIND_PHRASE_MOST hits, the rest taken as not: Go To shows only the
+// first few.
+FIND_HEADED_EXACTLY: int = 4;
+
 FIND_PHRASE_MOST: int = 400;
 
 find_order: []int = new int[1000](0);
@@ -275,9 +582,11 @@ find_rank(q: []i8, n: int) {
         for i in 0..hit_count {
             c: int = hit_chapter[i];
             b: int = ch_book[c];
-            score: int = if (c == here_c) 4 else if (b == here_b) 2 else if (b < 39 == here_b < 39) 1 else 0;
+            score: int = if (c == here_c) FIND_HERE_CHAPTER else if (b == here_b) FIND_HERE_BOOK else if (b < 39 == here_b < 39) FIND_HERE_TESTAMENT else 0;
+            if (find_hit_headed[i] != 0) score = score + FIND_HEADED;
+            if (find_hit_headed[i] == FIND_HEADING_ITSELF) score = score + FIND_HEADED_EXACTLY;
             if (fq_words > 1 && i < FIND_PHRASE_MOST && find_verse_has(hit_text[i],
-                c, hit_verse[i])) score = score + 8;
+                c, hit_verse[i])) score = score + FIND_PHRASE;
             // (At each, the version read's before those only another has.)
             scores[i] = score * 2 + (if (hit_text[i] == read) 1 else 0);
             find_order[i] = i
@@ -515,14 +824,19 @@ find_read_app_commentary(d: int) {
     }
 }
 
-// Whether id is a read of a document's (find_got takes it).
+// Whether id is a read of a version's or a document's (find_got takes
+// it).
 find_read_id(id: int): bool {
-    id >= FIND_READ_ID_FIRST && id < FIND_READ_ID_FIRST + FIND_DOCS_MOST + FIND_BLOCKS_MOST
+    id >= HS_FIND_ID && id < HS_FIND_ID + FIND_VERSIONS_MOST || id >= FIND_READ_ID_FIRST && id < FIND_READ_ID_FIRST + FIND_DOCS_MOST + FIND_BLOCKS_MOST
 }
 
 // A read of document d's came (size bytes; -1: it could not): its head,
 // then its index; or a block (find_block_got).
 find_got(id: int, size: int) {
+    if (id < FIND_READ_ID_FIRST) {
+        find_version_got(id - HS_FIND_ID, id, size);
+        return
+    }
     if (id >= FIND_READ_ID_FIRST + FIND_DOCS_MOST) {
         find_block_got(id - FIND_READ_ID_FIRST - FIND_DOCS_MOST, id, size);
         return
@@ -635,19 +949,15 @@ fd_n: []int = new int[FIND_GROUPS](0);
 
 fd_total: []int = new int[FIND_GROUPS](0);
 
-// The other versions here asked for (as Compare asks for them), so that a
-// search finds what they have too: each searched once it has come.
-find_versions_want() {
-    for t in 0..TEXT_PIN {
-        if (t != TEXT_ORIG && t != TEXT_ESV) _here: int = hs_text_ready(t)
-    }
-}
-
 // Whether some documents or versions are still being read (their results
 // to come).
 find_docs_coming(): bool {
-    for t in 0..len(hs_loading)
-        if (hs_loading[t]) return true;
+    for t in 0..FIND_VERSIONS_MOST {
+        match find_version_read[t] {
+            ReadingHead -> return true;
+            _ -> { }
+        }
+    }
     for d in 0..find_docs_n {
         match find_doc_read[d] {
             NotRead -> return true;
@@ -660,9 +970,9 @@ find_docs_coming(): bool {
 }
 
 // The query (find_query's) looked for in every document read, its results
-// ranked where the reader is: a commentary's, those on the chapter read
-// first, then its book, the commentary the panel reads before others at
-// each; a dictionary's or a book's, an entry or a part titled with the
+// ranked: a commentary's, those on a chapter of the first verses found
+// first (find_rank's, so ranked after them), then on the chapter read, then
+// its book, the commentary the panel reads before others at each; a dictionary's or a book's, an entry or a part titled with the
 // query's first word first; within each, in the documents' order. A
 // comment's paragraphs found are one result: its first.
 find_documents() {
@@ -709,6 +1019,7 @@ find_documents() {
                                 c: int = find_division_chapter(data.folio, division);
                                 fd_chapter[k] = c;
                                 fd_verse[k] = verse;
+                                if (find_shown_chapter(c)) score = score + 16;
                                 if (c == here_c) score = score + 8 else if (c >= 0 && ch_book[c] == ch_book[here_c]) score = score + 4;
                                 if (find_doc_slot[d] == panel_slot) score = score + 2
                             } else if (find_division_titled(data.folio, division)) score = score + 8;
@@ -732,6 +1043,16 @@ find_documents() {
             }
         }
     }
+}
+
+// Whether chapter c holds one of the first verses Go To shows (as
+// find_rank ordered them): a comment on it is on the passage looked for.
+FIND_SHOWN_VERSES: int = 3;
+
+find_shown_chapter(c: int): bool {
+    for k in 0..if (hit_count < FIND_SHOWN_VERSES) hit_count else FIND_SHOWN_VERSES
+        if (c >= 0 && hit_chapter[find_order[k]] == c) return true;
+    false
 }
 
 find_hit_swap(a: int, b: int) {
@@ -802,10 +1123,26 @@ find_division_titled(f: *folio::Folio, division: int): bool {
 }
 
 // ---- what is shown of them ----
-// Blocks of the bookshelf's documents decoded for what is shown (the most
-// lately used kept): which document's and which block each is (-1: none),
-// whether it is being read, and when it was last used.
-FIND_BLOCKS_MOST: int = 8;
+// Blocks of the documents decoded for what is shown (the most lately used
+// kept): which document's and which block each is (-1: none), whether it
+// is being read, and when it was last used. A block used for the screen
+// being made (since find_blocks_begin_making) isn't let go for another it
+// shows: a screen showing more than FIND_BLOCKS_MOST blocks' rows shows
+// the rest as an ellipsis rather than reading them by turns without end.
+// A bookshelf document's blocks are read a few at a time
+// (FIND_BLOCK_READS_MOST); the app's commentary's, here whole, are decoded
+// at once (and without being kept, with no place free).
+FIND_BLOCKS_MOST: int = 32;
+
+FIND_BLOCK_READS_MOST: int = 4;
+
+find_blocks_making: int = 0;
+
+// A screen showing documents' results begun.
+find_blocks_begin_making() {
+    find_block_clock = find_block_clock + 1;
+    find_blocks_making = find_block_clock
+}
 
 type FindBlock = {
     data: []i8
@@ -837,14 +1174,18 @@ find_block(d: int, block: int): int {
             return if (find_block_reading[k]) -1 else k
         }
     }
-    // (The one used longest ago, not being read, read into.)
+    // (The one used longest ago, not being read nor shown, read into.)
     k: int = -1;
+    reading: int = 0;
     for x in 0..FIND_BLOCKS_MOST {
-        if (!find_block_reading[x] && (k < 0 || find_block_used[x] < find_block_used[k])) k = x
+        if (find_block_reading[x]) reading = reading + 1 else if (find_block_used[x] < find_blocks_making && (k < 0 || find_block_used[x] < find_block_used[k])) k = x
     }
+    if (k < 0) return -1;
+    if (find_doc_slot[d] == FIND_APP_COMMENTARY) return find_block_decode_app(k, d,
+        block);
     i: int = shelf_find_slot(find_doc_slot[d]);
     f: ?fn(id: int, name: []i8, name_n: int, offset: int, count: int) = host_io.read_kept_range;
-    if (k < 0 || i < 0 || f == null || !shelf_kept_made_at(i)) return -1;
+    if (reading >= FIND_BLOCK_READS_MOST || i < 0 || f == null || !shelf_kept_made_at(i)) return -1;
     offset: int = 0;
     count: int = 0;
     borrow find_doc_data[d] as data {
@@ -859,6 +1200,33 @@ find_block(d: int, block: int): int {
     find_block_used[k] = find_block_clock;
     f(FIND_READ_ID_FIRST + FIND_DOCS_MOST + k, kp_name, kp_name_n, offset, count);
     -1
+}
+
+// The app's commentary's block (document d's), decoded into place k:
+// its place (-1: it could not be).
+find_block_decode_app(k: int, d: int, block: int): int {
+    drop find_blocks[k];
+    find_block_doc[k] = -1;
+    try {
+        next: owned *FindBlock = own {
+            decoded: []i8 = new i8[0](0i8);
+            borrow language_data {
+                borrow find_doc_data[d] as data {
+                    decoded = folio::folio_decode_block(data.folio, block, language_data.commentary,
+                        folio::folio_block_offset(data.folio, block))
+                }
+            }
+            new FindBlock { data: decoded }
+        };
+        find_blocks[k] = move next;
+        find_block_doc[k] = d;
+        find_block_number[k] = block;
+        find_block_clock = find_block_clock + 1;
+        find_block_used[k] = find_block_clock;
+        k
+    } with folio::FolioError _damaged -> {
+        -1
+    }
 }
 
 // Block place k's read came: decoded, and what shows it made again.
@@ -900,8 +1268,21 @@ find_hit_words(k: int): bool {
     vt_n = 0;
     d: int = fd_doc[k];
     at: int = fd_unit[k];
-    if (find_doc_slot[d] == FIND_APP_COMMENTARY) {
+    block: int = 0;
+    start: int = 0;
+    borrow find_doc_data[d] as data {
+        block = folio::folio_block_first(data.folio, at);
+        start = folio::folio_block_start(data.folio, block)
+    }
+    b: int = find_block(d, block);
+    if (b >= 0)
+        borrow find_blocks[b] as held {
+            borrow find_doc_data[d] as data {
+                find_unit_words_in(data, held.data, at - start)
+            }
+        } else if (find_doc_slot[d] == FIND_APP_COMMENTARY)
         borrow language_data {
+            // (No place free for it: read for this row alone.)
             borrow find_doc_data[d] as data {
                 try {
                     end: int = folio::folio_division_end(data.folio, fd_division[k]);
@@ -911,29 +1292,19 @@ find_hit_words(k: int): bool {
                     find_unit_words(data, window)
                 } with folio::FolioError _damaged -> { }
             }
-        }
-    } else {
-        block: int = 0;
-        start: int = 0;
-        borrow find_doc_data[d] as data {
-            block = folio::folio_block_first(data.folio, at);
-            start = folio::folio_block_start(data.folio, block)
-        }
-        b: int = find_block(d, block);
-        if (b < 0) return false;
-        borrow find_blocks[b] as held {
-            borrow find_doc_data[d] as data {
-                region {
-                    n: int = len(held.data) - (at - start);
-                    window: []i8 = new i8[if (n > 0) n else 0](0i8);
-                    if (n > 0) memcpy(window, 0, held.data, at - start, n);
-                    find_unit_words(data, window)
-                }
-            }
-        }
-    }
+        } else return false;
     match_in_vt();
     true
+}
+
+// The words of the unit at decoded[from..] (a block's) into vt.
+find_unit_words_in(data: *FindDocData, decoded: []i8, from: int) {
+    region {
+        n: int = len(decoded) - from;
+        window: []i8 = new i8[if (n > 0) n else 0](0i8);
+        if (n > 0) memcpy(window, 0, decoded, from, n);
+        find_unit_words(data, window)
+    }
 }
 
 // At most this much of a unit is read for what is shown of it.

@@ -326,7 +326,12 @@ devwire_lines(body: int) {
             id: int = 0;
             for i in at..tab id = id * 10 + (b[i] as int - 48);
             if (id > dw_since) dw_since = id;
-            if (tab + 1 < e) devwire_line(b, tab + 1, e);
+            if (tab + 1 < e) {
+                // (How long the line took, the screens it changed made.)
+                began: f64 = CACurrentMediaTime();
+                devwire_line(b, tab + 1, e);
+                note_num("bible: wire ms ", ((CACurrentMediaTime() - began) * 1000.0f64) as int)
+            }
             at = e + 1
         }
     }
@@ -346,6 +351,22 @@ devwire_line(b: []i8, from: int, to: int) {
     }
     if (devwire_line_is(b, from, to, "!where")) {
         devwire_where();
+        return
+    }
+    if (to - from > 6 && devwire_line_is(b, from, from + 6, "!type ")) {
+        devwire_type(b, from + 6, to);
+        return
+    }
+    if (devwire_line_is(b, from, to, "!record on")) {
+        devwire_record_on();
+        return
+    }
+    if (devwire_line_is(b, from, to, "!record off")) {
+        devwire_record_off();
+        return
+    }
+    if (to - from == 10 && devwire_line_is(b, from, from + 9, "!segment ")) {
+        devwire_segment(b[from + 9] as int - 48);
         return
     }
     if (devwire_line_is(b, from, to, "!close")) {
@@ -697,9 +718,154 @@ devwire_frame(_self: int, _cmd: int, _link: int): int {
         devwire_glide_step(now)
     }
     dw_frame_last = now;
+    if (dw_record_state == DW_RECORD_WRITING) devwire_record_written(now);
     uilog_frame(now);
     followlog_frame(now);
     0
+}
+
+// ---- a segment ----
+// `!segment N`: segment N of the top sheet's title (its segmented control:
+// a search's scopes, say) chosen, as a tap chooses it.
+devwire_segment(n: int) {
+    nav: int = top_presented();
+    if (nav == 0 || (msg1(nav, sel("isKindOfClass:"), cls("UINavigationController")) & 255) == 0) nav = bs_nav;
+    vc: int = if (nav == 0) 0 else msg(nav, sel("topViewController"));
+    seg: int = if (vc == 0) 0 else msg(msg(vc, sel("navigationItem")), sel("titleView"));
+    if (seg == 0 || !responds(seg, "setSelectedSegmentIndex:")) {
+        note("bible: driven: no segments in the title");
+        return
+    }
+    msg1(seg, sel("setSelectedSegmentIndex:"), n);
+    msg1(seg, sel("sendActionsForControlEvents:"), 4096)
+}
+
+// ---- typing ----
+// `!type TEXT`: the field of the top sheet's screen holding TEXT, as if
+// typed (its search controller told, as UIKit tells it of a key).
+devwire_type(b: []i8, from: int, to: int) {
+    nav: int = top_presented();
+    if (nav == 0 || (msg1(nav, sel("isKindOfClass:"), cls("UINavigationController")) & 255) == 0) nav = bs_nav;
+    vc: int = if (nav == 0) 0 else msg(nav, sel("topViewController"));
+    sc: int = if (vc == 0) 0 else msg(msg(vc, sel("navigationItem")), sel("searchController"));
+    if (sc == 0) {
+        note("bible: driven: no field to type in");
+        return
+    }
+    tb_n = 0;
+    for i in from..to tb_byte(b[i] as int);
+    msg1(msg(sc, sel("searchBar")), sel("setText:"), tb_ns());
+    _u: bool = uk_search_updated(sc)
+}
+
+// ---- a recording ----
+// `!record on`, `!record off`: the app's windows recorded as they are shown
+// (ReplayKit's: every animation at the display's rate), then the movie
+// posted to the server (POST /video, saved as .build/dev/videos/N.mov) to
+// be looked at frame by frame. The first recording after a launch waits
+// for the person holding the phone to allow it. Its movie is written after
+// the recording stops, with no word when it is done (a handler would be a
+// block, ios/block.l8): each frame looks for it, posted once its size
+// holds for DW_RECORD_SETTLE_S.
+DW_RECORD_NONE: int = 0;
+
+DW_RECORD_ON: int = 1;
+
+DW_RECORD_WRITING: int = 2;
+
+DW_RECORD_SETTLE_S: f64 = 0.5f64;
+
+DW_RECORD_WAIT_S: f64 = 30.0f64;
+
+dw_record_state: int = 0;
+
+dw_record_stopped: f64 = 0.0f64;
+
+dw_record_size: int = -1;
+
+dw_record_settled: f64 = 0.0f64;
+
+// ReplayKit's recorder (the framework loaded the first time: the app
+// doesn't link it).
+devwire_recorder(): int {
+    if (cls("RPScreenRecorder") == 0) _l: int = msg(msg1(cls("NSBundle"), sel("bundleWithPath:"),
+        nsstring("/System/Library/Frameworks/ReplayKit.framework")), sel("load"));
+    if (cls("RPScreenRecorder") == 0) 0 else msg(cls("RPScreenRecorder"), sel("sharedRecorder"))
+}
+
+// Where the movie is written: the app's tmp.
+devwire_record_path(): int {
+    msg1(NSHomeDirectory(), sel("stringByAppendingString:"), nsstring("/tmp/devwire-recording.mov"))
+}
+
+devwire_record_on() {
+    recorder: int = devwire_recorder();
+    if (recorder == 0 || dw_record_state != DW_RECORD_NONE) {
+        note("bible: record: can't record now");
+        return
+    }
+    msg1(recorder, sel("setMicrophoneEnabled:"), 0);
+    msg1(recorder, sel("startRecordingWithHandler:"), 0);
+    dw_record_state = DW_RECORD_ON;
+    note("bible: record: on")
+}
+
+devwire_record_off() {
+    recorder: int = devwire_recorder();
+    if (recorder == 0 || dw_record_state != DW_RECORD_ON) {
+        note("bible: record: not recording");
+        return
+    }
+    if ((msg(recorder, sel("isRecording")) & 255) == 0) {
+        dw_record_state = DW_RECORD_NONE;
+        note("bible: record: it never began (not allowed on the phone?)");
+        return
+    }
+    path: int = devwire_record_path();
+    _r: int = msg2(msg(cls("NSFileManager"), sel("defaultManager")), sel("removeItemAtPath:error:"),
+        path, 0);
+    msg2(recorder, sel("stopRecordingWithOutputURL:completionHandler:"), msg1(cls("NSURL"),
+        sel("fileURLWithPath:"), path), 0);
+    dw_record_state = DW_RECORD_WRITING;
+    dw_record_stopped = CACurrentMediaTime();
+    dw_record_size = -1;
+    note("bible: record: off, writing")
+}
+
+// The movie looked for (each frame while it is being written), posted once
+// it is whole.
+devwire_record_written(now: f64) {
+    if (now - dw_record_stopped > DW_RECORD_WAIT_S) {
+        dw_record_state = DW_RECORD_NONE;
+        note("bible: record: no movie came");
+        return
+    }
+    path: int = devwire_record_path();
+    attributes: int = msg2(msg(cls("NSFileManager"), sel("defaultManager")), sel("attributesOfItemAtPath:error:"),
+        path, 0);
+    size: int = if (attributes == 0) -1 else msg(attributes, sel("fileSize"));
+    if (size <= 0) return;
+    if (size != dw_record_size) {
+        dw_record_size = size;
+        dw_record_settled = now;
+        return
+    }
+    if (now - dw_record_settled < DW_RECORD_SETTLE_S) return;
+    dw_record_state = DW_RECORD_NONE;
+    body: int = msg1(cls("NSData"), sel("dataWithContentsOfFile:"), path);
+    url: int = msg1(cls("NSURL"), sel("URLWithString:"), msg1(dw_url, sel("stringByAppendingString:"),
+        nsstring("/video")));
+    request: int = if (url == 0 || body == 0) 0 else msg1(cls("NSMutableURLRequest"),
+        sel("requestWithURL:"), url);
+    if (request == 0) {
+        note("bible: record: could not post");
+        return
+    }
+    msg1(request, sel("setHTTPMethod:"), nsstring("POST"));
+    msg1(request, sel("setHTTPBody:"), body);
+    task: int = msg1(dw_session, sel("dataTaskWithRequest:"), request);
+    if (task != 0) msg(task, sel("resume"));
+    note_num("bible: record: posting bytes ", size)
 }
 
 // ---- a flick ----
