@@ -1774,6 +1774,8 @@ async function main() {
     params.set("L8_SEED", String(Math.abs(start)));
     if (start < 0) params.set("L8_PARK", "1");
   }
+  // (The game is going there, until it says it is: see L8COURSE.)
+  headed = (params.has("L8_PARK") ? -1 : 1) * Number(params.get("L8_SEED"));
   if (touch) params.set("L8_TOUCH", "1");
   // (On a page: the game stops for frames while it builds a place, and
   // leaves it to the page to show that it is loading. See L8LOAD.)
@@ -1843,7 +1845,7 @@ async function main() {
   // (The game is held behind a sheet that is up: see holdGame.)
   present();
   // (Picked while the game was starting somewhere else.)
-  if (wanted !== null && wanted !== placeNow) visit(wanted);
+  if (wanted !== null && wanted !== start) visit(wanted);
   wanted = null;
   canvas.focus();
   canvas.addEventListener("focus", () => (overlayWord = ""));
