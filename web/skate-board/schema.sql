@@ -37,6 +37,19 @@ CREATE TABLE IF NOT EXISTS place_lines (
   at INTEGER NOT NULL,
   PRIMARY KEY (course, style)
 );
+-- Runs shared (see share, in worker.js), for anyone with the id to watch:
+-- the place, score, version and replay, as a best run's; the name of who
+-- rode it; who shared it; and when.
+CREATE TABLE IF NOT EXISTS shares (
+  id TEXT PRIMARY KEY,
+  course INTEGER NOT NULL,
+  score INTEGER NOT NULL,
+  version INTEGER NOT NULL,
+  replay TEXT NOT NULL,
+  name TEXT NOT NULL,
+  by TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
 -- What a device has to say of how the game went on it: an error, or how
 -- fast its frames came (data, as JSON: see report, in ../skate/skate.js).
 -- With it, when; which visit to the page it is of; what the browser calls

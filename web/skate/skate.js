@@ -35,8 +35,14 @@ for (const name of ["touchstart", "touchmove"]) {
     if (!e.target.closest?.("a")) e.preventDefault();
   }, { passive: false });
 }
+// (Back is to the address the page was opened at, and steps forward again
+// to that of the page showing: see addressNow. Another address come to,
+// one given while the page is open, is that page: see openAddress.)
+const openedAt = location.href;
 history.pushState({ stay: true }, "", location.href);
-addEventListener("popstate", () => history.pushState({ stay: true }, "", location.href));
+addEventListener("popstate", () => {
+  if (location.href === openedAt) history.pushState({ stay: true }, "", addressNow());
+});
 
 // (?touch has a desktop browser be one, to try the game as a phone has it.)
 const touch = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0 || new URLSearchParams(location.search).has("touch");
@@ -116,6 +122,7 @@ const takeStep = (step) => {
 };
 // (Once the game is there and built: see L8COURSE and L8LOAD.)
 const stepWhenReady = () => {
+  watchWhenReady();
   syncSteps();
   if (pendingStep && lessonReady()) {
     const step = pendingStep;
@@ -197,6 +204,7 @@ const present = () => {
   if (id === "person") personOf = of;
   const motion = trail.length > shownLength ? "push" : trail.length < shownLength ? "pop" : "swap";
   shownLength = trail.length;
+  showAddress();
   showPage(motion);
   holdGame();
   syncLive();
@@ -243,6 +251,159 @@ const goBack = () => {
 addEventListener("keydown", (e) => {
   if (e.key === "Escape") goBack();
 });
+
+// ---- addresses ----
+// Each page has an address (after the #), so that loading it again comes
+// back to the same page, and it can be passed on:
+//   #/                          home
+//   #/tutorial, #/tutorial/N    the lessons; lesson N
+//   #/slopestyle, #/park        the places of a kind; and /days, the days
+//                               gone by
+//   #/place/ID                  a place (a park's number is negative)
+//   #/ride/ID, #/together       riding there; riding together
+//   #/person/NAME, #/players    someone's runs; who plays on this device
+//   #/watch/line/STYLE/ID       a place's best line, watched
+//   #/watch/run/ID              a run shared, watched (see shareNow)
+//   #/watch/best/PERSON/ID      someone's best run on a place, watched
+// The way back to it is the way that leads there from home (see
+// trailFor). His own run, watched, has no address of its own: it is his,
+// on this device. (A person's link, #me=, is another thing: see
+// ../people/people.js.)
+const addressOf = (view) => {
+  const [id, of, how] = view;
+  if (id === "lessons") return "#/tutorial";
+  if (id === "lesson") return `#/tutorial/${of}`;
+  if (id === "places") return of === "parks" ? "#/park" : "#/slopestyle";
+  if (id === "days") return of === "parks" ? "#/park/days" : "#/slopestyle/days";
+  if (id === "place") return `#/place/${of}`;
+  if (id === "ride") return how === "together" ? "#/together" : `#/ride/${of}`;
+  if (id === "person") return `#/person/${encodeURIComponent(of)}`;
+  if (id === "players") return "#/players";
+  if (id === "watch" && of?.kind === "line") return `#/watch/line/${of.style}/${of.course}`;
+  if (id === "watch" && of?.kind === "run") return `#/watch/run/${of.id}`;
+  if (id === "watch" && of?.kind === "best") return `#/watch/best/${of.person}/${of.course}`;
+  return "#/";
+};
+const addressNow = () => {
+  // (His own run being watched: the page it was watched from.)
+  const view = pageNow() === "watch" && !trail.at(-1)[1] && trail.length > 1 ? trail.at(-2) : trail.at(-1);
+  return location.pathname + location.search + addressOf(view);
+};
+const showAddress = () => {
+  if (location.pathname + location.search + location.hash !== addressNow()) history.replaceState(history.state, "", addressNow());
+};
+// The way from home to a place's page: through the places of its kind
+// (and the days gone by, to a day that is over); big air, straight from
+// home.
+const placeTrail = (id) => {
+  const kind = id < 0 ? "parks" : "courses";
+  if (isBigAir(id)) return [["menu"], ["place", id]];
+  if (isDaily(id) && Math.abs(id) !== today()) return [["menu"], ["places", kind], ["days", kind], ["place", id]];
+  return [["menu"], ["places", kind], ["place", id]];
+};
+// A place's number from an address, if it is one the page could have come
+// to (a course, a park, a day's or big air; not the tutorial, nor a
+// round); or null.
+const placeIn = (text) => {
+  const id = /^-?[0-9]{1,10}$/.test(text ?? "") ? Number(text) : 0;
+  return id !== 0 && !inTutorial(id) && !isRound(id) ? id : null;
+};
+// A run to be watched as the page opens (see openAddress): its place, if
+// known yet, and it, once it has come ({run, name, what}).
+let pendingWatch = null;
+// Open the page an address names, the way to it behind it; or home, if it
+// names none. (Before the game is up: the place a page shows is where the
+// game starts.)
+const openAddress = (hash) => {
+  const parts = hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+  const [what, a, b, c] = parts;
+  const kind = what === "park" ? "parks" : "courses";
+  let views = [["menu"]];
+  if (what === "tutorial" && !a) views = [["menu"], ["lessons"]];
+  else if (what === "tutorial" && Number(a) >= 1 && Number(a) <= LESSONS.length) views = [["menu"], ["lessons"], ["lesson", Number(a)]];
+  else if ((what === "slopestyle" || what === "park") && !a) views = [["menu"], ["places", kind]];
+  else if ((what === "slopestyle" || what === "park") && a === "days") views = [["menu"], ["places", kind], ["days", kind]];
+  else if (what === "place" && placeIn(a) !== null) views = placeTrail(placeIn(a));
+  else if (what === "ride" && placeIn(a) !== null) {
+    views = [...placeTrail(placeIn(a)), ["ride", placeIn(a)]];
+    wanted = placeIn(a);
+  } else if (what === "together" && mySecret) views = [["menu"], ["ride", ROUND_BASE, "together"]];
+  else if (what === "person" && a) views = [["menu"], ["person", a]];
+  else if (what === "players") views = [["menu"], ["players"]];
+  else if (what === "watch" && a === "line" && LINE_NAMES[b] && placeIn(c) !== null) {
+    const id = placeIn(c);
+    views = placeTrail(id);
+    pendingWatch = { course: id, got: null };
+    (async () => {
+      await fetchLines(id);
+      const run = lines.get(id)?.[b];
+      if (!run) return lost("That line is gone");
+      gotWatch({ ...run, course: id }, LINE_NAMES[b], { kind: "line", style: b, course: id });
+    })();
+  } else if (what === "watch" && a === "best" && /^[a-z0-9]{8}$/.test(b ?? "") && placeIn(c) !== null) {
+    const id = placeIn(c);
+    views = placeTrail(id);
+    pendingWatch = { course: id, got: null };
+    (async () => {
+      const run = await fetchRun(`${api}/replay?person=${b}&course=${id}`, { headers: { authorization: `Bearer ${mySecret}` } });
+      if (!run) return lost("Couldn't load that run");
+      gotWatch(run, run.name, { kind: "best", person: b, course: id });
+    })();
+  } else if (what === "watch" && a === "run" && /^[0-9a-f]{12}$/.test(b ?? "")) {
+    pendingWatch = { course: null, got: null };
+    (async () => {
+      const run = await fetchRun(`${api}/run?id=${b}`);
+      if (!run) return lost("Couldn't find that run");
+      // (Its place is known now: that is where the game goes, and the way
+      // back from it.)
+      trail.length = 0;
+      trail.push(...placeTrail(run.course));
+      pendingWatch.course = run.course;
+      present();
+      gotWatch(run, run.name, { kind: "run", id: b, course: run.course });
+    })();
+  }
+  trail.length = 0;
+  trail.push(...views);
+};
+// (An address given while the page is open, as one pasted into it: that
+// page, as if opened by it. The page's own changes of address are not
+// such: see showAddress.)
+addEventListener("hashchange", () => {
+  if (location.hash.startsWith("#me=") || location.pathname + location.search + location.hash === addressNow()) return;
+  if (pageNow() === "watch") typeKeys([65288]);
+  openAddress(location.hash);
+  present();
+  const [id, of] = trail.at(-1);
+  if (id === "ride") goTo(of, true);
+});
+const fetchRun = async (url, init) => {
+  try {
+    const r = await fetch(url, init);
+    return r.ok ? await r.json() : null;
+  } catch {
+    return null;
+  }
+};
+const lost = (text) => {
+  pendingWatch = null;
+  toast(text);
+};
+const gotWatch = (run, name, what) => {
+  if (!pendingWatch) return;
+  pendingWatch.got = { run, name, what };
+  watchWhenReady();
+};
+// The run come as the page opened, watched once the game is up, at its
+// place, and built (and if this game can play it).
+const watchWhenReady = () => {
+  const got = pendingWatch?.got;
+  if (!got || !sendKey || !gameFs || !gameVersion) return;
+  if (headed !== null || placeNow !== got.run.course || document.body.classList.contains("loading")) return;
+  pendingWatch = null;
+  if (got.run.version !== gameVersion) return toast("That run was ridden under other rules");
+  watchReplay(got.run, got.name, got.what);
+};
 
 // Places: a downhill course is a number; a park is one too, kept negative
 // (as the game says them: see run_id in programs/skate/park.l8). Each
@@ -684,12 +845,14 @@ const postRun = async (version, id, score, replay) => {
   showOpen();
 };
 // Watch a run ({version, course, score, replay}), under a name: the game
-// is handed it as watch.txt, and told to play it.
-const watchReplay = (run, name) => {
+// is handed it as watch.txt, and told to play it. What it is, for its
+// address and for sharing it, is `what`: {kind, course, run, name, and
+// for a line its style, for a run shared its id, for a best its person}.
+const watchReplay = (run, name, what) => {
   gameFs.writeFile("watch.txt", `${run.version} ${run.course} ${run.score} ${name.replace(/ /g, "_")} ${run.replay}`);
   // (Going back from the run, or its end, comes back to this sheet: see
   // L8RIDE.)
-  go("watch");
+  go("watch", { ...what, run, name });
   typeKeys([118]);
 };
 const watchRun = async (person, id) => {
@@ -698,7 +861,7 @@ const watchRun = async (person, id) => {
     const r = await fetch(`${api}/replay?person=${person}&course=${id}`, { headers: { authorization: `Bearer ${mySecret}` } });
     const run = await r.json();
     if (!r.ok) throw new Error(run.error);
-    watchReplay(run, run.name);
+    watchReplay(run, run.name, { kind: "best", person, course: id });
   } catch {
     toast("Couldn't load that run");
   }
@@ -713,19 +876,79 @@ const watchRun = async (person, id) => {
 // once a visit to the page.
 const LINE_NAMES = { human: "Human line", wild: "Wild line" };
 const lines = new Map();
-const fetchLines = async (id) => {
-  if (lines.has(id)) return;
-  lines.set(id, null);
-  try {
-    const r = await fetch(`${api}/lines?course=${id}`);
-    if (!r.ok) return;
-    lines.set(id, await r.json());
-    if (sheetNow() === "place" && placeOf === id) showPage();
-  } catch {}
+// (Fetched once: asked again, the same fetching, done or not.)
+const linesFetched = new Map();
+const fetchLines = (id) => {
+  if (!linesFetched.has(id)) {
+    lines.set(id, null);
+    linesFetched.set(id, (async () => {
+      try {
+        const r = await fetch(`${api}/lines?course=${id}`);
+        if (!r.ok) return;
+        lines.set(id, await r.json());
+        if (sheetNow() === "place" && placeOf === id) showPage();
+      } catch {}
+    })());
+  }
+  return linesFetched.get(id);
 };
 const watchLine = (style, id) => {
   const run = lines.get(id)?.[style];
-  if (run && sendKey) watchReplay({ ...run, course: id }, LINE_NAMES[style]);
+  if (run && sendKey) watchReplay({ ...run, course: id }, LINE_NAMES[style], { kind: "line", style, course: id });
+};
+// ---- sharing a run ----
+// A run can be passed on as a link to watch it: one being watched, or the
+// one he has just ridden. A place's best line, or a run already shared,
+// is its own address. Another (his own, or someone's best he sees) is
+// shared first (see share, in ../skate-board/worker.js): kept for anyone
+// with its link, which is made from the run itself (so the link is known
+// at once, while it is sent). Sharing needs a person's link: the run goes
+// out under his name.
+let lastRun = null;
+// What Share would share now ({run, name, ...what}, as watchReplay has it),
+// or null.
+const shareable = () => {
+  const replaying = document.body.classList.contains("replaying");
+  if (replaying && pageNow() === "watch" && trail.at(-1)[1]) {
+    const what = trail.at(-1)[1];
+    return what.kind === "best" && !mySecret ? null : what;
+  }
+  const over = document.body.classList.contains("over") || replaying;
+  if (over && mySecret && account && lastRun?.course === placeNow && lastRun.version === gameVersion) return { kind: "mine", course: lastRun.course, run: lastRun, name: account.name };
+  return null;
+};
+// A shared run's id: as the worker makes it.
+const shareId = async (run) => {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${run.course} ${run.version} ${run.score} ${run.replay}`));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 12);
+};
+const shareNow = async () => {
+  const what = shareable();
+  if (!what) return;
+  let address = addressOf(["watch", what]);
+  if (what.kind === "mine" || what.kind === "best") {
+    const id = await shareId(what.run);
+    address = `#/watch/run/${id}`;
+    const body = what.kind === "mine" ? { course: what.course, score: what.run.score, version: what.run.version, replay: what.run.replay } : { person: what.person, course: what.course };
+    fetch(`${api}/share`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${mySecret}` }, body: JSON.stringify(body) })
+      .then(async (r) => {
+        const kept = r.ok ? await r.json() : null;
+        if (kept?.id !== id) toast("Couldn't share that run");
+      })
+      .catch(() => toast("Couldn't share that run"));
+  }
+  const url = new URL(location.pathname + address, location.origin).href;
+  const title = `${what.name} on ${placeName(what.course)}: ${what.run.score}`;
+  // (A phone's own way to pass a link on; else it is copied.)
+  try {
+    if (navigator.share) await navigator.share({ title, url });
+    else {
+      await navigator.clipboard.writeText(url);
+      toast("Link copied");
+    }
+  } catch (e) {
+    if (e?.name !== "AbortError") toast("Couldn't share that run");
+  }
 };
 // ---- riding together ----
 // Riding together is one endless run, the same for everyone at once: a
@@ -977,6 +1200,7 @@ const gameSays = (line) => {
   else if (words[0] === "L8CURSOR") canvas.style.cursor = words[1] === "1" ? "pointer" : "";
   else if (words[0] === "L8VERSION") {
     gameVersion = Number(words[1]);
+    watchWhenReady();
     // (His runs under other rules are not ones to beat under these.)
     if (stored("skate.rules", 1) !== gameVersion) {
       for (const id of Object.keys(myRuns)) delete myRuns[id];
@@ -1032,6 +1256,7 @@ const gameSays = (line) => {
     if (replaying && pageNow() !== "watch" && !sheetOpen()) {
       trail.push(["watch"]);
       shownLength = trail.length;
+      showAddress();
     }
     if (!replaying && pageNow() === "watch") {
       trail.pop();
@@ -1040,7 +1265,10 @@ const gameSays = (line) => {
   }
   else if (words[0] === "L8NET") sayLive(line.trim().slice(6));
   else if (words[0] === "L8ROUND") scoreRound(Number(words[1]), Number(words[2]), words[3] === "1");
-  else if (words[0] === "L8REPLAY") postRun(Number(words[1]), Number(words[2]), Number(words[3]), words.slice(4).join(" "));
+  else if (words[0] === "L8REPLAY") {
+    lastRun = { version: Number(words[1]), course: Number(words[2]), score: Number(words[3]), replay: words.slice(4).join(" ") };
+    postRun(lastRun.version, lastRun.course, lastRun.score, lastRun.replay);
+  }
   else if (words[0] === "L8COURSE") {
     placeNow = Number(words[1]);
     if (placeNow === headed) headed = null;
@@ -1122,6 +1350,7 @@ const onTap = (name) => {
     showPage();
   } else if (what === "watch") watchRun(rest[0], Number(rest[1]));
   else if (what === "line") watchLine(rest[0], Number(rest[1]));
+  else if (what === "share") shareNow();
 };
 let toggleStats = null;
 
@@ -1378,7 +1607,11 @@ const syncChrome = () => {
   chrome("night", body.contains("night"));
   chrome("stats", true, statsOn, statsWords, statsRoom);
   chrome("steps", lesson, ["read", "watch", "try"].indexOf(stepAt()), body.contains("nudge"));
-  chrome("ends", body.contains("over") && !sheet && !replaying, !tutorial, !tutorial, tutorial ? onwardWord : "", lesson);
+  // (At the end of a run, its buttons; while one is watched, only Share,
+  // if it can be.)
+  const ending = body.contains("over") && !sheet && !replaying;
+  const sharing = !sheet && !tutorial && shareable() !== null;
+  chrome("ends", ending || (replaying && sharing), ending && !tutorial, ending && !tutorial, ending && tutorial ? onwardWord : "", lesson, sharing);
   // (Of the tutorial's words, only how a lesson went: nothing is said over
   // the course as he rides it himself.)
   chrome("teach", sheet || teach.kind !== 4 ? 0 : 4, teach.text, teach.ok);
@@ -1501,6 +1734,7 @@ async function main() {
   if (!params.has("L8_SEED")) placeNow = startPlace();
   // (Home; or with ?play, riding where he last was.)
   if (params.has("play")) trail.push(["ride", placeNow]);
+  else openAddress(location.hash);
   present();
   // (Opened by his link: who he is, once the leaderboards say.)
   if (people.linked) {

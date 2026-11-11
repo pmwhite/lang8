@@ -12,6 +12,9 @@
 //   POST /score  {course, score, version, replay}   a run of mine              (a person)
 //   GET  /replay?person=&course=              a best run, of someone I see
 //   GET  /lines?course=                       a place's best lines, wild and human      (anyone)
+//   POST /share {course, score, version, replay}   a run of mine, to share: its id      (a person)
+//   POST /share {person, course}              a best run of someone I see, to share: its id
+//   GET  /run?id=                             a shared run                              (anyone)
 //   POST /admin/line {course, style, score, version, replay}   a line found: kept if it is the best
 //   GET  /admin/last                          when each person last rode: {id: at}  (the admin)
 //   POST /admin/unscore  {person, course?}    delete a person's runs (on one course, or all)
@@ -42,6 +45,8 @@ import { bearer, personOf, personWith, seenBy } from "../people-api/people.js";
 // person's latest runs on a course are kept, and of everyone's shown.
 const COURSES = 5;
 const MAX_REPLAY = 150000;
+// How long a shared run's id is (hex digits).
+const SHARE_ID = 12;
 const KEEP_RUNS = 10;
 const RECENT = 20;
 // Reports: the kinds there are, how long one may be, how many one visit to
@@ -182,6 +187,44 @@ async function postLine(env, body) {
   await env.DB.prepare("INSERT OR REPLACE INTO place_lines (course, style, score, version, replay, at) VALUES (?, ?, ?, ?, ?, ?)")
     .bind(course, style, score, version, replay, Date.now()).run();
   return reply(200, { kept: true, score, version });
+}
+
+// A run shared: kept for anyone with its id to watch, with the name of who
+// rode it. Either his own, as his game wrote it; or the best run on a place
+// of someone he sees, as the leaderboards have it (so that a name goes
+// only on a run of theirs). Its id is made from the run itself, so that
+// the same run shared again has the same one (and keeps the name it was
+// first shared under).
+async function share(env, who, body) {
+  let run = null;
+  if (body?.person !== undefined) {
+    const { person, course } = body;
+    if (!validId(person) || !validCourse(course)) return fail(400, "bad request");
+    const rider = (await seenBy(env, who.id)).find((p) => p.id === person);
+    const row = rider && (await env.DB.prepare("SELECT score, version, replay FROM bests WHERE person = ? AND course = ?").bind(person, course).first());
+    if (!row) return fail(404, "no such run");
+    run = { course, score: row.score, version: row.version, replay: row.replay, name: rider.name };
+  } else {
+    const { course, score, version, replay } = body ?? {};
+    if (!validCourse(course) || !whole(score, 1, 10000000) || !whole(version, 1, 100000)) return fail(400, "bad run");
+    if (typeof replay !== "string" || replay.length === 0 || replay.length > MAX_REPLAY || !/^[0-9a-z. ]+$/.test(replay)) return fail(400, "bad replay");
+    run = { course, score, version, replay, name: who.name };
+  }
+  // (The page makes the same id itself, to have the link at once: see
+  // shareId, in ../skate/skate.js.)
+  const id = (await sha256(`${run.course} ${run.version} ${run.score} ${run.replay}`)).slice(0, SHARE_ID);
+  await env.DB.prepare("INSERT OR IGNORE INTO shares (id, course, score, version, replay, name, by, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(id, run.course, run.score, run.version, run.replay, run.name, who.id, Date.now()).run();
+  return reply(200, { id });
+}
+
+// A shared run (see share), to watch.
+async function shared(env, url) {
+  const id = url.searchParams.get("id");
+  if (typeof id !== "string" || !new RegExp(`^[0-9a-f]{${SHARE_ID}}$`).test(id)) return fail(400, "bad request");
+  const row = await env.DB.prepare("SELECT course, score, version, replay, name FROM shares WHERE id = ?").bind(id).first();
+  if (!row) return fail(404, "no such run");
+  return reply(200, { id, ...row });
 }
 
 // A device's report, kept (see the top of this file).
@@ -563,11 +606,14 @@ export default {
       if (request.method === "POST" && parts[0] === "report") return await report(env, request, body);
       // (A place's best lines are anyone's to watch.)
       if (request.method === "GET" && parts[0] === "lines") return await lines(env, url);
+      // (So is a run shared.)
+      if (request.method === "GET" && parts[0] === "run") return await shared(env, url);
       const who = await personOf(env, request);
       if (!who) return fail(401, "no such link");
       if (request.method === "GET" && parts[0] === "me") return await me(env, who);
       if (request.method === "GET" && parts[0] === "replay") return await replay(env, who, url);
       if (request.method === "POST" && parts[0] === "score") return await post(env, who, body);
+      if (request.method === "POST" && parts[0] === "share") return await share(env, who, body);
       return fail(404, "not found");
     } catch (e) {
       console.error(e);
