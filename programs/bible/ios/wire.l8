@@ -80,6 +80,22 @@ to_core_end() {
 // unless it is already being read or a request waits for its answer.
 feeding: bool = false;
 
+// How many lines core has been given that may change what it shows (every
+// one but `model`, which only asks): a model read is out of date once
+// this moves on from the count it was read at (uk_ui_lines).
+core_lines: int = 0;
+
+uk_ui_lines: int = -1;
+
+// Whether the line at bytes p to e of hs_inbox is a `model` line.
+inbox_line_asks(p: int, e: int): bool {
+    word: str = "model";
+    if (e - p < len(word) || e - p > len(word) && hs_inbox[p + len(word)] as int != 32) return false;
+    for k in 0..len(word)
+        if (hs_inbox[p + k] != word[k]) return false;
+    true
+}
+
 feed() {
     if (feeding) return;
     feeding = true;
@@ -90,6 +106,7 @@ feed() {
         p: int = 0;
         for i in 0..n {
             if (hs_inbox[i] as int == 10) {
+                if (!inbox_line_asks(p, i)) core_lines = core_lines + 1;
                 hs_line(p, i);
                 p = i + 1
             }
@@ -166,7 +183,10 @@ lines_take() {
             id: int = screen_note(at, e);
             if (id == 0) {
                 if (!wire_decode_span(&tray_ui, from_core_buf, at, end)) wire_fail("the tray could not be read")
-            } else uk_stale = true;
+            } else {
+                uk_keep(id, from_core_buf, at, end);
+                uk_stale = true
+            }
             from_core_at = end
         } else if (wl_at(at, e, "link")) {
             end: int = block_end(at);
@@ -451,6 +471,53 @@ ask_model(id: int, section: int, row: int): bool {
     if (!ask_end("screen")) return false;
     if (!wire_decode_span(&uk_ui, answer_buf, 0, answer_n)) wire_fail("a screen could not be read");
     uk_stale = false;
+    uk_ui_lines = core_lines;
+    uk_keep(id, answer_buf, 0, answer_n);
+    true
+}
+
+// Each slot's screen as core last wrote it: its bytes (in its part of
+// uk_kept, UK_KEPT_MOST each), how many, its id, and how many lines core
+// had been given then (core_lines). A list reloaded with nothing given to
+// core since reads it from here rather than asking core to make it again:
+// two lists in sight would otherwise ask by turns, each making the other's
+// out of date in uk_ui. A screen longer than its part is asked for.
+UK_KEPT_MOST: int = 262144;
+
+uk_kept: []i8 = new i8[UK_SLOTS * UK_KEPT_MOST](0i8);
+
+uk_kept_n: []int = new int[UK_SLOTS](0);
+
+uk_kept_id: []int = new int[UK_SLOTS](0);
+
+uk_kept_lines: []int = new int[UK_SLOTS](-1);
+
+// Screen id's bytes at to end of data kept for its slot.
+uk_keep(
+    id: int,
+    data: []i8,
+    at: int,
+    end: int
+) {
+    k: int = uk_slot_of_id(id);
+    if (k < 0) return;
+    n: int = end - at;
+    uk_kept_n[k] = 0;
+    if (n > UK_KEPT_MOST) return;
+    base: int = k * UK_KEPT_MOST;
+    for i in 0..n uk_kept[base + i] = data[at + i];
+    uk_kept_n[k] = n;
+    uk_kept_id[k] = id;
+    uk_kept_lines[k] = core_lines
+}
+
+// Slot k's screen read into uk_ui from what was kept, if it is still what
+// core shows: whether it was.
+uk_kept_read(k: int): bool {
+    if (uk_kept_n[k] == 0 || uk_kept_id[k] != uk_ids[k] || uk_kept_lines[k] != core_lines) return false;
+    if (!wire_decode_span(&uk_ui, uk_kept, k * UK_KEPT_MOST, k * UK_KEPT_MOST + uk_kept_n[k])) return false;
+    uk_stale = false;
+    uk_ui_lines = core_lines;
     true
 }
 

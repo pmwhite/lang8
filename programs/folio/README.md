@@ -25,17 +25,19 @@ Every number is an unsigned 32-bit little-endian integer.
 
 | Offset | What |
 |---|---|
-| 0 | `FOLIO`, a zero byte, the format's version (2) and a zero byte |
+| 0 | `FOLIO`, a zero byte, the format's version (3) and a zero byte |
 | 8 | the head's size: the bytes before the first block |
 | 12 | how many blocks there are |
 | 16 | the content's size, decoded |
 | 20 | the content's bytes in each block, decoded (the last block may hold fewer) |
 | 24, 28 | the metadata's size compressed, then decoded |
 | 32, 36 | the index's size compressed, then decoded |
-| 40 | each block's size compressed, a number each |
+| 40, 44 | the word index's size compressed, then decoded |
+| 48 | each block's size compressed, a number each |
 
 Then the metadata and the index, each a raw DEFLATE stream, then the
-blocks, each a raw DEFLATE stream of its part of the content. A block's
+blocks, each a raw DEFLATE stream of its part of the content, then the
+word index (below), one raw DEFLATE stream. A block's
 place in the content follows from its number; its place in the file from
 the sizes before it. So a reader needs the head (`folio_head_size` says
 how big it is, from the file's first 12 bytes) and then only the blocks
@@ -64,7 +66,46 @@ a comment begins `FOLIO_MARK_SPAN` (1536) bytes or more after the mark
 before, so that marks are no further apart than that, but where one
 paragraph is longer. `folio_division_marks` reads them; a folio of the
 format's first version, which the library still reads, has none
-(`folio_marked` says).
+(`folio_marked` says). A folio of the second version has no word index
+and no offsets 40 and 44: its block sizes begin at 40.
+
+## The word index
+
+Every word of the content, folded, with the units it is in, so that a
+reader finds where a search's words are without decoding the content. A
+word is a run of ASCII letters and digits and bytes past ASCII, but for
+the punctuation U+2000 to U+206F and the no-break space; ASCII capitals
+are folded to small letters (`folio_fold_words` folds a query the same
+way). A word longer than 48 bytes is left out.
+
+A unit is where a result begins, at the content offset of the record that
+begins it. In a Bible (metadata `kind` `bible`) a unit begins at each
+book, chapter, verse, comment and heading (`B`, `C`, `V`, `K`, `S`, `s`,
+`D`, `M`); in any other document at a paragraph (`P`) too. The words
+counted are those of the records a reader reads: the text, a link's
+words, headings, a psalm's title, an outline's lines (`T W I J G U H X L
+S s D d M m A O`); and in documents other than Bibles, notes (`F`), which
+in a Bible are a translator's rather than its text.
+
+The stream holds unsigned LEB128 numbers (varints) and bytes:
+
+1. flags (1: units begin at paragraphs);
+2. the number of units, then each unit's place as the difference from the
+   one before;
+3. the number of words, then for each word in byte order: how many
+   leading bytes it shares with the word before, how many follow, those
+   bytes, how many units it is in, and how many bytes its units take;
+4. each word's units, in the words' order: unit numbers as the
+   difference from the one before.
+
+`folio_has_words` says whether a folio has an index, and
+`folio_words_place`, `folio_words_packed` and `folio_words_size` give its
+place and sizes. `folio_words_open(source, at, packed, size)` reads it.
+`folio_words_units(words, w, from, to, matching)` gives the places of the
+units that hold the word `w[from..to)`: `Whole`, or with `Beginning` the
+units of the 256 most common words it begins (`FOLIO_BEGINNING_WORDS_MOST`).
+`folio_units_both` intersects two lists, and `folio_unit_end` says where
+a unit ends.
 
 ## Metadata
 

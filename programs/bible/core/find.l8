@@ -1,0 +1,1044 @@
+tag bible;
+
+use_tag std, builder;
+
+// Search by the documents' word indexes (programs/folio's words.l8): the
+// verses a search's words find in every version here that has one, each
+// verse once, and the order Go To shows the first few in. A search looks
+// its words up rather than reading the text, so it is quick however slowly
+// the app runs; the text is read only for what is shown, and to tell a
+// phrase.
+//
+// The query is folded as the indexes fold their words (folio's
+// folio_fold_words); its last word, typed and not yet ended by a space, is
+// looked for as a word's beginning ("liv" finds living), the others whole.
+// Every word must be in a verse for it to be found; quoted, the words must
+// be a phrase there.
+
+// ---- the query ----
+// Its words, folded, a space after each; how many; whether the last is a
+// word's beginning, and whether they are quoted (a phrase).
+fq: []i8 = new i8[512](0i8);
+
+fq_n: int = 0;
+
+fq_words: int = 0;
+
+fq_open_end: bool = false;
+
+fq_phrase: bool = false;
+
+// A word's beginning shorter than this is looked for whole: one letter
+// begins too many words to be a search.
+FIND_BEGINNING_LEAST: int = 2;
+
+// The query q's first n bytes, as the indexes take it.
+find_query(q: []i8, n: int) {
+    fq_n = 0;
+    fq_words = 0;
+    region {
+        out: *ByteBuilder = builder_new(2 * n + 8);
+        folio::folio_fold_words(out, q, 0, n);
+        for k in 0..out.size {
+            if (fq_n < len(fq)) {
+                fq[fq_n] = out.data[k];
+                fq_n = fq_n + 1;
+                if (out.data[k] == ' ') fq_words = fq_words + 1
+            }
+        }
+    }
+    last: int = if (n > 0) q[n - 1] as int & 255 else 32;
+    fq_open_end = last >= 128 || is_letter(last) || is_digit(last);
+    fq_phrase = false;
+    for k in 0..n
+        if (q[k] == '"') fq_phrase = true
+}
+
+// The places (content offsets) of the units every query word is in, in
+// words, in order.
+find_units(words: *folio::FolioWords): []int@new {
+    found: []int = new int[0](0);
+    at: int = 0;
+    k: int = 0;
+    while (at < fq_n) {
+        space: int = at;
+        while (fq[space] != ' ') space = space + 1;
+        open: bool = k == fq_words - 1 && fq_open_end && space - at >= FIND_BEGINNING_LEAST;
+        units: []int = folio::folio_words_units(words, fq, at, space, if (open) folio::WordMatching.Beginning else folio::WordMatching.Whole);
+        found = (if (k == 0) units else folio::folio_units_both(found, units));
+        if (len(found) == 0) return found;
+        at = space + 1;
+        k = k + 1
+    }
+    found
+}
+
+// ---- the versions searched ----
+// In the order a verse found in several is shown in: the one read, the
+// panel's version, then every other version here with an index (not the
+// original's, which Search reads by its own letters, nor the ESV's, which
+// it asks esv.org for).
+FIND_TEXTS_MOST: int = 24;
+
+find_texts: []int = new int[FIND_TEXTS_MOST](0);
+
+find_texts_n: int = 0;
+
+find_texts_choose() {
+    find_texts_n = 0;
+    find_text_add(quote_base());
+    match sk_beside_kept() {
+        Version v -> find_text_add(v.text);
+        _ -> { }
+    }
+    for t in 0..len(texts) {
+        if (t != TEXT_ORIG && t != TEXT_ESV && t != TEXT_PIN) find_text_add(t)
+    }
+}
+
+find_text_add(t: int) {
+    if (find_texts_n >= len(find_texts) || !find_text_indexed(t)) return;
+    for k in 0..find_texts_n
+        if (find_texts[k] == t) return;
+    find_texts[find_texts_n] = t;
+    find_texts_n = find_texts_n + 1
+}
+
+// Whether text t is here with a word index.
+find_text_indexed(t: int): bool {
+    if (t < 0 || t >= len(texts) || !text_ready(t)) return false;
+    borrow texts[t] as text {
+        text.words != null
+    }
+}
+
+// Whether the version read can be searched by its index (else Search
+// reads it).
+find_indexed(): bool {
+    find_text_indexed(quote_base())
+}
+
+// ---- verses ----
+// The verses the query finds in books from to last (inclusive), in every
+// version searched, each once (the first version's of those that have
+// it), in order: Search's hits (hit_chapter, hit_verse, hit_text), at most
+// as many as they hold (hit_more: there were more). Quoted, only the
+// verses where the words are a phrase.
+find_verses(
+    q: []i8,
+    n: int,
+    from: int,
+    last: int
+) {
+    hit_count = 0;
+    hit_more = false;
+    find_query(q, n);
+    if (fq_words == 0) return;
+    find_texts_choose();
+    first_c: int = book_first[from];
+    end_c: int = book_first[last] + book_count[last];
+    region {
+        keys: []int = new int[0](0);
+        owners: []int = new int[0](0);
+        for k in 0..find_texts_n {
+            t: int = find_texts[k];
+            found: []int = new int[0](0);
+            borrow texts[t] as text {
+                w: ?*folio::FolioWords = text.words;
+                if (w != null) found = find_text_verses(text, find_units(w), first_c,
+                    end_c)
+            }
+            // (Merged in: those the versions before had keep theirs.)
+            merged: []int = new int[len(keys) + len(found)](0);
+            merged_owners: []int = new int[len(keys) + len(found)](0);
+            i: int = 0;
+            j: int = 0;
+            m: int = 0;
+            while (i < len(keys) || j < len(found)) {
+                if (j >= len(found) || i < len(keys) && keys[i] <= found[j]) {
+                    if (j < len(found) && keys[i] == found[j]) j = j + 1;
+                    merged[m] = keys[i];
+                    merged_owners[m] = owners[i];
+                    i = i + 1
+                } else {
+                    merged[m] = found[j];
+                    merged_owners[m] = t;
+                    j = j + 1
+                }
+                m = m + 1
+            }
+            keys = new int[m](0);
+            owners = new int[m](0);
+            for x in 0..m {
+                keys[x] = merged[x];
+                owners[x] = merged_owners[x]
+            }
+        }
+        // (Quoted: the phrase looked for in each, as Search reads.)
+        if (fq_phrase) search_words(q, n);
+        for x in 0..len(keys) {
+            c: int = keys[x] / 1000;
+            v: int = keys[x] % 1000;
+            if (!fq_phrase || find_verse_has(owners[x], c, v)) {
+                if (hit_count >= len(hit_chapter)) {
+                    hit_more = true;
+                    break
+                }
+                hit_chapter[hit_count] = c;
+                hit_verse[hit_count] = v;
+                hit_text[hit_count] = owners[x];
+                hit_count = hit_count + 1
+            }
+        }
+    }
+}
+
+// Whether verse v of chapter c in text t holds what Search's words
+// (search_words) find.
+find_verse_has(t: int, c: int, v: int): bool {
+    _n: int = verse_text_of(t, c, v);
+    vt_found()
+}
+
+// The verses (chapter * 1000 + verse) of units in text's chapters from
+// first_c up to end_c, in order, each once: a verse's unit is its V
+// record's; a heading's (or a psalm's title's) the verse after it.
+find_text_verses(
+    text: *TextData,
+    units: []int,
+    first_c: int,
+    end_c: int
+): []int@new {
+    out: []int = new int[len(units)](0);
+    n: int = 0;
+    c: int = first_c;
+    for at in units {
+        while (c < end_c && (text.starts[c] < 0 || at >= text.ends[c])) c = c + 1;
+        if (c >= end_c)
+            break;
+        if (at >= text.starts[c]) {
+            v: int = find_verse_at(text, c, at);
+            key: int = c * 1000 + v;
+            if (v > 0 && (n == 0 || out[n - 1] != key)) {
+                out[n] = key;
+                n = n + 1
+            }
+        }
+    }
+    trimmed: []int = new int[n](0);
+    for k in 0..n trimmed[k] = out[k];
+    trimmed
+}
+
+// The verse the record at offset at of chapter c is in or heads (0: none
+// after it in the chapter).
+find_verse_at(text: *TextData, c: int, at: int): int {
+    p: int = at;
+    while (p < text.ends[c]) {
+        if (text.data[p] as int == 86) return record_key_at(text.data, text.size,
+            p + 1);
+        p = record_line_end(text.data, text.size, p) + 1
+    }
+    0
+}
+
+// ---- the order Go To shows them in ----
+// Each hit's place in the order: the words as a phrase there first, then
+// those in the chapter read, its book, its testament, the rest; within
+// each, those in the version read first, then in the Bible's order. (A phrase is told for at most
+// FIND_PHRASE_MOST hits, the rest taken as not: Go To shows only the
+// first few.)
+FIND_PHRASE_MOST: int = 400;
+
+find_order: []int = new int[1000](0);
+
+// The hits ranked (find_order[0..hit_count): hit numbers), for the query
+// q's first n bytes; Search's words (search_words) left as the query's,
+// its last word a beginning, for marking.
+find_rank(q: []i8, n: int) {
+    region {
+        scores: []int = new int[hit_count](0);
+        // (The phrase: the query quoted, its last word a beginning.)
+        quoted: []i8 = new i8[n + 3](0i8);
+        quoted[0] = '"' as i8;
+        for k in 0..n quoted[k + 1] = q[k];
+        m: int = n + 1;
+        if (fq_open_end) {
+            quoted[m] = '*' as i8;
+            m = m + 1
+        }
+        quoted[m] = '"' as i8;
+        if (fq_words > 1) search_words(quoted, m + 1);
+        here_c: int = if (sk_c >= 0 && sk_c < chapters) sk_c else 0;
+        here_b: int = ch_book[here_c];
+        read: int = quote_base();
+        for i in 0..hit_count {
+            c: int = hit_chapter[i];
+            b: int = ch_book[c];
+            score: int = if (c == here_c) 4 else if (b == here_b) 2 else if (b < 39 == here_b < 39) 1 else 0;
+            if (fq_words > 1 && i < FIND_PHRASE_MOST && find_verse_has(hit_text[i],
+                c, hit_verse[i])) score = score + 8;
+            // (At each, the version read's before those only another has.)
+            scores[i] = score * 2 + (if (hit_text[i] == read) 1 else 0);
+            find_order[i] = i
+        }
+        // (Stable: by score, then as they are, the Bible's order.)
+        for i in 1..hit_count {
+            x: int = find_order[i];
+            j: int = i;
+            while (j > 0 && scores[find_order[j - 1]] < scores[x]) {
+                find_order[j] = find_order[j - 1];
+                j = j - 1
+            }
+            find_order[j] = x
+        }
+    }
+    find_mark_words(q, n)
+}
+
+// Search's words made the query's, its last word typed as a word's
+// beginning (as the index looked for it), for marking what is shown.
+find_mark_words(q: []i8, n: int) {
+    region {
+        marked: []i8 = new i8[n + 1](0i8);
+        for k in 0..n marked[k] = q[k];
+        marked[n] = '*' as i8;
+        search_words(marked, if (fq_open_end) n + 1 else n)
+    }
+}
+
+// ---- what was found, kept ----
+// Go To's results, kept with what they were found for: its screen is made
+// again whenever a platform asks for it (often, as a key is typed and as
+// its list is drawn), and a search is the slow part of making it. They are
+// found again only when the query, the chapter read, the version read, the
+// panel's document or what can be searched (find_changes: a version or a
+// document's index come) is another. The verses' (FIND_KEPT_VERSES: the
+// hits, ranked) apart from the documents' (FIND_KEPT_DOCUMENTS); another
+// search's hits (Search's) forget the verses'.
+FIND_KEPT_VERSES: int = 0;
+
+FIND_KEPT_DOCUMENTS: int = 1;
+
+FIND_KEPT_INTS: int = 5;
+
+FIND_KEPT_QUERY_MOST: int = 512;
+
+find_changes: int = 0;
+
+find_kept_ints: []int = new int[2 * FIND_KEPT_INTS](0);
+
+find_kept_query: []i8 = new i8[2 * FIND_KEPT_QUERY_MOST](0i8);
+
+// The query's length for each (-1: nothing kept).
+find_kept_n: []int = new int[2](-1);
+
+find_now_ints: []int = new int[FIND_KEPT_INTS](0);
+
+// What results are found for now, besides the query (find_now_ints).
+find_now() {
+    find_now_ints[0] = sk_c;
+    find_now_ints[1] = quote_base();
+    find_now_ints[2] = text_cur;
+    find_now_ints[3] = (match sk_beside_kept() {
+        Version v -> v.text;
+        Module m -> 1000 + m.slot;
+        _ -> -1
+    });
+    find_now_ints[4] = find_changes
+}
+
+// Whether the results kept (which) were found for the query q's first n
+// bytes, as things are now.
+find_kept_for(which: int, q: []i8, n: int): bool {
+    if (find_kept_n[which] != n) return false;
+    find_now();
+    for k in 0..FIND_KEPT_INTS
+        if (find_kept_ints[which * FIND_KEPT_INTS + k] != find_now_ints[k]) return false;
+    for k in 0..n
+        if (find_kept_query[which * FIND_KEPT_QUERY_MOST + k] != q[k]) return false;
+    true
+}
+
+// The results (which) just found noted as found for q's first n bytes (a
+// query too long to note is found again each time).
+find_keep(which: int, q: []i8, n: int) {
+    find_kept_n[which] = -1;
+    if (n > FIND_KEPT_QUERY_MOST) return;
+    find_now();
+    for k in 0..FIND_KEPT_INTS find_kept_ints[which * FIND_KEPT_INTS + k] = find_now_ints[k];
+    for k in 0..n find_kept_query[which * FIND_KEPT_QUERY_MOST + k] = q[k];
+    find_kept_n[which] = n
+}
+
+find_forget(which: int) {
+    find_kept_n[which] = -1
+}
+
+// ---- the other documents ----
+// The bookshelf's commentaries, dictionaries and books, and the
+// commentary the app comes with (Study's), searched by their word indexes
+// too. A bookshelf's folio is read a part at a time with reads of its own
+// (FIND_READ_ID_FIRST plus its number here), apart from the bookshelf's
+// work, so that a search never waits on a download: its head, then its
+// index; its blocks only for what is shown of it. The app's commentary is
+// here whole (language data). Each has a number here for as long as the app
+// runs; one gone from the bookshelf is let go and not searched.
+FIND_DOCS_MOST: int = 64;
+
+FIND_READ_ID_FIRST: int = 3000000;
+
+// The app's commentary's place where a bookshelf slot goes.
+FIND_APP_COMMENTARY: int = -2;
+
+// How far a document's reading has come.
+type FindRead =
+    | NotRead
+    | ReadingHead
+    | ReadingWords { packed: int, size: int }
+    | Read
+    | Unsearchable
+
+// A document's head and index, read (in an arena of its own).
+type FindDocData = {
+    folio: *folio::Folio;
+    words: ?*folio::FolioWords
+}
+
+find_doc_slot: []int = new int[FIND_DOCS_MOST](0);
+
+find_doc_kind: []int = new int[FIND_DOCS_MOST](0);
+
+find_doc_read: []FindRead = new FindRead[FIND_DOCS_MOST](FindRead.NotRead);
+
+find_doc_data: []?owned *FindDocData = find_docs_begin();
+
+find_docs_n: int = 0;
+
+find_docs_begin(): []?owned *FindDocData@new {
+    new ?owned *FindDocData[FIND_DOCS_MOST](null)
+}
+
+// Whether a read is under way (one at a time).
+find_reading: bool = false;
+
+// The documents here noted, each not read yet begun reading, one at a time:
+// as Go To opens, so that their indexes are ready as words are typed.
+find_docs_want() {
+    if (find_app_commentary_here() && find_doc_number(FIND_APP_COMMENTARY) < 0) find_doc_note(FIND_APP_COMMENTARY,
+        SHELF_KIND_COMMENTARY);
+    if (sk_has_shelf) {
+        for i in 0..shelf_count() {
+            kind: int = shelf_kind_at(i);
+            searchable: bool = kind == SHELF_KIND_COMMENTARY || kind == SHELF_KIND_DICTIONARY || kind == SHELF_KIND_GLOSSARY || kind == SHELF_KIND_DEVOTIONAL || kind == SHELF_KIND_BOOK;
+            folio_form: bool = match shelf_form_at(i) {
+                Folio -> true;
+                _ -> false
+            };
+            if (searchable && folio_form && shelf_here_at(i) && find_doc_number(shelf_slot_at(i)) < 0) find_doc_note(shelf_slot_at(i),
+                kind)
+        }
+    }
+    find_read_next()
+}
+
+// Whether the app's commentary has come (with the language data).
+find_app_commentary_here(): bool {
+    here: bool = false;
+    borrow language_data {
+        here = language_data.commentary_folio != null
+    }
+    here
+}
+
+// The number here of the document in slot (-1: none).
+find_doc_number(slot: int): int {
+    for d in 0..find_docs_n
+        if (find_doc_slot[d] == slot) return d;
+    -1
+}
+
+find_doc_note(slot: int, kind: int) {
+    if (find_docs_n >= FIND_DOCS_MOST) return;
+    d: int = find_docs_n;
+    find_doc_slot[d] = slot;
+    find_doc_kind[d] = kind;
+    find_doc_read[d] = FindRead.NotRead;
+    find_docs_n = d + 1
+}
+
+// The next document not read begun (the app's commentary read at once,
+// from what is here).
+find_read_next() {
+    while (!find_reading) {
+        d: int = -1;
+        for k in 0..find_docs_n {
+            match find_doc_read[k] {
+                NotRead -> if (d < 0) d = k;
+                _ -> { }
+            }
+        }
+        if (d < 0) return;
+        if (find_doc_slot[d] == FIND_APP_COMMENTARY) find_read_app_commentary(d) else {
+            i: int = shelf_find_slot(find_doc_slot[d]);
+            f: ?fn(id: int, name: []i8, name_n: int, offset: int, count: int) = host_io.read_kept_range;
+            if (i < 0 || f == null || !shelf_kept_made_at(i)) find_doc_read[d] = FindRead.Unsearchable else {
+                find_doc_read[d] = FindRead.ReadingHead;
+                find_reading = true;
+                f(FIND_READ_ID_FIRST + d, kp_name, kp_name_n, 0, FIND_HEAD_FIRST)
+            }
+        }
+    }
+}
+
+// How much of a folio is read first: its head, as a rule, whole.
+FIND_HEAD_FIRST: int = 65536;
+
+find_read_app_commentary(d: int) {
+    find_doc_read[d] = FindRead.Unsearchable;
+    borrow language_data {
+        f: ?*folio::Folio = language_data.commentary_folio;
+        if (f != null && folio::folio_has_words(f)) {
+            try {
+                next: owned *FindDocData = own {
+                    new FindDocData { folio: folio::folio_open(language_data.commentary,
+                        language_data.commentary_size), words: folio::folio_words_open(language_data.commentary,
+                        folio::folio_words_place(f), folio::folio_words_packed(f),
+                        folio::folio_words_size(f)) }
+                };
+                drop find_doc_data[d];
+                find_doc_data[d] = move next;
+                find_doc_read[d] = FindRead.Read;
+                find_changes = find_changes + 1
+            } with folio::FolioError _damaged -> { }
+        }
+    }
+}
+
+// Whether id is a read of a document's (find_got takes it).
+find_read_id(id: int): bool {
+    id >= FIND_READ_ID_FIRST && id < FIND_READ_ID_FIRST + FIND_DOCS_MOST + FIND_BLOCKS_MOST
+}
+
+// A read of document d's came (size bytes; -1: it could not): its head,
+// then its index; or a block (find_block_got).
+find_got(id: int, size: int) {
+    if (id >= FIND_READ_ID_FIRST + FIND_DOCS_MOST) {
+        find_block_got(id - FIND_READ_ID_FIRST - FIND_DOCS_MOST, id, size);
+        return
+    }
+    d: int = id - FIND_READ_ID_FIRST;
+    find_reading = false;
+    if (d < 0 || d >= find_docs_n || size <= 0) {
+        if (d >= 0 && d < find_docs_n) find_doc_read[d] = FindRead.Unsearchable;
+        shelf_got_unwanted(id, size);
+        find_read_next();
+        return
+    }
+    match find_doc_read[d] {
+        ReadingHead -> find_head_got(d, id, size);
+        ReadingWords w -> find_words_got(d, id, size, w.packed, w.size);
+        _ -> shelf_got_unwanted(id, size)
+    }
+    find_read_next()
+}
+
+find_head_got(d: int, id: int, size: int) {
+    find_doc_read[d] = FindRead.Unsearchable;
+    i: int = shelf_find_slot(find_doc_slot[d]);
+    try {
+        head_size: int = 0;
+        region {
+            head: []i8 = new i8[size](0i8);
+            hs_file(id, head);
+            head_size = folio::folio_head_size(head, size);
+            if (head_size <= size) {
+                next: owned *FindDocData = own {
+                    new FindDocData { folio: folio::folio_open(head, size), words: null }
+                };
+                drop find_doc_data[d];
+                find_doc_data[d] = move next
+            }
+        }
+        f: ?fn(id: int, name: []i8, name_n: int, offset: int, count: int) = host_io.read_kept_range;
+        if (f == null || i < 0 || !shelf_kept_made_at(i)) return;
+        if (head_size > size) {
+            // (A head longer than the first read: read whole.)
+            find_doc_read[d] = FindRead.ReadingHead;
+            find_reading = true;
+            f(FIND_READ_ID_FIRST + d, kp_name, kp_name_n, 0, head_size);
+            return
+        }
+        borrow find_doc_data[d] as data {
+            if (folio::folio_has_words(data.folio)) {
+                at: int = folio::folio_words_place(data.folio);
+                packed: int = folio::folio_words_packed(data.folio);
+                find_doc_read[d] = FindRead.ReadingWords { packed: packed, size: folio::folio_words_size(data.folio) };
+                find_reading = true;
+                f(FIND_READ_ID_FIRST + d, kp_name, kp_name_n, at, packed)
+            }
+        }
+    } with folio::FolioError _damaged -> { }
+}
+
+find_words_got(
+    d: int,
+    id: int,
+    size: int,
+    packed: int,
+    decoded: int
+) {
+    find_doc_read[d] = FindRead.Unsearchable;
+    region {
+        bytes_read: []i8 = new i8[size](0i8);
+        hs_file(id, bytes_read);
+        if (size == packed) {
+            borrow find_doc_data[d] as data {
+                try {
+                    allocate data {
+                        data.words = folio::folio_words_open(bytes_read, 0, packed,
+                            decoded)
+                    }
+                    find_doc_read[d] = FindRead.Read;
+                    find_changes = find_changes + 1
+                } with folio::FolioError _damaged -> { }
+            }
+        }
+    }
+    // (Its results shown, if a search is.)
+    if (sk_q_n > 0) sk_update_all()
+}
+
+// ---- the documents' results ----
+// What the query finds in the documents read: each unit, its document,
+// where it is (a commentary's chapter and verse; a dictionary's entry, a
+// book's part: its division) and its place in the order; commentaries
+// (group 0) apart from the rest (group 1). At most FIND_DOC_HITS_MOST a
+// group (the counts go on: All N says how many).
+FIND_DOC_HITS_MOST: int = 500;
+
+FIND_GROUPS: int = 2;
+
+fd_doc: []int = new int[FIND_GROUPS * FIND_DOC_HITS_MOST](0);
+
+fd_unit: []int = new int[FIND_GROUPS * FIND_DOC_HITS_MOST](0);
+
+fd_division: []int = new int[FIND_GROUPS * FIND_DOC_HITS_MOST](0);
+
+fd_chapter: []int = new int[FIND_GROUPS * FIND_DOC_HITS_MOST](0);
+
+fd_verse: []int = new int[FIND_GROUPS * FIND_DOC_HITS_MOST](0);
+
+fd_score: []int = new int[FIND_GROUPS * FIND_DOC_HITS_MOST](0);
+
+fd_n: []int = new int[FIND_GROUPS](0);
+
+fd_total: []int = new int[FIND_GROUPS](0);
+
+// The other versions here asked for (as Compare asks for them), so that a
+// search finds what they have too: each searched once it has come.
+find_versions_want() {
+    for t in 0..TEXT_PIN {
+        if (t != TEXT_ORIG && t != TEXT_ESV) _here: int = hs_text_ready(t)
+    }
+}
+
+// Whether some documents or versions are still being read (their results
+// to come).
+find_docs_coming(): bool {
+    for t in 0..len(hs_loading)
+        if (hs_loading[t]) return true;
+    for d in 0..find_docs_n {
+        match find_doc_read[d] {
+            NotRead -> return true;
+            ReadingHead -> return true;
+            ReadingWords _w -> return true;
+            _ -> { }
+        }
+    }
+    false
+}
+
+// The query (find_query's) looked for in every document read, its results
+// ranked where the reader is: a commentary's, those on the chapter read
+// first, then its book, the commentary the panel reads before others at
+// each; a dictionary's or a book's, an entry or a part titled with the
+// query's first word first; within each, in the documents' order. A
+// comment's paragraphs found are one result: its first.
+find_documents() {
+    for g in 0..FIND_GROUPS {
+        fd_n[g] = 0;
+        fd_total[g] = 0
+    }
+    if (fq_words == 0) return;
+    panel_slot: int = match sk_beside_kept() {
+        Module m -> m.slot;
+        _ -> -1
+    };
+    here_c: int = if (sk_c >= 0 && sk_c < chapters) sk_c else 0;
+    for d in 0..find_docs_n {
+        ready: bool = match find_doc_read[d] {
+            Read -> true;
+            _ -> false
+        };
+        if (ready) {
+            g: int = if (find_doc_kind[d] == SHELF_KIND_COMMENTARY) 0 else 1;
+            borrow find_doc_data[d] as data {
+                w: ?*folio::FolioWords = data.words;
+                if (w != null) {
+                    last_division: int = -1;
+                    last_verse: int = -1;
+                    for at in find_units(w) {
+                        division: int = find_division_of(data.folio, at);
+                        verse: int = if (g == 0) find_division_verse(data.folio, division,
+                            at) else -1;
+                        if (g == 0 && division == last_division && verse == last_verse)
+                            continue;
+                        last_division = division;
+                        last_verse = verse;
+                        fd_total[g] = fd_total[g] + 1;
+                        if (fd_n[g] < FIND_DOC_HITS_MOST) {
+                            k: int = g * FIND_DOC_HITS_MOST + fd_n[g];
+                            fd_doc[k] = d;
+                            fd_unit[k] = at;
+                            fd_division[k] = division;
+                            fd_chapter[k] = -1;
+                            fd_verse[k] = 0;
+                            score: int = 0;
+                            if (g == 0) {
+                                c: int = find_division_chapter(data.folio, division);
+                                fd_chapter[k] = c;
+                                fd_verse[k] = verse;
+                                if (c == here_c) score = score + 8 else if (c >= 0 && ch_book[c] == ch_book[here_c]) score = score + 4;
+                                if (find_doc_slot[d] == panel_slot) score = score + 2
+                            } else if (find_division_titled(data.folio, division)) score = score + 8;
+                            fd_score[k] = score;
+                            fd_n[g] = fd_n[g] + 1
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // (Each group by score, then (commentaries) in the Bible's order
+    // across documents; steadily: else as they were found.)
+    for g in 0..FIND_GROUPS {
+        base: int = g * FIND_DOC_HITS_MOST;
+        for i in 1..fd_n[g] {
+            j: int = i;
+            while (j > 0 && (fd_score[base + j - 1] < fd_score[base + j] || fd_score[base + j - 1] == fd_score[base + j] && fd_chapter[base + j - 1] > fd_chapter[base + j])) {
+                find_hit_swap(base + j - 1, base + j);
+                j = j - 1
+            }
+        }
+    }
+}
+
+find_hit_swap(a: int, b: int) {
+    for arrays in [fd_doc, fd_unit, fd_division, fd_chapter, fd_verse, fd_score] {
+        x: int = arrays[a];
+        arrays[a] = arrays[b];
+        arrays[b] = x
+    }
+}
+
+// The division of folio's content offset at is in (-1: none).
+find_division_of(f: *folio::Folio, at: int): int {
+    lo: int = 0;
+    hi: int = folio::folio_division_count(f);
+    while (lo < hi) {
+        mid: int = (lo + hi) / 2;
+        if (folio::folio_division_end(f, mid) <= at) lo = mid + 1 else hi = mid
+    }
+    if (lo < folio::folio_division_count(f) && folio::folio_division_start(f, lo) <= at) lo else -1
+}
+
+// The chapter a division keyed as a chapter (CODE.n) is (-1: not one).
+find_division_chapter(f: *folio::Folio, division: int): int {
+    if (division < 0) return -1;
+    key: []i8 = folio::folio_division_key(f, division);
+    dot: int = 0;
+    while (dot < len(key) && key[dot] != '.') dot = dot + 1;
+    if (dot != 3 || dot + 1 >= len(key)) return -1;
+    n: int = 0;
+    for k in dot + 1..len(key) {
+        if (!is_digit(key[k] as int)) return -1;
+        n = n * 10 + key[k] as int - 48
+    }
+    for b in 0..books {
+        if (book_codes[b][0] == key[0] && book_codes[b][1] == key[1] && book_codes[b][2] == key[2]) return if (n >= 1 && n <= book_count[b]) book_first[b] + n - 1 else -1
+    }
+    -1
+}
+
+// The verse a commentary's division's place at is on: its last mark with
+// a verse at or before it (0: its introduction).
+find_division_verse(f: *folio::Folio, division: int, at: int): int {
+    if (division < 0) return 0;
+    v: int = 0;
+    for m in folio::folio_division_marks(f, division) {
+        if (m.offset > at) return v;
+        if (m.verse > 0) v = m.verse
+    }
+    v
+}
+
+// Whether a division's title (or key) is the query's first word, folded.
+find_division_titled(f: *folio::Folio, division: int): bool {
+    if (division < 0 || fq_n == 0) return false;
+    first_end: int = 0;
+    while (fq[first_end] != ' ') first_end = first_end + 1;
+    title: []i8 = folio::folio_division_title(f, division);
+    if (len(title) == 0) title = folio::folio_division_key(f, division);
+    same: bool = false;
+    region {
+        out: *ByteBuilder = builder_new(len(title) + 8);
+        folio::folio_fold_words(out, title, 0, len(title));
+        same = out.size == first_end + 1;
+        for k in 0..first_end
+            if (same && out.data[k] != fq[k]) same = false
+    }
+    same
+}
+
+// ---- what is shown of them ----
+// Blocks of the bookshelf's documents decoded for what is shown (the most
+// lately used kept): which document's and which block each is (-1: none),
+// whether it is being read, and when it was last used.
+FIND_BLOCKS_MOST: int = 8;
+
+type FindBlock = {
+    data: []i8
+}
+
+find_blocks: []?owned *FindBlock = find_blocks_begin();
+
+find_blocks_begin(): []?owned *FindBlock@new {
+    new ?owned *FindBlock[FIND_BLOCKS_MOST](null)
+}
+
+find_block_doc: []int = new int[FIND_BLOCKS_MOST](-1);
+
+find_block_number: []int = new int[FIND_BLOCKS_MOST](-1);
+
+find_block_reading: []bool = new bool[FIND_BLOCKS_MOST](false);
+
+find_block_used: []int = new int[FIND_BLOCKS_MOST](0);
+
+find_block_clock: int = 0;
+
+// The place in find_blocks of document d's block, decoded (-1: not yet,
+// its read begun if it isn't under way).
+find_block(d: int, block: int): int {
+    for k in 0..FIND_BLOCKS_MOST {
+        if (find_block_doc[k] == d && find_block_number[k] == block) {
+            find_block_clock = find_block_clock + 1;
+            find_block_used[k] = find_block_clock;
+            return if (find_block_reading[k]) -1 else k
+        }
+    }
+    // (The one used longest ago, not being read, read into.)
+    k: int = -1;
+    for x in 0..FIND_BLOCKS_MOST {
+        if (!find_block_reading[x] && (k < 0 || find_block_used[x] < find_block_used[k])) k = x
+    }
+    i: int = shelf_find_slot(find_doc_slot[d]);
+    f: ?fn(id: int, name: []i8, name_n: int, offset: int, count: int) = host_io.read_kept_range;
+    if (k < 0 || i < 0 || f == null || !shelf_kept_made_at(i)) return -1;
+    offset: int = 0;
+    count: int = 0;
+    borrow find_doc_data[d] as data {
+        offset = folio::folio_block_offset(data.folio, block);
+        count = folio::folio_block_compressed(data.folio, block)
+    }
+    drop find_blocks[k];
+    find_block_doc[k] = d;
+    find_block_number[k] = block;
+    find_block_reading[k] = true;
+    find_block_clock = find_block_clock + 1;
+    find_block_used[k] = find_block_clock;
+    f(FIND_READ_ID_FIRST + FIND_DOCS_MOST + k, kp_name, kp_name_n, offset, count);
+    -1
+}
+
+// Block place k's read came: decoded, and what shows it made again.
+find_block_got(k: int, id: int, size: int) {
+    if (k < 0 || k >= FIND_BLOCKS_MOST || !find_block_reading[k] || size <= 0) {
+        if (k >= 0 && k < FIND_BLOCKS_MOST) {
+            find_block_reading[k] = false;
+            find_block_doc[k] = -1
+        }
+        shelf_got_unwanted(id, size);
+        return
+    }
+    find_block_reading[k] = false;
+    d: int = find_block_doc[k];
+    region {
+        packed: []i8 = new i8[size](0i8);
+        hs_file(id, packed);
+        try {
+            next: owned *FindBlock = own {
+                decoded: []i8 = new i8[0](0i8);
+                borrow find_doc_data[d] as data {
+                    decoded = folio::folio_decode_block(data.folio, find_block_number[k],
+                        packed, 0)
+                }
+                new FindBlock { data: decoded }
+            };
+            drop find_blocks[k];
+            find_blocks[k] = move next
+        } with folio::FolioError _damaged -> {
+            find_block_doc[k] = -1
+        }
+    }
+    sk_update_all()
+}
+
+// Hit k's unit's words into vt (verse_text's buffer), what the query finds
+// in them marked (match_in_vt); false while its block is still to come.
+find_hit_words(k: int): bool {
+    vt_n = 0;
+    d: int = fd_doc[k];
+    at: int = fd_unit[k];
+    if (find_doc_slot[d] == FIND_APP_COMMENTARY) {
+        borrow language_data {
+            borrow find_doc_data[d] as data {
+                try {
+                    end: int = folio::folio_division_end(data.folio, fd_division[k]);
+                    if (end > at + FIND_UNIT_MOST) end = at + FIND_UNIT_MOST;
+                    window: []i8 = folio::folio_read(data.folio, language_data.commentary,
+                        at, end);
+                    find_unit_words(data, window)
+                } with folio::FolioError _damaged -> { }
+            }
+        }
+    } else {
+        block: int = 0;
+        start: int = 0;
+        borrow find_doc_data[d] as data {
+            block = folio::folio_block_first(data.folio, at);
+            start = folio::folio_block_start(data.folio, block)
+        }
+        b: int = find_block(d, block);
+        if (b < 0) return false;
+        borrow find_blocks[b] as held {
+            borrow find_doc_data[d] as data {
+                region {
+                    n: int = len(held.data) - (at - start);
+                    window: []i8 = new i8[if (n > 0) n else 0](0i8);
+                    if (n > 0) memcpy(window, 0, held.data, at - start, n);
+                    find_unit_words(data, window)
+                }
+            }
+        }
+    }
+    match_in_vt();
+    true
+}
+
+// At most this much of a unit is read for what is shown of it.
+FIND_UNIT_MOST: int = 4096;
+
+// The words of the unit that begins window (its records, to its end or
+// window's) into vt.
+find_unit_words(data: *FindDocData, window: []i8) {
+    w: ?*folio::FolioWords = data.words;
+    if (w == null) return;
+    end: int = folio::folio_unit_end(w, window, 0, len(window));
+    line: int = 0;
+    broke: bool = false;
+    while (line < end) {
+        e: int = line;
+        while (e < end && window[e] != 10i8) e = e + 1;
+        if (e > line) {
+            kind: int = window[line] as int;
+            if (kind == 'P' as int) broke = true else if (kind == 'L' as int) {
+                tab: int = line + 1;
+                while (tab < e && window[tab] != 9i8) tab = tab + 1;
+                if (tab < e) vt_words_from(window, tab + 1, e, broke);
+                broke = false
+            } else if (kind == 'T' as int || kind == 'W' as int || kind == 'I' as int || kind == 'J' as int || kind == 'G' as int || kind == 'U' as int || kind == 'H' as int || kind == 'X' as int || kind == 'S' as int || kind == 's' as int) {
+                vt_words_from(window, line + 1, e, broke);
+                broke = false
+            }
+        }
+        line = e + 1
+    }
+}
+
+// Hit k's document named (its short title; the app's commentary's) onto
+// fbuf.
+fput_find_doc(k: int) {
+    d: int = fd_doc[k];
+    if (find_doc_slot[d] == FIND_APP_COMMENTARY) fput_str("Matthew Henry\â\€\™s Concise Commentary") else fput_shelf_short_title(shelf_find_slot(find_doc_slot[d]))
+}
+
+// Hit k as a row: where it is (a commentary's reference; an entry's or a
+// part's title) and its document; its words with the query's marked (or,
+// its block still to come, none yet); tapped, opened there.
+find_hit_row(k: int) {
+    ui_row(UI_ITEM, ACT_GT_DOC_HIT, find_hit_arg(k));
+    ui_set_custom(CUSTOM_HIT);
+    d: int = fd_doc[k];
+    fbuf_n = 0;
+    if (fd_chapter[k] >= 0) fput_ref(fd_chapter[k], fd_verse[k], fd_verse[k]) else {
+        borrow find_doc_data[d] as data {
+            if (fd_division[k] >= 0) {
+                title: []i8 = folio::folio_division_title(data.folio, fd_division[k]);
+                if (len(title) == 0) title = folio::folio_division_key(data.folio,
+                    fd_division[k]);
+                fput_bytes(title, 0, len(title))
+            }
+        }
+    }
+    fput_str(" \Â\· ");
+    fput_find_doc(k);
+    ui_set_title_fbuf();
+    if (find_hit_words(k)) sk_vt_detail() else {
+        fbuf_n = 0;
+        fput_str("\â\€\¦");
+        ui_set_detail_fbuf();
+        ui_set_faint()
+    }
+}
+
+// Hit k, as a row's arg: its document's slot (FIND_APP_COMMENTARY too) and
+// its unit's place, so that a tap finds it again however the results have
+// changed since.
+find_hit_arg(k: int): int {
+    (find_doc_slot[fd_doc[k]] + 8) * 4294967296 + fd_unit[k]
+}
+
+// A document's hit tapped (arg find_hit_arg's), from Go To at at: a
+// commentary's, the page to its verse and the commentary beside it (the
+// app's: its Study); a dictionary's entry or a book's part, opened over Go
+// To.
+find_hit_open(at: int, arg: int) {
+    slot: int = arg / 4294967296 - 8;
+    unit: int = arg % 4294967296;
+    d: int = find_doc_number(slot);
+    if (d < 0) return;
+    ready: bool = match find_doc_read[d] {
+        Read -> true;
+        _ -> false
+    };
+    if (!ready) return;
+    division: int = 0;
+    c: int = -1;
+    v: int = 0;
+    borrow find_doc_data[d] as data {
+        division = find_division_of(data.folio, unit);
+        if (find_doc_kind[d] == SHELF_KIND_COMMENTARY) {
+            c = find_division_chapter(data.folio, division);
+            v = find_division_verse(data.folio, division, unit)
+        }
+    }
+    if (division < 0) return;
+    sk_remember_search();
+    if (find_doc_kind[d] == SHELF_KIND_COMMENTARY) {
+        if (c < 0) return;
+        sk_goto_from(at, c, v);
+        if (slot == FIND_APP_COMMENTARY) sk_beside_push(SCR_VERSE_STUDY, (c * 1000 + (if (v > 0) v else 1)) * 4) else sk_beside_read(slot)
+    } else if (find_doc_kind[d] == SHELF_KIND_BOOK) sk_open(SCR_SHELF_BOOK, slot * SHELF_PLACE + division + 1,
+        true) else sk_open(SCR_SHELF_ENTRY, slot * SHELF_PLACE + division, true)
+}

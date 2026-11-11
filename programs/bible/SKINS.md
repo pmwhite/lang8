@@ -554,12 +554,14 @@ those of the screens pushed over it (a book's chapters, a document's
 page), act for where a pick lands; core works that out, and the skin
 hands the actions back as for any screen.
 
-- Nothing typed: Ribbons and Reading Plan, Recent, Documents (what is
-  read: the page's document, the panel's, then the others read, the
-  latest first, up to six with the Bibles that come with the app), Browse
-  (a row a kind with documents, and Languages, each with a count at its
-  right; a tap puts its word in the field, `refill` then `retext`, as if
-  it was typed), then the books.
+- Nothing typed: Ribbons and Reading Plan, Recent, a Books of the Bible
+  row (the books' screen, `SCR_BOOKS` 69, pushed: Old and New Testament
+  sections, a row a book; typing finds a book too, so Go To doesn't list
+  them), Documents (what is read: the page's document, the panel's, then
+  the others read, the latest first, up to six with the Bibles that come
+  with the app), Browse (a row a kind with documents, and Languages, each
+  with a count at its right; a tap puts its word in the field, `refill`
+  then `retext`, as if it was typed).
 - Typed: the reference (a row to go there), Books of the Bible, then the
   documents by kind (Bibles, Commentaries, Dictionaries, Devotionals,
   Books), ordered open in a pane, read, coming with the app, in the
@@ -567,11 +569,27 @@ hands the actions back as for any screen.
   a language named; twelve for a kind named alone, then its other
   languages, rows refining the query); for "languages", a row a language
   (its own name; its English name and a count); then, for three letters
-  or more and no reference to a chapter, Verses: the first three verses
-  the words find in the version read (as Search finds them, the words
-  marked), a tap going there as Go To's places do, and `All N Verses`,
-  Search pushed over Go To with those words (its scopes, recent searches
-  and the ESV's own search there). The field waits 150 ms after a key
+  or more and no reference to a chapter, what the words find
+  (`core/find.l8`, by the documents' word indexes: folio's README), the
+  last word typed taken as a word's beginning. Verses: every version here
+  with an index searched, each verse once (the version read's, else the
+  first other's, named after the reference: `John 4:10 · KJV`), the first
+  three as they rank where the reader is (the words as a phrase there,
+  then the chapter read, its book, its testament; the version read's
+  first at each), the words marked, a tap going there as Go To's places
+  do, and `All N Verses`, Search pushed over Go To with those words (its
+  scopes, recent searches and the ESV's own search there). Commentaries
+  (the app's and the bookshelf's): comments on the chapter read first,
+  then its book, the panel's commentary's first at each; a row says
+  `Psalm 23:1 · Matthew Henry’s Concise Commentary` over the words found;
+  a tap goes to the verse and opens the commentary in the panel there.
+  Dictionaries and Books: an entry or part titled with the first word
+  first; a tap opens it. Three a section, then `Show All N` in place. While
+  documents' indexes or other versions are still being read, a faint busy
+  row `Searching more documents…` ends the list; each one read makes the
+  screen again with what it adds. A search's results are kept for its
+  query and where the reader is, so making the screen again (a `model`) is
+  quick. The field waits 150 ms after a key
   before it is searched (its screen's search wait). A section's `Show All N`
   makes the screen again with every row, sent as `refill ID 0`: the list
   keeps its offset. Nothing found: the screen's `empty` (No Matches; its
@@ -851,6 +869,14 @@ header, core sends `lazy COUNT ROW`: COUNT is its logical row count; ROW is
 with that row included. UIKit can therefore request visible concordance rows
 without calling core's lazy-row builder or retaining its construction buffers.
 Skins that use the default full sections continue receiving every row.
+
+The iPhone keeps each screen's latest bytes as core sent them (with a
+command's effects, or as a `model`'s answer) and the count of lines core
+had been given then. A list reloaded with no line given since (UIKit asks
+several times in one reload, and two lists in sight ask by turns) is read
+from those bytes; only after core has been given another line does it
+send `model` again. On the phone's interpreter a screen made again costs
+tens of milliseconds, a search's more.
 
 Core drains complete lines through the host's output receiver as its buffer
 fills. A large screen can span multiple batches; a batch boundary does not

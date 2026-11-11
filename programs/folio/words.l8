@@ -1,0 +1,656 @@
+tag folio_internal;
+
+use_tag std, deflate, builder;
+
+// A folio's word index: every word of its words, folded, with the units it
+// is in, so that a reader finds the places a search's words are without
+// reading the content. A unit is where a reader's result begins: in a
+// Bible a verse (or a heading, a chapter's or a book's start), in any
+// other document a paragraph, a comment, a heading or a verse a comment
+// begins. Its place is the content's offset of the record that begins it,
+// so that a reader holding the content (or the blocks about it) reads the
+// unit from there. See README.md for the section's bytes.
+
+// ---- words, as both the index and a search fold them ----
+// Whether byte k (0 to 255) is part of a word: a letter or a digit, or a
+// byte of a character past ASCII (but those of the punctuation U+2000 to
+// U+206F, which begin E2 80 or E2 81, and the no-break space C2 A0: those
+// end a word, as an apostrophe, a quotation mark or a dash does).
+folio_word_byte(k: int): bool {
+    k >= 'a' as int && k <= 'z' as int || k >= 'A' as int && k <= 'Z' as int || k >= '0' as int && k <= '9' as int || k >= 128
+}
+
+// How many bytes at data[at] (before to) are punctuation past ASCII (0:
+// none): E2 80 xx, E2 81 xx, C2 A0.
+folio_word_punctuation(data: []i8, at: int, to: int): int {
+    k: int = data[at] as int & 255;
+    if (k == 226 && at + 2 < to) {
+        m: int = data[at + 1] as int & 255;
+        if (m == 128 || m == 129) return 3
+    }
+    if (k == 194 && at + 1 < to && (data[at + 1] as int & 255) == 160) return 2;
+    0
+}
+
+// The words of data[from..to), folded (ASCII letters to small ones), into
+// out, each followed by a space: as the index is made and a search looks
+// it up. A word longer than FOLIO_WORD_MOST bytes is left out (no reader
+// types one; it would be a run of symbols).
+tag folio
+folio_fold_words(
+    out: *ByteBuilder@new,
+    data: []i8,
+    from: int,
+    to: int
+) {
+    at: int = from;
+    begun: int = out.size;
+    while (at < to) {
+        skip: int = folio_word_punctuation(data, at, to);
+        k: int = data[at] as int & 255;
+        if (skip == 0 && folio_word_byte(k)) {
+            builder_byte(out, (if (k >= 'A' as int && k <= 'Z' as int) k + 32 else k) trunc i8);
+            at = at + 1
+        } else {
+            folio_word_end(out, begun);
+            begun = out.size;
+            at = at + (if (skip > 0) skip else 1)
+        }
+    }
+    folio_word_end(out, begun)
+}
+
+FOLIO_WORD_MOST: int = 48;
+
+// A word folded into out from begun ended: a space after it, or, too long,
+// taken back.
+folio_word_end(out: *ByteBuilder@new, begun: int) {
+    if (out.size == begun) return;
+    if (out.size - begun > FOLIO_WORD_MOST) {
+        out.size = begun;
+        return
+    }
+    builder_byte(out, ' ' as i8)
+}
+
+// ---- making it ----
+// The index as a folio is written: each word met (its bytes in text, a
+// line each in a table by hash), and each word's units, as a chain through
+// unit and next (first and last: each word's chain's ends; -1 none).
+tag folio
+type FolioWordsMaking = tag folio_internal {
+    text: *ByteBuilder;
+    word_at: []int;
+    word_length: []int;
+    first: []int;
+    last: []int;
+    count: int;
+    places: []int;
+    unit: []int;
+    next: []int;
+    units: int;
+    // Each unit's place, by its number, and how many have begun; the unit
+    // being read (its number: -1, none yet); whether paragraphs begin
+    // units (not a Bible's), and the words folded from the record being
+    // read.
+    places_of_units: []int;
+    unit_count: int;
+    current: int;
+    by_paragraph: bool;
+    folded: *ByteBuilder
+}
+
+folio_words_making_new(): *FolioWordsMaking@new {
+    new FolioWordsMaking {
+        text: builder_new(65536),
+        word_at: new int[1024](0),
+        word_length: new int[1024](0),
+        first: new int[1024](-1),
+        last: new int[1024](-1),
+        count: 0,
+        places: new int[2048](0),
+        unit: new int[16384](0),
+        next: new int[16384](-1),
+        units: 0,
+        places_of_units: new int[4096](0),
+        unit_count: 0,
+        current: -1,
+        by_paragraph: true,
+        folded: builder_new(1024)
+    }
+}
+
+// Whether a record of kind begins a unit: a book's, a chapter's, a verse's,
+// a comment's, a heading's, a psalm's title's, a major section's; and, in
+// a document not a Bible, a paragraph's (a Bible's paragraphs are within
+// its verses, its poetry's lines too).
+folio_unit_begins(kind: i8, by_paragraph: bool): bool {
+    kind == 'B' || kind == 'C' || kind == 'V' || kind == 'K' || kind == 'S' || kind == 's' || kind == 'D' || kind == 'M' || kind == 'P' && by_paragraph
+}
+
+// Where a record of kind's words are, from its letter on (0: it has none
+// a search finds): its words' records, a link's words (after its tab), a
+// heading's, a psalm's title's, an outline's line (before its tab), and,
+// in a document not a Bible, a note's (a Bible's notes are a translator's,
+// not its text).
+folio_record_words(kind: i8, by_paragraph: bool): bool {
+    kind == 'T' || kind == 'W' || kind == 'I' || kind == 'J' || kind == 'G' || kind == 'U' || kind == 'H' || kind == 'X' || kind == 'L' || kind == 'S' || kind == 's' || kind == 'D' || kind == 'd' || kind == 'M' || kind == 'm' || kind == 'A' || kind == 'O' || kind == 'F' && by_paragraph
+}
+
+// Content's records data[from..to) (whole lines), beginning at offset base
+// in the content, read into the index: each unit numbered as it begins,
+// its place noted (the content's start is the first unit's, if a record
+// that begins none comes first).
+folio_words_read(
+    making: *FolioWordsMaking@new,
+    data: []i8,
+    from: int,
+    to: int,
+    base: int
+) {
+    line: int = from;
+    while (line < to) {
+        end: int = line;
+        while (end < to && data[end] != 10i8) end = end + 1;
+        if (end > line) {
+            kind: i8 = data[line];
+            if (making.current < 0 || folio_unit_begins(kind, making.by_paragraph)) folio_unit_begun(making,
+                base + line - from);
+            if (folio_record_words(kind, making.by_paragraph)) {
+                // (A link's words after its tab; an outline's line before
+                // its tab.)
+                words_from: int = line + 1;
+                words_to: int = end;
+                if (kind == 'L' || kind == 'O') {
+                    tab: int = line + 1;
+                    while (tab < end && data[tab] != 9i8) tab = tab + 1;
+                    if (kind == 'L') words_from = (if (tab < end) tab + 1 else end) else words_to = tab
+                }
+                builder_clear(making.folded);
+                folio_fold_words(making.folded, data, words_from, words_to);
+                folded: *ByteBuilder = making.folded;
+                at: int = 0;
+                while (at < folded.size) {
+                    space: int = at;
+                    while (folded.data[space] != ' ') space = space + 1;
+                    folio_words_add(making, folded.data, at, space);
+                    at = space + 1
+                }
+            }
+        }
+        line = end + 1
+    }
+}
+
+// A unit begun at place in the content.
+folio_unit_begun(making: *FolioWordsMaking@new, place: int) {
+    if (making.unit_count == len(making.places_of_units)) making.places_of_units = folio_ints_grown(making.places_of_units,
+        0);
+    making.places_of_units[making.unit_count] = place;
+    making.current = making.unit_count;
+    making.unit_count = making.unit_count + 1
+}
+
+// Word w[from..to) found in the unit being read.
+folio_words_add(
+    making: *FolioWordsMaking@new,
+    w: []i8,
+    from: int,
+    to: int
+) {
+    id: int = folio_words_id(making, w, from, to);
+    tail: int = making.last[id];
+    if (tail >= 0 && making.unit[tail] == making.current) return;
+    if (making.units == len(making.unit)) {
+        making.unit = folio_ints_grown(making.unit, 0);
+        making.next = folio_ints_grown(making.next, -1)
+    }
+    n: int = making.units;
+    making.unit[n] = making.current;
+    making.next[n] = -1;
+    if (tail >= 0) making.next[tail] = n else making.first[id] = n;
+    making.last[id] = n;
+    making.units = n + 1
+}
+
+// The number of word w[from..to), noted now if it is new.
+folio_words_id(
+    making: *FolioWordsMaking@new,
+    w: []i8,
+    from: int,
+    to: int
+): int {
+    if (2 * (making.count + 1) > len(making.places)) {
+        // (The table doubled, its words placed again.)
+        places: []int = new int[2 * len(making.places)](0);
+        for id in 0..making.count {
+            place: int = folio_key_hash(making.text.data, making.word_at[id], making.word_at[id] + making.word_length[id]) % len(places);
+            while (places[place] != 0) place = (place + 1) % len(places);
+            places[place] = id + 1
+        }
+        making.places = places
+    }
+    places: []int = making.places;
+    place: int = folio_key_hash(w, from, to) % len(places);
+    while (places[place] != 0) {
+        id: int = places[place] - 1;
+        if (making.word_length[id] == to - from && folio_same_bytes(making.text.data,
+            making.word_at[id], w, from, to - from)) return id;
+        place = (place + 1) % len(places)
+    }
+    if (making.count == len(making.word_at)) {
+        making.word_at = folio_ints_grown(making.word_at, 0);
+        making.word_length = folio_ints_grown(making.word_length, 0);
+        making.first = folio_ints_grown(making.first, -1);
+        making.last = folio_ints_grown(making.last, -1)
+    }
+    id: int = making.count;
+    making.word_at[id] = making.text.size;
+    making.word_length[id] = to - from;
+    builder_bytes(making.text, w, from, to);
+    places[place] = id + 1;
+    making.count = id + 1;
+    id
+}
+
+// Ints a, twice as many, the new ones fill.
+folio_ints_grown(a: []int, fill: int): []int@new {
+    b: []int = new int[2 * len(a) + 16](fill);
+    for k in 0..len(a) b[k] = a[k];
+    b
+}
+
+// The index's section, decoded (README.md): its flags, its units' places
+// (each as the difference from the one before), its words in order (each
+// sharing a prefix with the one before), each word's units' count and
+// bytes, then each word's units by number, as differences from the one
+// before.
+folio_words_bytes(making: *FolioWordsMaking): []i8@new {
+    order: []int = folio_words_sorted(making);
+    out: *ByteBuilder = builder_new(making.text.size + 4 * making.units + 2 * making.unit_count + 64);
+    folio_put_varint(out, if (making.by_paragraph) 1 else 0);
+    folio_put_varint(out, making.unit_count);
+    previous_place: int = 0;
+    for u in 0..making.unit_count {
+        folio_put_varint(out, making.places_of_units[u] - previous_place);
+        previous_place = making.places_of_units[u]
+    }
+    folio_put_varint(out, making.count);
+    // (Each word's units' bytes first, so that its count and size go
+    // before them in the table.)
+    units: *ByteBuilder = builder_new(2 * making.units + 16);
+    previous_at: int = 0;
+    previous_length: int = 0;
+    for k in 0..making.count {
+        id: int = order[k];
+        at: int = making.word_at[id];
+        length: int = making.word_length[id];
+        shared: int = 0;
+        while (shared < length && shared < previous_length && making.text.data[at + shared] == making.text.data[previous_at + shared]) shared = shared + 1;
+        begun: int = units.size;
+        count: int = 0;
+        last: int = 0;
+        n: int = making.first[id];
+        while (n >= 0) {
+            folio_put_varint(units, making.unit[n] - last);
+            last = making.unit[n];
+            count = count + 1;
+            n = making.next[n]
+        }
+        folio_put_varint(out, shared);
+        folio_put_varint(out, length - shared);
+        builder_bytes(out, making.text.data, at + shared, at + length);
+        folio_put_varint(out, count);
+        folio_put_varint(out, units.size - begun);
+        previous_at = at;
+        previous_length = length
+    }
+    builder_bytes(out, units.data, 0, units.size);
+    builder_slice(out)
+}
+
+// The words' numbers in their bytes' order (a merge sort).
+folio_words_sorted(making: *FolioWordsMaking): []int@new {
+    n: int = making.count;
+    a: []int = new int[n](0);
+    b: []int = new int[n](0);
+    for k in 0..n a[k] = k;
+    width: int = 1;
+    while (width < n) {
+        lo: int = 0;
+        while (lo < n) {
+            mid: int = if (lo + width < n) lo + width else n;
+            hi: int = if (lo + 2 * width < n) lo + 2 * width else n;
+            i: int = lo;
+            j: int = mid;
+            for k in lo..hi {
+                if (i < mid && (j >= hi || folio_word_order(making, a[i], a[j]) <= 0)) {
+                    b[k] = a[i];
+                    i = i + 1
+                } else {
+                    b[k] = a[j];
+                    j = j + 1
+                }
+            }
+            lo = hi
+        }
+        t: []int = a;
+        a = b;
+        b = t;
+        width = 2 * width
+    }
+    a
+}
+
+// Words x and y compared by their bytes (as unsigned), shorter first where
+// one begins the other.
+folio_word_order(making: *FolioWordsMaking, x: int, y: int): int {
+    text: []i8 = making.text.data;
+    folio_bytes_order(text, making.word_at[x], making.word_length[x], text, making.word_at[y],
+        making.word_length[y])
+}
+
+folio_bytes_order(
+    a: []i8,
+    a_at: int,
+    a_length: int,
+    b: []i8,
+    b_at: int,
+    b_length: int
+): int {
+    n: int = if (a_length < b_length) a_length else b_length;
+    for k in 0..n {
+        x: int = a[a_at + k] as int & 255;
+        y: int = b[b_at + k] as int & 255;
+        if (x != y) return x - y
+    }
+    a_length - b_length
+}
+
+folio_put_varint(out: *ByteBuilder@new, value: int) {
+    v: int = value;
+    while (v >= 128) {
+        builder_byte(out, (v & 127 | 128) trunc i8);
+        v = v >> 7
+    }
+    builder_byte(out, v trunc i8)
+}
+
+// ---- reading it ----
+// A folio's word index, read: each unit's place in the content (by its
+// number), its words (each one's bytes in words, in order), and where each
+// one's units are in units (a span of bytes) and how many there are;
+// whether its paragraphs begin units.
+tag folio
+type FolioWords = tag folio_internal {
+    places_of_units: []int;
+    words: []i8;
+    word_at: []int;
+    word_length: []int;
+    units: []i8;
+    units_at: []int;
+    units_size: []int;
+    units_count: []int;
+    count: int;
+    by_paragraph: bool
+}
+
+// How a word is looked for: whole, or as a word's beginning (the last word
+// typed, as it is typed).
+tag folio
+type WordMatching =
+    | Whole
+    | Beginning
+
+// The index's section (raw DEFLATE, packed bytes of source from at, size
+// bytes decoded) read.
+tag folio
+folio_words_open(
+    source: []i8,
+    at: int,
+    packed: int,
+    size: int
+) raises FolioError: *FolioWords@new {
+    data: []i8 = new i8[0](0i8);
+    try {
+        data = inflate(source, at, packed, size)
+    } with DeflateError _error -> {
+        folio_fail(FolioFailure.BadHead)
+    }
+    reading: FolioVarints = FolioVarints { data: data, at: 0 };
+    flags: int = folio_varint(&reading);
+    unit_count: int = folio_varint(&reading);
+    if (unit_count < 0 || unit_count > size) folio_fail(FolioFailure.BadHead);
+    places_of_units: []int = new int[unit_count](0);
+    place: int = 0;
+    for u in 0..unit_count {
+        step: int = folio_varint(&reading);
+        if (step < 0) folio_fail(FolioFailure.BadHead);
+        place = place + step;
+        places_of_units[u] = place
+    }
+    count: int = folio_varint(&reading);
+    if (count < 0 || count > size) folio_fail(FolioFailure.BadHead);
+    words: *ByteBuilder = builder_new(4 * count + 16);
+    made: *FolioWords = new FolioWords {
+        places_of_units: places_of_units,
+        words: new i8[0](0i8),
+        word_at: new int[count](0),
+        word_length: new int[count](0),
+        units: data,
+        units_at: new int[count](0),
+        units_size: new int[count](0),
+        units_count: new int[count](0),
+        count: count,
+        by_paragraph: (flags & 1) != 0
+    };
+    previous: int = 0;
+    for k in 0..count {
+        shared: int = folio_varint(&reading);
+        rest: int = folio_varint(&reading);
+        if (shared < 0 || rest < 0 || reading.at + rest > size || shared > (if (k == 0) 0 else made.word_length[k - 1])) folio_fail(FolioFailure.BadHead);
+        made.word_at[k] = words.size;
+        builder_bytes(words, words.data, previous, previous + shared);
+        builder_bytes(words, data, reading.at, reading.at + rest);
+        reading.at = reading.at + rest;
+        made.word_length[k] = shared + rest;
+        made.units_count[k] = folio_varint(&reading);
+        made.units_size[k] = folio_varint(&reading);
+        previous = made.word_at[k]
+    }
+    // (The units after the table, each word's after the one before.)
+    at_units: int = reading.at;
+    for k in 0..count {
+        made.units_at[k] = at_units;
+        at_units = at_units + made.units_size[k]
+    }
+    if (at_units != size) folio_fail(FolioFailure.BadHead);
+    made.words = builder_slice(words);
+    made
+}
+
+type FolioVarints = {
+    data: []i8;
+    at: int
+}
+
+// The varint at reading's place (-1 if it runs past its bytes), reading
+// past it.
+folio_varint(reading: *FolioVarints): int {
+    v: int = 0;
+    shift: int = 0;
+    while (reading.at < len(reading.data) && shift < 63) {
+        b: int = reading.data[reading.at] as int & 255;
+        reading.at = reading.at + 1;
+        v = v | (b & 127) << shift;
+        if (b < 128) return v;
+        shift = shift + 7
+    }
+    -1
+}
+
+// How many words the index has.
+tag folio
+folio_words_count(words: *FolioWords): int {
+    words.count
+}
+
+// Whether the document's paragraphs begin units (it is not a Bible).
+tag folio
+folio_words_by_paragraph(words: *FolioWords): bool {
+    words.by_paragraph
+}
+
+// The first word not before w[from..to) (its number; count if none).
+folio_words_lower(
+    words: *FolioWords,
+    w: []i8,
+    from: int,
+    to: int
+): int {
+    lo: int = 0;
+    hi: int = words.count;
+    while (lo < hi) {
+        mid: int = (lo + hi) / 2;
+        if (folio_bytes_order(words.words, words.word_at[mid], words.word_length[mid],
+            w, from, to - from) < 0) lo = mid + 1 else hi = mid
+    }
+    lo
+}
+
+// At most this many words a beginning matches are taken (the most a
+// reader's results could want: one or two letters begin thousands).
+tag folio
+FOLIO_BEGINNING_WORDS_MOST: int = 256;
+
+// The units word w[from..to) (folded, as folio_fold_words folds) is in,
+// whole or as a word's beginning (the units of every word it begins, at
+// most FOLIO_BEGINNING_WORDS_MOST of them, the most common), in order,
+// each once.
+tag folio
+folio_words_units(
+    words: *FolioWords,
+    w: []i8,
+    from: int,
+    to: int,
+    matching: WordMatching
+): []int@new {
+    first: int = folio_words_lower(words, w, from, to);
+    match matching {
+        Whole -> {
+            if (first < words.count && folio_bytes_order(words.words, words.word_at[first],
+                words.word_length[first], w, from, to - from) == 0) return folio_word_units(words,
+                first);
+            return new int[0](0)
+        }
+        Beginning -> { }
+    }
+    // (The words it begins: from the first not before it, while it begins
+    // them.)
+    last: int = first;
+    while (last < words.count && words.word_length[last] >= to - from && folio_bytes_order(words.words,
+        words.word_at[last], to - from, w, from, to - from) == 0) last = last + 1;
+    taken: []int = folio_most_common(words, first, last, FOLIO_BEGINNING_WORDS_MOST);
+    // (Their units marked by number, then read off in order: one pass
+    // however many words there are.)
+    marked: []bool = new bool[len(words.places_of_units)](false);
+    count: int = 0;
+    for id in taken {
+        reading: FolioVarints = FolioVarints { data: words.units, at: words.units_at[id] };
+        unit: int = 0;
+        for _k in 0..words.units_count[id] {
+            unit = unit + folio_varint(&reading);
+            if (unit >= 0 && unit < len(marked) && !marked[unit]) {
+                marked[unit] = true;
+                count = count + 1
+            }
+        }
+    }
+    out: []int = new int[count](0);
+    n: int = 0;
+    for unit in 0..len(marked) {
+        if (marked[unit]) {
+            out[n] = words.places_of_units[unit];
+            n = n + 1
+        }
+    }
+    out
+}
+
+// Word id's units' places, in order.
+folio_word_units(words: *FolioWords, id: int): []int@new {
+    out: []int = new int[words.units_count[id]](0);
+    reading: FolioVarints = FolioVarints { data: words.units, at: words.units_at[id] };
+    last: int = 0;
+    for k in 0..len(out) {
+        last = last + folio_varint(&reading);
+        out[k] = (if (last >= 0 && last < len(words.places_of_units)) words.places_of_units[last] else 0)
+    }
+    out
+}
+
+// Of words first to last, the most common most (their numbers): all, if
+// there are no more.
+folio_most_common(
+    words: *FolioWords,
+    first: int,
+    last: int,
+    most: int
+): []int@new {
+    n: int = last - first;
+    if (n <= most) {
+        all: []int = new int[n](0);
+        for k in 0..n all[k] = first + k;
+        return all
+    }
+    // (The most common kept, a pass each place: few places, many words.)
+    taken: []int = new int[most](-1);
+    for id in first..last {
+        weakest: int = 0;
+        for k in 1..most {
+            if (taken[k] < 0 || taken[weakest] >= 0 && words.units_count[taken[k]] < words.units_count[taken[weakest]]) weakest = k
+        }
+        if (taken[weakest] < 0 || words.units_count[id] > words.units_count[taken[weakest]]) taken[weakest] = id
+    }
+    taken
+}
+
+// The units both a and b have, in order.
+tag folio
+folio_units_both(a: []int, b: []int): []int@new {
+    out: []int = new int[if (len(a) < len(b)) len(a) else len(b)](0);
+    i: int = 0;
+    j: int = 0;
+    n: int = 0;
+    while (i < len(a) && j < len(b)) {
+        if (a[i] < b[j]) i = i + 1 else if (b[j] < a[i]) j = j + 1 else {
+            out[n] = a[i];
+            n = n + 1;
+            i = i + 1;
+            j = j + 1
+        }
+    }
+    trimmed: []int = new int[n](0);
+    for k in 0..n trimmed[k] = out[k];
+    trimmed
+}
+
+// Where the unit beginning at content[at] ends (before to: the next
+// unit's beginning, or to): content holds whole records from at.
+tag folio
+folio_unit_end(
+    words: *FolioWords,
+    content: []i8,
+    at: int,
+    to: int
+): int {
+    line: int = at;
+    first: bool = true;
+    while (line < to) {
+        if (!first && folio_unit_begins(content[line], words.by_paragraph)) return line;
+        first = false;
+        while (line < to && content[line] != 10i8) line = line + 1;
+        line = line + 1
+    }
+    to
+}

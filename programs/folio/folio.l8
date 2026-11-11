@@ -44,12 +44,15 @@ folio_failure_name(failure: FolioFailure): str {
     }
 }
 
-// The format's version this library writes; it reads this one and the
-// first (whose divisions say no marks).
-FOLIO_VERSION: int = 2;
+// The format's version this library writes; it reads this one, the second
+// (no word index) and the first (whose divisions say no marks too).
+FOLIO_VERSION: int = 3;
 
-// The fixed part of the head, before the blocks' sizes.
-FOLIO_FIXED_HEAD: int = 40;
+// The fixed part of the head, before the blocks' sizes: the third
+// version's (with its word index's sizes), and the first two's.
+FOLIO_FIXED_HEAD: int = 48;
+
+FOLIO_FIXED_HEAD_2: int = 40;
 
 // What folio_head_size needs to see.
 tag folio
@@ -152,7 +155,9 @@ type FolioWriter = tag folio_internal {
     // where its last mark is (in the content).
     open_marks: *ByteBuilder;
     open_comments: bool;
-    open_last_mark: int
+    open_last_mark: int;
+    // Its word index, made as its content is written (words.l8).
+    words: *FolioWordsMaking
 }
 
 tag folio
@@ -176,7 +181,8 @@ folio_writer_new(): *FolioWriter@new {
         chapter_key: builder_new(32),
         open_marks: builder_new(256),
         open_comments: false,
-        open_last_mark: 0
+        open_last_mark: 0,
+        words: folio_words_making_new()
     }
 }
 
@@ -198,7 +204,11 @@ folio_meta_bytes(
     builder_str(writer.meta, key);
     builder_byte(writer.meta, FOLIO_TAB);
     builder_bytes(writer.meta, value, from, to);
-    builder_byte(writer.meta, FOLIO_LINE_END)
+    builder_byte(writer.meta, FOLIO_LINE_END);
+    // (Its kind, said before its content: a Bible's units are its verses,
+    // another's its paragraphs too.)
+    if (key == "kind") writer.words.by_paragraph = !(to - from == 5 && folio_same_bytes(value,
+        from, bytes("bible"), 0, 5))
 }
 
 // The open division's line in the index, ending at the content's end.
@@ -374,6 +384,8 @@ folio_flush_block(writer: *FolioWriter@new, count: int) {
     pending.size = left
 }
 
+// The content's next bytes, data[from..to): whole records (folio_meta's
+// kind, if it has one, said before them), read into its word index too.
 tag folio
 folio_append(
     writer: *FolioWriter@new,
@@ -381,6 +393,7 @@ folio_append(
     from: int,
     to: int
 ) {
+    folio_words_read(writer.words, data, from, to, writer.content_size);
     at: int = from;
     while (at < to) {
         room: int = FOLIO_BLOCK_SIZE - writer.pending.size;
@@ -446,16 +459,19 @@ folio_put_u32_at(out: []i8, at: int, value: int) {
     for k in 0..4 out[at + k] = (value >> 8 * k & 255) trunc i8
 }
 
-// The folio: its head, then the blocks.
+// The folio: its head, then the blocks, then its word index.
 tag folio
 folio_finish(writer: *FolioWriter@new): []i8@new {
     folio_close_division(writer);
     if (writer.pending.size > 0) folio_flush_block(writer, writer.pending.size);
     meta: []i8 = deflate_compress(writer.meta.data, 0, writer.meta.size);
     index: []i8 = deflate_compress(writer.index.data, 0, writer.index.size);
+    decoded: []i8 = folio_words_bytes(writer.words);
+    words_size: int = len(decoded);
+    words: []i8 = deflate_compress(decoded, 0, words_size);
     sizes: int = writer.block_sizes.size;
     head_size: int = FOLIO_FIXED_HEAD + sizes + len(meta) + len(index);
-    out: []i8 = new i8[head_size + writer.blocks.size](0i8);
+    out: []i8 = new i8[head_size + writer.blocks.size + len(words)](0i8);
     memcpy(out, 0, bytes("FOLIO"), 0, 5);
     out[6] = FOLIO_VERSION trunc i8;
     folio_put_u32_at(out, 8, head_size);
@@ -466,10 +482,13 @@ folio_finish(writer: *FolioWriter@new): []i8@new {
     folio_put_u32_at(out, 28, writer.meta.size);
     folio_put_u32_at(out, 32, len(index));
     folio_put_u32_at(out, 36, writer.index.size);
+    folio_put_u32_at(out, 40, len(words));
+    folio_put_u32_at(out, 44, words_size);
     memcpy(out, FOLIO_FIXED_HEAD, writer.block_sizes.data, 0, sizes);
     memcpy(out, FOLIO_FIXED_HEAD + sizes, meta, 0, len(meta));
     memcpy(out, FOLIO_FIXED_HEAD + sizes + len(meta), index, 0, len(index));
     memcpy(out, head_size, writer.blocks.data, 0, writer.blocks.size);
+    memcpy(out, head_size + writer.blocks.size, words, 0, len(words));
     out
 }
 
@@ -500,7 +519,11 @@ type Folio = tag folio_internal {
     marks_to: []int;
     starts: []int;
     ends: []int;
-    places: []int
+    places: []int;
+    // Its word index's size packed and decoded (0: it has none, a folio of
+    // an earlier version); it is after the blocks.
+    words_packed: int;
+    words_size: int
 }
 
 // Whether source begins as a folio of this version does.
@@ -531,7 +554,9 @@ folio_decimal_at(data: []i8, from: int, to: int): int {
 tag folio
 folio_open(head: []i8, count: int) raises FolioError: *Folio@new {
     folio_check_prefix(head, count);
-    if (count < FOLIO_FIXED_HEAD) folio_fail(FolioFailure.Truncated);
+    version: int = head[6] as int;
+    fixed: int = if (version >= 3) FOLIO_FIXED_HEAD else FOLIO_FIXED_HEAD_2;
+    if (count < fixed) folio_fail(FolioFailure.Truncated);
     head_size: int = folio_get_u32(head, 8);
     block_count: int = folio_get_u32(head, 12);
     content_size: int = folio_get_u32(head, 16);
@@ -540,12 +565,14 @@ folio_open(head: []i8, count: int) raises FolioError: *Folio@new {
     meta_size: int = folio_get_u32(head, 28);
     index_packed: int = folio_get_u32(head, 32);
     index_size: int = folio_get_u32(head, 36);
-    if (block_size == 0 || head_size != FOLIO_FIXED_HEAD + 4 * block_count + meta_packed + index_packed || block_count != (content_size + block_size - 1) / block_size) folio_fail(FolioFailure.BadHead);
+    words_packed: int = if (version >= 3) folio_get_u32(head, 40) else 0;
+    words_size: int = if (version >= 3) folio_get_u32(head, 44) else 0;
+    if (block_size == 0 || head_size != fixed + 4 * block_count + meta_packed + index_packed || block_count != (content_size + block_size - 1) / block_size) folio_fail(FolioFailure.BadHead);
     if (count < head_size) folio_fail(FolioFailure.Truncated);
     offsets: []int = new int[block_count + 1](0);
     offsets[0] = head_size;
-    for b in 0..block_count offsets[b + 1] = offsets[b] + folio_get_u32(head, FOLIO_FIXED_HEAD + 4 * b);
-    meta_at: int = FOLIO_FIXED_HEAD + 4 * block_count;
+    for b in 0..block_count offsets[b + 1] = offsets[b] + folio_get_u32(head, fixed + 4 * b);
+    meta_at: int = fixed + 4 * block_count;
     meta: []i8 = new i8[0](0i8);
     index: []i8 = new i8[0](0i8);
     try {
@@ -559,7 +586,7 @@ folio_open(head: []i8, count: int) raises FolioError: *Folio@new {
         if (byte == FOLIO_LINE_END) divisions = divisions + 1
     }
     folio: *Folio = new Folio {
-        version: head[6] as int,
+        version: version,
         head_size: head_size,
         block_count: block_count,
         content_size: content_size,
@@ -576,7 +603,9 @@ folio_open(head: []i8, count: int) raises FolioError: *Folio@new {
         marks_to: new int[divisions](0),
         starts: new int[divisions](0),
         ends: new int[divisions](0),
-        places: new int[2 * divisions + 1](0)
+        places: new int[2 * divisions + 1](0),
+        words_packed: words_packed,
+        words_size: words_size
     };
     // (Each line: a key, its start and its end, after the one before, and
     // perhaps a title, and after it (from the second version) marks.)
@@ -615,6 +644,29 @@ folio_open(head: []i8, count: int) raises FolioError: *Folio@new {
     }
     if (divisions > 0 && folio.ends[divisions - 1] != content_size) folio_fail(FolioFailure.BadHead);
     folio
+}
+
+// Whether the folio has a word index (its version's third or later), and
+// where it is in the file (after the last block), its size packed and
+// decoded: folio_words_open reads it.
+tag folio
+folio_has_words(folio: *Folio): bool {
+    folio.words_packed > 0
+}
+
+tag folio
+folio_words_place(folio: *Folio): int {
+    folio.block_offsets[folio.block_count]
+}
+
+tag folio
+folio_words_packed(folio: *Folio): int {
+    folio.words_packed
+}
+
+tag folio
+folio_words_size(folio: *Folio): int {
+    folio.words_size
 }
 
 // The metadata's value for key (empty if there is none).
@@ -840,3 +892,6 @@ tag folio
 folio_content(folio: *Folio, file: []i8) raises FolioError: []i8@new {
     folio_read(folio, file, 0, folio.content_size)
 }
+
+// (The word index, after the types and helpers it uses.)
+import "words.l8"
