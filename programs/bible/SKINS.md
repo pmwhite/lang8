@@ -247,18 +247,18 @@ other's place; the bar's `version` then names the commentary); the panel a
 version or a commentary. The reader screen is one row of chrome, drawn
 as the page's bar is on that skin, so that the two panes are named
 alike: its title is always the chapter at its reading line, and its
-`left` the document's short name (as the page's bar names its version: a
-version's abbreviation, KJV; a commentary's first word, Spurgeon), whose
-tap presents Go To aimed at the panel (below). A skin draws them as the
-page's title and version: the chapter in the title's type, the name
-faint and smaller after it ("Psalm 147 Spurgeon"), the name cut short
-before the chapter is; a chevron after them where the page's title has
-one. Its tools are Link (prominent while linked) and a menu (`ellipsis`:
-Swap Panes, Full Screen or Beside the Page, Close Panel), drawn as the
-page's bar's glyphs are, Link lit while linked as the page's panel
-button is while the panel shows; where the page's bar puts glyphs at
-both sides (the iPhone's), Link takes the outer left place and the menu
-the outer right.
+`left` the name of what it reads, as the page's `version` names the
+page's (a version's name, King James Version; a commentary's short title,
+Spurgeon's Treasury of David), whose tap presents Go To aimed at the
+panel (below). A skin draws them as the page's title and version: the
+chapter in the title's type, the name small and faint under it, cut at
+its end where it must be; a chevron after the chapter where the page's
+title has one. Its tools are Link (prominent while linked) and a menu
+(`ellipsis`: Swap Panes, Full Screen or Beside the Page, Close Panel),
+drawn as the page's bar's glyphs are, Link lit while linked as the
+page's panel button is while the panel shows; where the page's bar puts
+glyphs at both sides (the iPhone's), Link takes the outer left place and
+the menu the outer right.
 The reader is the panel's first screen: it has no Back. A commentary on the page has no verses to select:
 core lets a `tapverse` on it go. Core and the skin divide the work by what each
 knows best, and speak across the line in the document's terms, never in
@@ -566,7 +566,13 @@ hands the actions back as for any screen.
   reader's language, the others; three a kind then `Show All N` (five for
   a language named; twelve for a kind named alone, then its other
   languages, rows refining the query); for "languages", a row a language
-  (its own name; its English name and a count). A section's `Show All N`
+  (its own name; its English name and a count); then, for three letters
+  or more and no reference to a chapter, Verses: the first three verses
+  the words find in the version read (as Search finds them, the words
+  marked), a tap going there as Go To's places do, and `All N Verses`,
+  Search pushed over Go To with those words (its scopes, recent searches
+  and the ESV's own search there). The field waits 150 ms after a key
+  before it is searched (its screen's search wait). A section's `Show All N`
   makes the screen again with every row, sent as `refill ID 0`: the list
   keeps its offset. Nothing found: the screen's `empty` (No Matches; its
   line "More is found when you’re online." where only the connection
@@ -725,7 +731,7 @@ Other lines from core:
 | `arriving P THOUSANDTHS`, `arrived P` | a document on its way to pane P, so much come (a hairline along the foot of that pane's bar, ink at 30%); nothing on its way any more (the hairline fades out): see Panes, Arriving |
 | `goto` | the sheets away, as the platform puts them away (a `go 0` follows) |
 | `highlights SWATCH WASH STRENGTH...`, `themes DAY NIGHT PAGE INK...`, then `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT THEME CHOSEN HAIRLINE SELECTION SHEET CELL` | all a skin needs of look.l8. `highlights`: each of the five by the color its `mark` lines name it with, and the wash a highlighted verse shows now (STRENGTH, like GLOSS, HAIRLINE and SELECTION, in thousandths). `themes`: the themes Auto follows by day and at night, then each theme's page and ink, in the Theme setting's order (for its swatches). `look`: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument); THEME the theme it is and CHOSEN the one chosen (0 Auto), of `themes`; HAIRLINE a rule's strength (RULE's color), SELECTION a selection's (ACCENT's); SHEET and CELL a sheet's color and its rows' (`-`: the platform's grouped colors) |
-| `title` TEXT, `version` TEXT | the bar's title and the version's abbreviation (or the commentary the page reads; while a document is on its way to the page, its name), shown faint after the title (which opens Go To); the version is chosen in Go To, not from the bar or the settings |
+| `title` TEXT, `version` TEXT | the bar's title (the chapter) and the name of what the page reads (the version's, Berean Standard Bible; the commentary's short title; while a document is on its way to the page, its name), shown small and faint under the title (which opens Go To); a collapsed bar shows the title alone; the version is chosen in Go To, not from the bar or the settings |
 | `url` ADDRESS | a page outside the app to open |
 | `back` WORDS | the capsule's words (none: away); the way back and a ribbon move the page with `go 0` |
 | `next` | core has work going on a step at a time (the Bookshelf opening a module, making a Bible a version, decoding a commentary's block): the skin answers `next` on its next turn, once it has drawn and taken input, so the app answers its reader between steps however slow it runs |
@@ -772,7 +778,7 @@ From the skin:
 | Line | Meaning |
 |---|---|
 | `start W H DENSITY DARK TZ` | the app begun: the window (points), its scale (hundredths), the system's appearance, its time zone (seconds east of UTC: the day turns at its midnight) |
-| `tap goto`, `tap settings`, `tap history`, `tap search`, `tap library`, `tap shelf` | the bar's buttons (`goto`: its title; `shelf`: the panel beside the reader opened or closed, or with nothing read there yet Go To aimed at it; without a panel that fits, Go To aimed at the page) |
+| `tap goto`, `tap settings`, `tap history`, `tap search`, `tap library`, `tap shelf` | the bar's buttons (`goto`: its title, which finds words too, so a bar needs no Search button; `search` stays for a skin's keys and menus; `shelf`: the panel beside the reader opened or closed, or with nothing read there yet Go To aimed at it; without a panel that fits, Go To aimed at the page) |
 | `act ID ACTION ARG VALUE` | an action (VALUE: a toggle's 1 or 0, a choice's, segment's, filter's or sort's index, a slider's value, a time's minutes, a swatch's color). An action on a screen means those over it have gone |
 | `query ID TEXT` | screen ID's field typed in (TEXT to the line's end), once typing has rested |
 | `scope ID N` | scope N chosen in screen ID's field |

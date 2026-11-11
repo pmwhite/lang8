@@ -56,7 +56,6 @@ public final class Bible extends Activity {
   FrameLayout root;
   LinearLayout bar;
   TextView title, settings, library, shelf;
-  android.widget.ImageView search;
   // A screen or a part being said (between its first line and end): the
   // part's pane (null: one not shown), its chapter, index, count and words.
   Screen building;
@@ -90,9 +89,11 @@ public final class Bible extends Activity {
     title = new TextView(this);
     title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
     title.setTypeface(Typeface.create(Typeface.SERIF, Typeface.BOLD));
-    title.setSingleLine();
+    // (Two lines: the chapter, and under it what the page reads.)
+    title.setMaxLines(2);
     title.setEllipsize(TextUtils.TruncateAt.END);
-    title.setPadding(0, dp(12), dp(12), dp(12));
+    title.setLineSpacing(0, 0.95f);
+    title.setPadding(0, dp(4), dp(12), dp(4));
     title.setOnClickListener(v -> Native.send("tap goto"));
     // (A long press: the title's menu, core's: New Ribbon Here, the
     // ribbon carried's Leave Here, Move Here.)
@@ -109,15 +110,9 @@ public final class Bible extends Activity {
     // (The panel: what is read beside the page.)
     shelf = button("▤", "shelf");
     shelf.setContentDescription("Panel");
-    search = new android.widget.ImageView(this);
-    search.setImageResource(android.R.drawable.ic_menu_search);
-    search.setPadding(dp(10), dp(10), dp(10), dp(10));
-    search.setContentDescription("Search");
-    search.setOnClickListener(v -> Native.send("tap search"));
     bar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
     bar.addView(shelf);
     bar.addView(library);
-    bar.addView(search, new LinearLayout.LayoutParams(dp(44), dp(44)));
     bar.addView(settings);
     root.addView(bar, new FrameLayout.LayoutParams(-1, dp(52), Gravity.TOP));
     pageHairline = new Hairline(this, look);
@@ -633,10 +628,11 @@ public final class Bible extends Activity {
 
   // The bar's title, the carried ribbon's glyph before it in its color.
   // The title: the ribbon carried (a strip of its color), the chapter, and
-  // the version, faint and smaller, as the iPhone's title has it.
+  // under it what the page reads, faint and smaller, as the iPhone's title
+  // has it.
   void showTitle() {
     String lead = carried.isEmpty() ? "" : "\u258E ";
-    String tail = versionWord.isEmpty() ? "" : "  " + versionWord;
+    String tail = versionWord.isEmpty() ? "" : "\n" + versionWord;
     android.text.SpannableString s = new android.text.SpannableString(lead + titleWords + tail);
     if (!carried.isEmpty())
       s.setSpan(new android.text.style.ForegroundColorSpan(Look.color(carried)), 0, 1,
@@ -645,7 +641,9 @@ public final class Bible extends Activity {
       int from = s.length() - tail.length();
       s.setSpan(new android.text.style.ForegroundColorSpan(look.faint), from, s.length(),
           android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-      s.setSpan(new android.text.style.RelativeSizeSpan(0.75f), from, s.length(),
+      s.setSpan(new android.text.style.RelativeSizeSpan(0.65f), from, s.length(),
+          android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+      s.setSpan(new android.text.style.TypefaceSpan("sans-serif"), from, s.length(),
           android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
     }
     title.setText(s);
@@ -799,7 +797,6 @@ public final class Bible extends Activity {
     settings.setTextColor(look.accent);
     library.setTextColor(look.accent);
     shelf.setTextColor(look.accent);
-    search.setColorFilter(look.accent);
     Window w = getWindow();
     w.setStatusBarColor(look.bg);
     w.setNavigationBarColor(look.bg);

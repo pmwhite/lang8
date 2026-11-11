@@ -543,16 +543,18 @@ final class Panel extends FrameLayout {
     subtitle.setText(s.subtitle);
     subtitle.setVisibility(s.subtitle.isEmpty() ? GONE : VISIBLE);
     // (The panel's reader's title, drawn as the page's bar's is: the
-    // chapter, the document's name faint and smaller after it, its tap Go
+    // chapter, the document's name faint and smaller under it, its tap Go
     // To aimed at the panel.)
     boolean named = s.reader && !s.left.isEmpty();
     if (named) {
-      String tail = "  " + s.left;
+      String tail = "\n" + s.left;
       android.text.SpannableString t = new android.text.SpannableString(s.title + tail);
       int from = t.length() - tail.length();
       t.setSpan(new android.text.style.ForegroundColorSpan(look.faint), from, t.length(),
           android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-      t.setSpan(new android.text.style.RelativeSizeSpan(0.75f), from, t.length(),
+      t.setSpan(new android.text.style.RelativeSizeSpan(0.65f), from, t.length(),
+          android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+      t.setSpan(new android.text.style.TypefaceSpan("sans-serif"), from, t.length(),
           android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
       back.setText(t);
       title.setText("");

@@ -992,7 +992,6 @@ bar.titleButton.addEventListener("contextmenu", (e) => {
 });
 $(".bar .library").addEventListener("click", () => send("tap library"));
 $(".bar .shelf").addEventListener("click", () => send("tap shelf"));
-$(".bar .search").addEventListener("click", () => send("tap search"));
 $(".bar .aa").addEventListener("click", () => send("tap settings"));
 
 // ---- the panes ----
@@ -2886,6 +2885,7 @@ const panel = {
     // (Its words in spans of their own, cut short with an ellipsis where
     // they don't fit (read.css: the name first); the icon after them
     // always shown.)
+    // (The chapter, and under it what is read, small and faint.)
     if (named) back.replaceChildren(el("span", "pchapter", s.title), el("span", "pname", s.left));
     else back.replaceChildren(s.left ? el("span", "pname", s.left) : icon(depth > 1 ? "chevron-left" : "x"));
     // (The reader's title has no chevron, as the page's has none.)
