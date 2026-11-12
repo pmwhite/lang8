@@ -25,7 +25,11 @@ over it when a verse is studied; nothing else stacks there. It is kept
 while sheets come and go and opened again as it was left. The reader's
 name opens Go To, its picks landing in the panel, to read another
 document there; with nothing read there yet, the bar's panel button
-opens that Go To, and the panel opens once something is picked. `core/panes.l8` keeps the two
+opens that Go To, and the panel opens once something is picked. Each
+skin shows the panel its platform's way (from iOS 26, UIKit's split view
+inspector: a column on a wide window, a sheet over the page elsewhere);
+where it is a column it can't fill the screen, and its menu has no Full
+Screen (`panelfill`). `core/panes.l8` keeps the two
 panes, the page and the panel's reader, the same way on every skin: each
 reads its document a part at a time (a version's chapter in parts of its
 verses from one that begins a paragraph; a commentary's, about 2 KB of its

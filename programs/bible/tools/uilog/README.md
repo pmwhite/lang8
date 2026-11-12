@@ -113,6 +113,7 @@ iPhone.
 | `input` | `type`: `pointerdown`, `pointermove`, `wheel` (`dy`), `touchstart`, `touchend`, `key`, `click`, `wire` (`detail`), `drag-start`, `drag-end`, `decel-start`, `decel-end`. `pane` is 0 for the page and 1 for the panel. `on` names the element that was touched |
 | `rest` | After 18 frames without a change: `items` lists `[id, x, y, w, h, clipped, visible rect, text start]` for everything in sight and not covered |
 | `f` | A frame. `c` is the logger's own cost in ms |
+| `value` | A number the app keeps that shapes what shows, as it changes: `n` its name, `v` its value. On the iPhone from iOS 26, `page-inset` (the page's bottom inset, set as the panel's sheet settles), `sheet-cover` (how much of the window's foot the panel's sheet covers, each frame it moves) and `gap-top` (the top of the page-colored cover under the floating sheet, -1 when there is none) |
 | `mark`, `stop`, `walk` | A step's name, the end, and a walk stopped at its limit (`capped`) |
 
 Kinds: `bar`, `sheet`, `toast`, `hairline`, `row`, `button`, `heading`,

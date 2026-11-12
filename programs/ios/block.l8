@@ -14,6 +14,19 @@ use_tag std;
 // is an ordinary L8 function: under hot reload, a trampoline into the
 // module (RELOAD.md).
 //
+// A block's record (and the type encoding its descriptor points at) lives
+// as long as the process, in C's heap: never in the module's memory (under
+// hot reload a build's memory goes with it) nor in L8's own `malloc`
+// (l8rt_malloc, an arena's while one is current, used again for other
+// things). UIKit may keep a block it was given, and call or release it,
+// long after (a sheet's detent resolver, the sheet still shown through a
+// reload; a detent's own block, released as the sheet goes): its record
+// must be whole until the process ends. So each build takes its room once
+// and never gives it back; a reload leaves the last build's records in
+// place (BLOCK_TABLE_BYTES a build), their handlers, trampolines by name,
+// entering the new build's functions. A record let go (block_free) is used
+// again only for another block's record, never for anything else.
+//
 // The app's code runs on the main thread only. UIKit calls the blocks it
 // is given there (actions, menus, detents, animations); a framework's
 // completion handler may be called on a queue of its own: made with
@@ -46,6 +59,14 @@ extern l8_block_invoke(
 
 extern l8_block_invoke_double(block: int, a: int): f64;
 
+// C's heap, and copies into it. (calloc, not malloc: L8 names its own
+// arena allocator malloc.)
+extern calloc(count: int, byte_count: int): int;
+
+extern memcpy_ints_to(dst: int, src: []int, n: int): int = memcpy;
+
+extern memcpy_bytes_to(dst: int, src: []i8, n: int): int = memcpy;
+
 // A record's words: isa, flags, invoke, descriptor, handler, context,
 // objects, and its descriptor (reserved, size, signature);
 // blocks.arm64-darwin.s says what each is.
@@ -54,7 +75,14 @@ BLOCK_WORDS: int = 10;
 // How many blocks the app may hold at once.
 BLOCKS_MOST: int = 1024;
 
-block_records: []int = new int[BLOCK_WORDS * BLOCKS_MOST](0);
+// The records' native room (BLOCKS_MOST records of BLOCK_WORDS words),
+// taken the first time a block is made (0: not yet, or none to be had).
+BLOCK_TABLE_BYTES: int = BLOCKS_MOST * BLOCK_WORDS * 8;
+
+block_table: int = 0;
+
+// A record made here before it is copied to its place.
+block_record: []int = new int[BLOCK_WORDS](0);
 
 block_held: []bool = new bool[BLOCKS_MOST](false);
 
@@ -77,10 +105,23 @@ block_shim_names: []str = ["l8_block_call", "l8_block_call_double", "l8_block_ca
 block_shims: []int = new int[3](0);
 
 // The type encodings blocks are made with ("v16@?0@8", say), each once and
-// ended by a zero byte, so a descriptor can point at it.
+// ended by a zero byte, so a descriptor can point at it: kept here to be
+// found, and copied to their native room (block_signatures_native), which
+// the descriptors point at.
+BLOCK_SIGNATURE_BYTES: int = 4096;
+
 block_signatures: []i8 = new i8[4096](0i8);
 
 block_signatures_n: int = 0;
+
+block_signatures_native: int = 0;
+
+// The native rooms taken (false: none to be had; no block is made).
+block_rooms(): bool {
+    if (block_table == 0) block_table = calloc(1, BLOCK_TABLE_BYTES);
+    if (block_signatures_native == 0) block_signatures_native = calloc(1, BLOCK_SIGNATURE_BYTES);
+    block_table != 0 && block_signatures_native != 0
+}
 
 block_signature_address(signature: str): int {
     // (One already kept: its place.)
@@ -94,7 +135,7 @@ block_signature_address(signature: str): int {
             if (block_signatures[at + k] != signature[k] as i8) same = false;
             k = k + 1
         }
-        if (same) return bytes_address(block_signatures) + at;
+        if (same) return block_signatures_native + at;
         at = end + 1
     }
     if (block_signatures_n + len(signature) + 1 > len(block_signatures)) return 0;
@@ -102,14 +143,16 @@ block_signature_address(signature: str): int {
     for k in 0..len(signature) block_signatures[at + k] = signature[k] as i8;
     block_signatures[at + len(signature)] = 0i8;
     block_signatures_n = at + len(signature) + 1;
-    bytes_address(block_signatures) + at
+    // (All of them copied again: the copy's start is where at counts from.)
+    _c: int = memcpy_bytes_to(block_signatures_native, block_signatures, block_signatures_n);
+    block_signatures_native + at
 }
 
 // A block of kind whose code calls handler (an L8 function's C entry) with
 // context first, its arguments' objects (bit k for argument k) kept while
 // it waits for the main thread, typed as signature says: its address, to
 // give where a block is wanted (0: BLOCKS_MOST held already, no room for
-// its signature, or no shims linked: none made).
+// its signature or its record, or no shims linked: none made).
 block_make(
     kind: int,
     handler: int,
@@ -121,34 +164,34 @@ block_make(
     for i in 0..BLOCKS_MOST {
         if (slot < 0 && !block_held[i]) slot = i
     }
-    if (slot < 0) return 0;
+    if (slot < 0 || !block_rooms()) return 0;
     types: int = block_signature_address(signature);
     if (types == 0) return 0;
     if (block_shims[kind] == 0) block_shims[kind] = dlsym(-2, block_shim_names[kind]);
     // (A hot reload host built before the shims were: no block.)
     if (block_shims[kind] == 0) return 0;
     block_held[slot] = true;
-    w: int = slot * BLOCK_WORDS;
-    address: int = ints_address(block_records) + w * 8;
-    block_records[w] = dlsym(-2, "_NSConcreteGlobalBlock");
-    block_records[w + 1] = BLOCK_FLAGS;
-    block_records[w + 2] = block_shims[kind];
-    block_records[w + 3] = address + 7 * 8;
-    block_records[w + 4] = handler;
-    block_records[w + 5] = context;
-    block_records[w + 6] = objects;
-    block_records[w + 7] = 0;
-    block_records[w + 8] = BLOCK_SIZE;
-    block_records[w + 9] = types;
+    address: int = block_table + slot * BLOCK_WORDS * 8;
+    record: []int = block_record;
+    record[0] = dlsym(-2, "_NSConcreteGlobalBlock");
+    record[1] = BLOCK_FLAGS;
+    record[2] = block_shims[kind];
+    record[3] = address + 7 * 8;
+    record[4] = handler;
+    record[5] = context;
+    record[6] = objects;
+    record[7] = 0;
+    record[8] = BLOCK_SIZE;
+    record[9] = types;
+    _c: int = memcpy_ints_to(address, record, BLOCK_WORDS * 8);
     address
 }
 
 // A block made here let go, once nothing it was given to will call it
 // again (the menu it acted for gone, say); a block not made here, nothing.
 block_free(b: int) {
-    first: int = ints_address(block_records);
-    if (b < first || b >= first + BLOCKS_MOST * BLOCK_WORDS * 8) return;
-    slot: int = (b - first) / (BLOCK_WORDS * 8);
+    if (block_table == 0 || b < block_table || b >= block_table + BLOCK_TABLE_BYTES) return;
+    slot: int = (b - block_table) / (BLOCK_WORDS * 8);
     block_held[slot] = false
 }
 

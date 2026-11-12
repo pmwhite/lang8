@@ -1,0 +1,1260 @@
+tag bible_ios;
+
+use_tag std, ios, bible, bible_wire;
+
+// The panel beside the page as UIKit's own (iOS 26 and later): the page
+// in a split view controller, the panel (ios/beside.l8's navigation
+// controller, bs_nav) in its inspector column. On a wide window the
+// inspector is a column at the page's right, resized by its divider; where
+// the split is collapsed (every iPhone, and a window too narrow for both)
+// UIKit shows it as a sheet over the page, which stops at a third, a half
+// or the whole height. The page stays bright and usable above the sheet
+// at a third and a half; the whole height is Full Screen. Before iOS 26
+// the panel is ios/beside.l8's own, laid out by frames.
+//
+// What is UIKit's: the column and the sheet, their motion, the grabber,
+// the drag between heights, the swipe that closes it. What is the app's:
+// the page's navigation controller (`nav`) moved between two hosts, so
+// that UIKit never wraps it in one of its own (which would give the page a
+// Back to an empty column); the sheet's heights, set before each showing
+// (UIKit makes a new presentation for each); and, since no call comes as
+// the sheet moves, a display link that watches it from a move's start to
+// three still frames (its settle), moving the floating controls above it
+// each frame and, at the settle, the page's inset, the detent (Full
+// Screen), and following by the linked panes' rule once.
+import "../../ios/objc.l8";
+
+import "../../ios/block.l8";
+
+// ---- UIKit's numbers ----
+// UISplitViewControllerColumn.
+COLUMN_PRIMARY: int = 0;
+
+COLUMN_SECONDARY: int = 2;
+
+COLUMN_COMPACT: int = 3;
+
+COLUMN_INSPECTOR: int = 4;
+
+// UISplitViewControllerStyleDoubleColumn,
+// UISplitViewControllerDisplayModeSecondaryOnly,
+// UISplitViewControllerDisplayModeButtonVisibilityNever.
+SPLIT_DOUBLE_COLUMN: int = 1;
+
+SPLIT_SECONDARY_ONLY: int = 1;
+
+SPLIT_BUTTON_NEVER: int = 1;
+
+// UIUserInterfaceSizeClass.
+SIZE_CLASS_COMPACT: int = 1;
+
+SIZE_CLASS_REGULAR: int = 2;
+
+// ---- the panel's widths as a column (points) ----
+INSPECTOR_PREFERRED_W: f64 = 390.0f64;
+
+INSPECTOR_LEAST_W: f64 = 320.0f64;
+
+INSPECTOR_MOST_W: f64 = 480.0f64;
+
+// Its most as a share of the window's width.
+INSPECTOR_MOST_SHARE: f64 = 0.4f64;
+
+// ---- the sheet's heights ----
+// Small (the app's: a third of the most a sheet may be), medium and large
+// (the system's); large is Full Screen.
+type PanelDetent =
+    | Small
+    | Medium
+    | Large
+
+DETENT_SMALL_SHARE: f64 = 0.33f64;
+
+// The heights' identifiers (the small one the app's own name).
+ins_small_id: int = 0;
+
+// Each height's place, smallest first (to compare two).
+ins_detent_rank(d: PanelDetent): int {
+    match d {
+        Small -> 0;
+        Medium -> 1;
+        Large -> 2
+    }
+}
+
+ins_detent_is_large(d: PanelDetent): bool {
+    ins_detent_rank(d) == 2
+}
+
+ins_detent_id(d: PanelDetent): int {
+    rank: int = ins_detent_rank(d);
+    if (rank == 2) return objc_const("UISheetPresentationControllerDetentIdentifierLarge");
+    if (rank == 1) return objc_const("UISheetPresentationControllerDetentIdentifierMedium");
+    if (ins_small_id == 0) ins_small_id = keep(nsstring("small"));
+    ins_small_id
+}
+
+// The height an identifier names (an unknown one, as nil before a sheet
+// shows: medium).
+ins_detent_of(id: int): PanelDetent {
+    if (id != 0 && ins_same(id, ins_detent_id(PanelDetent.Large))) return PanelDetent.Large;
+    if (id != 0 && ins_same(id, ins_detent_id(PanelDetent.Small))) return PanelDetent.Small;
+    PanelDetent.Medium
+}
+
+ins_same(a: int, b: int): bool {
+    (msg1(a, sel("isEqualToString:"), b) & 255) != 0
+}
+
+ins_detent_word(d: PanelDetent): str {
+    match d {
+        Small -> "small";
+        Medium -> "medium";
+        Large -> "large"
+    }
+}
+
+// The height the sheet was last left at, not counting large (which is
+// core's Full Screen): where it opens again, and where Beside the Page
+// takes it back to.
+ins_detent_left: PanelDetent = PanelDetent.Medium;
+
+// ---- the split and its hosts ----
+split_vc: int = 0;
+
+split_class: int = 0;
+
+// The page's two hosts: the secondary column's (expanded) and the compact
+// column's (collapsed). `nav` is the one child of whichever the split
+// shows, so UIKit takes it as the column's own navigation controller.
+page_host: int = 0;
+
+compact_host: int = 0;
+
+page_host_class: int = 0;
+
+compact_host_class: int = 0;
+
+// Whether this iOS has the split's inspector column (iOS 26): the panel
+// is UIKit's; else ios/beside.l8's own (decided once a build).
+ins_known: int = -1;
+
+panel_in_split(): bool {
+    if (ins_known < 0) ins_known = (if ((msg1(cls("UISplitViewController"), sel("instancesRespondToSelector:"),
+        sel("setPreferredInspectorColumnWidth:")) & 255) != 0) 1 else 0);
+    ins_known == 1
+}
+
+// Whether the split is collapsed now (the panel a sheet).
+split_collapsed(): bool {
+    split_vc != 0 && (msg(split_vc, sel("isCollapsed")) & 255) != 0
+}
+
+// ---- the panel's showing ----
+// Whether the inspector is asked to show (showColumn: until it is hidden),
+// whether it is being hidden by the app (core closed it: the panel's
+// screens let go once UIKit has hidden it), and whether core opened it
+// again meanwhile.
+ins_shown: bool = false;
+
+ins_hiding: bool = false;
+
+ins_reopen_after_hide: bool = false;
+
+// Whether a collapse or an expansion is under way (from the delegate's
+// question to its did): the column hidden and shown by it is not a close.
+ins_transition: bool = false;
+
+// Whether the panel waits to show until the sheets over the page are gone
+// (Go To, aimed at the panel, picked from).
+ins_waiting_for_sheets: bool = false;
+
+// The split made the window's root's child, `nav` in its secondary
+// column's host, the panel's column empty until it opens (ios/ipad.l8's
+// root_attach, on iOS 26).
+split_attach(root: int) {
+    split: int = msg1(msg(split_class, sel("alloc")), sel("initWithStyle:"), SPLIT_DOUBLE_COLUMN);
+    split_vc = split;
+    msg1(split, sel("setDelegate:"), split);
+    msg1(split, sel("setPreferredDisplayMode:"), SPLIT_SECONDARY_ONLY);
+    msg1(split, sel("setPresentsWithGesture:"), 0);
+    msg1(split, sel("setDisplayModeButtonVisibility:"), SPLIT_BUTTON_NEVER);
+    msg_set_f(split, sel("setPreferredInspectorColumnWidth:"), INSPECTOR_PREFERRED_W);
+    msg_set_f(split, sel("setMinimumInspectorColumnWidth:"), INSPECTOR_LEAST_W);
+    // (The primary column is never shown: a plain screen in the page's
+    // color, there because the split wants one.)
+    primary: int = msg(make("UIViewController"), sel("autorelease"));
+    msg1(msg(primary, sel("view")), sel("setBackgroundColor:"), c_bg);
+    page_host = keep(msg(msg(page_host_class, sel("alloc")), sel("init")));
+    compact_host = keep(msg(msg(compact_host_class, sel("alloc")), sel("init")));
+    host_adopt_page(page_host);
+    msg2(split, sel("setViewController:forColumn:"), primary, COLUMN_PRIMARY);
+    msg2(split, sel("setViewController:forColumn:"), page_host, COLUMN_SECONDARY);
+    msg2(split, sel("setViewController:forColumn:"), compact_host, COLUMN_COMPACT);
+    msg1(root, sel("addChildViewController:"), split);
+    sv: int = msg(split, sel("view"));
+    msg1(sv, sel("setAutoresizingMask:"), 0);
+    l8_msg_hfa(hfa, msg(root, sel("view")), sel("bounds"), 0, 0, 0);
+    msg_rect(sv, sel("setFrame:"), 0.0f64, 0.0f64, hfa[2], hfa[3]);
+    msg1(msg(root, sel("view")), sel("addSubview:"), sv);
+    msg1(split, sel("didMoveToParentViewController:"), root);
+    split_widths(hfa[2])
+}
+
+// `nav` made host's one child (its view's frame the host's to set, so the
+// page is still at its old width when the host lays out: the place is
+// measured there first, ipad.l8's width_will_change).
+host_adopt_page(host: int) {
+    if (nav == 0 || msg(nav, sel("parentViewController")) == host) return;
+    if (msg(nav, sel("parentViewController")) != 0) {
+        msg1(nav, sel("willMoveToParentViewController:"), 0);
+        msg(msg(nav, sel("view")), sel("removeFromSuperview"));
+        msg(nav, sel("removeFromParentViewController"))
+    }
+    msg1(host, sel("addChildViewController:"), nav);
+    nv: int = msg(nav, sel("view"));
+    msg1(nv, sel("setAutoresizingMask:"), 0);
+    msg1(msg(host, sel("view")), sel("addSubview:"), nv);
+    msg1(nav, sel("didMoveToParentViewController:"), host);
+    msg(msg(host, sel("view")), sel("setNeedsLayout"))
+}
+
+// The root laid out (W by H): the split filling it, the column's widths
+// for this window, and whether a regular window is too narrow for both.
+split_place(W: f64, H: f64) {
+    if (split_vc == 0) return;
+    beside_frame(msg(split_vc, sel("view")), 0.0f64, 0.0f64, W, H);
+    split_widths(W);
+    split_force_collapse(W);
+    beside_ensure()
+}
+
+// The inspector's most (a share of the window, never under its least) and
+// the page's least beside it: 28 em and its margins (beside.l8's rule).
+split_widths(W: f64) {
+    if (split_vc == 0) return;
+    most: f64 = INSPECTOR_MOST_SHARE * W;
+    if (most > INSPECTOR_MOST_W) most = INSPECTOR_MOST_W;
+    if (most < INSPECTOR_LEAST_W) most = INSPECTOR_LEAST_W;
+    msg_set_f(split_vc, sel("setMaximumInspectorColumnWidth:"), most);
+    if (responds(split_vc, "setMinimumSecondaryColumnWidth:")) msg_set_f(split_vc,
+        sel("setMinimumSecondaryColumnWidth:"), PAGE_LEAST_EM * em + 2.0f64 * look_margin)
+}
+
+// A regular-width window that can't hold the page's least beside the
+// panel: the split told it is compact (so the panel is the iPhone's sheet,
+// never squeezing or overlapping the page); told again only as the window
+// crosses the rule, never as the panel opens.
+split_forced_compact: bool = false;
+
+split_force_collapse(W: f64) {
+    if (window == 0 || !responds(split_vc, "traitOverrides")) return;
+    regular: bool = msg(msg(window, sel("traitCollection")), sel("horizontalSizeClass")) == SIZE_CLASS_REGULAR;
+    force: bool = regular && !beside_fits_in(W);
+    if (force == split_forced_compact) return;
+    split_forced_compact = force;
+    overrides: int = msg(split_vc, sel("traitOverrides"));
+    if (force) msg1(overrides, sel("setHorizontalSizeClass:"), SIZE_CLASS_COMPACT) else msg1(overrides,
+        sel("removeTrait:"), cls("UITraitHorizontalSizeClass"));
+    note_num("bible: panel: the split kept collapsed (a regular window too narrow) ",
+        if (force) 1 else 0)
+}
+
+// A host laid out: the page its size (measured at its old width first),
+// the floating controls placed; a size changed (a rotation) watched as
+// the sheet moves with it.
+host_laid_out(self: int) {
+    if (nav == 0 || msg(nav, sel("parentViewController")) != self) return;
+    l8_msg_hfa(hfa, msg(self, sel("view")), sel("bounds"), 0, 0, 0);
+    W: f64 = hfa[2];
+    H: f64 = hfa[3];
+    if (W <= 0.0f64) return;
+    nv: int = msg(nav, sel("view"));
+    l8_msg_hfa(hfa, nv, sel("frame"), 0, 0, 0);
+    was_w: f64 = hfa[2];
+    was_h: f64 = hfa[3];
+    if (was_w != W && was_w > 0.0f64) {
+        // (A column shown or hidden beside it, a rotation: the page made
+        // again at its new width outside UIKit's animation, each part where
+        // it ends, the change cross-faded beside a column, as the panel's
+        // own did.)
+        host_reflow_from = was_w;
+        host_reflow_w = W;
+        host_reflow_h = H;
+        if (host_reflow == 0) host_reflow = block0(&host_reflow_now, 0, "v8@?0");
+        if (!split_collapsed() && !reduce_motion()) fade_layer(msg(nv, sel("layer")),
+            0.2f64);
+        if (host_reflow != 0) msg1(cls("UIView"), sel("performWithoutAnimation:"),
+            host_reflow) else _r: int = host_reflow_now(0)
+    } else beside_frame(nv, 0.0f64, 0.0f64, W, H);
+    float_layout();
+    if ((was_w != W || was_h != H) && bs_shown) ins_motion_begin()
+}
+
+// The page's new width: the place measured at the old, the page's frame
+// set, its panes made again (ipad.l8's hooks); run without animation
+// (host_reflow, made once a process).
+host_reflow_from: f64 = 0.0f64;
+
+host_reflow_w: f64 = 0.0f64;
+
+host_reflow_h: f64 = 0.0f64;
+
+persistent host_reflow: int = 0;
+
+host_reflow_now(_context: int): int {
+    width_will_change(host_reflow_from);
+    beside_frame(msg(nav, sel("view")), 0.0f64, 0.0f64, host_reflow_w, host_reflow_h);
+    width_changed(host_reflow_from, host_reflow_w);
+    0
+}
+
+page_host_laid_out(self: int, cmd: int): int {
+    super0(self, page_host_class, cmd);
+    host_laid_out(self);
+    0
+}
+
+compact_host_laid_out(self: int, cmd: int): int {
+    super0(self, compact_host_class, cmd);
+    host_laid_out(self);
+    0
+}
+
+// ---- the split's delegate ----
+// Collapsing (a phone, a window grown narrow): `nav` into the compact
+// column's host, which UIKit shows alone.
+split_collapsing(
+    _self: int,
+    _cmd: int,
+    _split: int,
+    _proposed: int
+): int {
+    ins_transition = true;
+    host_adopt_page(compact_host);
+    COLUMN_COMPACT
+}
+
+// Expanding: `nav` back in the secondary column's host, shown alone (the
+// panel's column beside it if it is open).
+split_expanding(
+    _self: int,
+    _cmd: int,
+    _split: int,
+    _proposed: int
+): int {
+    ins_transition = true;
+    host_adopt_page(page_host);
+    SPLIT_SECONDARY_ONLY
+}
+
+split_did_collapse(_self: int, _cmd: int, _split: int): int {
+    ins_transition = false;
+    // (UIKit shows the panel again, as a sheet, a few frames on.)
+    ins_seen_presented = false;
+    ins_unseen_since = CACurrentMediaTime();
+    ins_tell_fill();
+    note("bible: panel: the split collapsed");
+    if (bs_shown) ins_motion_begin();
+    0
+}
+
+// Expanded: no Full Screen beside the page (a column can't fill the
+// window): if the panel filled the screen as a sheet, it is beside the page
+// now.
+split_did_expand(_self: int, _cmd: int, _split: int): int {
+    ins_transition = false;
+    ins_tell_fill();
+    note("bible: panel: the split expanded");
+    page_foot_cover = 0.0f64;
+    ins_cover_now = 0.0f64;
+    set_insets();
+    float_controls_place();
+    if (bs_full) send0("tap full");
+    if (bs_shown) ins_motion_begin();
+    0
+}
+
+// The inspector about to show: as a sheet, its heights set (UIKit shows it
+// itself as the split collapses with the panel open).
+split_will_show(
+    _self: int,
+    _cmd: int,
+    _split: int,
+    column: int
+): int {
+    if (column == COLUMN_INSPECTOR && split_collapsed()) ins_sheet_configure();
+    0
+}
+
+// The inspector hidden: by the app (core closed the panel: its screens let
+// go now), or by a hand (the sheet swiped away, VoiceOver's scrub: core
+// told, once; ins_settle_hand_close decides it). Not by a collapse or
+// expansion.
+split_did_hide(
+    _self: int,
+    _cmd: int,
+    _split: int,
+    column: int
+): int {
+    if (column != COLUMN_INSPECTOR) return 0;
+    // (Put away by the app: its screens let go now. Otherwise, a hand's
+    // swipe or a collapse's or expansion's own hiding, which the settle
+    // tells apart: ins_settle_hand_close.)
+    if (ins_hiding) ins_hidden() else ins_motion_begin();
+    0
+}
+
+// The sheet's height changed by a hand: watched to its settle.
+ins_detent_changed(_self: int, _cmd: int, _sheet: int): int {
+    ins_motion_begin();
+    0
+}
+
+ins_hidden() {
+    if (!ins_shown) return;
+    ins_shown = false;
+    bs_shown = false;
+    send1("panelvisible", 0);
+    ins_cover_now = 0.0f64;
+    float_controls_place();
+    ins_gap_place(0.0f64);
+    ins_page_cover(0.0f64);
+    layout_bar();
+    if (ins_hiding) {
+        ins_hiding = false;
+        beside_discard();
+        if (ins_reopen_after_hide && bs_open) beside_build();
+        ins_reopen_after_hide = false;
+        return
+    }
+    note("bible: panel: put away by a hand");
+    if (bs_open) {
+        place_tell();
+        send0("tap shelf")
+    }
+}
+
+// Whether the panel is a sheet now (collapsed, shown, presented).
+ins_is_sheet(): bool {
+    bs_nav != 0 && split_collapsed() && msg(bs_nav, sel("presentingViewController")) != 0
+}
+
+// `panelfill`: whether the panel may fill the screen (a sheet, collapsed)
+// or not (a column, expanded), told to core as it changes.
+ins_told_fill: int = -1;
+
+ins_tell_fill() {
+    if (!restored || split_vc == 0) return;
+    fill: int = if (split_collapsed()) 1 else 0;
+    if (fill == ins_told_fill) return;
+    ins_told_fill = fill;
+    send1("panelfill", fill)
+}
+
+// ---- opening and closing ----
+// The panel's stack made (beside.l8's beside_made): shown in the
+// inspector column; as a sheet at the height it was left at (large if core
+// says it fills the screen). Its reader lays out in its viewIsAppearing:
+// (ins_reader_appearing), at its final size, before the first frame of the
+// rise, so nothing in it moves as it comes. While a sheet is over the page
+// (Go To, aimed at the panel, picked from) it shows once that is gone.
+ins_show() {
+    if (split_vc == 0 || bs_nav == 0 || ins_hiding) return;
+    if (ins_sheets_going()) {
+        ins_wait_for_sheets();
+        return
+    }
+    if (msg1(split_vc, sel("viewControllerForColumn:"), COLUMN_INSPECTOR) != bs_nav) msg2(split_vc,
+        sel("setViewController:forColumn:"), bs_nav, COLUMN_INSPECTOR);
+    if (split_collapsed()) ins_sheet_configure();
+    ins_shown = true;
+    bs_shown = true;
+    ins_seen_presented = false;
+    ins_unseen_since = CACurrentMediaTime();
+    msg1(split_vc, sel("showColumn:"), COLUMN_INSPECTOR);
+    send1("panelvisible", 1);
+    ins_motion_begin();
+    note_num("bible: beside: shown, screens ", msg(msg(bs_nav, sel("viewControllers")),
+        sel("count")))
+}
+
+INS_WAIT_S: f64 = 0.05f64;
+
+// Whether a sheet is over the page, or one's coming or going isn't over
+// (its transition: UIKit holds a presentation asked for meanwhile until
+// something else lays the window out).
+ins_sheets_going(): bool {
+    presented() != 0 || root_vc != 0 && msg(root_vc, sel("transitionCoordinator")) != 0 || msg(nav,
+        sel("transitionCoordinator")) != 0
+}
+
+ins_wait_for_sheets() {
+    if (ins_waiting_for_sheets) return;
+    ins_waiting_for_sheets = true;
+    note("bible: panel: waits for the sheets to go");
+    _t: int = after_common(INS_WAIT_S, "inspectorAfterSheets:")
+}
+
+// The sheets over the page gone (their dismissal's end, or looked for
+// every INS_WAIT_S while they go): the panel shown now.
+ins_after_sheets() {
+    if (!ins_waiting_for_sheets) return;
+    if (ins_sheets_going()) {
+        _t: int = after_common(INS_WAIT_S, "inspectorAfterSheets:");
+        return
+    }
+    ins_waiting_for_sheets = false;
+    if (bs_open && bs_nav != 0 && !ins_shown) ins_show()
+}
+
+ins_after_sheets_fired(_self: int, _cmd: int, _timer: int): int {
+    ins_after_sheets();
+    0
+}
+
+// Core closed the panel: hidden by UIKit's own motion, its screens let go
+// once it is (ins_hidden); already gone (a hand put it away), let go now.
+ins_close() {
+    if (!ins_shown || split_vc == 0) {
+        ins_waiting_for_sheets = false;
+        beside_discard();
+        return
+    }
+    ins_hiding = true;
+    bs_shown = false;
+    msg1(split_vc, sel("hideColumn:"), COLUMN_INSPECTOR);
+    ins_motion_begin()
+}
+
+// Core opened the panel: shown, or (while it is being hidden) made again
+// once it has gone.
+ins_open() {
+    if (ins_hiding) {
+        ins_reopen_after_hide = true;
+        return
+    }
+    if (bs_nav == 0) beside_build() else ins_show()
+}
+
+// ---- the sheet ----
+// The small height's resolver, made once a process (kept through a hot
+// reload: a sheet still shown keeps calling the one it was given, whose
+// record ios/block.l8 never lets go).
+persistent ins_small_resolver: int = 0;
+
+// The small height: a third of the most a sheet may be (so it doesn't
+// depend on the text's size).
+ins_small_height(_context: int, resolution: int): int {
+    block_double(msg_f(resolution, sel("maximumDetentValue")) * DETENT_SMALL_SHARE)
+}
+
+// The sheet UIKit is about to present the panel in (a new one each time):
+// its heights, the page undimmed up to medium, its lists' scrolling never
+// growing it, the system's grabber, the height it opens at, the app as
+// its delegate (UIKit leaves it none).
+ins_sheet_configure() {
+    sheet: int = msg(bs_nav, sel("sheetPresentationController"));
+    if (sheet == 0) return;
+    det: int = cls("UISheetPresentationControllerDetent");
+    if (ins_small_resolver == 0) ins_small_resolver = block1_double(&ins_small_height,
+        0, "d16@?0@8");
+    three: []int = new int[3](0);
+    three[0] = msg2(det, sel("customDetentWithIdentifier:resolver:"), ins_detent_id(PanelDetent.Small),
+        ins_small_resolver);
+    three[1] = msg(det, sel("mediumDetent"));
+    three[2] = msg(det, sel("largeDetent"));
+    msg1(sheet, sel("setDetents:"), nsarray(three, 3));
+    msg1(sheet, sel("setLargestUndimmedDetentIdentifier:"), ins_detent_id(PanelDetent.Medium));
+    msg1(sheet, sel("setPrefersScrollingExpandsWhenScrolledToEdge:"), 0);
+    msg1(sheet, sel("setPrefersGrabberVisible:"), 1);
+    msg1(sheet, sel("setSelectedDetentIdentifier:"), ins_detent_id(if (bs_full) PanelDetent.Large else ins_detent_left));
+    if (msg(sheet, sel("delegate")) == 0) msg1(sheet, sel("setDelegate:"), split_vc)
+}
+
+// The sheet's height now (medium before it shows).
+ins_detent_now(): PanelDetent {
+    if (!ins_is_sheet()) return ins_detent_left;
+    ins_detent_of(msg(msg(bs_nav, sel("sheetPresentationController")), sel("selectedDetentIdentifier")))
+}
+
+// The sheet taken to height d by UIKit's motion (Full Screen, Beside the
+// Page, the wire's `!detent`); remembered for the next showing if it is
+// not a sheet now.
+ins_detent_wanted: PanelDetent = PanelDetent.Medium;
+
+ins_select_detent(d: PanelDetent) {
+    if (!ins_detent_is_large(d)) ins_detent_left = d;
+    if (!ins_is_sheet()) return;
+    if (ins_detent_rank(ins_detent_now()) == ins_detent_rank(d)) return;
+    ins_detent_wanted = d;
+    if (ins_detent_change == 0) ins_detent_change = block0(&ins_apply_detent, 0, "v8@?0");
+    if (ins_detent_change == 0) return;
+    msg1(msg(bs_nav, sel("sheetPresentationController")), sel("animateChanges:"),
+        ins_detent_change);
+    ins_motion_begin()
+}
+
+// The block animateChanges: runs (made once a process, kept through a hot
+// reload as the resolver is: it reads the height wanted when it runs).
+persistent ins_detent_change: int = 0;
+
+ins_apply_detent(_context: int): int {
+    msg1(msg(bs_nav, sel("sheetPresentationController")), sel("setSelectedDetentIdentifier:"),
+        ins_detent_id(ins_detent_wanted));
+    0
+}
+
+// Core's Full Screen changed (its menu, or the sheet's own height told it):
+// the sheet at large, or back at the height it came from. Expanded, there
+// is no Full Screen: core told it so.
+ins_full_changed() {
+    if (split_vc != 0 && !split_collapsed()) {
+        if (bs_full) send0("tap full");
+        return
+    }
+    ins_select_detent(if (bs_full) PanelDetent.Large else ins_detent_left)
+}
+
+// ---- watching it move ----
+// (Kept through a hot reload: a link made again each build would go on.)
+persistent ins_link: int = 0;
+
+// The window's foot covered by the sheet: as last seen, and as the
+// floating controls are placed for (left as it was at large, where the
+// page is behind the sheet).
+ins_cover_seen: f64 = -1.0f64;
+
+ins_cover_now: f64 = 0.0f64;
+
+// The page's foot covered as its inset was last set (a settle's).
+page_foot_cover: f64 = 0.0f64;
+
+// How many frames the sheet has been still; three is its settle.
+ins_still_frames: int = 0;
+
+INS_SETTLE_FRAMES: int = 3;
+
+ins_moving: bool = false;
+
+// The frames' cost while it moves (the interpreter is slow): total and
+// count, written at the settle.
+ins_frame_ms_total: f64 = 0.0f64;
+
+ins_frame_ms_worst: f64 = 0.0f64;
+
+ins_frames: int = 0;
+
+// The sheet's move watched from now: begun by UIKit's own motion (show,
+// hide, a height chosen, a rotation, a collapse) or a hand on it.
+ins_motion_begin() {
+    if (window == 0) return;
+    if (ins_link == 0) {
+        ins_link = keep(msg2(cls("CADisplayLink"), sel("displayLinkWithTarget:selector:"),
+            app_obj, sel("inspectorFrame:")));
+        msg2(ins_link, sel("addToRunLoop:forMode:"), msg(cls("NSRunLoop"), sel("mainRunLoop")),
+            l8_run_loop_common_modes())
+    }
+    ins_still_frames = 0;
+    if (!ins_moving) {
+        ins_frame_ms_total = 0.0f64;
+        ins_frame_ms_worst = 0.0f64;
+        ins_frames = 0
+    }
+    ins_moving = true;
+    msg1(ins_link, sel("setPaused:"), 0)
+}
+
+// Each frame while it moves: where its top is, the floating controls above
+// it; still for INS_SETTLE_FRAMES, its settle.
+ins_frame(_self: int, _cmd: int, _link: int): int {
+    if (!ins_moving) {
+        msg1(ins_link, sel("setPaused:"), 1);
+        return 0
+    }
+    began: f64 = CACurrentMediaTime();
+    cover: f64 = ins_cover_measure();
+    d: f64 = cover - ins_cover_seen;
+    if (d < 0.25f64 && d > -0.25f64) ins_still_frames = ins_still_frames + 1 else ins_still_frames = 0;
+    ins_cover_seen = cover;
+    if (bs_nav != 0 && msg(msg(bs_nav, sel("view")), sel("window")) != 0) ins_seen_presented = true;
+    // (Up to the medium height's room: at large the page is behind the
+    // sheet, the controls left where they were.)
+    if (!bs_full && cover <= ins_cover_most()) {
+        ins_cover_now = cover;
+        float_controls_place()
+    }
+    ins_gap_place(cover);
+    ms: f64 = (CACurrentMediaTime() - began) * 1000.0f64;
+    ins_frame_ms_total = ins_frame_ms_total + ms;
+    if (ms > ins_frame_ms_worst) ins_frame_ms_worst = ms;
+    ins_frames = ins_frames + 1;
+    if (ins_still_frames < INS_SETTLE_FRAMES) return 0;
+    ins_moving = false;
+    msg1(ins_link, sel("setPaused:"), 1);
+    ins_settle();
+    0
+}
+
+// The most of the window the controls ride up to: as far as the medium
+// height puts the sheet's top, and a little more.
+ins_cover_most(): f64 {
+    0.6f64 * view_height(window)
+}
+
+// How much of the window's foot the panel's sheet covers now (its
+// presentation layers', mid-motion): 0 if it is not a sheet in sight.
+ins_cover_measure(): f64 {
+    v: int = ins_sheet_view();
+    if (v == 0) return 0.0f64;
+    cover: f64 = view_height(window) - ins_window_top(v, LayerState.Shown);
+    if (cover < 0.0f64) 0.0f64 else cover
+}
+
+// ---- the gap under the floating sheet ----
+// At its small and medium heights the sheet floats a little in from the
+// screen's sides and foot, and the page's text would show in that gap,
+// against the panel's last line. A plain view in the page's color covers
+// the page from the sheet's top, below its rounded corners, to the
+// screen's foot (the page's words still pass behind the corners' curve),
+// placed each frame with the sheet; none at large, where nothing floats.
+ins_gap: int = 0;
+
+// The sheet's corners' radius where UIKit doesn't say it.
+INS_SHEET_RADIUS: f64 = 32.0f64;
+
+ins_gap_place(cover: f64) {
+    if (root_vc == 0) return;
+    if (ins_gap == 0) {
+        ins_gap = keep(make("UIView"));
+        msg1(ins_gap, sel("setUserInteractionEnabled:"), 0);
+        msg1(ins_gap, sel("setIsAccessibilityElement:"), 0);
+        msg1(ins_gap, sel("setAutoresizingMask:"), 0)
+    }
+    root: int = msg(root_vc, sel("view"));
+    if (msg(ins_gap, sel("superview")) != root) msg1(root, sel("addSubview:"), ins_gap);
+    radius: f64 = ins_sheet_radius();
+    H: f64 = view_height(root);
+    shown: bool = cover > radius && cover <= ins_cover_most() && split_collapsed();
+    msg(cls("CATransaction"), sel("begin"));
+    msg1(cls("CATransaction"), sel("setDisableActions:"), 1);
+    msg1(ins_gap, sel("setHidden:"), if (shown) 0 else 1);
+    if (shown) {
+        msg1(ins_gap, sel("setBackgroundColor:"), c_bg);
+        msg_rect(ins_gap, sel("setFrame:"), 0.0f64, H - cover + radius, view_width(root),
+            cover - radius);
+        msg1(root, sel("bringSubviewToFront:"), ins_gap)
+    }
+    msg(cls("CATransaction"), sel("commit"))
+}
+
+// The sheet's corners' radius: its wrapper's, or that of the first of its
+// own views that has one.
+ins_sheet_radius(): f64 {
+    v: int = ins_sheet_view();
+    if (v == 0) return INS_SHEET_RADIUS;
+    r: f64 = msg_f(msg(v, sel("layer")), sel("cornerRadius"));
+    if (r < 1.0f64 && msg(msg(v, sel("subviews")), sel("count")) > 0) r = msg_f(msg(msg1(msg(v,
+        sel("subviews")), sel("objectAtIndex:"), 0), sel("layer")), sel("cornerRadius"));
+    if (r < 1.0f64) INS_SHEET_RADIUS else r
+}
+
+// The cover's top in the window (-1: not shown), for the UI log.
+ins_gap_top(): f64 {
+    if (ins_gap == 0 || (msg(ins_gap, sel("isHidden")) & 255) != 0) return -1.0f64;
+    l8_msg_hfa(hfa, ins_gap, sel("frame"), 0, 0, 0);
+    hfa[1]
+}
+
+// The gap's color as the theme's now.
+ins_gap_restyle() {
+    if (ins_gap != 0) msg1(ins_gap, sel("setBackgroundColor:"), c_bg)
+}
+
+// Which of a layer's states to read: as it shows mid-animation (its
+// presentation layer), or where it is going (the layer itself).
+type LayerState =
+    | Shown
+    | Final
+
+ins_layer_in(layer: int, state: LayerState): int {
+    match state {
+        Shown -> {
+            shown: int = msg(layer, sel("presentationLayer"));
+            if (shown == 0) layer else shown
+        }
+        Final -> layer
+    }
+}
+
+// View v's top in the window in that state: each layer's frame in its
+// parent's bounds, added up (no transforms on the sheet's views:
+// BUILD-M1-spike.md S4).
+ins_window_top(v: int, state: LayerState): f64 {
+    y: f64 = 0.0f64;
+    layer: int = msg(v, sel("layer"));
+    while (layer != 0) {
+        l8_msg_hfa(hfa, ins_layer_in(layer, state), sel("frame"), 0, 0, 0);
+        y = y + hfa[1];
+        parent: int = msg(layer, sel("superlayer"));
+        if (parent != 0) {
+            l8_msg_hfa(hfa, ins_layer_in(parent, state), sel("bounds"), 0, 0, 0);
+            y = y - hfa[1]
+        }
+        layer = parent
+    }
+    y
+}
+
+// The sheet's view (its wrapper, which UIKit moves), if it is shown as a
+// sheet in the window now; else 0.
+ins_sheet_view(): int {
+    if (window == 0 || bs_nav == 0 || !split_collapsed()) return 0;
+    pc: int = msg(bs_nav, sel("presentationController"));
+    shown: int = if (pc == 0) 0 else msg(pc, sel("presentedView"));
+    if (shown == 0 || msg(shown, sel("window")) == 0 || msg(bs_nav, sel("presentingViewController")) == 0) return 0;
+    shown
+}
+
+// How much of the window's foot the sheet covers where UIKit is taking it.
+ins_cover_final(): f64 {
+    v: int = ins_sheet_view();
+    if (v == 0) return 0.0f64;
+    cover: f64 = view_height(window) - ins_window_top(v, LayerState.Final);
+    if (cover < 0.0f64) 0.0f64 else cover
+}
+
+// How far above the window's safe area the floating controls go: the
+// sheet's cover past the safe area's foot (0 on ios/beside.l8's own
+// panel, which lays the controls out itself).
+floating_foot_lift(): f64 {
+    if (!panel_in_split() || window == 0) return 0.0f64;
+    l8_msg_hfa(hfa, window, sel("safeAreaInsets"), 0, 0, 0);
+    lift: f64 = ins_cover_now - hfa[2];
+    if (lift < 0.0f64) 0.0f64 else lift
+}
+
+// The tray, the way back's capsule and the mini player, above the sheet.
+float_controls_place() {
+    tray_place_bottom();
+    msg(window, sel("layoutIfNeeded"));
+    if (back_text != 0) style_back();
+    if (listen_shown) layout_player()
+}
+
+// The sheet still (or the column placed): once, the page's inset to what
+// the sheet covers, the height read (Full Screen told to core as large is
+// reached or left), the page's place told, and the panel brought by the
+// linked panes' rule if what links to the page's top edge is out of its
+// sight (a short glide). At large, the page is left as it was.
+ins_settle() {
+    if (diag_on) {
+        tb_n = 0;
+        tb_str("bible: panel: settled, cover ");
+        tb_int(ins_cover_seen as int);
+        tb_str(" detent ");
+        tb_str(ins_detent_word(ins_detent_now()));
+        tb_str(" frames ");
+        tb_int(ins_frames);
+        tb_str(" frame ms mean ");
+        tb_int(if (ins_frames > 0) (ins_frame_ms_total * 10.0f64 / ins_frames as f64) as int else 0);
+        tb_str(" tenths, worst ");
+        tb_int((ins_frame_ms_worst * 10.0f64) as int);
+        tb_str(" tenths");
+        note_ns(tb_ns())
+    }
+    if (ins_settle_hand_close()) return;
+    if (!ins_is_sheet()) {
+        ins_page_cover(0.0f64);
+        return
+    }
+    d: PanelDetent = ins_detent_now();
+    if (ins_detent_is_large(d)) {
+        if (!bs_full) {
+            place_tell();
+            send0("tap full")
+        }
+        return
+    }
+    ins_detent_left = d;
+    if (bs_full) send0("tap full");
+    // (Where UIKit has put the sheet, not its last frame on the way: the
+    // spring's last fractions of a point are still to come.)
+    cover: f64 = ins_cover_final();
+    ins_cover_now = cover;
+    float_controls_place();
+    ins_gap_place(cover);
+    ins_page_cover(cover)
+}
+
+// Whether the panel, shown, is gone with no word from the app: a hand put
+// it away (a swipe, VoiceOver's scrub), which core is told once. Read at a
+// settle with no presentation's or size's transition running (a collapse
+// or expansion hides and shows it again by itself), and only once the
+// panel has been seen in the window since it was asked to show (UIKit may
+// show it some frames late: watched for INS_UNSEEN_WAIT_S more, then said
+// in the log, never taken for a close).
+ins_seen_presented: bool = false;
+
+ins_unseen_since: f64 = 0.0f64;
+
+INS_UNSEEN_WAIT_S: f64 = 1.0f64;
+
+ins_settle_hand_close(): bool {
+    running: bool = root_vc != 0 && msg(root_vc, sel("transitionCoordinator")) != 0;
+    // (A collapse or expansion that never said it ended: not one now.)
+    if (!running) ins_transition = false;
+    if (!ins_shown || ins_hiding || ins_transition || running || bs_nav == 0) return false;
+    if (msg(msg(bs_nav, sel("view")), sel("window")) != 0) {
+        ins_seen_presented = true;
+        return false
+    }
+    if (ins_seen_presented) {
+        ins_hidden();
+        return true
+    }
+    if (CACurrentMediaTime() - ins_unseen_since < INS_UNSEEN_WAIT_S) {
+        ins_motion_begin();
+        return true
+    }
+    note("bible: panel: ASKED TO SHOW BUT NEVER SEEN; left open");
+    ins_unseen_since = CACurrentMediaTime() + 1000000.0f64;
+    false
+}
+
+// The page's foot covered by cover points: its inset set (its offset left
+// alone: what it shows doesn't move), its place told, and the panel
+// brought by the rule once.
+ins_page_cover(cover: f64) {
+    if (cover == page_foot_cover) {
+        if (bs_shown) win_follow(PANE_PAGE);
+        return
+    }
+    page_foot_cover = cover;
+    set_insets();
+    note_num("bible: panel: page inset for the sheet ", cover as int);
+    if (win_table[PANE_PAGE] == 0) return;
+    win_aim_let_go(PANE_PAGE);
+    win_tell(PANE_PAGE, false);
+    if (bs_shown) win_follow(PANE_PAGE)
+}
+
+// ---- the panel's reader ----
+// The panel's reader coming into sight in the window, at its final size,
+// before the first frame of the sheet's rise or the column's: laid out at
+// its place now (its `go`, or its window made again for this width).
+ins_reader_appearing(vc: int) {
+    if (!panel_in_split()) return;
+    msg(msg(vc, sel("view")), sel("layoutIfNeeded"));
+    win_appeared(PANE_PANEL)
+}
+
+// The reader's bar: UIKit's navigation bar, never large, its title the one
+// the page's bar has (the chapter with its chevron, what is read small and
+// faint under it; a tap is Go To aimed at the panel), Link at its left and
+// the menu at its right as plain glyphs.
+ins_reader_dress(k: int, vc: int) {
+    item: int = msg(vc, sel("navigationItem"));
+    msg1(item, sel("setLargeTitleDisplayMode:"), 2);
+    msg2(vc, sel("setToolbarItems:animated:"), 0, 0);
+    msg1(vc, sel("setTitle:"), uk_text(uk_ui.left));
+    msg_rect(vc, sel("setAdditionalSafeAreaInsets:"), 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    ins_title_make();
+    beside_title_fill(k);
+    ins_title_layout();
+    if (msg(item, sel("titleView")) != bs_head) msg1(item, sel("setTitleView:"), bs_head);
+    // (The items it has kept and changed in place, so that the bar's
+    // glyphs aren't taken away and put back as the screen is dressed
+    // again: its menu's items change with Full Screen.)
+    // (The same two items on every reader screen, moved to this one's bar
+    // and changed in place: Swap Panes makes a new screen.)
+    left: int = 0;
+    right: int = 0;
+    for j in 0..uk_ui.tools_n {
+        tool: UiTool = uk_ui.tools[j];
+        if (tool.icon.n == 0)
+            continue;
+        if (tool.menu.n > 0 && right == 0) right = ins_bar_glyph(k, j, tool, ins_menu_item) else if (tool.menu.n == 0 && left == 0) left = ins_bar_glyph(k,
+            j, tool, ins_link_item)
+    }
+    if (left != 0) ins_link_item = held(ins_link_item, left);
+    if (right != 0) ins_menu_item = held(ins_menu_item, right);
+    if (msg(item, sel("leftBarButtonItem")) != left) msg2(item, sel("setLeftBarButtonItems:animated:"),
+        ins_items(left), 0);
+    if (msg(item, sel("rightBarButtonItem")) != right) msg2(item, sel("setRightBarButtonItems:animated:"),
+        ins_items(right), 0);
+    ins_reader_bar_look(item, uk_tables[k]);
+    if (bs_nav != 0 && (msg(bs_nav, sel("isNavigationBarHidden")) & 255) != 0) msg2(bs_nav,
+        sel("setNavigationBarHidden:animated:"), 0, 0)
+}
+
+// The reader's Link and menu items, kept for its next screen.
+ins_link_item: int = 0;
+
+ins_menu_item: int = 0;
+
+ins_items(b: int): int {
+    if (b == 0) return 0;
+    one[0] = b;
+    nsarray(one, 1)
+}
+
+// How words pass under the reader's bar. As the page's bar does: the bar
+// opaque in the panel's color, nothing behind its title at rest, and below
+// it a short fade, so that a line going under softens away rather than
+// being cut (ins_fade). The system's edge effect (soft or hard: the same
+// on the phone) left the comment above the reading line half legible behind
+// the title; the wire's `!paneledge system` puts it back, to compare.
+ins_edge_system: bool = false;
+
+ins_reader_bar_look(item: int, t: int) {
+    if (t != 0 && responds(t, "topEdgeEffect")) {
+        edge: int = msg(t, sel("topEdgeEffect"));
+        msg1(edge, sel("setHidden:"), if (ins_edge_system) 0 else 1);
+        style: int = msg(cls("UIScrollEdgeEffectStyle"), sel("softStyle"));
+        if (style != 0) msg1(edge, sel("setStyle:"), style)
+    }
+    look: int = 0;
+    if (!ins_edge_system) {
+        look = msg(make("UINavigationBarAppearance"), sel("autorelease"));
+        msg(look, sel("configureWithOpaqueBackground"));
+        msg1(look, sel("setBackgroundColor:"), c_panel_bg);
+        msg1(look, sel("setShadowColor:"), msg(cls("UIColor"), sel("clearColor")))
+    }
+    msg1(item, sel("setStandardAppearance:"), look);
+    msg1(item, sel("setScrollEdgeAppearance:"), look);
+    msg1(item, sel("setCompactAppearance:"), look);
+    msg1(item, sel("setCompactScrollEdgeAppearance:"), look);
+    ins_fade_place()
+}
+
+// The fade under the reader's bar: the panel's color whole for
+// BS_HEAD_SOLID points below the bar, then easing out over BAR_FADE (as the
+// page's bar's, bar.l8's fade_set), over the reader's words; shown while
+// the reader is the panel's top screen, placed as the panel lays out.
+ins_fade: int = 0;
+
+ins_fade_gradient: int = 0;
+
+ins_fade_place() {
+    if (bs_nav == 0) return;
+    view: int = msg(bs_nav, sel("view"));
+    if (ins_fade == 0) {
+        ins_fade = keep(make("UIView"));
+        msg1(ins_fade, sel("setUserInteractionEnabled:"), 0);
+        msg1(ins_fade, sel("setIsAccessibilityElement:"), 0);
+        msg1(ins_fade, sel("setAutoresizingMask:"), 0);
+        ins_fade_gradient = keep(make("CAGradientLayer"));
+        msg1(msg(ins_fade, sel("layer")), sel("addSublayer:"), ins_fade_gradient)
+    }
+    if (msg(ins_fade, sel("superview")) != view) msg1(view, sel("addSubview:"), ins_fade);
+    shown: bool = !ins_edge_system && beside_is_reader(msg(bs_nav, sel("topViewController")));
+    msg(cls("CATransaction"), sel("begin"));
+    msg1(cls("CATransaction"), sel("setDisableActions:"), 1);
+    msg1(ins_fade, sel("setHidden:"), if (shown) 0 else 1);
+    if (shown) {
+        l8_msg_hfa(hfa, msg(bs_nav, sel("navigationBar")), sel("frame"), 0, 0, 0);
+        top: f64 = hfa[1] + hfa[3];
+        h: f64 = BS_HEAD_SOLID + BAR_FADE;
+        w: f64 = view_width(view);
+        msg_rect(ins_fade, sel("setFrame:"), 0.0f64, top, w, h);
+        msg_rect(ins_fade_gradient, sel("setFrame:"), 0.0f64, 0.0f64, w, h);
+        fade_set(ins_fade_gradient, c_panel_bg, BS_HEAD_SOLID / h, false);
+        msg1(view, sel("bringSubviewToFront:"), ins_fade)
+    }
+    msg(cls("CATransaction"), sel("commit"))
+}
+
+// Tool j of slot k as a bar item (item, made if 0): a glyph, no fill (no
+// shared glass behind it); Link in the accent while linked; the menu's
+// items core's, opening on a tap.
+ins_bar_glyph(
+    k: int,
+    j: int,
+    tool: UiTool,
+    item: int
+): int {
+    menu: bool = tool.menu.n > 0;
+    on: bool = tool.style == UI_TOOL_PROMINENT;
+    image: int = symbol_ns(uk_text(tool.icon), 17.0f64, if (menu) 6 else 4, 0);
+    b: int = item;
+    if (b == 0) b = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
+        image, 0, if (menu) 0 else app_obj, if (menu) 0 else sel("coreTool:")), sel("autorelease")) else msg1(b,
+        sel("setImage:"), image);
+    msg1(b, sel("setTintColor:"), if (on) c_accent else c_icon);
+    msg1(b, sel("setTag:"), k * 16 + j);
+    if (tool.label.n > 0) msg1(b, sel("setAccessibilityLabel:"), uk_text(tool.label));
+    // (Lit by its color alone: a selected item is filled on iOS 26.)
+    msg1(b, sel("setAccessibilityTraits:"), if (on) objc_const("UIAccessibilityTraitButton") | objc_const("UIAccessibilityTraitSelected") else objc_const("UIAccessibilityTraitButton"));
+    if (menu) msg1(b, sel("setMenu:"), uk_tool_menu(k, j));
+    if (responds(b, "setHidesSharedBackground:")) msg1(b, sel("setHidesSharedBackground:"),
+        1);
+    b
+}
+
+// The title's views (beside.l8's bs_head_*), made once a panel: a box as
+// tall as the bar, the chapter and its chevron in it, what is read under
+// them, one button over both.
+ins_title_make() {
+    if (bs_head != 0) return;
+    h: int = keep(make("UIView"));
+    msg1(h, sel("setAutoresizingMask:"), 0);
+    label: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(label, sel("setLineBreakMode:"), 4);
+    msg1(label, sel("setIsAccessibilityElement:"), 0);
+    msg1(h, sel("addSubview:"), label);
+    bs_head_label = held(bs_head_label, label);
+    chevron: int = msg(make("UIImageView"), sel("autorelease"));
+    msg1(h, sel("addSubview:"), chevron);
+    bs_head_chevron = held(bs_head_chevron, chevron);
+    doc: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(doc, sel("setTextAlignment:"), 1);
+    msg1(doc, sel("setLineBreakMode:"), 4);
+    msg1(doc, sel("setIsAccessibilityElement:"), 0);
+    msg1(doc, sel("setUserInteractionEnabled:"), 0);
+    msg1(h, sel("addSubview:"), doc);
+    bs_head_doc = held(bs_head_doc, doc);
+    name: int = msg1(cls("UIButton"), sel("buttonWithType:"), 0);
+    msg3(name, sel("addTarget:action:forControlEvents:"), app_obj, sel("coreLeft:"),
+        64);
+    msg1(name, sel("setAccessibilityHint:"), nsstring("Chooses what to read beside the page"));
+    hover(name);
+    msg1(h, sel("addSubview:"), name);
+    bs_head_name = held(bs_head_name, name);
+    bs_head = h
+}
+
+// The title laid out in a box as wide as the bar leaves between its glyphs
+// (two 56 point places), 44 high: the chapter a little above the middle,
+// cut at its end if it must be, the chevron 4 points after it, what is
+// read under it, as the page's bar has them.
+INS_TITLE_H: f64 = 44.0f64;
+
+ins_title_layout() {
+    if (bs_head == 0 || bs_nav == 0) return;
+    ins_title_w = view_width(msg(bs_nav, sel("view")));
+    room: f64 = ins_title_w - 2.0f64 * 56.0f64;
+    if (room < 120.0f64) room = 120.0f64;
+    msg(bs_head_label, sel("sizeToFit"));
+    words_w: f64 = view_width(bs_head_label);
+    msg(bs_head_chevron, sel("sizeToFit"));
+    chevron_w: f64 = view_width(bs_head_chevron);
+    chevron_h: f64 = view_height(bs_head_chevron);
+    if (words_w > room - 4.0f64 - chevron_w) words_w = room - 4.0f64 - chevron_w;
+    w: f64 = words_w + 4.0f64 + chevron_w;
+    x0: f64 = (room - w) / 2.0f64;
+    cy: f64 = INS_TITLE_H / 2.0f64;
+    ty: f64 = cy - TITLE_LIFT;
+    msg_rect(bs_head, sel("setFrame:"), 0.0f64, 0.0f64, room, INS_TITLE_H);
+    msg_rect(bs_head_label, sel("setFrame:"), x0, ty - 12.0f64, words_w, 24.0f64);
+    msg_rect(bs_head_chevron, sel("setFrame:"), x0 + words_w + 4.0f64, ty - chevron_h / 2.0f64 + 1.0f64,
+        chevron_w, chevron_h);
+    msg_rect(bs_head_doc, sel("setFrame:"), 0.0f64, cy + TITLE_DOC_DROP - 7.0f64,
+        room, 14.0f64);
+    msg_rect(bs_head_name, sel("setFrame:"), x0 - 8.0f64, 0.0f64, w + 16.0f64, INS_TITLE_H)
+}
+
+// The panel laid out: its title again if its width changed.
+ins_title_w: f64 = -1.0f64;
+
+ins_panel_laid_out(self: int, cmd: int): int {
+    super0(self, bs_class, cmd);
+    if (!panel_in_split() || self != bs_nav) return 0;
+    if (view_width(msg(self, sel("view"))) != ins_title_w) ins_title_layout();
+    ins_fade_place();
+    0
+}
+
+// The bar a document's arriving hairline runs along: the panel's
+// navigation bar.
+ins_arrive_bar(): int {
+    if (bs_nav == 0) 0 else msg(bs_nav, sel("navigationBar"))
+}
+
+// ---- the wire's view of it ----
+// `!detent small|medium|large`: the sheet to that height by UIKit's
+// motion.
+ins_wire_detent(word: str) {
+    d: PanelDetent = if (word == "small") PanelDetent.Small else if (word == "large") PanelDetent.Large else PanelDetent.Medium;
+    if (!ins_is_sheet()) {
+        note("bible: driven: the panel is not a sheet");
+        return
+    }
+    ins_select_detent(d)
+}
+
+// For `!where`: the panel as a column, a sheet (its height) or closed;
+// core's open and full; panelfill; the page's inset for it; and the
+// structure (nav's host, its stack, what is above it).
+ins_where() {
+    tb_n = 0;
+    tb_str("bible: where panel ");
+    if (!panel_in_split()) tb_str("hand-built") else if (!bs_shown) tb_str("closed") else if (ins_is_sheet()) {
+        tb_str("sheet ");
+        tb_str(ins_detent_word(ins_detent_now()))
+    } else tb_str("column");
+    tb_str(" beside ");
+    tb_int(if (bs_open) 1 else 0);
+    tb_str(" ");
+    tb_int(if (bs_full) 1 else 0);
+    tb_str(" panelfill ");
+    tb_int(ins_told_fill);
+    tb_str(" page cover ");
+    tb_int(page_foot_cover as int);
+    tb_str(" bottom inset ");
+    tb_int(if (table == 0) 0 else bottom_inset(table) as int);
+    note_ns(tb_ns());
+    if (split_vc == 0) return;
+    tb_n = 0;
+    tb_str("bible: where split collapsed ");
+    tb_int(if (split_collapsed()) 1 else 0);
+    tb_str(" nav in ");
+    tb_nsstring(NSStringFromClass(msg(msg(nav, sel("parentViewController")), sel("class"))));
+    tb_str(" nav screens ");
+    tb_int(msg(msg(nav, sel("viewControllers")), sel("count")));
+    tb_str(" nav's navigationController ");
+    tb_int(if (msg(nav, sel("navigationController")) == 0) 0 else 1);
+    for column in [COLUMN_PRIMARY, COLUMN_SECONDARY, COLUMN_COMPACT, COLUMN_INSPECTOR] {
+        vc: int = msg1(split_vc, sel("viewControllerForColumn:"), column);
+        tb_str(" column ");
+        tb_int(column);
+        tb_str(" ");
+        if (vc == 0) tb_str("none") else tb_nsstring(NSStringFromClass(msg(vc, sel("class"))))
+    }
+    note_ns(tb_ns())
+}
+
+// ---- classes ----
+make_split_classes() {
+    split_class = class_make(cls("UISplitViewController"), "L8Split");
+    add_method2(split_class, sel("splitViewController:topColumnForCollapsingToProposedTopColumn:"),
+        &split_collapsing, "q@:@q");
+    add_method2(split_class, sel("splitViewController:displayModeForExpandingToProposedDisplayMode:"),
+        &split_expanding, "q@:@q");
+    add_method1(split_class, sel("splitViewControllerDidCollapse:"), &split_did_collapse,
+        "v@:@");
+    add_method1(split_class, sel("splitViewControllerDidExpand:"), &split_did_expand,
+        "v@:@");
+    add_method2(split_class, sel("splitViewController:willShowColumn:"), &split_will_show,
+        "v@:@q");
+    add_method2(split_class, sel("splitViewController:didHideColumn:"), &split_did_hide,
+        "v@:@q");
+    add_method1(split_class, sel("sheetPresentationControllerDidChangeSelectedDetentIdentifier:"),
+        &ins_detent_changed, "v@:@");
+    add_protocol(split_class, "UISplitViewControllerDelegate");
+    add_protocol(split_class, "UISheetPresentationControllerDelegate");
+    page_host_class = class_make(cls("UIViewController"), "L8PageHost");
+    add_method0(page_host_class, sel("viewDidLayoutSubviews"), &page_host_laid_out,
+        "v@:");
+    // (The reader's title laid out again as the panel's width changes: a
+    // floating sheet, an edge-attached one, a column dragged wider.)
+    add_method0(bs_class, sel("viewDidLayoutSubviews"), &ins_panel_laid_out, "v@:");
+    compact_host_class = class_make(cls("UIViewController"), "L8CompactHost");
+    add_method0(compact_host_class, sel("viewDidLayoutSubviews"), &compact_host_laid_out,
+        "v@:")
+}
+
+add_inspector_methods(app: int) {
+    add_method1(app, sel("inspectorFrame:"), &ins_frame, "v@:@");
+    add_method1(app, sel("inspectorAfterSheets:"), &ins_after_sheets_fired, "v@:@")
+}

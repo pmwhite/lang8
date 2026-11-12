@@ -554,6 +554,7 @@ function printTimeline(from, to) {
       else if (e.e === "panes") parts.push(`panes page ${e.p[0]} panel ${e.p[1]} at ${e.at ? e.at.join(" / ") : "?"}`);
       else if (e.e === "rest") parts.push(`(rest: ${e.items.length} on screen)`);
       else if (e.e === "walk") parts.push(`(walk ${e.views} views ${e.ms} ms)`);
+      else if (e.e === "value") parts.push(`${e.n} ${e.v}`);
     }
     if (parts.length) console.log(`${(t / 1000).toFixed(3)}  ${parts.join(" | ")}`);
   }
