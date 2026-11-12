@@ -210,6 +210,19 @@ build them). It is a title, sections, and rows, and what is around them:
   a note under its detail, faint words after its title, a ⓘ doing an
   action, actions a screen reader offers (and shown as a menu at its end),
   an action its swipe does, a spinner, and a grid's cells (Forms).
+  A row's actions are also its menu, which a skin offers as its platform
+  offers a list row's: a long press or a secondary click (`core/row_menus.l8`
+  says which rows have them). A menu never repeats the tap: it offers what
+  the tap can't (the place or document in the panel, a verse's words to
+  copy or share, the row's About), then taking the row away (its swipe's
+  action, destructive). "Open in Panel" is the tap's action plus
+  `ACT_IN_PANEL` (1000000), with the row's argument: the tap as a Go To
+  aimed at the panel does it (one Go To), offered only while the panel
+  shows a reader and the tap doesn't already land in it, and on a place
+  only while the panes are unlinked (linked, the tap moves both). A verse
+  found is copied or shared in the version its row shows. Removing a
+  recent place takes that chapter's visits from History. A skin hands
+  them back as any action.
 - **Text** is plain UTF-8, or set by runs: `END:STYLE` pairs (UTF-16 places)
   using the reader's styles (`STYLE_*`, text.l8) or core's own (`RUN_*`,
   ui.l8: a verse's number, Greek and Hebrew, a transliteration, faint,

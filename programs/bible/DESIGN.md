@@ -87,7 +87,9 @@ lands, the page (the bar's title) or the panel (the panel's name). Nothing
 typed, it shows the ribbons and plan, Recent, Documents (the page's
 document, the panel's, then the others read, the latest first, up to six
 with the Bibles that come with the app), Browse (each kind and the
-languages, a count each; a tap types its word) and the books. Typed, the
+languages, a count each; a tap types its word) and the books. Recent is
+History's latest chapters: removing a recent place (its menu's Remove or
+its swipe) takes that chapter's visits from History. Typed, the
 reference, the books, then the documents by kind, each kind ordered open
 in a pane, read (the latest first), coming with the app, in the reader's
 language, the others; within those, titles the query begins, then those
