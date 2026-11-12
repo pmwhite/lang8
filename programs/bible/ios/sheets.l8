@@ -70,9 +70,164 @@ done_item(): int {
 present(vc: int) {
     rest_tell();
     bar_expand();
+    sheet_zoom_from(vc);
     msg3(sheet_presenter(), sel("presentViewController:animated:completion:"), vc,
         1, 0)
 }
+
+// ---- a sheet grows from what opened it (iOS 26's zoom) ----
+// On iOS 26, where a sheet morphing out of the control that opened it is
+// the system's design, a sheet of core's grows from that control and
+// shrinks back into it: Go To from the title of the pane it goes to,
+// the Library from its button, both of them over the whole page. Reading
+// (half height, over the text being read) slides up from the foot, as the
+// panel does; History and Search have no control of their own on an
+// iPhone (Go To pushes them). Elsewhere, and where its control isn't in
+// sight, UIKit's slide from the foot. (The zoom came in iOS 18; it is
+// used, and checked, only on iOS 26.)
+//
+// No control is kept: the provider, asked as the sheet opens and again as
+// it closes, finds the control from the sheet it is asked for (its
+// context's zoomedViewController) among the views there are then, so a
+// control let go meanwhile (the panel's title, the panel put away under Go
+// To) is never asked for.
+
+// The provider (made once a process, kept through a hot reload as other
+// blocks UIKit keeps are).
+persistent sheet_zoom_provider: int = 0;
+
+// Whether this iOS is one that zooms sheets (iOS 26: the zoom from a bar
+// button item, which came with it, is there).
+sheet_zooms(): bool {
+    transitions: int = cls("UIViewControllerTransition");
+    transitions != 0 && (msg1(transitions, sel("respondsToSelector:"), sel("zoomWithOptions:sourceBarButtonItemProvider:")) & 255) != 0
+}
+
+// The control sheet vc (a navigation controller of core's screens, its
+// first the one it was opened for) opens from, while it is in sight (in
+// the window, nothing holding it hidden or faded out: a collapsed bar's
+// title); else 0.
+sheet_zoom_source_of(vc: int): int {
+    if (vc == 0) return 0;
+    // (Its screen's kind and argument, told to the sheet as it was
+    // presented: by its close, the screen may have been let go.)
+    told: int = objc_getAssociatedObject(vc, ints_address(sheet_zoom_key));
+    kind: int = -1;
+    arg: int = 0;
+    if (told != 0) {
+        kind = msg(msg1(told, sel("objectAtIndex:"), 0), sel("longValue"));
+        arg = msg(msg1(told, sel("objectAtIndex:"), 1), sel("longValue"))
+    } else {
+        nav: bool = (msg1(vc, sel("isKindOfClass:"), cls("UINavigationController")) & 255) != 0;
+        screens: int = if (nav) msg(vc, sel("viewControllers")) else 0;
+        first: int = if (!nav) vc else if (screens == 0 || msg(screens, sel("count")) == 0) 0 else msg1(screens,
+            sel("objectAtIndex:"), 0);
+        for k in 0..UK_SLOTS {
+            if (first != 0 && uk_vcs[k] == first) {
+                kind = uk_kind_of(uk_ids[k]);
+                arg = uk_arg_of(uk_ids[k])
+            }
+        }
+        if (kind >= 0) {
+            sheet_zoom_told[0] = nsnumber_int(kind);
+            sheet_zoom_told[1] = nsnumber_int(arg);
+            objc_setAssociatedObject(vc, ints_address(sheet_zoom_key), nsarray(sheet_zoom_told,
+                2), 1)
+        }
+    }
+    source: int = if (kind == SCR_GOTO) if (arg == GOTO_PANEL && bs_shown && bs_head != 0) bs_head else title_btn[0] else if (kind == SCR_LIBRARY) bar_buttons[BAR_LIBRARY] else 0;
+    if (source == 0) return 0;
+    if (msg(source, sel("window")) == 0) {
+        note("bible: sheet: its control is not in the window");
+        return 0
+    }
+    // (The control's own opacity is not asked: UIKit hides it while the
+    // sheet is grown from it, and asks again as the sheet closes.)
+    // (Nor what UIKit does to the panel's sheet: it hides the sheet while a
+    // full-height one covers it, and shows it again as that one goes, so
+    // the walk stops at the panel's own view.)
+    panel_view: int = if (bs_nav == 0) 0 else msg(bs_nav, sel("view"));
+    v: int = msg(source, sel("superview"));
+    while (v != 0 && v != panel_view) {
+        if ((msg(v, sel("isHidden")) & 255) != 0 || msg_f(v, sel("alpha")) < 0.05f64) {
+            tb_n = 0;
+            tb_str("bible: sheet: its control is held by a view hidden or faded: ");
+            tb_nsstring(NSStringFromClass(object_getClass(v)));
+            tb_str(" alpha100 ");
+            tb_int((msg_f(v, sel("alpha")) * 100.0f64) as int);
+            note_ns(tb_ns());
+            return 0
+        }
+        v = msg(v, sel("superview"))
+    }
+    source
+}
+
+// The provider's answer for the sheet its context names, each call logged
+// with the source's rectangle in the window, for the zoom's checks (a call
+// is UIKit zooming from it; none, UIKit's own transition).
+sheet_zoom_source_view(_context: int, zoom_context: int): int {
+    vc: int = if (zoom_context == 0 || !responds(zoom_context, "zoomedViewController")) 0 else msg(zoom_context,
+        sel("zoomedViewController"));
+    source: int = sheet_zoom_source_of(vc);
+    // (UIKit zooms only if a control is given: the uilog is told then, as
+    // the sheet opens.)
+    if (source != 0 && (msg(vc, sel("isBeingPresented")) & 255) != 0) uilog_zoom();
+    if (diag_on) {
+        tb_n = 0;
+        tb_str("bible: sheet: zoom asks for its source: ");
+        if (source == 0) tb_str("none in sight") else {
+            l8_msg_hfa(hfa, source, sel("bounds"), 0, 0, 0);
+            if (sheet_zoom_convert == 0) sheet_zoom_convert = rect_object_invocation(source,
+                "convertRect:toView:");
+            if (sheet_zoom_convert != 0 && rect_object_invoke(sheet_zoom_convert,
+                source, hfa[0], hfa[1], hfa[2], hfa[3], 0, hfa)) {
+                tb_str("window rect");
+                for k in 0..4 {
+                    tb_str(" ");
+                    tb_int((hfa[k] * 10.0f64) as int)
+                }
+                tb_str(" (tenths of a point)")
+            }
+        }
+        note_ns(tb_ns())
+    }
+    source
+}
+
+// The key the kind and argument of a sheet's screen are kept under, on
+// the sheet, and the two as they are told.
+sheet_zoom_key: []int = new int[1](0);
+
+sheet_zoom_told: []int = new int[2](0);
+
+// UIView's convertRect:toView: (made the first time a source is logged).
+sheet_zoom_convert: int = 0;
+
+// Sheet vc told how it comes: growing from its control, if this iOS zooms
+// sheets and the control is in sight; else UIKit's own (its transition
+// set to none, so a controller presented again never keeps an old zoom).
+// (A popover, in a wide window, grows from its source on its own: a zoom
+// set on one is a combination UIKit doesn't document, and is never set.
+// Reading slides up from the foot, as the panel's sheet does: a sheet at
+// half height over the text being read, which a card growing from AA
+// would cross.)
+sheet_zoom_from(vc: int) {
+    if (!responds(vc, "setPreferredTransition:")) return;
+    zoom: int = 0;
+    popover: bool = msg(vc, sel("modalPresentationStyle")) == SHEET_STYLE_POPOVER;
+    if (sheet_zooms() && !popover && sheet_zoom_source_of(vc) != 0) {
+        if (sheet_zoom_provider == 0) sheet_zoom_provider = block1(&sheet_zoom_source_view,
+            0, "@16@?0@8");
+        if (sheet_zoom_provider != 0) zoom = msg2(cls("UIViewControllerTransition"),
+            sel("zoomWithOptions:sourceViewProvider:"), 0, sheet_zoom_provider)
+    }
+    msg1(vc, sel("setPreferredTransition:"), zoom);
+    note(if (zoom != 0) "bible: sheet: grows from its control" else if (!sheet_zooms()) "bible: sheet: slides (this iOS doesn't zoom sheets)" else if (popover) "bible: sheet: a popover (grows from its source its own way)" else "bible: sheet: slides (Reading, or no control of its own in sight)")
+}
+
+// UIModalPresentationPopover.
+SHEET_STYLE_POPOVER: int = 7;
 
 // What presents the next sheet: the top sheet; else the panel, while it is
 // UIKit's sheet over the page (ios/inspector.l8: Go To over it, not
