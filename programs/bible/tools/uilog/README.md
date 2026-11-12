@@ -117,7 +117,10 @@ iPhone.
 | `mark`, `stop`, `walk` | A step's name, the end, and a walk stopped at its limit (`capped`) |
 
 Kinds: `bar`, `sheet`, `toast`, `hairline`, `row`, `button`, `heading`,
-`text`, `para` (reader text), and `pane` (a scroll container).
+`text`, `para` (reader text), `pane` (a scroll container), and `cover`
+(the iPhone's picture of a pane, over it while what it reads changes:
+`check.mjs` doesn't count what comes and goes under a cover while it is
+there).
 
 ## The checker
 

@@ -54,7 +54,7 @@ const T = {
 
 // ---- the elements, as the log builds them ----
 const elements = new Map(); // id -> {d, k, a, sc, r, o, shown}
-for (const e of events) if (e.e === "add") elements.set(e.id, { d: e.d, k: e.k, a: e.a, sc: e.sc, tx: Boolean(e.tx) || e.k === "para" || e.k === "text" });
+for (const e of events) if (e.e === "add") elements.set(e.id, { d: e.d, k: e.k, a: e.a, sc: e.sc, r: e.r, tx: Boolean(e.tx) || e.k === "para" || e.k === "text" });
 const desc = (id) => elements.get(id)?.d ?? `#${id}`;
 const kind = (id) => elements.get(id)?.k;
 // What holds id, and what holds that, outwards.
@@ -117,6 +117,26 @@ function find(rule, key, t, message) {
   findings.get(k).times.push(t);
 }
 
+// Covers: a picture of what a pane showed, put over it while what it reads
+// changes (the iPhone's Swap Panes, a document picked); what comes and
+// goes under one, inside its rect, while it is there, isn't seen.
+const covers = [];
+{
+  const open = new Map();
+  for (const e of events) {
+    if (e.e === "add" && e.k === "cover") open.set(e.id, { from: e.t, r: e.r });
+    else if (e.e === "remove" && open.has(e.id)) {
+      covers.push({ ...open.get(e.id), to: e.t });
+      open.delete(e.id);
+    }
+  }
+  for (const c of open.values()) covers.push({ ...c, to: Infinity });
+}
+const inside = (r, c) => r && c && r[0] >= c[0] - 2 && r[1] >= c[1] - 2 && r[0] + r[2] <= c[0] + c[2] + 2 && r[1] + r[3] <= c[1] + c[3] + 2;
+// (An element is under one if it, or a pane holding it, lies inside it: a
+// reader's text views run past the screen, clipped by their pane.)
+const covered = (t, r, id) => covers.some((c) => t >= c.from - 20 && t <= c.to + 20 && (inside(r, c.r) || (id !== undefined && [...ancestors(id)].some((a) => kind(a) === "pane" && inside(elements.get(a)?.r, c.r)))));
+
 // The motion events (what a person sees change), on screen.
 const visibleChange = (e) => (e.e === "move" || e.e === "fade" || e.e === "text" || (e.e === "scroll" && !e.off) || (e.e === "add" && !e.off && !e.base) || e.e === "remove");
 
@@ -159,9 +179,11 @@ function sign(x) {
   const removedByDesc = new Map();
   for (const e of events) {
     if (e.e === "remove") {
+      if (covered(e.t, e.r, e.id)) continue;
       last.set(e.id, { type: "remove", t: e.t });
       if (!e.off) removedByDesc.set(e.d, { t: e.t, r: e.r, id: e.id });
     } else if (e.e === "add" && !e.base) {
+      if (covered(e.t, e.r, e.id)) continue;
       const was = last.get(e.id);
       if (was && was.type === "remove" && e.t - was.t <= T.flickerMs && !e.off) find("flicker", `${e.d}|gone`, was.t, `${e.d} vanished for ${ms(e.t - was.t)} and came back`);
       const twin = removedByDesc.get(e.d);
@@ -198,7 +220,7 @@ function sameRect(a, b) {
   }
   const animated = (id, from, to) => events.some((x) => x.id === id && (x.e === "move" || x.e === "fade") && x.t >= from && x.t <= to);
   for (const e of events) {
-    if ((e.e !== "add" && e.e !== "remove") || e.base || e.off || !T.popKinds.has(kind(e.id))) continue;
+    if ((e.e !== "add" && e.e !== "remove") || e.base || e.off || !T.popKinds.has(kind(e.id)) || covered(e.t, e.r, e.id)) continue;
     const together = [...byFrame.entries()].filter(([t]) => Math.abs(t - e.t) <= 20).flatMap(([, ids]) => [...ids]);
     if ([...ancestors(e.id)].some((a) => together.includes(a))) continue;
     if (e.e === "add" && (e.o ?? 1) >= 0.9 && !animated(e.id, e.t, e.t + 250)) find("pop", `${e.d}|in`, e.t, `${e.d} appeared at full opacity in one frame (no fade or slide)`);
@@ -210,7 +232,7 @@ function sameRect(a, b) {
 
 // 4. Scroll jumps: far in one frame with no input just before.
 for (const e of events) {
-  if (e.e !== "scroll" || e.off) continue;
+  if (e.e !== "scroll" || e.off || covered(e.t, elements.get(e.id)?.r, e.id)) continue;
   const by = e.to - e.from;
   const quiet = sinceInput(e.t);
   if (Math.abs(by) > T.scrollJumpPx && quiet > T.scrollJumpQuietMs) {

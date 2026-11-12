@@ -668,6 +668,34 @@ pane_part_coming_done(p: int, c: int, k: int) {
     }
 }
 
+// The page waiting for its commentary's file (a launch's place kept, no
+// `go` sent: pane_go_verse, pane_page_jump_anchor), as the Bookshelf
+// moves (shelf_screens_changed) or the app starts: sent there once the
+// file is open (pane_comments_came); given up if it can't be (the module
+// gone, not ready, or broken): a toast says so, and the page reads the
+// Bible at the place kept.
+pane_page_wait_check() {
+    c: int = pane_verse_kept_c[PANE_PAGE];
+    if (c < 0) return;
+    slot: int = pref_get("pageSlot") - 1;
+    i: int = shelf_find_slot(slot);
+    if (pane_by_comment(PANE_PAGE) && (pane_anchors_knowable(PANE_PAGE) || i >= 0 && shelf_ready_at(i) && !shelf_broken_at(i))) return;
+    v: int = if (pane_verse_kept_i[PANE_PAGE] >= -1) sk_v else pane_verse_kept_v[PANE_PAGE];
+    frac: int = pane_verse_kept_f[PANE_PAGE];
+    pane_verse_kept_c[PANE_PAGE] = -1;
+    page_read(PlaceDocument.Bible);
+    // (A module gone from the Bookshelf is read as the Bible already: the
+    // page's pick forgotten too.)
+    set_pref("pageSlot", 0);
+    pane_go_verse(PANE_PAGE, c, v, frac, PANE_GO_AT_ONCE);
+    sk_save();
+    fbuf_n = 0;
+    fput_str("Couldn\â\€\™t open ");
+    if (i >= 0) fput_shelf_short_title(i) else fput_str("the commentary");
+    fput(46);
+    ui_toast(TOAST_WARNING)
+}
+
 // A commentary's text come (shelf_screens_changed): its chapters' parts
 // known now, and each part told as coming told again, in whichever pane
 // reads it.
@@ -686,7 +714,9 @@ pane_comments_came() {
                 }
                 // (Its maps, now its anchors are known.)
                 for q in 0..PANES
-                    if (pane_places[q].c >= 0) pane_links_near(pane_places[q].c)
+                    if (pane_places[q].c >= 0) pane_links_near(pane_places[q].c);
+                // (A verse it was sent to before: there now.)
+                pane_verse_kept_go(p)
             }
             _ -> { }
         }
@@ -694,6 +724,10 @@ pane_comments_came() {
 }
 
 // ---- the skin's lines ----
+// `at`'s fifth number, while its line is taken (-1: none): the chapter the
+// pane's title names (the first in sight below its bar).
+pane_at_named: int = -1;
+
 // `at P C I FRAC`: pane p's reading line's place: the page's kept as the
 // reading place (its verse, how far through it), the panel's chapter named
 // in its title; the link maps of the chapters near it sent.
@@ -706,6 +740,12 @@ pane_at(
     if (p < 0 || p >= PANES || c < 0 || c >= chapters) return;
     // (Showing "Openingâ€¦": no place in a document yet.)
     if (doc_pane_opening(p)) return;
+    // (The panel's reader begun anew and not sent to its place yet: a place
+    // the skin tells now is the old document's.)
+    if (p == PANE_PANEL && pane_panel_unplaced) return;
+    // (A verse waiting for its document to be read: the place the skin
+    // tells is a guess (the chapter's top, or parts not come).)
+    if (pane_verse_kept_c[p] >= 0) return;
     pane_places[p].c = c;
     pane_places[p].i = i;
     pane_places[p].frac = (if (frac < 0) 0 else if (frac > 999) 999 else frac);
@@ -718,7 +758,8 @@ pane_at(
         sk_frac = pane_places[p].frac;
         sk_keep_place();
         if (c != was) sk_write_title()
-    } else bb_reader_placed(pane_place_chapter(p, c), v);
+    } else bb_reader_placed(pane_place_chapter(p, c), v, if (pane_at_named < 0) -1 else pane_place_chapter(p,
+        pane_at_named));
     pane_links_near(c)
 }
 
@@ -733,10 +774,7 @@ pane_place_chapter(p: int, c: int): int {
 // `rest P ENDS_HI MS`: pane p at rest: the page's counted as read
 // (core/reading.l8).
 pane_rest(p: int, ends_hi: int, ms: int) {
-    if (p == pane_leader && pane_hand_moving) {
-        pane_hand_moving = false;
-        bb_reader_rested()
-    }
+    if (p == pane_leader && pane_hand_moving) pane_hand_moving = false;
     // (Reading counted in the Bible alone: a commentary on the page isn't
     // its chapter read.)
     if (p != PANE_PAGE || pane_places[p].c < 0 || !page_reads_bible()) return;
@@ -755,6 +793,8 @@ pane_moving(p: int, ms: int) {
     if (p < 0 || p >= PANES) return;
     pane_leader = p;
     pane_hand_moving = true;
+    // (A hand's place, not a verse still waiting for its document.)
+    pane_verse_kept_c[p] = -1;
     pane_write_pane_line("halt ", 1 - p);
     if (p == PANE_PAGE) {
         rd_scroll(ms as f64 / 1000.0f64);
@@ -793,6 +833,8 @@ pane_go(
     ui_byte(32);
     ui_int(mode);
     ui_byte(10);
+    if (p == PANE_PANEL) pane_panel_unplaced = false;
+    pane_verse_kept_c[p] = -1;
     pane_places[p].c = c;
     pane_places[p].i = i;
     pane_places[p].frac = frac
@@ -815,7 +857,43 @@ pane_go_verse(
     }
     i: int = if (v <= 0) -1 else if (pane_by_comment(p)) pane_comment_first(p, c,
         v) else pane_anchor_of(p, c, v);
-    pane_go(p, c, i, if (i < 0 || pane_by_comment(p)) 0 else frac, mode)
+    // (Its anchors not known yet (a commentary's file still opening, as at
+    // a launch; a version not read yet): the verse kept, and gone to once
+    // they are, not guessed (pane_verse_kept_go). The page not sent at all
+    // meanwhile: it shows nothing at a wrong place, and its place, kept,
+    // isn't lost to one; the panel shows its chapter's top.)
+    keep: bool = v > 0 && !pane_anchors_knowable(p);
+    if (keep) {
+        pane_verse_kept_c[p] = c;
+        pane_verse_kept_v[p] = v;
+        pane_verse_kept_i[p] = -2;
+        pane_verse_kept_f[p] = frac;
+        if (p == PANE_PAGE) return
+    }
+    pane_go(p, c, i, if (i < 0 || pane_by_comment(p)) 0 else frac, mode);
+    if (keep) pane_verse_kept_c[p] = c
+}
+
+// A verse pane p was sent to before its anchors could be known (-1: none):
+// its chapter, verse and thousandths; the places the skin tells for the
+// pane not taken until it is gone to, or a hand moves the pane.
+pane_verse_kept_c: []int = new int[PANES](-1);
+
+pane_verse_kept_v: []int = new int[PANES](0);
+
+// Or the anchor kept (-2: a verse kept, not an anchor).
+pane_verse_kept_i: []int = new int[PANES](-2);
+
+pane_verse_kept_f: []int = new int[PANES](0);
+
+// Pane p sent to the verse kept for it, once its anchors can be known.
+pane_verse_kept_go(p: int) {
+    c: int = pane_verse_kept_c[p];
+    if (c < 0 || !pane_anchors_knowable(p)) return;
+    pane_verse_kept_c[p] = -1;
+    if (pane_verse_kept_i[p] >= -1) pane_go(p, c, pane_verse_kept_i[p], pane_verse_kept_f[p],
+        PANE_GO_AT_ONCE) else pane_go_verse(p, c, pane_verse_kept_v[p], pane_verse_kept_f[p],
+        PANE_GO_AT_ONCE)
 }
 
 // `forget P C`: pane p's parts of chapter c (-1: every chapter) to be
@@ -935,6 +1013,19 @@ pane_page_jump(c: int, v: int, frac: int) {
     if (pane_linked()) pane_go_verse(PANE_PANEL, c, v, frac, PANE_GO_AT_ONCE)
 }
 
+// The page to anchor i of chapter c, frac through it (a commentary's
+// comment, kept at a launch: held until its file is open, as a verse is),
+// the panel linked brought to the page's verse.
+pane_page_jump_anchor(c: int, i: int, frac: int) {
+    if (pane_anchors_knowable(PANE_PAGE)) pane_go(PANE_PAGE, c, i, frac, PANE_GO_AT_ONCE) else {
+        pane_verse_kept_c[PANE_PAGE] = c;
+        pane_verse_kept_i[PANE_PAGE] = i;
+        pane_verse_kept_f[PANE_PAGE] = frac
+    }
+    pane_leader = PANE_PAGE;
+    if (pane_linked()) pane_go_verse(PANE_PANEL, c, sk_v, frac, PANE_GO_AT_ONCE)
+}
+
 // The page to chapter c, verse v, frac through it, at once, the panel's
 // reader left where it is (core moves it itself: Swap Panes).
 pane_page_jump_alone(c: int, v: int, frac: int) {
@@ -949,11 +1040,20 @@ pane_panel_to(c: int, v: int, frac: int) {
     pane_go_verse(PANE_PANEL, c, v, frac, PANE_GO_BROUGHT)
 }
 
+// Whether the panel's reader has been begun anew and not yet sent to a
+// place (pane_go): until it is, a place the skin tells for the panel is
+// the old document's, laid out before core's lines reached it, and is not
+// taken (the new one would inherit the old one's chapter, and never be
+// sent to the page's).
+pane_panel_unplaced: bool = false;
+
 // The panel's reader begun anew (opened, or its document changed): its
 // parts and link maps forgotten; it opens at the page's place.
 pane_panel_begun() {
     pane_forget(PANE_PANEL, -1);
     pane_places[PANE_PANEL].c = -1;
+    pane_panel_unplaced = true;
+    pane_verse_kept_c[PANE_PANEL] = -1;
     pane_leader = PANE_PAGE;
     for s in 0..PANE_PARTS_COMING_MOST {
         if (pane_coming_p[s] == PANE_PANEL) pane_coming_c[s] = -1
@@ -964,6 +1064,11 @@ pane_panel_begun() {
 // place if it has none yet (linked, then where the rule puts it), else
 // staying where it is.
 pane_panel_shown() {
+    // (A verse kept for it before its document could be read: there now.)
+    if (pane_verse_kept_c[PANE_PANEL] >= 0) {
+        pane_verse_kept_go(PANE_PANEL);
+        return
+    }
     if (pane_places[PANE_PANEL].c >= 0) return;
     pane_go_verse(PANE_PANEL, sk_c, sk_v, sk_frac, if (pane_linked()) PANE_GO_RULED else PANE_GO_AT_ONCE)
 }

@@ -288,7 +288,25 @@ thousandths rounded), checked by `link_cases`' `place` and `at` cases:
 a pane sent to a place tells that place back, and a `go` is held as
 parts come in about it until a hand moves the pane, so that Swap Panes
 (each document to its own place, anchor and thousandths, in the other
-pane) leaves both where they were after any number of round trips.
+pane) leaves both where they were after any number of round trips. For
+that, a skin tells both panes' places as they are (`at`, whether their
+anchors changed or not) before an act on the panel's reader (Swap Panes,
+its Link and menu), and a pane still where a `go` put it tells the place
+it was sent to, not the place measured again from its layout (a chapter's
+top is laid out under the bar, not at the reading line; offsets fall on
+the screen's pixels). A pane whose parts were all forgotten (`forget P
+-1`) tells no place until core's next `go` for it, or a hand moves it:
+until then its reading line is the old document's place in the new one's
+parts. A panel sent to a verse before its document can say its anchors
+(a commentary's file still opening, a version not read yet) is sent to
+its chapter's top meanwhile, and to the verse once they are known; core
+takes no `at` for it until then, or until a hand moves it (`moving`).
+The page reading a commentary keeps its comment (`pageAnchor`) and goes
+back to it at a launch; until the commentary's file is open core sends
+the page no `go` at all, so it shows nothing at a wrong place. A pane at
+rest keeps its place as a sent one (the iPhone): a turn of the window, a
+launch's sheet or an inset put that place back at its reading line, and
+a turn holds both panes as a jump does, until a hand moves either.
 
 **Parts.** A skin asks for the parts near what a pane shows, `want P C K`,
 and core answers each:
@@ -319,9 +337,13 @@ changing height, above what is in sight never moves what is in sight.
 far down what of it is in sight (the page's a third of the way, the
 panel's at its top). The skin says where each pane is read, in places:
 
-- `at P C I FRAC`: its reading line's place, as the anchor there changes
-  and at rest (not each frame). Core keeps the page's as the reading place
-  and names the panel's chapter in its title.
+- `at P C I FRAC [NAMED]`: its reading line's place, as the anchor there
+  changes and at rest (not each frame). Core keeps the page's as the
+  reading place and names the panel's chapter in its title: NAMED, if the
+  skin sends it, else C. NAMED is the chapter whose opener or words are
+  first in sight below the pane's bar (the space after a chapter's last
+  words, above the next one's opener, is the next one's, though a reading
+  line in it is still the place before).
 - `moving P MS`: a finger (or a key) began to move it: it leads.
 - `rest P ENDS_HI MS`: it stopped, ENDS_HI the last chapter whose end is in
   sight (-1 none).
@@ -461,11 +483,23 @@ both panes where they were. The panel's reader opened, its document
 come, or the app restored has no jump to hold: core sends its `go` with
 MODE 2, and the skin puts it where the rule says for the page, at once
 (not glided), and again as parts come and tell it better, until a hand
-moves either pane. Opening, nothing in the panel moves as it comes: its
-reader is laid out at its place before its first frame shows (the
-iPhone from iOS 26 as UIKit's sheet or column appears; elsewhere it
-slides in only once laid out there, at most half a second); closing, it
-goes the way it came. A pane moved by the app (the status bar, a key's
+moves either pane or the panel comes into sight. A document picked for
+the panel opens at the page's place while linked, at the panel's own
+place while not (its nearest chapter, by the run rule, if it has none
+there); until core has sent the panel's reader its `go`, a place the skin
+tells for the panel is the old document's and core takes none. Opening, nothing in the panel moves
+as it comes: its reader is laid out at its place before its first frame
+shows (the iPhone from iOS 26 out of the window, then shown once placed,
+at most half a second; elsewhere it slides in only once laid out there,
+at most half a second); once in sight, the rule is checked once more
+when it is still, a glide if it must move; closing, it goes the way it
+came. While what a pane reads changes (Swap Panes, a document picked),
+the iPhone keeps a picture of what each pane showed over it, and takes
+both away in one frame once each is laid out at its place (at most half
+a second, or a second and a half while a pane's parts in sight are still
+coming, as a commentary's file still opening after a launch makes them),
+so no frame is blank; a pane uncovered before its parts came goes to its
+place by one quick glide as they come, never a jump. A pane moved by the app (the status bar, a key's
 page) leads as a hand's move does.
 
 Once both panes rest (and no jump holds them), the rule is checked
@@ -480,8 +514,8 @@ page leads, and the panel follows it.
 The reading line (`line`) is what `at` and `go` place and what Go To
 leaves a verse at; following doesn't use it: it goes by the top edge.
 
-Linked, the panel's title names its chapter only once the hand lets the
-panes rest: the two cross a chapter's border a frame or a line apart.
+The panel's title names its chapter as it changes, while a hand moves
+either pane too, as the page's title follows its scroll.
 
 These rules are the skins' each, so each is checked against core's: core's
 `link_cases` tool writes cases (a chapter's map or several, both panes'
@@ -841,7 +875,7 @@ From the skin:
 | `windowrows 0/1` | choose full lazy sections (the default) or their counts with rows fetched on demand, a page at a time (`model ID SECTION ROW`); available to every skin |
 | `editmenu COMMAND` | perform one of core's text-selection menu commands on the current selection |
 | `place C V FRAC` | the page's place as an address names it: where it opens, before `start`; Go To it, after |
-| `want P C K`, `at P C I FRAC`, `rest P ENDS_HI MS`, `moving P MS` | a pane's part wanted, its reading line's place, at rest, a finger on it: see Panes above |
+| `want P C K`, `at P C I FRAC [NAMED]`, `rest P ENDS_HI MS`, `moving P MS` | a pane's part wanted, its reading line's place, at rest, a finger on it: see Panes above |
 | `dark 0/1` | the system's appearance changed |
 | `esvstatus STATUS ESV`, `esvact WHAT C` | whether the site's Worker gives the ESV (STATUS its answer's, 0 none); a tap on chapter C's ESV line (`link` KIND 3: ARG `ESV_TRY`, `ESV_BSB`, `ESV_SITE`). Core asks for the ESV's chapters near the place as a wire skin reads it (its host's `fetch`), draws one not here as its line, and ends each with "(ESV) · esv.org" |
 | `version ABBR` | the version an address names (`KJV`): before `start`, the one the reader opens in; after, read now |
@@ -958,8 +992,10 @@ and the page never has a Back; the panel's navigation controller is the
 split's inspector column. On a wide window the panel is a column at the
 page's right (320 to 390 points, at most 480 or 0.4 of the window, its
 divider dragged; the page keeps 28 em and its margins, `panelfill 0`: no
-Full Screen there). Collapsed (an iPhone, and a regular window too narrow
-for both, which the root keeps collapsed by its size class) UIKit shows
+Full Screen there). Collapsed (an iPhone, held either way: sideways its
+split lays the inspector over the page, not beside it; and an iPad window
+too narrow for both, the room inside its safe area; the root tells the
+split its size class) UIKit shows
 it as a sheet over the page, `panelfill 1`: at a third, a half or the
 whole height (the last its Full Screen, `tap full` sent as the sheet
 reaches or leaves it), the page bright and usable above the first two,
@@ -973,7 +1009,11 @@ page's bottom inset becomes what the sheet covers (its offset untouched,
 so nothing on it moves), its place is told, and the panel is brought by
 the rule once if the page's top edge's link is out of its sight (at the
 whole height the page is left as it was). The panel's reader is laid out
-at its place in its `viewIsAppearing:`, before the sheet's first frame.
+at its place out of the window before the sheet is asked for, at the
+size the sheet last had at that height, with the window's display scale,
+text size and style lent to it (TextKit measures by them), and corrected
+in its `viewIsAppearing:` at its final size, before the sheet's first
+frame.
 Sheets (Go To, Reading) present over the panel's sheet, never in place
 of it. The reader has the system's navigation bar: its title the page's
 title's kind (the chapter with its chevron, what is read small and faint

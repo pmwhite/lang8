@@ -236,28 +236,55 @@ split_widths(W: f64) {
     most: f64 = INSPECTOR_MOST_SHARE * W;
     if (most > INSPECTOR_MOST_W) most = INSPECTOR_MOST_W;
     if (most < INSPECTOR_LEAST_W) most = INSPECTOR_LEAST_W;
+    // (Its width at first as wide as it may be with the page keeping its
+    // least beside it, so that UIKit lays it beside the page and never over
+    // it: 390 points, or less, to its least, in a narrower window.)
+    preferred: f64 = split_room(W) - page_least_w();
+    if (preferred > INSPECTOR_PREFERRED_W) preferred = INSPECTOR_PREFERRED_W;
+    if (preferred < INSPECTOR_LEAST_W) preferred = INSPECTOR_LEAST_W;
+    if (preferred > most) most = preferred;
     msg_set_f(split_vc, sel("setMaximumInspectorColumnWidth:"), most);
+    msg_set_f(split_vc, sel("setPreferredInspectorColumnWidth:"), preferred);
     if (responds(split_vc, "setMinimumSecondaryColumnWidth:")) msg_set_f(split_vc,
-        sel("setMinimumSecondaryColumnWidth:"), PAGE_LEAST_EM * em + 2.0f64 * look_margin)
+        sel("setMinimumSecondaryColumnWidth:"), page_least_w())
 }
 
-// A regular-width window that can't hold the page's least beside the
-// panel: the split told it is compact (so the panel is the iPhone's sheet,
-// never squeezing or overlapping the page); told again only as the window
-// crosses the rule, never as the panel opens.
-split_forced_compact: bool = false;
+// The page's least width beside the panel: 28 em and its margins.
+page_least_w(): f64 {
+    PAGE_LEAST_EM * em + 2.0f64 * look_margin
+}
+
+// The room across a window W wide for the page and the panel: inside its
+// safe area (an iPhone held sideways loses its sides to the sensor's
+// housing and the corners).
+split_room(W: f64): f64 {
+    if (window == 0) return W;
+    l8_msg_hfa(hfa, window, sel("safeAreaInsets"), 0, 0, 0);
+    W - hfa[1] - hfa[3]
+}
+
+// The split's width as the panel's room says, whatever the window's size
+// class: regular (the panel a column beside the page) where the page keeps
+// its least beside it (beside_fits_in: an iPad only), compact (the panel a
+// sheet over the page) where it doesn't (a regular window too narrow:
+// never squeezed or overlapping);
+// no override where the window's own class agrees. Told only as the
+// geometry crosses the rule (rotation, text size, window size), never as
+// the panel opens (0: none told).
+split_told_class: int = 0;
 
 split_force_collapse(W: f64) {
     if (window == 0 || !responds(split_vc, "traitOverrides")) return;
-    regular: bool = msg(msg(window, sel("traitCollection")), sel("horizontalSizeClass")) == SIZE_CLASS_REGULAR;
-    force: bool = regular && !beside_fits_in(W);
-    if (force == split_forced_compact) return;
-    split_forced_compact = force;
+    natural: int = msg(msg(window, sel("traitCollection")), sel("horizontalSizeClass"));
+    wanted: int = if (beside_fits_in(W)) SIZE_CLASS_REGULAR else SIZE_CLASS_COMPACT;
+    told: int = if (wanted == natural) 0 else wanted;
+    if (told == split_told_class) return;
+    split_told_class = told;
     overrides: int = msg(split_vc, sel("traitOverrides"));
-    if (force) msg1(overrides, sel("setHorizontalSizeClass:"), SIZE_CLASS_COMPACT) else msg1(overrides,
-        sel("removeTrait:"), cls("UITraitHorizontalSizeClass"));
-    note_num("bible: panel: the split kept collapsed (a regular window too narrow) ",
-        if (force) 1 else 0)
+    if (told == 0) msg1(overrides, sel("removeTrait:"), cls("UITraitHorizontalSizeClass")) else msg1(overrides,
+        sel("setHorizontalSizeClass:"), told);
+    note_num("bible: panel: the split's width class told (0 none, 1 compact, 2 regular) ",
+        told)
 }
 
 // A host laid out: the page its size (measured at its old width first),
@@ -467,10 +494,18 @@ ins_show() {
     }
     if (msg1(split_vc, sel("viewControllerForColumn:"), COLUMN_INSPECTOR) != bs_nav) msg2(split_vc,
         sel("setViewController:forColumn:"), bs_nav, COLUMN_INSPECTOR);
+    // (As a sheet: its reader laid out at its place out of the window first,
+    // shown once it is: ins_prelay.)
+    if (split_collapsed() && !ins_prelaid) {
+        ins_prelay();
+        return
+    }
+    ins_prelaid = false;
     if (split_collapsed()) ins_sheet_configure();
     ins_shown = true;
     bs_shown = true;
     ins_seen_presented = false;
+    ins_show_retried = false;
     ins_unseen_since = CACurrentMediaTime();
     msg1(split_vc, sel("showColumn:"), COLUMN_INSPECTOR);
     send1("panelvisible", 1);
@@ -480,6 +515,242 @@ ins_show() {
 }
 
 INS_WAIT_S: f64 = 0.05f64;
+
+// ---- laid out before it shows ----
+// The sheet's reader is laid out at its place before the sheet rises, so
+// that nothing in it moves as it comes (a long commentary's parts come
+// and are measured over several frames): out of the window, its
+// navigation's view given the size the sheet will have (as the sheet last
+// settled at that height, else a share of the window) and the window's
+// traits (display scale, text size, style: TextKit measures by them),
+// then shown once it is at its place (ins_hold_check), or after
+// INS_HOLD_MOST_S at most (a long commentary's parts can take most of it:
+// held less, they come in sight after the sheet has risen). Its viewIsAppearing: corrects the rest
+// at its final size, before the first frame (ins_reader_appearing).
+INS_HOLD_MOST_S: f64 = 0.5f64;
+
+INS_HOLD_TICK_S: f64 = 0.016f64;
+
+// Whether this showing has been laid out (ins_show then shows it), and
+// whether the panel's list is being laid out out of the window now
+// (ios/pane.l8's win_ready takes it so).
+ins_prelaid: bool = false;
+
+ins_offwindow: bool = false;
+
+ins_hold_since: f64 = 0.0f64;
+
+// The sheet's size as it last settled: its width, and its height at each
+// detent (by ins_detent_rank; 0: not seen yet).
+ins_sheet_w: f64 = 0.0f64;
+
+ins_sheet_h: []f64 = new f64[3](0.0f64);
+
+// When the panel was last asked to show (its first frame is timed from it).
+ins_asked_at: f64 = 0.0f64;
+
+ins_prelay() {
+    view: int = msg(bs_nav, sel("view"));
+    d: PanelDetent = if (bs_full) PanelDetent.Large else ins_detent_left;
+    rank: int = ins_detent_rank(d);
+    H: f64 = view_height(window);
+    w: f64 = if (ins_sheet_w > 0.0f64) ins_sheet_w else view_width(window);
+    h: f64 = if (ins_sheet_h[rank] > 0.0f64) ins_sheet_h[rank] else H * (if (rank == 0) 0.33f64 else if (rank == 1) 0.54f64 else 0.93f64);
+    ins_asked_at = CACurrentMediaTime();
+    ins_traits_lend();
+    msg_rect(view, sel("setFrame:"), 0.0f64, 0.0f64, w, h);
+    msg(view, sel("layoutIfNeeded"));
+    ins_offwindow = true;
+    ins_hold_since = CACurrentMediaTime();
+    ins_hold_offset = -1.0f64;
+    ins_hold_still = 0;
+    win_appeared(PANE_PANEL);
+    if (diag_on) {
+        t: int = win_table[PANE_PANEL];
+        tb_n = 0;
+        tb_str("bible: panel: laid out out of the window at ");
+        tb_int(w as int);
+        tb_str(" x ");
+        tb_int(h as int);
+        tb_str(", its list ");
+        tb_int(if (t == 0) -1 else view_width(t) as int);
+        tb_str(" x ");
+        tb_int(if (t == 0) -1 else view_height(t) as int);
+        note_ns(tb_ns())
+    }
+    ins_hold_check()
+}
+
+// Laid out at its place, or held long enough: shown. At its place: the
+// parts in sight come, and every part in its window (the rule places it by
+// the anchors of those above too, as they come), the chapters at both
+// panes' top edges known, and its offset the same INS_HOLD_STILL_TICKS
+// ticks running (the rule done moving it as better places came).
+ins_hold_offset: f64 = 0.0f64;
+
+ins_hold_still: int = 0;
+
+INS_HOLD_STILL_TICKS: int = 3;
+
+// Whether any part in pane p's window only holds its place still.
+ins_parts_coming(p: int): bool {
+    for i in 0..win_n[p] {
+        x: int = wr(p, i);
+        if (win_coming(p, win_c[x], win_k[x])) return true
+    }
+    false
+}
+
+ins_hold_check() {
+    if (!ins_offwindow) return;
+    held: f64 = CACurrentMediaTime() - ins_hold_since;
+    t: int = win_table[PANE_PANEL];
+    offset: f64 = if (t == 0) -1.0f64 else offset_y(t);
+    ins_hold_still = (if (t != 0 && offset == ins_hold_offset) ins_hold_still + 1 else 0);
+    ins_hold_offset = offset;
+    placed: bool = win_panel_placed() && !ins_parts_coming(PANE_PANEL) && (!win_linked || win_follow_edges_known()) && ins_hold_still >= INS_HOLD_STILL_TICKS;
+    if (!placed && held < INS_HOLD_MOST_S) {
+        _t: int = after_common(INS_HOLD_TICK_S, "inspectorHold:");
+        return
+    }
+    ins_offwindow = false;
+    ins_note_list("held");
+    ins_heights_keep();
+    tb_n = 0;
+    tb_str(if (held >= INS_HOLD_MOST_S) "bible: panel: shown before its parts came, held ms " else "bible: panel: placed out of the window in ms ");
+    tb_int((held * 1000.0f64) as int);
+    note_ns(tb_ns());
+    ins_prelaid = true;
+    ins_show()
+}
+
+ins_hold_fired(_self: int, _cmd: int, _timer: int): int {
+    ins_hold_check();
+    0
+}
+
+// The window's display scale, text size and style lent to the panel while
+// it is out of the window (TextKit measures by them), and given back once
+// it is in it.
+ins_traits_lend() {
+    if (bs_nav == 0 || window == 0 || !responds(bs_nav, "traitOverrides")) return;
+    over: int = msg(bs_nav, sel("traitOverrides"));
+    traits: int = msg(window, sel("traitCollection"));
+    msg_set_f(over, sel("setDisplayScale:"), msg_f(traits, sel("displayScale")));
+    msg1(over, sel("setPreferredContentSizeCategory:"), msg(traits, sel("preferredContentSizeCategory")));
+    msg1(over, sel("setUserInterfaceStyle:"), msg(traits, sel("userInterfaceStyle")));
+    // (Bold Text makes the system's fonts heavier and wider: lines break
+    // elsewhere; and the writing's direction, for Hebrew and Greek.)
+    msg1(over, sel("setLegibilityWeight:"), msg(traits, sel("legibilityWeight")));
+    msg1(over, sel("setLayoutDirection:"), msg(traits, sel("layoutDirection")))
+}
+
+ins_traits_give_back() {
+    if (bs_nav == 0 || !responds(bs_nav, "traitOverrides")) return;
+    over: int = msg(bs_nav, sel("traitOverrides"));
+    msg1(over, sel("removeTrait:"), cls("UITraitDisplayScale"));
+    msg1(over, sel("removeTrait:"), cls("UITraitPreferredContentSizeCategory"));
+    msg1(over, sel("removeTrait:"), cls("UITraitUserInterfaceStyle"));
+    msg1(over, sel("removeTrait:"), cls("UITraitLegibilityWeight"));
+    msg1(over, sel("removeTrait:"), cls("UITraitLayoutDirection"))
+}
+
+// `!boldtext on|off`: Bold Text as the system's setting gives it, through
+// the root's traits (the window's own override is the theme's).
+ins_bold_text(on: bool) {
+    if (root_vc == 0 || !responds(root_vc, "traitOverrides")) return;
+    over: int = msg(root_vc, sel("traitOverrides"));
+    if (on) msg1(over, sel("setLegibilityWeight:"), UI_LEGIBILITY_BOLD) else msg1(over,
+        sel("removeTrait:"), cls("UITraitLegibilityWeight"));
+    note_num("bible: bold text ", if (on) 1 else 0)
+}
+
+// UILegibilityWeightBold.
+UI_LEGIBILITY_BOLD: int = 1;
+
+// The heights the parts in sight were measured at out of the window, to be
+// compared with their heights once shown (ins_heights_compare: TextKit in
+// the window must agree to within INS_HEIGHT_SLACK).
+INS_HEIGHTS_MOST: int = 16;
+
+INS_HEIGHT_SLACK: f64 = 0.01f64;
+
+ins_heights_view: []int = new int[16](0);
+
+ins_heights_h: []f64 = new f64[16](0.0f64);
+
+ins_heights_n: int = 0;
+
+ins_heights_keep() {
+    ins_heights_n = 0;
+    p: int = PANE_PANEL;
+    for i in 0..win_n[p] {
+        x: int = wr(p, i);
+        if (ins_heights_n < INS_HEIGHTS_MOST && !win_coming(p, win_c[x], win_k[x])) {
+            ins_heights_view[ins_heights_n] = win_view[x];
+            ins_heights_h[ins_heights_n] = win_text_height(win_view[x]);
+            ins_heights_n = ins_heights_n + 1
+        }
+    }
+}
+
+// The panel's list as it is now, to the log (where a showing changes it).
+ins_note_list(when: str) {
+    if (!diag_on) return;
+    t: int = win_table[PANE_PANEL];
+    tb_n = 0;
+    tb_str("bible: panel list ");
+    tb_str(when);
+    if (t == 0) {
+        tb_str(": none");
+        note_ns(tb_ns());
+        return
+    }
+    tb_str(": offset ");
+    tb_int((offset_y(t) * 10.0f64) as int);
+    tb_str(" top inset ");
+    tb_int((top_inset(t) * 10.0f64) as int);
+    tb_str(" size ");
+    tb_int(view_width(t) as int);
+    tb_str(" x ");
+    tb_int(view_height(t) as int);
+    tb_str(" rows ");
+    tb_int(win_n[PANE_PANEL]);
+    tb_str(" go waiting ");
+    tb_int(win_go_c[PANE_PANEL]);
+    tb_str(" ruled ");
+    tb_int(if (win_ruled) 1 else 0);
+    note_ns(tb_ns())
+}
+
+// The panel's first frame in sight: its time from being asked to show, its
+// parts' heights measured again in the window against those out of it, the
+// lent traits given back.
+ins_first_seen() {
+    ins_note_list("first frame");
+    // (In sight now: no more placing it again as parts tell its place
+    // better (core's MODE 2, which replaces the parts in sight); the rule
+    // is checked once at the sheet's settle, a glide if it must move.)
+    if (win_ruled) note("bible: panel: shown while still being placed: the rule checked at the settle");
+    win_ruled = false;
+    worst: f64 = 0.0f64;
+    for k in 0..ins_heights_n {
+        d: f64 = win_text_height(ins_heights_view[k]) - ins_heights_h[k];
+        if (d < 0.0f64) d = -d;
+        if (d > worst) worst = d
+    }
+    ins_traits_give_back();
+    tb_n = 0;
+    tb_str("bible: panel: first frame ms ");
+    tb_int(((CACurrentMediaTime() - ins_asked_at) * 1000.0f64) as int);
+    tb_str(" after it was asked to show; parts measured out of the window ");
+    tb_int(ins_heights_n);
+    tb_str(", most apart in the window (thousandths of a point) ");
+    tb_int((worst * 1000.0f64) as int);
+    tb_str(if (worst <= INS_HEIGHT_SLACK) " (same)" else " (DIFFERENT)");
+    note_ns(tb_ns());
+    ins_heights_n = 0
+}
 
 // Whether a sheet is over the page, or one's coming or going isn't over
 // (its transition: UIKit holds a presentation asked for meanwhile until
@@ -524,6 +795,11 @@ ins_close() {
     ins_hiding = true;
     bs_shown = false;
     msg1(split_vc, sel("hideColumn:"), COLUMN_INSPECTOR);
+    // (Never shown: UIKit has nothing to hide and will say nothing.)
+    if (!ins_seen_presented) {
+        ins_hidden();
+        return
+    }
     ins_motion_begin()
 }
 
@@ -677,7 +953,10 @@ ins_frame(_self: int, _cmd: int, _link: int): int {
     d: f64 = cover - ins_cover_seen;
     if (d < 0.25f64 && d > -0.25f64) ins_still_frames = ins_still_frames + 1 else ins_still_frames = 0;
     ins_cover_seen = cover;
-    if (bs_nav != 0 && msg(msg(bs_nav, sel("view")), sel("window")) != 0) ins_seen_presented = true;
+    if (bs_nav != 0 && msg(msg(bs_nav, sel("view")), sel("window")) != 0 && !ins_seen_presented) {
+        ins_seen_presented = true;
+        ins_first_seen()
+    }
     // (Up to the medium height's room: at large the page is behind the
     // sheet, the controls left where they were.)
     if (!bs_full && cover <= ins_cover_most()) {
@@ -877,6 +1156,9 @@ ins_settle() {
         return
     }
     ins_detent_left = d;
+    // (Its size kept, to lay it out at before it next shows.)
+    ins_sheet_w = view_width(msg(bs_nav, sel("view")));
+    ins_sheet_h[ins_detent_rank(d)] = view_height(msg(bs_nav, sel("view")));
     if (bs_full) send0("tap full");
     // (Where UIKit has put the sheet, not its last frame on the way: the
     // spring's last fractions of a point are still to come.)
@@ -900,11 +1182,18 @@ ins_unseen_since: f64 = 0.0f64;
 
 INS_UNSEEN_WAIT_S: f64 = 1.0f64;
 
+ins_show_retried: bool = false;
+
 ins_settle_hand_close(): bool {
     running: bool = root_vc != 0 && msg(root_vc, sel("transitionCoordinator")) != 0;
     // (A collapse or expansion that never said it ended: not one now.)
     if (!running) ins_transition = false;
-    if (!ins_shown || ins_hiding || ins_transition || running || bs_nav == 0) return false;
+    if (!ins_shown || ins_hiding || bs_nav == 0) return false;
+    // (A transition under way: decided once it is over.)
+    if (ins_transition || running) {
+        ins_motion_begin();
+        return true
+    }
     if (msg(msg(bs_nav, sel("view")), sel("window")) != 0) {
         ins_seen_presented = true;
         return false
@@ -917,10 +1206,24 @@ ins_settle_hand_close(): bool {
         ins_motion_begin();
         return true
     }
+    // (Never shown, as after a hot reload while a transition held UIKit's
+    // presentations: asked once more, then said in the log.)
+    if (!ins_show_retried && split_vc != 0) {
+        ins_show_retried = true;
+        note("bible: panel: never seen; asked to show again");
+        if (split_collapsed()) ins_sheet_configure();
+        msg1(split_vc, sel("showColumn:"), COLUMN_INSPECTOR);
+        ins_unseen_since = CACurrentMediaTime();
+        ins_motion_begin();
+        return true
+    }
     note("bible: panel: ASKED TO SHOW BUT NEVER SEEN; left open");
     ins_unseen_since = CACurrentMediaTime() + 1000000.0f64;
     false
 }
+
+// Whether the sheet has not yet covered the page's foot since the launch.
+ins_cover_first: bool = true;
 
 // The page's foot covered by cover points: its inset set (its offset left
 // alone: what it shows doesn't move), its place told, and the panel
@@ -934,6 +1237,22 @@ ins_page_cover(cover: f64) {
     set_insets();
     note_num("bible: panel: page inset for the sheet ", cover as int);
     if (win_table[PANE_PAGE] == 0) return;
+    // (The sheet's new height part of a turn of the window (its width
+    // changed within the last second), or the panel's first showing at a
+    // launch (the page laid out at its place before the sheet came): the
+    // page's place kept, as the turn keeps it and the panel's, not the text
+    // at its top.)
+    launch: bool = ins_cover_first;
+    if (cover > 0.0f64) ins_cover_first = false;
+    if (launch || CACurrentMediaTime() - wk_at < 1.0f64) {
+        kept: bool = win_to_sent(PANE_PAGE) || win_sent_c[PANE_PAGE] >= 0 && win_rebuild_at_sent(PANE_PAGE);
+        note_num("bible: panel: the page's place kept under the sheet (a launch's or a turn's; 0: none to keep) ",
+            if (kept) 1 else 0);
+        if (kept) return
+    }
+    // (The text stays where it is: the place at its reading line now is
+    // its place.)
+    win_sent_c[PANE_PAGE] = -1;
     win_aim_let_go(PANE_PAGE);
     win_tell(PANE_PAGE, false);
     if (bs_shown) win_follow(PANE_PAGE)
@@ -945,8 +1264,13 @@ ins_page_cover(cover: f64) {
 // its place now (its `go`, or its window made again for this width).
 ins_reader_appearing(vc: int) {
     if (!panel_in_split()) return;
+    // (Out of the window its bar gave it no room at its top: the room comes
+    // now, and win_inset_changed keeps the words at its top edge where they
+    // are; the list's logs show that nothing in sight moves.)
+    ins_note_list("appearing");
     msg(msg(vc, sel("view")), sel("layoutIfNeeded"));
-    win_appeared(PANE_PANEL)
+    win_appeared(PANE_PANEL);
+    ins_note_list("appeared")
 }
 
 // The reader's bar: UIKit's navigation bar, never large, its title the one
@@ -1201,6 +1525,18 @@ ins_where() {
     tb_int(ins_told_fill);
     tb_str(" page cover ");
     tb_int(page_foot_cover as int);
+    if (window != 0) {
+        tb_str(" room ");
+        tb_int(split_room(view_width(window)) as int);
+        tb_str(" needs ");
+        tb_int((INSPECTOR_LEAST_W + page_least_w()) as int);
+        l8_msg_hfa(hfa, msg(nav, sel("view")), sel("frame"), 0, 0, 0);
+        tb_str(" page w ");
+        tb_int(hfa[2] as int);
+        tb_str(" (em ");
+        tb_int((em * 10.0f64) as int);
+        tb_str(" tenths)")
+    }
     tb_str(" bottom inset ");
     tb_int(if (table == 0) 0 else bottom_inset(table) as int);
     note_ns(tb_ns());
@@ -1256,5 +1592,6 @@ make_split_classes() {
 
 add_inspector_methods(app: int) {
     add_method1(app, sel("inspectorFrame:"), &ins_frame, "v@:@");
-    add_method1(app, sel("inspectorAfterSheets:"), &ins_after_sheets_fired, "v@:@")
+    add_method1(app, sel("inspectorAfterSheets:"), &ins_after_sheets_fired, "v@:@");
+    add_method1(app, sel("inspectorHold:"), &ins_hold_fired, "v@:@")
 }
