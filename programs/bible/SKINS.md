@@ -930,7 +930,14 @@ action is `act ID ACTION ARG VALUE`; its effects are done the iPhone's way
 (`push` into the navigation the action came from, `present` as a sheet,
 `update` a cross-fade and reload, a row deleted with the system's animation
 when that is all that changed, `dismiss`). The platform's work stays the
-app's: core's version switch is the iPhone's `switch_version`. Core's screens
+app's: core's version switch is the iPhone's `switch_version`. A row's
+actions are UIKit's context menu on a long press (the system's lifted row,
+no preview of the app's; its delete action destructive) and its delete
+action UIKit's swipe (`ios/rowmenus.l8`): one provider and one handler
+block a process, each action telling its row by an object associated with
+it. The development wire's `!rowmenu` and `!rowswipe` call the same
+delegate methods and handlers, since no public API brings up either as a
+finger does. Core's screens
 are the app's own controller class (`L8CoreList`), made again as they come
 back from a screen pushed over them; Go To's and Search's are the app's own
 classes for their focus and keyboard.

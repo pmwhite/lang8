@@ -1,0 +1,202 @@
+tag bible_ios;
+
+use_tag std, ios, bible, bible_wire;
+
+// A row's menu and its swipe in core's lists (core/row_menus.l8 says what
+// they offer): a long press lifts the row and shows its actions as UIKit's
+// context menu (no preview of our own: the system's lifted row); a swipe
+// to the left shows its delete action (Delete, a plan's or a recent
+// place's Remove) in the system's red, a full swipe doing it. Both are the
+// row's actions in core's screen model, as a screen reader's are (each
+// action told its slot, row and index as theirs are: uk_row_act).
+//
+// UIKit keeps the blocks it is given; one of each is made a process
+// (persistent: a hot reload keeps them, their handlers entering the new
+// build's functions by name), each action saying which it is by an object
+// associated with it, not by a block of its own, so menus shown make no
+// blocks.
+import "../../ios/objc.l8";
+
+import "../../ios/block.l8";
+
+// The provider of the menus' actions, the menus' actions' handler, and the
+// swipes' handler.
+persistent row_menu_provider: int = 0;
+
+persistent row_menu_handler: int = 0;
+
+persistent row_swipe_handler: int = 0;
+
+// The menu made for the configuration UIKit was given last (kept: the
+// provider gives it when UIKit asks, after the row has lifted, so a list
+// refilled meanwhile can't put another row's actions in it), and its row
+// (its slot * 4096 + its row; -1: none).
+row_menu_built: int = 0;
+
+row_menu_row: int = -1;
+
+// UIMenuElementAttributesDestructive; UIContextualActionStyleDestructive.
+ROW_DESTRUCTIVE_ATTRIBUTE: int = 2;
+
+ROW_SWIPE_DESTRUCTIVE: int = 1;
+
+// The most rows (and sections) a code can tell apart, and the most actions
+// a menu has room for: past them, no menu or swipe (and a line in the log),
+// never a menu cut short or one telling the wrong row.
+ROW_CODE_MOST: int = 4096;
+
+// tableView:contextMenuConfigurationForRowAtIndexPath:point: for slot k's
+// list: a configuration whose menu (made now) is the row's actions, or 0
+// (no menu) for a row without actions.
+row_menu_configuration(t: int, path: int): int {
+    k: int = uk_slot_of(t);
+    if (k < 0 || !uk_ensure(k)) return 0;
+    i: int = uk_row_at(path);
+    if (i < 0 || uk_ui.rows[i].actions_n == 0 || uk_ui.rows[i].disabled) return 0;
+    if (i >= ROW_CODE_MOST || uk_ui.rows[i].actions_n > len(one)) {
+        note_num("bible: rowmenu: none, the row is past what a menu can tell or hold: row ",
+            i);
+        return 0
+    }
+    if (row_menu_provider == 0) row_menu_provider = block1(&row_menu_actions, 0, "@16@?0@8");
+    if (row_menu_handler == 0) row_menu_handler = block1(&row_menu_chosen, 0, "v16@?0@8");
+    if (row_menu_provider == 0 || row_menu_handler == 0) return 0;
+    row_menu_row = k * ROW_CODE_MOST + i;
+    row_menu_built = held(row_menu_built, row_menu_make(k, i));
+    msg3(cls("UIContextMenuConfiguration"), sel("configurationWithIdentifier:previewProvider:actionProvider:"),
+        0, 0, row_menu_provider)
+}
+
+// Row i of slot k's actions as a menu: each a UIAction of the action's
+// words and symbol, its Delete (or Remove) destructive, telling its row,
+// its index, and the action and argument it was made for.
+row_menu_make(k: int, i: int): int {
+    row: UiRow = uk_ui.rows[i];
+    n: int = row.actions_n;
+    for j in 0..n {
+        a: UiAction = uk_ui.actions[row.actions + j];
+        image: int = if (a.icon.n == 0) 0 else msg1(cls("UIImage"), sel("systemImageNamed:"),
+            uk_text(a.icon));
+        action: int = msg4(cls("UIAction"), sel("actionWithTitle:image:identifier:handler:"),
+            uk_text(a.title), image, 0, row_menu_handler);
+        if (a.action == row.delete_action) msg1(action, sel("setAttributes:"), ROW_DESTRUCTIVE_ATTRIBUTE);
+        row_tell(action, (k * ROW_CODE_MOST + i) * 8 + j, a.action, row.arg);
+        one[j] = action
+    }
+    msg2(cls("UIMenu"), sel("menuWithTitle:children:"), nsstring(""), nsarray(one,
+        n))
+}
+
+// The provider: the menu made with the configuration (UIKit's suggested
+// actions, none for a list's row, not used).
+row_menu_actions(_context: int, _suggested: int): int {
+    row_menu_built
+}
+
+// What an action tells (an object associated with it): its code, and the
+// action and argument it was made for, so that it does nothing to a row
+// that has changed since.
+row_told: []int = new int[3](0);
+
+row_tell(
+    object: int,
+    code: int,
+    action: int,
+    arg: int
+) {
+    row_told[0] = nsnumber_int(code);
+    row_told[1] = nsnumber_int(action);
+    row_told[2] = nsnumber_int(arg);
+    objc_setAssociatedObject(object, ints_address(uk_act_key), nsarray(row_told, 3),
+        1)
+}
+
+// Whether what object tells is there: into row_told as whole numbers.
+row_told_read(object: int): bool {
+    told: int = objc_getAssociatedObject(object, ints_address(uk_act_key));
+    if (told == 0 || msg(told, sel("count")) != 3) return false;
+    for x in 0..3 row_told[x] = msg(msg1(told, sel("objectAtIndex:"), x), sel("longValue"));
+    true
+}
+
+// A menu's action chosen: the row's action, as its screen reader's is, if
+// the row still has it (else nothing, and a line in the log).
+row_menu_chosen(_context: int, action: int): int {
+    if (!row_told_read(action)) return 0;
+    code: int = row_told[0];
+    k: int = code / 8 / ROW_CODE_MOST;
+    i: int = code / 8 % ROW_CODE_MOST;
+    j: int = code % 8;
+    same: bool = k < UK_SLOTS && uk_ensure(k) && i < uk_ui.rows_n && j < uk_ui.rows[i].actions_n && uk_ui.actions[uk_ui.rows[i].actions + j].action == row_told[1] && uk_ui.rows[i].arg == row_told[2];
+    if (!same) {
+        note("bible: rowmenu: the row changed under its menu; nothing done");
+        return 0
+    }
+    uk_row_act(code)
+}
+
+// tableView:trailingSwipeActionsConfigurationForRowAtIndexPath: for slot
+// k's list: the row's delete action, destructive, under its own word
+// (uk_delete_title); none (an empty configuration, so UIKit offers no
+// Delete of its own) for a row that has none.
+row_swipe_configuration(t: int, path: int): int {
+    k: int = uk_slot_of(t);
+    i: int = if (k >= 0 && uk_ensure(k)) uk_row_at(path) else -1;
+    configurations: int = cls("UISwipeActionsConfiguration");
+    none: int = msg1(configurations, sel("configurationWithActions:"), nsarray(one,
+        0));
+    if (i < 0 || uk_ui.rows[i].delete_action == 0) return none;
+    section: int = msg(path, sel("section"));
+    r: int = msg(path, sel("row"));
+    if (section >= ROW_CODE_MOST || r >= ROW_CODE_MOST) {
+        note_num("bible: rowswipe: none, the row is past what a code can tell: row ",
+            r);
+        return none
+    }
+    if (row_swipe_handler == 0) row_swipe_handler = block3(&row_swipe_chosen, 0, "v32@?0@8@16@?24");
+    if (row_swipe_handler == 0) return none;
+    action: int = msg3(cls("UIContextualAction"), sel("contextualActionWithStyle:title:handler:"),
+        ROW_SWIPE_DESTRUCTIVE, uk_delete_title(t, path), row_swipe_handler);
+    // (The delete action's own symbol: Delete's trash, Remove's minus.)
+    icon: int = nsstring("trash");
+    row: UiRow = uk_ui.rows[i];
+    for j in 0..row.actions_n {
+        a: UiAction = uk_ui.actions[row.actions + j];
+        if (a.action == row.delete_action && a.icon.n > 0) icon = uk_text(a.icon)
+    }
+    msg1(action, sel("setImage:"), msg1(cls("UIImage"), sel("systemImageNamed:"),
+        icon));
+    // (Which row: its slot, its section and row in the list; the action
+    // and argument it was made for.)
+    row_tell(action, (k * ROW_CODE_MOST + section) * ROW_CODE_MOST + r, row.delete_action,
+        row.arg);
+    one[0] = action;
+    msg1(configurations, sel("configurationWithActions:"), nsarray(one, 1))
+}
+
+// A swipe's action done: the row deleted (core's action; the row taken
+// away with the system's animation, uk_deleted), then UIKit told it was
+// done (completion(YES)), so it closes the swipe.
+row_swipe_chosen(
+    _context: int,
+    action: int,
+    _source: int,
+    completion: int
+): int {
+    done: bool = false;
+    if (row_told_read(action)) {
+        n: int = row_told[0];
+        k: int = n / ROW_CODE_MOST / ROW_CODE_MOST;
+        s: int = n / ROW_CODE_MOST % ROW_CODE_MOST;
+        r: int = n % ROW_CODE_MOST;
+        t: int = if (k < UK_SLOTS) uk_tables[k] else 0;
+        i: int = if (t != 0 && uk_ensure(k)) uk_row_of(s, r) else -1;
+        if (i >= 0 && uk_ui.rows[i].delete_action == row_told[1] && uk_ui.rows[i].arg == row_told[2]) {
+            uk_delete_row(k, s, r, uk_ui.rows[i].delete_action, uk_ui.rows[i].arg);
+            done = true
+        } else note("bible: rowswipe: the row changed under its swipe; nothing done")
+    }
+    if (completion != 0) _c: int = l8_block_invoke(completion, if (done) 1 else 0,
+        0, 0);
+    0
+}

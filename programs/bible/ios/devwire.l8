@@ -24,8 +24,10 @@ use_tag std, ios, bible, bible_wire;
 // `!boldtext on|off` sets Bold Text as the system's setting does;
 // `!rotate landscape|portrait` turns the interface; `!detent snap
 // small|medium|large` sets the sheet's height with no animation (the
-// uilog checker's broken case); `!slowmo N` runs the window's animations
-// N times slower. While it is connected, the screen stays on (a
+// uilog checker's broken case); `!rowmenu` and `!rowswipe` bring up a
+// row's menu and swipe as UIKit would (below); `!slowmo N` runs the
+// window's animations N times slower. While it is connected, the screen
+// stays on (a
 // phone's Auto-Lock, not ten minutes of Keep Screen On) and its
 // diagnostics are written. Data files changed on the server since it
 // started (web/dev.mjs --data) are read from it instead of the bundle, so a
@@ -454,6 +456,14 @@ devwire_line(b: []i8, from: int, to: int) {
     }
     if (to - from > 8 && devwire_line_is(b, from, from + 8, "!slowmo ")) {
         devwire_slow_motion(b, from + 8, to);
+        return
+    }
+    if (to - from > 9 && devwire_line_is(b, from, from + 9, "!rowmenu ")) {
+        devwire_row_menu(b, from + 9, to);
+        return
+    }
+    if (to - from > 10 && devwire_line_is(b, from, from + 10, "!rowswipe ")) {
+        devwire_row_swipe(b, from + 10, to);
         return
     }
     if (to - from > 5 && devwire_line_is(b, from, from + 5, "!tap ")) {
@@ -1197,6 +1207,140 @@ devwire_glide_end(sv: int) {
 add_devwire_methods(app: int) {
     add_method1(app, sel("devwireAgain:"), &devwire_again, "v@:@");
     add_method1(app, sel("devwireFrame:"), &devwire_frame, "v@:@")
+}
+
+// ---- a row's menu and swipe, as a finger would bring them ----
+// No public API shows a row's context menu or reveals its swipe, so these
+// call the app's own delegate methods (ios/rowmenus.l8), as UIKit would,
+// and log what they give; then do an action as the menu's or the swipe's
+// own handler would. All of it public API and the app's own code.
+//
+// `!rowmenu SCREEN SECTION ROW`: the menu of that row of the shown screen
+// whose title begins with SCREEN (one word: History, Go, Search), each of
+// its actions' words, symbol and whether it is destructive; `!rowmenu
+// SCREEN SECTION ROW N`: then its action N done by its handler.
+// `!rowswipe SCREEN SECTION ROW`: the swipe's actions, then the first done
+// by the handler UIKit would call (UIContextualAction's own), with a
+// completion of ours that logs what it was told.
+type DevwireRow = {
+    slot: int;
+    path: int;
+    // The number after the row (-1: none).
+    then: int
+}
+
+// The words after the line's name: SCREEN SECTION ROW [N] (the numbers
+// read into devwire_row_numbers, -1 for one not given).
+devwire_row_numbers: []int = new int[3](-1);
+
+devwire_row_parse(b: []i8, from: int, to: int): DevwireRow {
+    at: int = from;
+    while (at < to && b[at] as int != 32) at = at + 1;
+    tb_n = 0;
+    for i in from..at tb_byte(b[i] as int);
+    screen: int = tb_ns();
+    numbers: []int = devwire_row_numbers;
+    for n in 0..3 {
+        numbers[n] = -1;
+        while (at < to && b[at] as int == 32) at = at + 1;
+        if (at < to && b[at] as int >= 48 && b[at] as int <= 57) {
+            numbers[n] = 0;
+            while (at < to && b[at] as int >= 48 && b[at] as int <= 57) {
+                numbers[n] = numbers[n] * 10 + b[at] as int - 48;
+                at = at + 1
+            }
+        }
+    }
+    slot: int = -1;
+    for k in 0..UK_SLOTS {
+        vc: int = uk_vcs[k];
+        nav: int = if (vc == 0) 0 else msg(vc, sel("navigationController"));
+        if (slot < 0 && nav != 0 && msg(nav, sel("topViewController")) == vc && msg(msg(vc,
+            sel("view")), sel("window")) != 0 && uk_ensure(k) && devwire_begins(uk_text(uk_ui.title),
+            screen)) slot = k
+    }
+    path: int = if (slot < 0 || numbers[0] < 0 || numbers[1] < 0) 0 else msg2(cls("NSIndexPath"),
+        sel("indexPathForRow:inSection:"), numbers[1], numbers[0]);
+    DevwireRow { slot: slot, path: path, then: numbers[2] }
+}
+
+devwire_row_menu(b: []i8, from: int, to: int) {
+    row: DevwireRow = devwire_row_parse(b, from, to);
+    if (row.slot < 0 || row.path == 0) {
+        note("bible: rowmenu: no such screen shown, or no section and row");
+        return
+    }
+    configuration: int = row_menu_configuration(uk_tables[row.slot], row.path);
+    if (configuration == 0) {
+        note("bible: rowmenu: none (the row has no actions)");
+        return
+    }
+    menu: int = row_menu_actions(0, 0);
+    children: int = if (menu == 0) 0 else msg(menu, sel("children"));
+    n: int = if (children == 0) 0 else msg(children, sel("count"));
+    i: int = row_menu_row % 4096;
+    for j in 0..n {
+        action: int = msg1(children, sel("objectAtIndex:"), j);
+        tb_n = 0;
+        tb_str("bible: rowmenu ");
+        tb_int(j);
+        tb_str(" ");
+        tb_nsstring(msg(action, sel("title")));
+        tb_str(" | symbol ");
+        if (uk_ensure(row.slot) && i < uk_ui.rows_n && j < uk_ui.rows[i].actions_n) tb_nsstring(uk_text(uk_ui.actions[uk_ui.rows[i].actions + j].icon));
+        tb_str(" | image ");
+        tb_int(if (msg(action, sel("image")) != 0) 1 else 0);
+        tb_str(" destructive ");
+        tb_int(if ((msg(action, sel("attributes")) & ROW_DESTRUCTIVE_ATTRIBUTE) != 0) 1 else 0);
+        note_ns(tb_ns())
+    }
+    if (row.then < 0) return;
+    if (row.then >= n) {
+        note("bible: rowmenu: no such action");
+        return
+    }
+    note_num("bible: rowmenu: done ", row.then);
+    _d: int = row_menu_chosen(0, msg1(children, sel("objectAtIndex:"), row.then))
+}
+
+// The completion handed to a swipe's handler (made once a process).
+persistent devwire_swipe_completion: int = 0;
+
+devwire_swipe_completed(_context: int, success: int): int {
+    note_num("bible: rowswipe: completion called with ", success & 255);
+    0
+}
+
+devwire_row_swipe(b: []i8, from: int, to: int) {
+    row: DevwireRow = devwire_row_parse(b, from, to);
+    if (row.slot < 0 || row.path == 0) {
+        note("bible: rowswipe: no such screen shown, or no section and row");
+        return
+    }
+    t: int = uk_tables[row.slot];
+    configuration: int = row_swipe_configuration(t, row.path);
+    actions: int = msg(configuration, sel("actions"));
+    n: int = if (actions == 0) 0 else msg(actions, sel("count"));
+    note_num("bible: rowswipe: actions ", n);
+    if (n == 0) return;
+    action: int = msg1(actions, sel("objectAtIndex:"), 0);
+    tb_n = 0;
+    tb_str("bible: rowswipe 0 ");
+    tb_nsstring(msg(action, sel("title")));
+    tb_str(" | style ");
+    tb_int(msg(action, sel("style")));
+    note_ns(tb_ns());
+    if (devwire_swipe_completion == 0) devwire_swipe_completion = block1(&devwire_swipe_completed,
+        0, "v12@?0B8");
+    handler: int = if (responds(action, "handler")) msg(action, sel("handler")) else 0;
+    cell: int = msg1(t, sel("cellForRowAtIndexPath:"), row.path);
+    if (handler != 0) {
+        note("bible: rowswipe: done by the action's own handler");
+        _h: int = l8_block_invoke(handler, action, cell, devwire_swipe_completion)
+    } else {
+        note("bible: rowswipe: done by the app's handler (the action has no handler to read)");
+        _a: int = row_swipe_chosen(0, action, cell, devwire_swipe_completion)
+    }
 }
 
 // `!slowmo N`: everything Core Animation runs in the window N times slower
