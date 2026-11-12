@@ -110,6 +110,17 @@ ul_n: []int = new int[2](0);
 
 ul_view: []int = new int[2 * 1500](0);
 
+// Each record's id in the log: a number given as its view is first seen
+// and kept while it is seen again (a view's address is not an id: UIKit
+// reuses the address of a view freed for another).
+ul_id: []int = new int[2 * 1500](0);
+
+ul_last_id: int = 0;
+
+// Whether the record is a presented controller's view (a sheet, a
+// popover, a full-screen cover), as UIKit placed it.
+ul_presented_view: []bool = new bool[2 * 1500](false);
+
 ul_class: []int = new int[2 * 1500](0);
 
 ul_kind: []int = new int[2 * 1500](0);
@@ -432,6 +443,7 @@ uilog_start() {
     ul_t0 = CACurrentMediaTime();
     ul_on = true;
     ul_frames = 0;
+    ul_last_id = 0;
     ul_quiet = 0;
     ul_rest_written = false;
     ul_n[0] = 0;
@@ -458,6 +470,8 @@ uilog_start() {
 // Logging stopped (the log kept for !uilog off).
 ul_stop_walking() {
     ul_on = false;
+    release(ul_convert);
+    ul_convert = 0;
     if (ul_touch_recognizer != 0) msg1(msg(ul_touch_recognizer, sel("view")), sel("removeGestureRecognizer:"),
         ul_touch_recognizer);
     release(ul_touch_recognizer);
@@ -535,6 +549,7 @@ uilog_frame(now: f64) {
     ul_changes = 0;
     ul_visits = 0;
     ul_capped = false;
+    ul_presented_found();
     l8_msg_hfa(hfa, window, sel("bounds"), 0, 0, 0);
     ul_screen_w = hfa[2];
     ul_screen_h = hfa[3];
@@ -550,7 +565,7 @@ uilog_frame(now: f64) {
         if (!ul_matched[i]) {
             at: int = last * UL_MOST + i;
             ul_begin("remove");
-            ul_field_int("id", ul_view[at]);
+            ul_field_int("id", ul_id[at]);
             ul_desc_field(at);
             ul_rect_field("r", at);
             ul_end();
@@ -566,12 +581,20 @@ uilog_frame(now: f64) {
         ul_field_int("visits", ul_visits);
         ul_end()
     }
+    if (ul_presented_capped) {
+        ul_begin("walk");
+        ul_field_int("presented", UL_PRESENTED_MOST);
+        ul_end()
+    }
     ul_quiet = (if (ul_changes > 0) 0 else ul_quiet + 1);
     if (ul_changes > 0) ul_rest_written = false;
     if (!ul_rest_written && ul_quiet >= UL_REST_FRAMES) {
         ul_rest_written = true;
         ul_rest()
     }
+    // (The window's layers are this frame's only: not kept past it.)
+    ul_window_layer = 0;
+    ul_window_model = 0;
     took: f64 = (CACurrentMediaTime() - started) * 1000.0f64;
     ul_walk_total = ul_walk_total + took;
     if (took > ul_walk_worst) ul_walk_worst = took;
@@ -605,8 +628,9 @@ ul_keyboard_window(w: int): bool {
 
 // Where a view's parent is and what holds it: the parent's window
 // position and bounds' origin and its opacity; the nearest reported view
-// above (0: none), whether it is a list, and its position (in its content,
-// for a list); and the rectangle that clips what is in sight.
+// above (its log id; 0: none), whether it is a list, and its position (in
+// its content, for a list); the parent's own layer; and the rectangle that
+// clips what is in sight.
 type UlFrom = {
     x: f64;
     y: f64;
@@ -617,6 +641,7 @@ type UlFrom = {
     anchor_scrolls: bool;
     ax: f64;
     ay: f64;
+    layer: int;
     clip_x0: f64;
     clip_y0: f64;
     clip_x1: f64;
@@ -625,6 +650,8 @@ type UlFrom = {
 
 ul_walk_window(w: int) {
     layer: int = ul_layer(w);
+    ul_window_layer = layer;
+    ul_window_model = msg(w, sel("layer"));
     l8_msg_hfa(hfa, layer, sel("frame"), 0, 0, 0);
     x: f64 = hfa[0];
     y: f64 = hfa[1];
@@ -638,6 +665,7 @@ ul_walk_window(w: int) {
         anchor_scrolls: false,
         ax: 0.0f64,
         ay: 0.0f64,
+        layer: msg(w, sel("layer")),
         clip_x0: 0.0f64,
         clip_y0: 0.0f64,
         clip_x1: ul_screen_w,
@@ -674,19 +702,35 @@ ul_walk(v: int, from: UlFrom, depth: int) {
     slot: int = ul_class_slot(c);
     kind: int = ul_class_kind[slot];
     how: int = ul_class_how[slot];
+    model: int = msg(v, sel("layer"));
     layer: int = ul_layer(v);
     l8_msg_hfa(hfa, layer, sel("frame"), 0, 0, 0);
     x: f64 = from.x + hfa[0] - from.bx;
     y: f64 = from.y + hfa[1] - from.by;
     w: f64 = hfa[2];
     h: f64 = hfa[3];
+    // (A presented controller's view, or a view whose layer UIKit has put
+    // under layers of its own rather than its superview's (iOS 26's panel
+    // sheet, whose height above the window's foot is in such a layer):
+    // where the screen shows it, converted through every layer above it,
+    // their transforms (a zoom's) included. What it holds is placed from
+    // there.)
+    presented: bool = ul_is_presented(v);
+    if (presented) kind = UL_SHEET;
+    if ((presented || msg(model, sel("superlayer")) != from.layer) && ul_window_rect(layer,
+        model)) {
+        x = ul_convert_out[0];
+        y = ul_convert_out[1];
+        w = ul_convert_out[2];
+        h = ul_convert_out[3]
+    }
     l8_msg_hfa(hfa, layer, sel("bounds"), 0, 0, 0);
     bx: f64 = hfa[0];
     by: f64 = hfa[1];
     // (Opacity: the model's, unless an animation runs on the layer.)
     alpha: f64 = msg_f(v, sel("alpha"));
-    if (msg(msg(v, sel("layer")), sel("animationKeys")) != 0) alpha = msg_f(msg1(layer,
-        sel("valueForKey:"), nsstring("opacity")), sel("doubleValue"));
+    if (msg(model, sel("animationKeys")) != 0) alpha = msg_f(msg1(layer, sel("valueForKey:"),
+        nsstring("opacity")), sel("doubleValue"));
     alpha = alpha * from.alpha;
     if (v == toast_label) kind = UL_TOAST;
     if (msg(v, sel("tag")) == PANE_COVER_TAG) {
@@ -700,13 +744,13 @@ ul_walk(v: int, from: UlFrom, depth: int) {
     next.bx = bx;
     next.by = by;
     next.alpha = alpha;
+    next.layer = model;
     if (kind != UL_NONE) {
         if (ul_n[ul_bank] >= UL_MOST) {
             ul_capped = true;
             return
         }
-        ul_record(v, c, kind, x, y, w, h, alpha, from, bx, by);
-        next.anchor = v;
+        next.anchor = ul_record(v, c, kind, x, y, w, h, alpha, from, bx, by, presented);
         next.anchor_scrolls = kind == UL_PANE;
         next.ax = x;
         next.ay = y;
@@ -735,8 +779,9 @@ ul_record(
     alpha: f64,
     from: UlFrom,
     bx: f64,
-    by: f64
-) {
+    by: f64,
+    presented: bool
+): int {
     i: int = ul_n[ul_bank];
     ul_n[ul_bank] = i + 1;
     at: int = ul_bank * UL_MOST + i;
@@ -774,13 +819,15 @@ ul_record(
     if (li >= 0 && ul_class[(1 - ul_bank) * UL_MOST + li] != c) li = -1;
     old: int = if (li >= 0) (1 - ul_bank) * UL_MOST + li else -1;
     if (li >= 0) ul_matched[li] = true;
+    ul_presented_view[at] = presented;
+    if (old >= 0) ul_id[at] = ul_id[old] else {
+        ul_last_id = ul_last_id + 1;
+        ul_id[at] = ul_last_id
+    }
     ul_words(v, kind, at, old);
     ul_label_kept(v, at, old);
-    if (old < 0) {
-        ul_added(at);
-        return
-    }
-    ul_compared(at, old)
+    if (old < 0) ul_added(at) else ul_compared(at, old);
+    ul_id[at]
 }
 
 // View v's spoken label's start kept for record at: read once, as the view
@@ -838,7 +885,7 @@ ul_on_screen(at: int): bool {
 
 ul_added(at: int) {
     ul_begin("add");
-    ul_field_int("id", ul_view[at]);
+    ul_field_int("id", ul_id[at]);
     ul_str(",\"k\":\"");
     ul_str(ul_kind_name(ul_kind[at]));
     ul_str("\"");
@@ -848,6 +895,7 @@ ul_added(at: int) {
     if (ul_text_n[at] > 0) ul_text_field("tx", at);
     if (!ul_on_screen(at)) ul_field_int("off", 1);
     if (ul_frames == 1) ul_field_int("base", 1);
+    if (ul_presented_view[at]) ul_field_int("pv", 1);
     if (ul_anchor[at] != 0) ul_field_int("a", ul_anchor[at]);
     if (ul_anchor_scrolls[at]) ul_field_int("sc", 1);
     if (ul_kind[at] == UL_PANE) {
@@ -875,7 +923,7 @@ ul_compared(at: int, old: int) {
             ul_rect[old * 4 + 3]);
         if (relative && on_screen) {
             ul_begin("move");
-            ul_field_int("id", ul_view[at]);
+            ul_field_int("id", ul_id[at]);
             ul_desc_field(at);
             ul_rect_field("r", at);
             ul_field_num("dx", ul_rel[at * 2] - ul_rel[old * 2]);
@@ -887,7 +935,7 @@ ul_compared(at: int, old: int) {
         }
         if (ul_alpha[at] - ul_alpha[old] >= 0.02f64 || ul_alpha[old] - ul_alpha[at] >= 0.02f64) {
             ul_begin("fade");
-            ul_field_int("id", ul_view[at]);
+            ul_field_int("id", ul_id[at]);
             ul_desc_field(at);
             ul_field_num("from", ul_alpha[old]);
             ul_field_num("to", ul_alpha[at]);
@@ -896,7 +944,7 @@ ul_compared(at: int, old: int) {
         }
         if (ul_text_hash[at] != ul_text_hash[old]) {
             ul_begin("text");
-            ul_field_int("id", ul_view[at]);
+            ul_field_int("id", ul_id[at]);
             ul_desc_field(at);
             ul_text_field("from", old);
             ul_text_field("to", at);
@@ -908,7 +956,7 @@ ul_compared(at: int, old: int) {
         if (ul_differs(ul_scroll[at * 2 + 1], ul_scroll[old * 2 + 1]) || ul_differs(ul_scroll[at * 2],
             ul_scroll[old * 2])) {
             ul_begin("scroll");
-            ul_field_int("id", ul_view[at]);
+            ul_field_int("id", ul_id[at]);
             ul_desc_field(at);
             ul_field_num("from", ul_scroll[old * 2 + 1]);
             ul_field_num("to", ul_scroll[at * 2 + 1]);
@@ -939,7 +987,7 @@ ul_flag_input(
     ul_str(",\"type\":\"");
     if (now) ul_str(began) else ul_str(ended);
     ul_str("\"");
-    ul_field_int("id", ul_view[at]);
+    ul_field_int("id", ul_id[at]);
     ul_field_int("pane", ul_pane_of_view(ul_view[at]));
     ul_end()
 }
@@ -965,13 +1013,13 @@ ul_rest() {
         if (!first) ul_byte(44);
         first = false;
         ul_byte(91);
-        ul_int(ul_view[at]);
+        ul_int(ul_id[at]);
         for k in 0..4 {
             ul_byte(44);
             ul_num(ul_rect[at * 4 + k])
         }
         ul_byte(44);
-        ul_int(if (ul_clipped(at)) 1 else 0);
+        ul_int(ul_clipped(at));
         ul_str(",[");
         for k in 0..4 {
             if (k > 0) ul_byte(44);
@@ -983,12 +1031,24 @@ ul_rest() {
     ul_end()
 }
 
-ul_clipped(at: int): bool {
-    if (ul_kind[at] != UL_TEXT || ul_text_n[at] == 0) return false;
+// Whether a one-line label's words are wider than it: 0 not; 1 cut where
+// its box ends; 2 shortened with an ellipsis (its line break mode
+// truncates: NSLineBreakByTruncatingHead, Tail or Middle, 3 to 5), which
+// says so.
+UL_FITS: int = 0;
+
+UL_CUT: int = 1;
+
+UL_ELLIPSIS: int = 2;
+
+ul_clipped(at: int): int {
+    if (ul_kind[at] != UL_TEXT || ul_text_n[at] == 0) return UL_FITS;
     v: int = ul_view[at];
-    if (msg(v, sel("numberOfLines")) != 1) return false;
+    if (msg(v, sel("numberOfLines")) != 1) return UL_FITS;
     l8_msg_hfa(hfa, v, sel("intrinsicContentSize"), 0, 0, 0);
-    hfa[0] > ul_rect[at * 4 + 2] + 1.0f64
+    if (hfa[0] <= ul_rect[at * 4 + 2] + 1.0f64) return UL_FITS;
+    mode: int = msg(v, sel("lineBreakMode"));
+    if (mode >= 3 && mode <= 5) UL_ELLIPSIS else UL_CUT
 }
 
 // ---- the two panes ----
@@ -1142,4 +1202,85 @@ ul_pane_at(x: f64, y: f64): int {
         }
     }
     0
+}
+
+// The next sheet presented grows from its control (iOS 26's zoom, set by
+// sheets.l8's sheet_zoom_from): a zoom the walk can't see (UIKit draws it
+// where the walk doesn't reach), so the log says so for the checker.
+uilog_zoom() {
+    if (!ul_on) return;
+    ul_begin("zoom");
+    ul_end()
+}
+
+// ---- where the screen shows a view ----
+// CALayer's convertRect:toLayer: (0 until first wanted; let go as logging
+// stops), the layer of the window being walked (its presentation), and the
+// last rectangle converted.
+ul_convert: int = 0;
+
+ul_window_layer: int = 0;
+
+ul_window_model: int = 0;
+
+ul_convert_out: []f64 = new f64[4](0.0f64);
+
+// Shown layer's bounds in the window's points, through every presentation
+// layer above it and their transforms, to ul_convert_out; false if it
+// can't be converted.
+// (Within one tree: a presentation layer to the window's presentation; a
+// layer that has none yet, added this frame (model is layer), to the
+// window's own.)
+// Only a layer in the window's tree is converted (a frame where it is
+// not, as a sheet is moved between UIKit's containers, would give a rect
+// against another root: the walk's sum is used then). The tree is the
+// model layers' (their objects last; a presentation copy is made anew).
+ul_window_rect(layer: int, model: int): bool {
+    if (ul_convert == 0) ul_convert = rect_object_invocation(layer, "convertRect:toLayer:");
+    target: int = if (layer == model) ul_window_model else ul_window_layer;
+    if (ul_convert == 0 || target == 0 || ul_window_model == 0) return false;
+    above: int = msg(model, sel("superlayer"));
+    depth: int = 0;
+    while (above != 0 && above != ul_window_model && depth < UL_DEPTH_MOST * 2) {
+        above = msg(above, sel("superlayer"));
+        depth = depth + 1
+    }
+    if (above != ul_window_model) return false;
+    l8_msg_hfa(hfa, layer, sel("bounds"), 0, 0, 0);
+    rect_object_invoke(ul_convert, layer, hfa[0], hfa[1], hfa[2], hfa[3], target,
+        ul_convert_out)
+}
+
+// The presented controllers' views this frame (each sheet, popover or
+// cover UIKit shows over the window's root, the panel's sheet among them),
+// found as the frame begins.
+UL_PRESENTED_MOST: int = 8;
+
+ul_presented: []int = new int[UL_PRESENTED_MOST](0);
+
+ul_presented_n: int = 0;
+
+// Whether there were more presented than that (the walk says so).
+ul_presented_capped: bool = false;
+
+ul_presented_found() {
+    ul_presented_n = 0;
+    root: int = if (window == 0) 0 else msg(window, sel("rootViewController"));
+    shown: int = if (root == 0) 0 else msg(root, sel("presentedViewController"));
+    while (shown != 0 && ul_presented_n < UL_PRESENTED_MOST) {
+        controller: int = msg(shown, sel("presentationController"));
+        view: int = if (controller == 0) 0 else msg(controller, sel("presentedView"));
+        if (view != 0) {
+            ul_presented[ul_presented_n] = view;
+            ul_presented_n = ul_presented_n + 1
+        }
+        shown = msg(shown, sel("presentedViewController"))
+    }
+    ul_presented_capped = shown != 0
+}
+
+ul_is_presented(v: int): bool {
+    for i in 0..ul_presented_n
+        if (ul_presented[i] == v) return true;
+    false
 }

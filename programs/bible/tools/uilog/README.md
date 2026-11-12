@@ -89,7 +89,23 @@ without posting.
 Rectangles come from each view's presentation layer, so animations show as
 motion. They are added up in window points from each layer's frame. An
 ancestor's scale is not applied: the page shrinking behind a sheet shows
-only on the sheet's card. The logger records bars, sheets
+only on the sheet's card. A presented controller's view (each sheet,
+popover or cover over the window's root, the panel's sheet among them) and
+any view whose layer UIKit has put under layers of its own (iOS 26's panel
+sheet is one) is placed instead by converting its layer's bounds through
+every presentation layer above it, transforms included (and only while
+that layer is in the window's tree: otherwise by the sum, for that
+frame), so a sheet's rise and fall between its heights is its rect frame
+by frame; what it holds is placed from there, without the sheet's
+transform, and the checker doesn't judge those views' pops while their
+sheet moves. A zoom (a sheet growing from the control that opened it,
+iOS 26) is not seen: UIKit draws it where the walk doesn't reach, so a
+zoomed sheet's first rect is already its last one, and it appears and
+goes in one frame. The app marks each zoom in the log (`zoom`), and the
+checker lists those sheets' coming and going as zoomed, not as pops. Each
+view gets an id of its own as it is first seen and keeps it
+while it is seen (UIKit reuses a freed view's address for another, so an
+address is not an id). The logger records bars, sheets
 (`UILayoutContainerView`, `UIDropShadowView`, popovers), lists, cells,
 labels, controls, text views (not their insides), the toast, and hairlines
 (a plain view at most 1.5 points tall).
@@ -103,7 +119,7 @@ iPhone.
 | `e` | Fields |
 |---|---|
 | `meta` | `platform` (`web` or `ios`), `viewport`, `dpr`, and on the web `url` and `build` |
-| `add` | `id`, `k` (kind), `d` (descriptor), `r`, `o` (opacity, ancestors' included), `tx` (text), `a` (the id of what holds it), `sc` (what holds it scrolls), `off` (out of sight), `base` (already there when logging began), `s` (a list's scroll offset) |
+| `add` | `id`, `k` (kind), `d` (descriptor), `r`, `o` (opacity, ancestors' included), `tx` (text), `a` (the id of what holds it), `sc` (what holds it scrolls), `off` (out of sight), `base` (already there when logging began), `pv` (iPhone: a presented controller's view), `s` (a list's scroll offset) |
 | `remove` | `id`, `d`, `r` |
 | `move` | `id`, `d`, `r`, `dx dy dw dh`: moved within what holds it *and* on the screen. A list scrolling isn't a move of its rows, and a change above the reading line that the scroll makes up for isn't a move either |
 | `fade` | `id`, `d`, `from`, `to` |
@@ -111,10 +127,11 @@ iPhone.
 | `scroll` | `id`, `d`, `from`, `to` (and `fromx`, `tox`), `off` (out of sight before and after, as a panel laid out past the window's edge) |
 | `panes` | While the panel's reader shows, in each frame where either pane's offset changed (plus the frame after): `p` is both offsets `[page, panel]`. `at` is each pane's place at its reading line. On the web that is `CHAPTER:VERSE.FRACTION` (`l` before a comment's number). On the iPhone it is `CHAPTER:aANCHOR.FRACTION`, from `win_place` |
 | `input` | `type`: `pointerdown`, `pointermove`, `wheel` (`dy`), `touchstart`, `touchend`, `key`, `click`, `wire` (`detail`), `drag-start`, `drag-end`, `decel-start`, `decel-end`. `pane` is 0 for the page and 1 for the panel. `on` names the element that was touched |
-| `rest` | After 18 frames without a change: `items` lists `[id, x, y, w, h, clipped, visible rect, text start]` for everything in sight and not covered |
+| `rest` | After 18 frames without a change: `items` lists `[id, x, y, w, h, clipped, visible rect, text start]` for everything in sight and not covered, back to front. On the iPhone `clipped` is 1 for words cut off where the label ends, 2 for words shortened with "…" |
 | `f` | A frame. `c` is the logger's own cost in ms |
 | `value` | A number the app keeps that shapes what shows, as it changes: `n` its name, `v` its value. On the iPhone from iOS 26, `page-inset` (the page's bottom inset, set as the panel's sheet settles), `sheet-cover` (how much of the window's foot the panel's sheet covers, each frame it moves) and `gap-top` (the top of the page-colored cover under the floating sheet, -1 when there is none) |
-| `mark`, `stop`, `walk` | A step's name, the end, and a walk stopped at its limit (`capped`) |
+| `mark`, `stop`, `walk` | A step's name, the end, and a walk stopped at its limit (`capped`; `presented`: the presented views looked for stopped at their limit) |
+| `zoom` | iPhone: the next sheet presented grows from its control (iOS 26's zoom), which the walk can't see |
 
 Kinds: `bar`, `sheet`, `toast`, `hairline`, `row`, `button`, `heading`,
 `text`, `para` (reader text), `pane` (a scroll container), and `cover`
@@ -128,6 +145,9 @@ there).
 node check.mjs LOG                   # the report
 node check.mjs LOG --all             # every occurrence, not just the first twelve
 node check.mjs LOG --timeline 2000-4000   # what changed, frame by frame, in that window (ms)
+node check.mjs LOG --sheets          # each presented sheet: its rect as it moves, rows added late
+                                     # (a height going back less than 6 in all is a spring settling,
+                                     # not "turned back")
 ```
 
 Repeated identical findings are grouped, with their count and times. The
@@ -138,10 +158,16 @@ thresholds sit at the top of `check.mjs`:
   between. More frames than that is an animation.
 - **Flicker.** An element goes and comes back within 250 ms, is replaced by
   a twin a frame or more later, has its text changed and changed back, or
-  dips in opacity and recovers.
+  dips in opacity and recovers. A list blanks: three or more of its rows
+  and headers on screen go in one frame with none put in their place, and
+  rows come back into it within 250 ms.
 - **Pop.** A sheet, toast, bar, or pane appears or goes at full opacity in
   one frame, with no fade or slide nearby. Only the outermost of elements
-  that appear together is reported.
+  that appear together is reported. A presented sheet that moves or
+  changes its height by 20 or more in one frame, not moving in the frames
+  around it, jumped (a height set without animation) and is a pop too.
+  Not pops: a zoomed sheet's coming and going (listed apart as zoomed),
+  and a presented sheet hidden while a later one covers it (UIKit's).
 - **Scroll jump.** A container in sight scrolls more than 40 in one frame
   with no input in the 100 ms before.
 - **Late settle.** Visible changes continue more than 600 ms after the hand
@@ -151,13 +177,16 @@ thresholds sit at the top of `check.mjs`:
   the logger's own cost.
 - **At rest:**
   - **Overlap.** Words overlap a bar or other words, both in the same
-    scroller and sheet, with neither containing the other.
+    scroller and sheet, with neither containing the other. What a
+    presented sheet covers (the part of anything walked before it, under
+    its rect and outside it) is not in sight for these checks.
   - **Misalignment.** Stacked labels or rows in one column start their words
     1–4 px apart. On the iPhone the label's left edge is used, and the
     range is 0.5–3 points.
   - **Clipped text.** On the web, text wider than its overflow-hidden box
     or past its line clamp. On the iPhone, a one-line label narrower than
-    its words.
+    its words and cut where it ends; one shortened with "…" (its line break
+    mode truncates) is listed apart, as shortened with an ellipsis.
 - **Linked panes.** Each episode of pane motion is measured. The leader is
   the pane the last input was in; on the iPhone a `!flick` line counts.
   The report gives:

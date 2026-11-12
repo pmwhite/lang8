@@ -4,12 +4,15 @@
 // frames, overlap, misalignment, clipped text, and how the two linked
 // panes keep together.
 //
-//   node programs/bible/tools/uilog/check.mjs LOG [--timeline [FROM-TO]] [--all]
+//   node programs/bible/tools/uilog/check.mjs LOG [--timeline [FROM-TO]] [--sheets] [--all]
 //
 // LOG is a .jsonl file or the development server's
 // http://HOST:8777/uilog/latest. --timeline prints what changed, frame
 // by frame condensed, between FROM and TO ms (all of it if not given);
-// --all lists every occurrence of a finding instead of the first few.
+// --sheets prints each presented sheet's coming and going (iPhone logs:
+// its rect each frame it moves, whether it grew or shrank steadily, and
+// rows added in it after its first frame); --all lists every occurrence
+// of a finding instead of the first few.
 import fs from "node:fs";
 
 const args = process.argv.slice(2);
@@ -50,11 +53,17 @@ const T = {
   spikeFactor: 2.5, // a follower step this many times the leader's typical step (and...)
   spikeMinPx: 12, // ...at least this far from the follower's own previous step) is a spike
   reverseMinPx: 2, // a follower step back at least this far is a reversal
+  sheetJumpPx: 20, // a presented sheet moving this far in one frame...
+  sheetStillMs: 40, // ...with no move of it this near before or after has jumped
+  sheetCoversWidth: 0.9, // a sheet over this much of an element's width hides what is under it
+  zoomMs: 600, // a presented sheet added this soon after the app's `zoom` mark is the zoomed one
+  turnBackPx: 6, // a sheet's height going back less than this in all is its spring settling
+  blankRowsLeast: 3, // this many rows and headers of a list on screen gone in a frame, none in their place...
 };
 
 // ---- the elements, as the log builds them ----
 const elements = new Map(); // id -> {d, k, a, sc, r, o, shown}
-for (const e of events) if (e.e === "add") elements.set(e.id, { d: e.d, k: e.k, a: e.a, sc: e.sc, r: e.r, tx: Boolean(e.tx) || e.k === "para" || e.k === "text" });
+for (const e of events) if (e.e === "add") elements.set(e.id, { d: e.d, k: e.k, a: e.a, sc: e.sc, r: e.r, pv: Boolean(e.pv), tx: Boolean(e.tx) || e.k === "para" || e.k === "text" });
 const desc = (id) => elements.get(id)?.d ?? `#${id}`;
 const kind = (id) => elements.get(id)?.k;
 // What holds id, and what holds that, outwards.
@@ -62,6 +71,13 @@ function ancestors(id) {
   const out = new Set();
   for (let a = elements.get(id)?.a; a && !out.has(a); a = elements.get(a)?.a) out.add(a);
   return out;
+}
+// The presented sheet (a presented controller's view, `pv`: the panel's
+// sheet, Go To...) holding id, or id itself if it is one (0: none).
+function presentedSheetOf(id) {
+  if (elements.get(id)?.pv) return id;
+  for (const a of ancestors(id)) if (elements.get(a)?.pv) return a;
+  return 0;
 }
 // The nearest sheet (panel, menu, dialog) holding id (0: none).
 function sheetOf(id) {
@@ -137,6 +153,14 @@ const inside = (r, c) => r && c && r[0] >= c[0] - 2 && r[1] >= c[1] - 2 && r[0] 
 // reader's text views run past the screen, clipped by their pane.)
 const covered = (t, r, id) => covers.some((c) => t >= c.from - 20 && t <= c.to + 20 && (inside(r, c.r) || (id !== undefined && [...ancestors(id)].some((a) => kind(a) === "pane" && inside(elements.get(a)?.r, c.r)))));
 
+// Zoomed sheets: a presented sheet added soon after the app's `zoom` mark
+// (iOS 26's zoom, which the logger can't see: README.md).
+const zoomed = new Set();
+for (const z of events.filter((e) => e.e === "zoom")) {
+  const add = events.find((e) => e.e === "add" && e.pv && e.t >= z.t && e.t - z.t <= T.zoomMs);
+  if (add) zoomed.add(add.id);
+}
+
 // The motion events (what a person sees change), on screen.
 const visibleChange = (e) => (e.e === "move" || e.e === "fade" || e.e === "text" || (e.e === "scroll" && !e.off) || (e.e === "add" && !e.off && !e.base) || e.e === "remove");
 
@@ -205,6 +229,66 @@ function sign(x) {
   }
 }
 
+// What a presented sheet hides at rest: a rest's items are in the order the
+// logger walked them, back to front, so a presented sheet hides the part of
+// each item before it that lies under it (not its own views). An item
+// whose width the sheet spans loses the band the sheet covers; an item
+// hidden whole is dropped.
+function coveredBySheets(items) {
+  const out = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    let [x, y, w, h] = item.vis;
+    for (let j = i + 1; j < items.length && h > 0; j++) {
+      const sheet = items[j];
+      if (!elements.get(sheet.id)?.pv || presentedSheetOf(item.id) === sheet.id) continue;
+      const [sx, sy, sw, sh] = sheet.vis;
+      const across = Math.min(x + w, sx + sw) - Math.max(x, sx);
+      if (across < T.sheetCoversWidth * w) continue;
+      const top = Math.max(y, sy);
+      const bottom = Math.min(y + h, sy + sh);
+      if (bottom <= top) continue;
+      // (The sheet over the item's foot or head: what shows is the rest.)
+      if (sy <= y && sy + sh >= y + h) h = 0;
+      else if (sy > y) h = top - y;
+      else {
+        h = y + h - bottom;
+        y = bottom;
+      }
+    }
+    if (h > 0) out.push({ ...item, vis: [x, y, w, h] });
+  }
+  return out;
+}
+
+// A list blanking: in one frame, rows and headers of a list on screen go
+// with none put in their place, and rows come back into it within the
+// flicker window (each row may come back taller or with new words, so the
+// rule above sees only some of them).
+{
+  // (By the logger's frames: a frame's events are written over a few ms,
+  // ending with its `f`.)
+  const framesOf = new Map();
+  let frame = 0;
+  for (const e of events) {
+    if (e.e === "f") frame++;
+    if ((e.e !== "remove" && e.e !== "add") || e.off || e.base) continue;
+    const k = kind(e.id);
+    if (k !== "row" && k !== "text" && k !== "heading") continue;
+    const list = elements.get(e.id)?.a;
+    if (!list || kind(list) !== "pane") continue;
+    const key = `${list}|${frame}`;
+    if (!framesOf.has(key)) framesOf.set(key, { list, t: e.t, gone: 0, came: 0 });
+    framesOf.get(key)[e.e === "remove" ? "gone" : "came"]++;
+  }
+  const frames = [...framesOf.values()].sort((a, b) => a.t - b.t);
+  for (const f of frames) {
+    if (f.gone < T.blankRowsLeast || f.came > 0 || covered(f.t, elements.get(f.list)?.r, f.list)) continue;
+    const back = frames.find((g) => g.list === f.list && g.t > f.t + 12 && g.t - f.t <= T.flickerMs && g.came > 0);
+    if (back) find("flicker", `${desc(f.list)}|blank`, f.t, `${desc(f.list)} lost ${f.gone} rows and headers with none in their place; rows came back ${ms(back.t - f.t)} later (blank between)`);
+  }
+}
+
 function sameRect(a, b) {
   return a && b && Math.abs(a[0] - b[0]) < 2 && Math.abs(a[1] - b[1]) < 2 && Math.abs(a[2] - b[2]) < 2 && Math.abs(a[3] - b[3]) < 2;
 }
@@ -219,15 +303,70 @@ function sameRect(a, b) {
     byFrame.get(e.t).add(e.id);
   }
   const animated = (id, from, to) => events.some((x) => x.id === id && (x.e === "move" || x.e === "fade") && x.t >= from && x.t <= to);
+  // (What a presented sheet holds is placed from the sheet's rect without
+  // its transform: while the sheet moves (a zoom), its views' own geometry
+  // is not judged.)
+  const inMovingSheet = (id, t) => {
+    const sheet = presentedSheetOf(id);
+    return sheet && sheet !== id && events.some((x) => x.id === sheet && x.e === "move" && Math.abs(x.t - t) <= 250);
+  };
   for (const e of events) {
-    if ((e.e !== "add" && e.e !== "remove") || e.base || e.off || !T.popKinds.has(kind(e.id)) || covered(e.t, e.r, e.id)) continue;
+    if ((e.e !== "add" && e.e !== "remove") || e.base || e.off || !T.popKinds.has(kind(e.id)) || covered(e.t, e.r, e.id) || inMovingSheet(e.id, e.t)) continue;
+    if (zoomed.has(e.id)) {
+      find("zoomed (not seen by the log)", `${e.d}|${e.e}`, e.t, `${e.d} ${e.e === "add" ? "came" : "went"} by a zoom from its control, which the logger can't see (its first rect is its last)`);
+      continue;
+    }
     const together = [...byFrame.entries()].filter(([t]) => Math.abs(t - e.t) <= 20).flatMap(([, ids]) => [...ids]);
     if ([...ancestors(e.id)].some((a) => together.includes(a))) continue;
     if (e.e === "add" && (e.o ?? 1) >= 0.9 && !animated(e.id, e.t, e.t + 250)) find("pop", `${e.d}|in`, e.t, `${e.d} appeared at full opacity in one frame (no fade or slide)`);
     if (e.e === "remove" && !animated(e.id, e.t - 250, e.t)) find("pop", `${e.d}|out`, e.t, `${e.d} vanished in one frame (no fade or slide)`);
   }
+  // (A presented sheet hidden while another covers it, as UIKit hides a
+  // sheet a full-height one is over, and shown again as that one goes:
+  // covered, not a pop.)
+  const sheetLife = new Map();
+  for (const x of events) {
+    if (!elements.get(x.id)?.pv) continue;
+    if (x.e === "add") sheetLife.set(x.id, { from: x.t, to: Infinity, rects: [[x.t, x.r]] });
+    else if (x.e === "move" && sheetLife.has(x.id)) sheetLife.get(x.id).rects.push([x.t, x.r]);
+    else if (x.e === "remove" && sheetLife.has(x.id)) sheetLife.get(x.id).to = x.t;
+  }
+  const rectAt = (life, t) => {
+    let r = life.rects[0][1];
+    for (const [rt, rr] of life.rects) if (rt <= t) r = rr;
+    return r;
+  };
+  const coveredBySheetChange = (id, t) => {
+    const own = presentedSheetOf(id);
+    const ownLife = sheetLife.get(own);
+    if (!ownLife) return false;
+    const mine = rectAt(ownLife, t);
+    for (const [other, life] of sheetLife) {
+      if (other === own || life.from <= ownLife.from || t < life.from || t > life.to + 600) continue;
+      const r = rectAt(life, Math.min(t, life.to));
+      if (r[1] <= mine[1] + 2 && r[0] <= mine[0] + 2 && r[0] + r[2] >= mine[0] + mine[2] - 2) return true;
+    }
+    return false;
+  };
   for (const e of events)
-    if (e.e === "fade" && T.popKinds.has(kind(e.id)) && Math.abs(e.to - e.from) >= 0.8) find("pop", `${desc(e.id)}|fade`, e.t, `${desc(e.id)} opacity ${e.from} → ${e.to} in a single frame`);
+    if (e.e === "fade" && T.popKinds.has(kind(e.id)) && Math.abs(e.to - e.from) >= 0.8 && !coveredBySheetChange(e.id, e.t)) find("pop", `${desc(e.id)}|fade`, e.t, `${desc(e.id)} opacity ${e.from} → ${e.to} in a single frame`);
+  // A presented sheet that changes its place or height in one frame, not
+  // moving in the frames around it (a detent set without animation): it
+  // jumped. (Its rect is where the screen shows it: the iPhone logs a
+  // presented view through its layers' transforms.)
+  const sheetMoves = new Map();
+  for (const e of events) if (e.e === "move" && elements.get(e.id)?.pv) (sheetMoves.get(e.id) || sheetMoves.set(e.id, []).get(e.id)).push(e);
+  for (const [id, moves] of sheetMoves) {
+    for (let i = 0; i < moves.length; i++) {
+      const m = moves[i];
+      const size = Math.max(Math.abs(m.dy), Math.abs(m.dh), Math.abs(m.dx), Math.abs(m.dw));
+      if (size < T.sheetJumpPx) continue;
+      const before = moves[i - 1];
+      const after = moves[i + 1];
+      if ((before && m.t - before.t <= T.sheetStillMs) || (after && after.t - m.t <= T.sheetStillMs)) continue;
+      find("pop", `${desc(id)}|jump`, m.t, `${desc(id)} jumped (${[m.dy && `y ${sign(m.dy)}`, m.dh && `height ${sign(m.dh)}`, m.dx && `x ${sign(m.dx)}`, m.dw && `width ${sign(m.dw)}`].filter(Boolean).join(", ")}) in one frame, with no animation`);
+    }
+  }
 }
 
 // 4. Scroll jumps: far in one frame with no input just before.
@@ -301,7 +440,7 @@ for (const e of events) {
   const textual = new Set(["text", "para", "row", "button", "heading"]);
   const seenRest = new Set();
   for (const rest of events.filter((e) => e.e === "rest")) {
-    const items = rest.items.map(([id, x, y, w, h, clip, vis, textX]) => ({ id, x, y, w, h, clip, vis: vis || [x, y, w, h], textX }));
+    const items = coveredBySheets(rest.items.map(([id, x, y, w, h, clip, vis, textX]) => ({ id, x, y, w, h, clip, vis: vis || [x, y, w, h], textX })));
     const fingerprint = items.map((i) => `${i.id}:${Math.round(i.x)}:${Math.round(i.y)}`).join(",");
     if (seenRest.has(fingerprint)) continue;
     seenRest.add(fingerprint);
@@ -356,7 +495,12 @@ for (const e of events) {
         find("misalignment", `${desc(a.id)}|${desc(b.id)}`, rest.t, `words begin at ${Math.round(a.left * 10) / 10} vs ${Math.round(b.left * 10) / 10} (${Math.round(d * 10) / 10} apart): ${desc(a.id)} / ${desc(b.id)}`);
       }
     }
-    for (const i of items) if (i.clip) find("clipped text", `${desc(i.id)}`, rest.t, `${desc(i.id)} is cut off (its text is wider than its box)`);
+    // (On the iPhone, clip 2 is a label shortened with an ellipsis, which
+    // says so: listed apart; 1, or the web's, is words cut off silently.)
+    for (const i of items) {
+      if (ios && i.clip === 2) find("shortened with an ellipsis", `${desc(i.id)}`, rest.t, `${desc(i.id)} is shortened with "…" (its text is wider than its box)`);
+      else if (i.clip) find("clipped text", `${desc(i.id)}`, rest.t, `${desc(i.id)} is cut off (its text is wider than its box)`);
+    }
   }
 }
 
@@ -509,6 +653,10 @@ function median(a) {
 }
 
 // ---- the report ----
+if (args.includes("--sheets")) {
+  printSheets();
+  process.exit(0);
+}
 const timelineIndex = args.indexOf("--timeline");
 if (timelineIndex >= 0) {
   const range = /^(\d+)-(\d+)$/.exec(args[timelineIndex + 1] || "");
@@ -523,7 +671,7 @@ console.log(`${meta.platform} log, ${(end / 1000).toFixed(1)} s, ${frames.length
 if (cost.length) console.log(`logger's own work a frame: median ${cost[cost.length >> 1]} ms, worst ${cost[cost.length - 1]} ms`);
 const marks = events.filter((e) => e.e === "mark");
 if (marks.length) console.log(`steps: ${marks.map((m) => `${at(m.t)} ${m.label}`).join(" | ")}`);
-const order = ["layout jump after appearing", "flicker", "pop", "scroll jump", "late settle", "dropped frames", "overlap", "misalignment", "clipped text"];
+const order = ["layout jump after appearing", "flicker", "pop", "zoomed (not seen by the log)", "scroll jump", "late settle", "dropped frames", "overlap", "misalignment", "clipped text", "shortened with an ellipsis"];
 const all = args.includes("--all");
 let any = false;
 for (const rule of order) {
@@ -579,5 +727,45 @@ function printTimeline(from, to) {
       else if (e.e === "value") parts.push(`${e.n} ${e.v}`);
     }
     if (parts.length) console.log(`${(t / 1000).toFixed(3)}  ${parts.join(" | ")}`);
+  }
+}
+
+// Each presented sheet (`pv`): when it came, its rect each frame it moved
+// from then until it was still, whether its height grew (or, as it went,
+// shrank) without turning back, and the rows added inside it after its
+// first frame (its content laid out late).
+function printSheets() {
+  const r = (x) => (x ? x.map((v) => Math.round(v)).join(",") : "?");
+  const sheets = events.filter((e) => e.e === "add" && e.pv);
+  if (!sheets.length) console.log("no presented sheet in this log (or a log from before `pv`)");
+  for (const add of sheets) {
+    const id = add.id;
+    const gone = events.find((e) => e.e === "remove" && e.id === id && e.t > add.t);
+    const moves = events.filter((e) => e.e === "move" && e.id === id && (!gone || e.t <= gone.t));
+    console.log(`${desc(id)} #${id}: came at ${at(add.t)}${add.base ? " (there when logging began)" : ""}, first rect ${r(add.r)}${add.off ? " (out of sight)" : ""}${gone ? `; went at ${at(gone.t)}, last rect ${r(gone.r)}` : ""}`);
+    // (Runs of moves a frame or two apart: one motion each.)
+    const runs = [];
+    for (const m of moves) {
+      const last = runs[runs.length - 1];
+      if (last && m.t - last[last.length - 1].t <= 50) last.push(m);
+      else runs.push([m]);
+    }
+    for (const run of runs) {
+      const heights = run.map((m) => m.r[3]);
+      const tops = run.map((m) => m.r[1]);
+      const steps = heights.slice(1).map((h, i) => h - heights[i]);
+      const up = steps.filter((d) => d > 0.5).length;
+      const down = steps.filter((d) => d < -0.5).length;
+      // (Going back by less than T.turnBackPx in all is a spring settling.)
+      const growing = heights[heights.length - 1] >= heights[0];
+      const back = steps.filter((d) => (growing ? d < 0 : d > 0)).reduce((a, d) => a + Math.abs(d), 0);
+      const steady = !(up && down) || back < T.turnBackPx;
+      console.log(`  ${at(run[0].t)}–${at(run[run.length - 1].t)}: ${run.length} frame(s), top ${Math.round(tops[0])} → ${Math.round(tops[tops.length - 1])}, height ${Math.round(heights[0])} → ${Math.round(heights[heights.length - 1])}${steady ? "" : ` (TURNED BACK: ${up} frame(s) taller, ${down} shorter)`}`);
+      console.log(`    rects: ${run.map((m) => r(m.r)).join(" | ")}`);
+    }
+    const firstFrame = events.find((e) => e.e === "f" && e.t >= add.t);
+    const late = events.filter((e) => e.e === "add" && !e.off && kind(e.id) === "row" && e.t > (firstFrame ? firstFrame.t : add.t) && (!gone || e.t < gone.t) && presentedSheetOf(e.id) === id);
+    if (late.length) console.log(`  rows added after its first frame: ${late.length}, first at ${at(late[0].t)} (${ms(late[0].t - add.t)} after it came)`);
+    else console.log("  rows added after its first frame: none");
   }
 }
