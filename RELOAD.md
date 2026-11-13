@@ -212,27 +212,11 @@ list (or a server out of reach after three seconds) comes from the bundle.
 `wire` lines go to the app rather than the host: a Smooth Bible build for
 hot reload (`programs/bible/ios/devwire.l8`) long-polls the server's
 `/wire` and gives each line to core as its skin would (`select C V`,
-`trayact ACTION 0`, `act ID ACTION ARG VALUE`; `|` separates several;
-`!screens` writes the screens shown to the log, `!close` closes the
-sheets shown, as their Done does, `!back` goes back a screen (the top
-sheet's, else the panel's), `!tap WORDS` taps the row, button, menu item
-(the panel reader's Swap Panes, Full Screen, Close Panel) or bar's left
-button (the panel reader's name) whose title begins with WORDS, else the
-panel's own Close Panel or Full Screen, `!info WORDS` that row's ⓘ,
-`!flick page DY` or `!flick panel DY` flicks the page or the panel's
-reader DY points, `!scroll DY` scrolls the top sheet's list (else the
-panel's), `!type TEXT` puts TEXT in the top sheet's search field as if it
-was typed, `!segment N` chooses segment N of the top sheet's title (a
-search's scopes), `!record on` and `!record off` record the app's screen
-(ReplayKit, which asks the person holding the phone to allow it the first
-time after a launch) and post the movie to the server's `/video`, saved
-as `.build/dev/videos/N.mov`, every animation in it at the display's rate,
-`!blocks` makes each kind of block (`programs/ios/block.l8`) and calls it,
-the results written to the log, `!where` writes each pane's place at its
-reading line and its anchors' distances from it, and `!state` writes the wire's flags). While it is connected the app keeps the
-screen on and writes its diagnostics, among them each frame drawn late
-while the page or panel moves (`frame late ms N`) and, at a flick's end,
-how many were (`flick ended late N worst ms M`). A build without a
+`trayact ACTION 0`, `act ID ACTION ARG VALUE`; `|` separates several).
+Lines beginning `!` are the skin's own (`!state`, `!scroll`, `!flick`,
+`!tap`, `!close`, `!record on|off` and others; the list is in
+[its README](programs/bible/ios/README.md)); `!record off` posts the movie
+to the server's `/video`, saved as `.build/dev/videos/N.mov`. A build without a
 server set asks nothing.
 
 These commands use `http://localhost:8777` by default (`--server URL`
@@ -272,7 +256,7 @@ retained is never released, since those globals are gone with its memory.
 Smooth Bible's `reload()` (`programs/bible/ios/app.l8`) empties the old
 build's views before it makes its own (their text and drawing let go, their
 data sources and delegates no longer the app), and keeps what must outlive
-a build (its run-loop display link, URL session and reachability watcher)
-in `persistent` globals; each reload writes `memory available MB` to the log.
+a build (the development wire's URL session, the reachability watcher, the
+dock's window) in `persistent` globals.
 Without that, the old screens' drawing used up the address space for a new
 instance after about 35 reloads ("no memory for the build").

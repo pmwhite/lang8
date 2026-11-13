@@ -1,14 +1,12 @@
-// Reads a UI-change log (uilog.js's on the web, ios/uilog.l8's from the
-// iPhone; README.md) and reports the moments a designer should look at:
-// layout jumps, flicker, pops, scroll jumps, late settling, dropped
-// frames, overlap, misalignment, clipped text, and how the two linked
-// panes keep together.
+// Reads a UI-change log (uilog.js's; README.md) and reports the moments
+// a designer should look at: layout jumps, flicker, pops, scroll jumps,
+// late settling, dropped frames, overlap, misalignment, clipped text, and
+// how the two linked panes keep together.
 //
 //   node programs/bible/tools/uilog/check.mjs LOG [--timeline [FROM-TO]] [--sheets] [--all]
 //
-// LOG is a .jsonl file or the development server's
-// http://HOST:8777/uilog/latest. --timeline prints what changed, frame
-// by frame condensed, between FROM and TO ms (all of it if not given);
+// LOG is a .jsonl file (or an http URL of one). --timeline prints what
+// changed, frame by frame condensed, between FROM and TO ms (all of it if not given);
 // --sheets prints each presented sheet's coming and going (iPhone logs:
 // its rect each frame it moves, whether it grew or shrank steadily, and
 // rows added in it after its first frame); --all lists every occurrence

@@ -25,10 +25,6 @@
 //                          lines after N (Smooth Bible's ios/devwire.l8)
 //   POST /shot             a screenshot (PNG) from the device, saved under
 //                          .build/dev/shots/; GET /shots/latest says which
-//   POST /uilog            a UI-change log (JSON lines) from the device
-//                          (Smooth Bible's `!uilog off`), saved as
-//                          .build/dev/uilog/N.jsonl; GET /uilog/latest is
-//                          the latest (programs/bible/tools/uilog)
 //   POST /video            a screen recording (a QuickTime movie) from the
 //                          device (Smooth Bible's `!record off`), saved as
 //                          .build/dev/videos/N.mov; GET /videos/latest says
@@ -281,12 +277,6 @@ let wireId = Date.now();
 const wireWaiters = new Set();
 const shotsDir = path.join(".build", "dev", "shots");
 let shots = 0;
-const uilogDir = path.join(".build", "dev", "uilog");
-// (Numbered on from those an earlier run saved.)
-let uilogs = 0;
-try {
-  for (const f of fs.readdirSync(uilogDir)) uilogs = Math.max(uilogs, parseInt(f, 10) || 0);
-} catch {}
 const videosDir = path.join(".build", "dev", "videos");
 let videos = 0;
 try {
@@ -414,20 +404,6 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (url.pathname === "/uilog" && req.method === "POST") {
-    const parts = [];
-    req.on("data", (d) => parts.push(d));
-    req.on("end", () => {
-      fs.mkdirSync(uilogDir, { recursive: true });
-      uilogs++;
-      const file = path.join(uilogDir, `${uilogs}.jsonl`);
-      const body = Buffer.concat(parts);
-      fs.writeFileSync(file, body);
-      console.log(`${new Date().toLocaleTimeString()}  uilog ${uilogs}: ${file} (${body.length} bytes)`);
-      json({ uilog: uilogs, file });
-    });
-    return;
-  }
   if (url.pathname === "/video" && req.method === "POST") {
     const parts = [];
     req.on("data", (d) => parts.push(d));
@@ -443,11 +419,6 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === "/videos/latest") return json({ video: videos, file: videos ? path.join(videosDir, `${videos}.mov`) : null });
-  if (url.pathname === "/uilog/latest") {
-    if (!uilogs) return json({ error: "no uilog saved yet" }, 404);
-    res.writeHead(200, { ...headers, "Content-Type": "text/plain; charset=utf-8" });
-    return res.end(fs.readFileSync(path.join(uilogDir, `${uilogs}.jsonl`)));
-  }
   if (url.pathname === "/shots/latest") return json({ shot: shots, file: shots ? path.join(shotsDir, `${shots}.png`) : null });
   if (url.pathname === "/build") return json(info());
   if (url.pathname === "/wait") {

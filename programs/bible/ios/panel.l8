@@ -1,730 +1,612 @@
-tag bible_ios;
+tag vellum;
 
 use_tag std, ios, bible, bible_wire;
 
-// Where the panel shows (ios/beside.l8 keeps its screens): an ordinary
-// sheet the page presents, or, on an iPad window with room for both, a
-// column at the page's right.
+// The panel beside the page (SKINS.md: core/beside.l8's screens, group 1):
+// an ordinary sheet the root presents, at a third, half or the whole
+// height, the page bright and usable behind it at every height, the
+// system's grabber, drag and swipe. Its first screen is the panel's
+// reader (pane 1), a VellumList whose view is the pane's scroll view
+// under the system's navigation bar: the chapter there as its title, what
+// it reads under it (a tap: Go To aimed at the panel), Link at its left
+// and the menu at its right. Study goes on its navigation over it.
 //
-// The sheet is UIKit's own: it stops at a third, a half or the whole
-// height (the last is core's Full Screen), the page bright and usable
-// above the two smaller ones, with the system's grabber, drag and swipe
-// to close. UIKit tells the app what a hand did through the sheet's
-// delegate (a height chosen, the sheet swiped away), and the panel's own
-// layout says where the sheet's top is, so the floating controls ride
-// above it and the page's foot is inset under it once it has settled.
-// Other sheets (Go To, Reading) are presented over it.
-//
-// The column is the root's second child, laid out by frames beside the
-// page with a hairline between them; it has no Full Screen (`panelfill 0`).
-// A window that changes size moves the panel between the two homes.
+// As the sheet's top moves, the dock rides above it, and once it is
+// still the page's foot becomes what it covers (its offset untouched: no
+// word on it moves).
 import "../../ios/objc.l8";
 
 import "../../ios/block.l8";
 
-// ---- the column ----
-// The panel's width as a column, and the least the page keeps beside it:
-// 28 em and its margins.
-PANEL_W: f64 = 390.0f64;
+import "kit.l8";
+
+import "pane.l8";
+
+type Panel = {
+    // Its navigation controller (held; 0: none), whether it is presented,
+    // and whether core wants it open and filling the screen.
+    nav: int;
+    shown: bool;
+    wanted: bool;
+    full: bool;
+    // Where its sheet's top is in the window (the window's height: none).
+    top: f64;
+    // The reader screen's slot (-1: none).
+    reader_slot: int;
+    // Being put away by the app (not a swipe).
+    leaving: bool;
+    // A column at the page's right (an iPad's wide window), not a sheet.
+    column: bool
+}
+
+panel: Panel = Panel {
+    nav: 0,
+    shown: false,
+    wanted: false,
+    full: false,
+    top: 0.0f64,
+    reader_slot: -1,
+    leaving: false,
+    column: false
+};
+
+// The column's width, and the page's least beside it (em of its type, and
+// its margins).
+PANEL_COLUMN_W: f64 = 390.0f64;
 
 PAGE_LEAST_EM: f64 = 28.0f64;
 
-page_least_w(): f64 {
-    PAGE_LEAST_EM * em + 2.0f64 * look_margin
+// Whether the window has room for the panel as a column: a regular width
+// (an iPad's), the page keeping 28 em and its margins beside it.
+panel_column_fits(): bool {
+    if (root_vc == 0) return false;
+    if (msg(msg(root_vc, sel("traitCollection")), sel("horizontalSizeClass")) != 2) return false;
+    w: f64 = bounds_of(root_view).w;
+    w >= PAGE_LEAST_EM * page_type.em + 2.0f64 * look.margin + PANEL_COLUMN_W + 1.0f64
 }
 
-// The room across a window W wide for the page and the panel: inside its
-// safe area.
-panel_room(W: f64): f64 {
-    if (window == 0) return W;
-    l8_msg_hfa(hfa, window, sel("safeAreaInsets"), 0, 0, 0);
-    W - hfa[1] - hfa[3]
+// The page's width now (the window's, less the column where it is one).
+page_width(w: f64): f64 {
+    if (panel.shown && panel.column) w - PANEL_COLUMN_W - 1.0f64 else w
 }
 
-// Whether a window W wide shows the panel as a column: an iPad's, with room
-// for the page's least beside it. (An iPhone never: held sideways, a column
-// would leave the page too narrow to read.)
-panel_column_fits(W: f64): bool {
-    is_ipad() && panel_room(W) >= PANEL_W + 1.0f64 + page_least_w()
+// The panel as a column: its navigation the root's child at the right.
+panel_column_attach(nav: int) {
+    msg1(root_vc, sel("addChildViewController:"), nav);
+    add_sub(root_view, msg(nav, sel("view")));
+    msg1(nav, sel("didMoveToParentViewController:"), root_vc);
+    panel.column = true;
+    send1("panelfill", 0);
+    chrome_relayout()
 }
 
-// Whether the panel shows as a column in the window as it is now.
-panel_as_column(): bool {
-    root_vc != 0 && panel_column_fits(view_width(msg(root_vc, sel("view"))))
+panel_column_detach() {
+    if (panel.nav == 0 || !panel.column) return;
+    msg1(panel.nav, sel("willMoveToParentViewController:"), 0);
+    msg(msg(panel.nav, sel("view")), sel("removeFromSuperview"));
+    msg(panel.nav, sel("removeFromParentViewController"));
+    panel.column = false
 }
 
-// ---- the sheet's heights ----
-// Small (the app's: a third of the most a sheet may be), medium and large
-// (the system's); large is Full Screen.
-type PanelDetent =
-    | Small
-    | Medium
-    | Large
+// The column laid out at the root's right, a hairline before it.
+panel_column_layout(w: f64, h: f64) {
+    if (!panel.shown || !panel.column || panel.nav == 0) return;
+    set_frame4(msg(panel.nav, sel("view")), w - PANEL_COLUMN_W, 0.0f64, PANEL_COLUMN_W,
+        h);
+    layer: int = msg(msg(panel.nav, sel("view")), sel("layer"));
+    msg_set_f(layer, sel("setBorderWidth:"), 0.0f64);
+    panel.top = h
+}
 
-DETENT_SMALL_SHARE: f64 = 0.33f64;
-
-// The small height's identifier (the app's own name).
-panel_small_id: int = 0;
-
-panel_detent_rank(d: PanelDetent): int {
-    match d {
-        Small -> 0;
-        Medium -> 1;
-        Large -> 2
+// The window changed size: the panel moved between sheet and column.
+panel_mode_check() {
+    if (!panel.shown || panel.nav == 0) return;
+    fits: bool = panel_column_fits();
+    if (fits == panel.column) return;
+    nav: int = retain(panel.nav);
+    if (panel.column) {
+        panel_column_detach();
+        panel_sheet_dress(nav);
+        send1("panelfill", 1);
+        panel_present()
+    } else {
+        panel.leaving = true;
+        presenter: int = msg(nav, sel("presentingViewController"));
+        if (presenter != 0) msg2(presenter, sel("dismissViewControllerAnimated:completion:"),
+            0, 0);
+        panel.leaving = false;
+        panel_column_attach(nav)
     }
+    release(nav)
 }
 
-panel_detent_id(d: PanelDetent): int {
-    match d {
-        Small -> {
-            if (panel_small_id == 0) panel_small_id = keep(nsstring("small"));
-            panel_small_id
-        }
-        Medium -> objc_const("UISheetPresentationControllerDetentIdentifierMedium");
-        Large -> objc_const("UISheetPresentationControllerDetentIdentifierLarge")
+panel_nav(): int {
+    panel.nav
+}
+
+panel_shown(): bool {
+    panel.shown
+}
+
+// (By what it presented: once a sheet has gone, its controller's
+// presentationController is a new one.)
+panel_presentation_is(presentation: int): bool {
+    panel.nav != 0 && presentation != 0 && msg(presentation, sel("presentedViewController")) == panel.nav
+}
+
+// `beside OPEN FULL`: the panel wanted open (its screens asked for:
+// `panelmake`) or not, and filling the screen or not.
+beside_line(open: bool, full: bool) {
+    panel.full = full;
+    if (open && !panel.wanted) {
+        panel.wanted = true;
+        send0("panelmake")
+    } else if (!open && panel.wanted) {
+        panel.wanted = false;
+        panel_put_away()
+    } else if (open && panel.shown) panel_detent_to_full(full)
+}
+
+// A screen of the panel's shown: its first (the reader, or Study) as the
+// navigation's root, presented if it isn't.
+panel_screen_show(s: int) {
+    if (s < 0) return;
+    controller: int = slot_controller(s);
+    if (screen_load(s) && ui.reader) panel.reader_slot = s;
+    if (panel.nav != 0 && panel.shown) {
+        stack: int = msg(panel.nav, sel("viewControllers"));
+        sheet_mark_closing(stack);
+        one_item[0] = controller;
+        msg2(panel.nav, sel("setViewControllers:animated:"), nsarray(one_item, 1),
+            0);
+        panel_forget_gone();
+        return
     }
-}
-
-// The height an identifier names (none, before a sheet shows: medium).
-panel_detent_of(id: int): PanelDetent {
-    if (id != 0 && panel_same(id, panel_detent_id(PanelDetent.Large))) return PanelDetent.Large;
-    if (id != 0 && panel_same(id, panel_detent_id(PanelDetent.Small))) return PanelDetent.Small;
-    PanelDetent.Medium
-}
-
-panel_same(a: int, b: int): bool {
-    (msg1(a, sel("isEqualToString:"), b) & 255) != 0
-}
-
-panel_detent_word(d: PanelDetent): str {
-    match d {
-        Small -> "small";
-        Medium -> "medium";
-        Large -> "large"
-    }
-}
-
-// The height the sheet was last left at, not counting large (core's Full
-// Screen): where it opens again, and where leaving Full Screen takes it.
-panel_detent_left: PanelDetent = PanelDetent.Medium;
-
-// ---- where it is ----
-// The panel's navigation (bs_nav) presented as a sheet by the page's, a
-// child of the root beside the page, or neither.
-type PanelHome =
-    | Away
-    | Sheet
-    | Column
-
-panel_home: PanelHome = PanelHome.Away;
-
-panel_is_away(): bool {
-    match panel_home {
-        Away -> true;
-        _ -> false
-    }
-}
-
-panel_is_sheet(): bool {
-    match panel_home {
-        Sheet -> true;
-        _ -> false
-    }
-}
-
-panel_is_column(): bool {
-    match panel_home {
-        Column -> true;
-        _ -> false
-    }
-}
-
-// Why the sheet is being dismissed by the app: core closed the panel (its
-// screens let go once it has gone, and made again if core opened it
-// meanwhile), or the window changed its home (shown again in the other).
-type PanelLeaving =
-    | Staying
-    | Closing
-    | Rehoming
-
-panel_leaving: PanelLeaving = PanelLeaving.Staying;
-
-// Whether the sheet's presentation is due (panel_present_sheet): on the
-// next turn, or once the sheets over the page have gone (Go To, aimed at
-// the panel, picked from).
-panel_waits: bool = false;
-
-// The hairline between the page and the column.
-panel_rule: int = 0;
-
-// ---- showing and hiding ----
-// The panel's stack made (beside_made), or core opened it again: shown in
-// its home for this window.
-panel_show() {
-    if (bs_nav == 0 || root_vc == 0) return;
-    match panel_home {
-        Away -> { }
-        Column -> return;
-        Sheet -> {
-            // (Presented, or still going: shown again once it has gone,
-            // panel_disappeared.)
-            if (msg(bs_nav, sel("presentingViewController")) != 0) return;
-            // (Gone without a word: away.)
-            panel_home = PanelHome.Away;
-            panel_leaving = PanelLeaving.Staying
-        }
-    }
-    if (panel_as_column()) panel_attach_column() else panel_present_sheet()
-}
-
-// Core closed the panel: away by UIKit's motion (the sheet) or at once
-// (the column), its screens let go once it has gone.
-panel_hide() {
-    if (bs_nav == 0) return;
-    panel_waits = false;
-    match panel_home {
-        Away -> beside_discard();
-        Column -> {
-            panel_detach_column();
-            beside_discard()
-        }
-        Sheet -> {
-            panel_now_hidden();
-            // (Swiped away already: gone now.)
-            if (msg(bs_nav, sel("presentingViewController")) == 0) {
-                panel_home = PanelHome.Away;
-                beside_discard();
-                return
-            }
-            panel_leaving = PanelLeaving.Closing;
-            msg2(msg(bs_nav, sel("presentingViewController")), sel("dismissViewControllerAnimated:completion:"),
-                1, 0)
-        }
-    }
-}
-
-// The panel out of sight: core told, the floating controls and the page's
-// foot back down.
-panel_now_hidden() {
-    if (bs_shown) {
-        bs_shown = false;
-        send1("panelvisible", 0)
-    }
-    panel_cover = 0.0f64;
-    float_controls_place();
-    panel_page_cover(0.0f64);
-    layout_bar()
-}
-
-panel_now_shown() {
-    bs_shown = true;
+    nav: int = nav_new(controller);
+    panel.nav = held(panel.nav, nav);
+    // (Its sheet rises from the foot.)
+    panel.top = chrome_bounds.h;
+    panel.shown = true;
+    panel.leaving = false;
     send1("panelvisible", 1);
-    note_num("bible: panel: shown, screens ", msg(msg(bs_nav, sel("viewControllers")),
-        sel("count")))
-}
-
-// ---- the sheet ----
-// The sheet presented on the next turn of the run loop (never from inside
-// a layout or a transition's callback), once no other sheet is over the
-// page or coming or going: UIKit presents one sheet from the page at a
-// time.
-panel_present_sheet() {
-    if (panel_waits) return;
-    panel_waits = true;
-    _t: int = after_common(0.0f64, "panelPresent:")
-}
-
-PANEL_WAIT_S: f64 = 0.05f64;
-
-panel_present_due(_self: int, _cmd: int, _timer: int): int {
-    if (!panel_waits) return 0;
-    if (presented() != 0 || msg(nav, sel("presentedViewController")) != 0 || msg(nav,
-        sel("transitionCoordinator")) != 0) {
-        _t: int = after_common(PANEL_WAIT_S, "panelPresent:");
-        return 0
+    panel_button_light(true);
+    if (panel_column_fits()) {
+        panel_column_attach(nav);
+        return
     }
-    panel_waits = false;
-    if (!bs_open || bs_nav == 0 || !panel_is_away() || panel_as_column()) return 0;
-    panel_sheet_configure();
-    panel_home = PanelHome.Sheet;
-    beside_dress_all();
-    panel_leaving = PanelLeaving.Staying;
-    panel_now_shown();
-    msg3(nav, sel("presentViewController:animated:completion:"), bs_nav, 1, 0);
+    panel_sheet_dress(nav);
+    send1("panelfill", 1);
+    panel_present()
+}
+
+// The panel's sheet presented over the page, but not over a sheet of
+// core's: presented over one, it would go when that one is put away (a
+// document picked in Go To for the panel). It waits for them to go.
+panel_present() {
+    if (panel.nav == 0 || panel.column) return;
+    if (msg(panel.nav, sel("presentingViewController")) != 0) return;
+    if (msg(root_vc, sel("presentedViewController")) != 0) {
+        // (The panel's last sheet going: presented as soon as it has gone.)
+        if (!panel_dismissing) panel_check_soon();
+        return
+    }
+    panel_transition_blocks();
+    panel_presenting = held(panel_presenting, panel.nav);
+    msg3(root_vc, sel("presentViewController:animated:completion:"), panel.nav, 1,
+        panel_presented_block);
+    panel_check_soon()
+}
+
+// ---- the sheet's transitions, one after another ----
+// A sheet's coming or going can't be undone halfway, nor another begun
+// meanwhile: a tap of the panel's button as one is under way is done as
+// soon as it ends (its completion), so that taps as quick as a hand's
+// follow one another, the last one's wish where they end.
+panel_presenting: int = 0;
+
+panel_dismissing: bool = false;
+
+panel_presented_block: int = 0;
+
+panel_dismissed_block: int = 0;
+
+panel_transition_blocks() {
+    if (panel_presented_block != 0) return;
+    panel_presented_block = block0(&panel_presented, 0, "v8@?0");
+    panel_dismissed_block = block0(&panel_dismissed, 0, "v8@?0")
+}
+
+// Come: if it was put away as it came, it goes now.
+panel_presented(_context: int): int {
+    nav: int = panel_presenting;
+    if (nav == 0) return 0;
+    _kept: int = retain(nav);
+    panel_presenting = held(panel_presenting, 0);
+    if ((nav != panel.nav || !panel.shown) && msg(nav, sel("presentingViewController")) != 0) panel_dismiss_sheet(nav);
+    release(nav);
     0
 }
 
-// The small height's resolver, made once a process (kept through a hot
-// reload: a sheet still shown keeps calling the one it was given).
-persistent panel_small_resolver: int = 0;
-
-// A third of the most a sheet may be, whatever the text's size.
-panel_small_height(_context: int, resolution: int): int {
-    block_double(msg_f(resolution, sel("maximumDetentValue")) * DETENT_SMALL_SHARE)
+panel_dismiss_sheet(nav: int) {
+    presenter: int = msg(nav, sel("presentingViewController"));
+    if (presenter == 0) return;
+    panel_transition_blocks();
+    panel_dismissing = true;
+    msg2(presenter, sel("dismissViewControllerAnimated:completion:"), 1, panel_dismissed_block)
 }
 
-// The sheet's heights, the page undimmed up to medium, the panel's lists'
-// scrolling never growing it, the system's grabber, the height it opens
-// at, and the app's delegate.
-panel_sheet_configure() {
-    msg1(bs_nav, sel("setModalPresentationStyle:"), MODAL_PAGE_SHEET);
-    sheet: int = msg(bs_nav, sel("sheetPresentationController"));
-    if (sheet == 0) return;
-    det: int = cls("UISheetPresentationControllerDetent");
-    if (panel_small_resolver == 0) panel_small_resolver = block1_double(&panel_small_height,
-        0, "d16@?0@8");
-    three: []int = new int[3](0);
-    three[0] = msg2(det, sel("customDetentWithIdentifier:resolver:"), panel_detent_id(PanelDetent.Small),
-        panel_small_resolver);
-    three[1] = msg(det, sel("mediumDetent"));
-    three[2] = msg(det, sel("largeDetent"));
-    msg1(sheet, sel("setDetents:"), nsarray(three, 3));
-    msg1(sheet, sel("setLargestUndimmedDetentIdentifier:"), panel_detent_id(PanelDetent.Large));
-    msg1(sheet, sel("setPrefersScrollingExpandsWhenScrolledToEdge:"), 0);
-    msg1(sheet, sel("setPrefersGrabberVisible:"), 1);
-    // (Held sideways, a card at the foot that keeps its heights, the page
-    // beside it, not a sheet over the whole screen.)
-    msg1(sheet, sel("setPrefersEdgeAttachedInCompactHeight:"), 1);
-    msg1(sheet, sel("setSelectedDetentIdentifier:"), panel_detent_id(if (bs_full) PanelDetent.Large else panel_detent_left));
-    msg1(sheet, sel("setDelegate:"), panel_sheet_delegate())
-}
-
-// UIModalPresentationPageSheet.
-MODAL_PAGE_SHEET: int = 1;
-
-// The sheet's delegate: an object of its own, answering only for this
-// sheet (the other sheets' is app_obj). Made once a process (UIKit keeps
-// it as the delegate of a sheet shown through a hot reload).
-persistent panel_sheet_delegate_object: int = 0;
-
-panel_sheet_delegate_class: int = 0;
-
-panel_sheet_delegate(): int {
-    if (panel_sheet_delegate_object == 0) panel_sheet_delegate_object = keep(msg(msg(panel_sheet_delegate_class,
-        sel("alloc")), sel("init")));
-    panel_sheet_delegate_object
-}
-
-// The sheet's height now (as it was left, if it isn't a sheet now).
-panel_detent_now(): PanelDetent {
-    if (!panel_is_sheet() || bs_nav == 0) return panel_detent_left;
-    panel_detent_of(msg(msg(bs_nav, sel("sheetPresentationController")), sel("selectedDetentIdentifier")))
-}
-
-// A hand chose a height: Full Screen told to core as large is reached or
-// left; the others kept, to open at next time.
-panel_detent_changed(_self: int, _cmd: int, _sheet: int): int {
-    d: PanelDetent = panel_detent_now();
-    match d {
-        Large -> {
-            if (!bs_full) {
-                place_tell();
-                send0("tap full")
-            }
-        }
-        _ -> {
-            panel_detent_left = d;
-            if (bs_full) send0("tap full")
-        }
-    }
-    panel_settle_soon();
+// Gone: if the panel was asked for again meanwhile, it comes now.
+panel_dismissed(_context: int): int {
+    panel_dismissing = false;
+    if (panel.shown && panel.nav != 0 && msg(panel.nav, sel("presentingViewController")) == 0) panel_present();
     0
 }
 
-// A hand swiped the sheet away: core told, which closes the panel
-// (beside_line, panel_hide: the screens let go).
-panel_sheet_dismissed(_self: int, _cmd: int, _controller: int): int {
-    note("bible: panel: put away by a hand");
-    // (Gone, whichever of this and its viewDidDisappear: comes first.)
-    panel_home = PanelHome.Away;
-    panel_leaving = PanelLeaving.Staying;
-    panel_now_hidden();
-    if (bs_open) {
-        place_tell();
+// Whether the sheet shows as the panel says it does: a presentation that
+// couldn't be made (another under way), or one put away with what it was
+// over, is made again while core wants the panel; else it is gone.
+panel_check_due: bool = false;
+
+panel_check_soon() {
+    if (panel_check_due || app_obj == 0) return;
+    panel_check_due = true;
+    _t: int = timer_after(app_obj, 0.4f64, "vellumPanelCheck:")
+}
+
+panel_check_fired(_self: int, _cmd: int, _timer: int): int {
+    panel_check_due = false;
+    if (!panel.shown || panel.column || panel.nav == 0 || panel.leaving) return 0;
+    if (msg(panel.nav, sel("presentingViewController")) != 0) return 0;
+    if (panel.wanted) panel_present() else {
+        panel_gone();
         send0("tap shelf")
     }
     0
 }
 
-// The sheet taken to height d by UIKit's motion (Full Screen, leaving it,
-// the wire's `!detent`); remembered for the next showing if it is not a
-// sheet now.
-panel_detent_wanted: PanelDetent = PanelDetent.Medium;
+// The sheet: a third, a half and the whole height, never dimming the page.
+panel_small_block: int = 0;
 
-panel_select_detent(d: PanelDetent) {
-    match d {
-        Large -> { }
-        _ -> panel_detent_left = d
-    }
-    if (!panel_is_sheet() || bs_nav == 0) return;
-    if (panel_detent_rank(panel_detent_now()) == panel_detent_rank(d)) return;
-    panel_detent_wanted = d;
-    if (panel_detent_change == 0) panel_detent_change = block0(&panel_apply_detent,
+panel_third_height(_context: int, resolution: int): int {
+    block_double(msg_f(resolution, sel("maximumDetentValue")) * 0.36f64)
+}
+
+// The whole height's identifier.
+panel_full_id(): int {
+    msg(msg(cls("UISheetPresentationControllerDetent"), sel("largeDetent")), sel("identifier"))
+}
+
+panel_sheet_dress(nav: int) {
+    msg1(nav, sel("setModalPresentationStyle:"), 2);
+    sheet: int = msg(nav, sel("sheetPresentationController"));
+    if (sheet == 0) return;
+    if (panel_small_block == 0) panel_small_block = block1_double(&panel_third_height,
+        0, "d16@?0@8");
+    small: int = if (panel_small_block != 0) msg2(cls("UISheetPresentationControllerDetent"),
+        sel("customDetentWithIdentifier:resolver:"), nsstring("third"), panel_small_block) else 0;
+    medium: int = msg(cls("UISheetPresentationControllerDetent"), sel("mediumDetent"));
+    large: int = msg(cls("UISheetPresentationControllerDetent"), sel("largeDetent"));
+    detents: int = fresh("NSMutableArray");
+    if (small != 0) msg1(detents, sel("addObject:"), small);
+    msg1(detents, sel("addObject:"), medium);
+    msg1(detents, sel("addObject:"), large);
+    msg1(sheet, sel("setDetents:"), detents);
+    msg1(sheet, sel("setLargestUndimmedDetentIdentifier:"), msg(large, sel("identifier")));
+    msg1(sheet, sel("setPrefersGrabberVisible:"), 1);
+    msg1(sheet, sel("setPrefersScrollingExpandsWhenScrolledToEdge:"), 0);
+    msg1(sheet, sel("setPrefersEdgeAttachedInCompactHeight:"), 1);
+    msg1(sheet, sel("setWidthFollowsPreferredContentSizeWhenEdgeAttached:"), 1);
+    msg1(sheet, sel("setSelectedDetentIdentifier:"), msg(if (panel.full) large else medium,
+        sel("identifier")));
+    msg1(sheet, sel("setDelegate:"), screens_delegate);
+    // (Pulled down, it goes: the swipe is Close Panel.)
+    msg1(nav, sel("setModalInPresentation:"), 0)
+}
+
+// (The height chosen in the sheet's own animation: animateChanges:'s
+// block.)
+panel_detent_block: int = 0;
+
+panel_detent_full: bool = false;
+
+panel_detent_to_full(full: bool) {
+    if (panel.nav == 0) return;
+    sheet: int = msg(panel.nav, sel("sheetPresentationController"));
+    if (sheet == 0) return;
+    panel_detent_full = full;
+    if (panel_detent_block == 0) panel_detent_block = block0(&panel_detent_chosen,
         0, "v8@?0");
-    msg1(msg(bs_nav, sel("sheetPresentationController")), sel("animateChanges:"),
-        panel_detent_change)
+    msg1(sheet, sel("animateChanges:"), panel_detent_block)
 }
 
-// The block animateChanges: runs (made once a process: it reads the height
-// wanted when it runs).
-persistent panel_detent_change: int = 0;
-
-panel_apply_detent(_context: int): int {
-    if (bs_nav != 0) msg1(msg(bs_nav, sel("sheetPresentationController")), sel("setSelectedDetentIdentifier:"),
-        panel_detent_id(panel_detent_wanted));
+panel_detent_chosen(_context: int): int {
+    if (panel.nav == 0) return 0;
+    sheet: int = msg(panel.nav, sel("sheetPresentationController"));
+    id: int = if (panel_detent_full) panel_full_id() else msg(msg(cls("UISheetPresentationControllerDetent"),
+        sel("mediumDetent")), sel("identifier"));
+    if (sheet != 0) msg1(sheet, sel("setSelectedDetentIdentifier:"), id);
     0
 }
 
-// Core's Full Screen changed: the sheet at large, or back at the height it
-// came from. A column has none: core told so.
-panel_full_changed() {
-    if (panel_is_column()) {
-        if (bs_full) send0("tap full");
-        return
-    }
-    panel_select_detent(if (bs_full) PanelDetent.Large else panel_detent_left)
+// A height chosen by a hand: core's Full Screen made to agree.
+panel_height_chosen(sheet: int) {
+    if (panel.nav == 0 || msg(panel.nav, sel("sheetPresentationController")) != sheet) return;
+    chosen: int = msg(sheet, sel("selectedDetentIdentifier"));
+    full: bool = ns_equal(chosen, panel_full_id());
+    if (full != panel.full) send0("tap full");
+    panel_settle_soon()
 }
 
-// ---- the sheet's place over the page ----
-// How much of the window's foot the sheet covers, as the floating controls
-// (the tray, the way back's capsule, the mini player) ride above it: 0 at
-// the whole height, where the page is behind it, and in a column.
-panel_cover: f64 = 0.0f64;
+// Put away by the app: its screens let go (`closegroup 1`).
+panel_put_away() {
+    if (panel.nav == 0) return;
+    panel.leaving = true;
+    sheet_mark_closing(msg(panel.nav, sel("viewControllers")));
+    // (Still coming, it goes once it has come: panel_presented.)
+    if (panel.column) panel_column_detach() else if (panel_presenting != panel.nav) panel_dismiss_sheet(panel.nav);
+    panel_gone();
+    send1("closegroup", 1)
+}
 
-// The page's foot as its inset was last set for the sheet.
-page_foot_cover: f64 = 0.0f64;
+// Swiped away by a hand: Close Panel, core's.
+panel_swiped_away() {
+    panel_gone();
+    send0("tap shelf")
+}
 
-// The panel laid out (its sheet risen, dragged or moved to a height, the
-// column resized): its title for its width, its fade, and the floating
-// controls above the sheet's top, where UIKit puts it; the page's foot once
-// the sheet has been still a moment (panel_settle_soon).
-panel_laid_out(self: int, cmd: int): int {
-    super0(self, bs_class, cmd);
-    if (self != bs_nav) return 0;
-    if (view_width(msg(self, sel("view"))) != panel_title_w) panel_title_layout();
-    panel_fade_place();
-    if (!panel_is_sheet() || window == 0) return 0;
-    cover: f64 = panel_sheet_cover();
-    if (!bs_full && cover <= PANEL_COVER_MOST * view_height(window) && cover != panel_cover) {
-        panel_cover = cover;
-        float_controls_place()
+panel_gone() {
+    panel_column_detach();
+    panel.shown = false;
+    panel.wanted = false;
+    panel.reader_slot = -1;
+    // (Its words shown as its sheet goes, let go once it has.)
+    _t: int = timer_after(app_obj, 0.7f64, "vellumPanelDetach:");
+    panel.nav = held(panel.nav, 0);
+    panel.top = chrome_bounds.h;
+    send1("panelvisible", 0);
+    panel_button_light(false);
+    panel_forget_gone();
+    chrome_relayout();
+    panel_settle_soon()
+}
+
+// Screens of the panel's no longer on its navigation let go.
+panel_forget_gone() {
+    for s in 0..SLOTS_MOST {
+        c: int = slots[s].controller;
+        if (c != 0 && slots[s].group == 1 && (panel.nav == 0 || msg(c, sel("navigationController")) != panel.nav)) {
+            closing: bool = slots[s].closing;
+            if (panel.reader_slot == s) panel.reader_slot = -1;
+            slot_free(s);
+            if (!closing && panel.nav != 0) send1("panelanchor", panel_top_id())
+        }
     }
-    panel_settle_soon();
+}
+
+// The id of the panel's top screen (0: none).
+panel_top_id(): int {
+    if (panel.nav == 0) return 0;
+    s: int = slot_of_controller(msg(panel.nav, sel("topViewController")));
+    if (s < 0) 0 else slots[s].id
+}
+
+// A screen shown on the panel's navigation: those a hand popped told.
+panel_nav_showed() {
+    if (panel.nav == 0) return;
+    panel_forget_gone()
+}
+
+// ---- its reader ----
+// The reader screen's view: the pane's scroll view, filling it.
+panel_reader_install(s: int, view: int) {
+    scroll: int = fresh("UIScrollView");
+    msg1(scroll, sel("setAutoresizingMask:"), 18);
+    set_frame(scroll, bounds_of(view));
+    set_background(view, colors.panel);
+    add_sub(view, scroll);
+    panel.reader_slot = s;
+    pane_attach(PANE_PANEL, scroll);
+    panel_reader_dress(s)
+}
+
+// The reader's bar: the chapter and what it reads (a button: Go To aimed
+// at the panel), Link at its left, the menu at its right.
+panel_reader_dress(s: int) {
+    controller: int = slots[s].controller;
+    if (controller == 0 || ui_slot != s) return;
+    linked = ui.reader_linked;
+    item: int = msg(controller, sel("navigationItem"));
+    title: int = msg1(cls("UIButton"), sel("buttonWithType:"), 1);
+    config: int = msg(cls("UIButtonConfiguration"), sel("plainButtonConfiguration"));
+    msg1(config, sel("setTitle:"), ui_text(ui.title));
+    msg1(config, sel("setSubtitle:"), ui_text(ui.left));
+    msg1(config, sel("setTitleAlignment:"), 2);
+    msg1(config, sel("setBaseForegroundColor:"), colors.ink);
+    msg1(title, sel("setConfiguration:"), config);
+    msg3(title, sel("addTarget:action:forControlEvents:"), controller, sel("vellumLeft:"),
+        64);
+    msg1(item, sel("setTitleView:"), title);
+    msg1(item, sel("setLeftBarButtonItem:"), 0);
+    msg1(item, sel("setRightBarButtonItem:"), 0);
+    // (Link at the outer left, the menu at the outer right: the first tool
+    // left, the others right, as the page's dock has its glyphs.)
+    for k in 0..ui.tools_n {
+        tool: UiTool = ui.tools[k];
+        b: int = if (tool.menu.n > 0) panel_menu_item(tool, k, controller) else bar_item_symbol_ns(ui_text(tool.icon),
+            "vellumTool:", controller);
+        if (b == 0)
+            continue;
+        msg1(b, sel("setTag:"), k);
+        if (tool.style == 1) msg1(b, sel("setTintColor:"), colors.accent) else msg1(b,
+            sel("setTintColor:"), colors.ink);
+        if (tool.label.n > 0) msg1(b, sel("setAccessibilityLabel:"), ui_text(tool.label));
+        if (k == 0 && ui.tools_n > 1) msg1(item, sel("setLeftBarButtonItem:"), b) else msg1(item,
+            sel("setRightBarButtonItem:"), b)
+    }
+    msg2(controller, sel("setToolbarItems:animated:"), 0, 0);
+    nav: int = msg(controller, sel("navigationController"));
+    if (nav != 0) msg2(nav, sel("setToolbarHidden:animated:"), 1, 0)
+}
+
+// A tool with a menu: its items (ARG:TITLE split by |), each its action
+// with its argument.
+// The panel's menu (core's: Swap Panes, Full Screen, Close Panel) on its
+// sheet: what the sheet does itself left out (filling the screen, a drag
+// up; closing, a swipe down or the dock's button); one item left, a
+// button that does it (Swap Panes, its arrows); none, no button. In a
+// column, all of it.
+panel_menu_one_arg: int = 0;
+
+panel_menu_item(tool: UiTool, k: int, controller: int): int {
+    if (tool.action != ACT_BESIDE_MENU || panel.column) return tool_menu_item(tool);
+    kept: int = 0;
+    one_arg: int = 0;
+    one_words: int = 0;
+    n: int = split_count(&ui, tool.menu);
+    for i in 0..n {
+        part: int = split_word(&ui, tool.menu, i);
+        colon: int = msg1(part, sel("rangeOfString:"), nsstring(":"));
+        if (colon >= 0 && colon < ns_length(part)) {
+            arg: int = msg(msg1(part, sel("substringToIndex:"), colon), sel("integerValue"));
+            if (arg != BESIDE_MENU_FULL && arg != BESIDE_MENU_CLOSE) {
+                kept = kept + 1;
+                one_arg = arg;
+                one_words = msg1(part, sel("substringFromIndex:"), colon + 1)
+            }
+        }
+    }
+    if (kept == 0) return 0;
+    if (kept > 1) return tool_menu_item(tool);
+    panel_menu_one_arg = one_arg;
+    b: int = bar_item_symbol(if (one_arg == BESIDE_MENU_SWAP) "arrow.up.arrow.down" else "ellipsis",
+        "vellumPanelMenuOne:", controller);
+    msg1(b, sel("setTag:"), k);
+    msg1(b, sel("setAccessibilityLabel:"), one_words);
+    b
+}
+
+// The panel's one menu item, done.
+panel_menu_one_tapped(self: int, _cmd: int, item: int): int {
+    s: int = slot_of_controller(self);
+    k: int = msg(item, sel("tag"));
+    if (s < 0 || !screen_load(s) || k < 0 || k >= ui.tools_n) return 0;
+    haptic_impact(0);
+    act(s, ui.tools[k].action, panel_menu_one_arg, 0);
     0
 }
 
-// The most of the window the controls ride up to: a little over the
-// medium height.
-PANEL_COVER_MOST: f64 = 0.6f64;
-
-// How much of the window's foot the sheet covers where UIKit puts it.
-panel_sheet_cover(): f64 {
-    if (bs_nav == 0 || window == 0) return 0.0f64;
-    view: int = msg(bs_nav, sel("view"));
-    if (msg(view, sel("window")) == 0) return 0.0f64;
-    cover: f64 = view_height(window) - window_top(view);
-    if (cover < 0.0f64) 0.0f64 else cover
+tool_menu_item(tool: UiTool): int {
+    kids: int = fresh("NSMutableArray");
+    n: int = split_count(&ui, tool.menu);
+    for i in 0..n {
+        part: int = split_word(&ui, tool.menu, i);
+        colon: int = msg1(part, sel("rangeOfString:"), nsstring(":"));
+        if (colon >= 0 && colon < ns_length(part)) {
+            arg: int = msg(msg1(part, sel("substringToIndex:"), colon), sel("integerValue"));
+            words: int = msg1(part, sel("substringFromIndex:"), colon + 1);
+            c: int = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+                words, 0, sel("vellumCommand:"), nsnumber_int(tool.action * 1000000 + arg));
+            msg1(kids, sel("addObject:"), c)
+        }
+    }
+    menu: int = msg2(cls("UIMenu"), sel("menuWithTitle:children:"), nsstring(""),
+        kids);
+    autoreleased(msg2(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:menu:"),
+        symbol_image(ui_text(tool.icon), 17.0f64, 5), menu))
 }
 
-// The tray, the way back's capsule and the mini player, above the sheet.
-float_controls_place() {
-    tray_place_bottom();
-    if (window != 0) msg(window, sel("layoutIfNeeded"));
-    if (back_text != 0) style_back();
-    if (listen_shown) layout_player()
+// The reader's view laid out: the pane's chrome its bar's and the sheet's
+// foot; the sheet's top told to the chrome.
+panel_reader_layout(controller: int) {
+    view: int = msg(controller, sel("view"));
+    safe: Insets = safe_insets(view);
+    pane_chrome(PANE_PANEL, safe.top, safe.bottom);
+    panel_top_measure();
+    if (panel_pane.go_c >= 0) pane_settle_soon()
 }
 
-// How far above the window's safe area the floating controls go.
-floating_foot_lift(): f64 {
-    if (window == 0) return 0.0f64;
-    l8_msg_hfa(hfa, window, sel("safeAreaInsets"), 0, 0, 0);
-    lift: f64 = panel_cover - hfa[2];
-    if (lift < 0.0f64) 0.0f64 else lift
+// ---- the panel under the dock ----
+// The dock floats over the panel's sheet (dock.l8: a window of its own):
+// the sheet's top is where UIKit lays it out (the page's reading area
+// ends there), and what the panel shows ends above the dock (more of the
+// safe area at its foot).
+panel_top_measure() {
+    if (panel.column || panel.nav == 0 || !panel.shown) return;
+    panel_dock_room();
+    top: f64 = panel_sheet_top();
+    if (top == panel.top) return;
+    panel.top = top;
+    panel_settle_soon()
 }
 
-// The sheet still for PANEL_SETTLE_S after its last layout: the page's
-// inset to what it covers, its place told, and the panel brought by the
-// linked panes' rule once.
-PANEL_SETTLE_S: f64 = 0.12f64;
+// Where the sheet is laid out to be, its transform aside.
+panel_sheet_top(): f64 {
+    if (panel.nav == 0) return chrome_bounds.h;
+    presented: int = msg(msg(panel.nav, sel("presentationController")), sel("presentedView"));
+    if (presented == 0) return chrome_bounds.h;
+    geo_of(presented, "center");
+    middle: f64 = geo[1];
+    geo_of(presented, "bounds");
+    middle - geo[3] / 2.0f64
+}
 
-panel_settle_timer: int = 0;
+// The safe area added at the panel's foot for the dock over it.
+panel_extra_bottom: f64 = 0.0f64;
+
+panel_dock_room() {
+    presented: int = msg(msg(panel.nav, sel("presentationController")), sel("presentedView"));
+    if (presented == 0) return;
+    geo_of(presented, "center");
+    middle: f64 = geo[1];
+    geo_of(presented, "bounds");
+    sheet_bottom: f64 = middle + geo[3] / 2.0f64;
+    // (From the sheet's foot to a little above the dock, less what of the
+    // safe area the sheet has of its own.)
+    wanted: f64 = sheet_bottom - (chrome_bounds.h - chrome_bottom_cover());
+    own: f64 = safe_insets(msg(panel.nav, sel("view"))).bottom - panel_extra_bottom;
+    extra: f64 = wanted - own;
+    if (extra < 0.0f64) extra = 0.0f64;
+    if (abs_f(extra - panel_extra_bottom) < 0.5f64) return;
+    panel_extra_bottom = extra;
+    msg_insets(panel.nav, sel("setAdditionalSafeAreaInsets:"), 0.0f64, 0.0f64, extra,
+        0.0f64)
+}
+
+// Once the sheet has been still a moment: the page's foot what it covers.
+panel_settle_due: bool = false;
 
 panel_settle_soon() {
-    panel_settle_timer = stop_timer(panel_settle_timer);
-    panel_settle_timer = after_common(PANEL_SETTLE_S, "panelSettled:")
+    if (panel_settle_due || app_obj == 0) return;
+    panel_settle_due = true;
+    _t: int = timer_after(app_obj, 0.15f64, "vellumPanelSettle:")
 }
 
-panel_settled(_self: int, _cmd: int, _timer: int): int {
-    panel_settle_timer = 0;
-    if (!panel_is_sheet() || bs_nav == 0 || msg(msg(bs_nav, sel("view")), sel("window")) == 0) {
-        panel_page_cover(0.0f64);
-        return 0
-    }
-    // (Core's Full Screen as the sheet's height is, however it got there;
-    // at the whole height the page is behind the sheet: left as it was.)
-    match panel_detent_now() {
-        Large -> {
-            if (!bs_full) {
-                place_tell();
-                send0("tap full")
-            }
-            return 0
-        }
-        _ -> if (bs_full) send0("tap full")
-    }
-    cover: f64 = panel_sheet_cover();
-    // (The controls too, if a layout during Full Screen's change left them.)
-    if (cover != panel_cover && cover <= PANEL_COVER_MOST * view_height(window)) {
-        panel_cover = cover;
-        float_controls_place()
-    }
-    panel_page_cover(cover);
-    0
-}
-
-// Whether the sheet has not yet covered the page's foot since the launch.
-panel_cover_first: bool = true;
-
-// The page's foot covered by cover points: its inset set (its offset left
-// alone: what it shows doesn't move), its place told, and the panel
-// brought by the rule once.
-panel_page_cover(cover: f64) {
-    if (cover == page_foot_cover) {
-        if (bs_shown) win_follow(PANE_PAGE);
-        return
-    }
-    page_foot_cover = cover;
-    set_insets();
-    note_num("bible: panel: page inset for the sheet ", cover as int);
-    if (win_table[PANE_PAGE] == 0) return;
-    // (The panel's first showing at a launch (the page laid out at its place
-    // before the sheet came), or a turn of the window (its width changed
-    // within the last second): the page's place kept, not the text at its
-    // top.)
-    launch: bool = panel_cover_first;
-    if (cover > 0.0f64) panel_cover_first = false;
-    if (launch || CACurrentMediaTime() - wk_at < 1.0f64) {
-        kept: bool = win_to_sent(PANE_PAGE) || win_sent_c[PANE_PAGE] >= 0 && win_rebuild_at_sent(PANE_PAGE);
-        if (kept) return
-    }
-    // (The text stays where it is: the place at its reading line now is
-    // its place.)
-    win_sent_c[PANE_PAGE] = -1;
-    win_aim_let_go(PANE_PAGE);
-    win_tell(PANE_PAGE, false);
-    if (bs_shown) win_follow(PANE_PAGE)
-}
-
-// The panel's navigation gone from the window: a sheet dismissed (by the
-// app, or swiped away) or a column taken away. A sheet dismissed for its
-// new home is shown there; one core closed lets its screens go (made again
-// if core opened it meanwhile).
-panel_disappeared(self: int, cmd: int, animated: int): int {
-    _r: int = super1(self, bs_class, cmd, animated);
-    if (self != bs_nav || !panel_is_sheet()) return 0;
-    // (Still presented: something only passed over it.)
-    if (msg(self, sel("presentingViewController")) != 0) return 0;
-    panel_home = PanelHome.Away;
-    leaving: PanelLeaving = panel_leaving;
-    panel_leaving = PanelLeaving.Staying;
-    match leaving {
-        Rehoming -> panel_show();
-        Closing -> {
-            beside_discard();
-            if (bs_open) beside_build()
-        }
-        Staying -> {
-            // (Swiped away: core has been told (panel_sheet_dismissed), and
-            // its close lets the screens go.)
-            panel_now_hidden();
-            if (!bs_open) beside_discard()
-        }
+panel_settle_fired(_self: int, _cmd: int, _timer: int): int {
+    panel_settle_due = false;
+    page_chrome_set();
+    if (panel.shown) {
+        pane_tell(PANE_PAGE, true);
+        follow_rested(PANE_PAGE)
     }
     0
 }
 
-// The panel's reader coming into sight at its final size (its
-// viewIsAppearing:, before the first frame of the sheet's rise or the
-// column's): laid out at its place now (its `go`, or its window made again
-// for this width), so that it rises with its words where they stay.
-panel_reader_appearing(vc: int) {
-    msg(msg(vc, sel("view")), sel("layoutIfNeeded"));
-    win_appeared(PANE_PANEL)
-}
-
-// ---- the column ----
-panel_attach_column() {
-    view: int = msg(root_vc, sel("view"));
-    if (panel_rule == 0) {
-        panel_rule = keep(make("UIView"));
-        msg1(panel_rule, sel("setAutoresizingMask:"), 0)
-    }
-    msg1(panel_rule, sel("setBackgroundColor:"), c_divider);
-    msg1(root_vc, sel("addChildViewController:"), bs_nav);
-    msg1(msg(bs_nav, sel("view")), sel("setAutoresizingMask:"), 0);
-    msg1(view, sel("addSubview:"), panel_rule);
-    msg1(view, sel("addSubview:"), msg(bs_nav, sel("view")));
-    msg1(bs_nav, sel("didMoveToParentViewController:"), root_vc);
-    panel_home = PanelHome.Column;
-    beside_dress_all();
-    panel_now_shown();
-    // (The page cross-fades to its new width.)
-    if (!reduce_motion()) fade_layer(msg(view, sel("layer")), 0.2f64);
-    root_relayout()
-}
-
-panel_detach_column() {
-    if (!panel_is_column()) return;
-    msg1(bs_nav, sel("willMoveToParentViewController:"), 0);
-    msg(msg(bs_nav, sel("view")), sel("removeFromSuperview"));
-    msg(bs_nav, sel("removeFromParentViewController"));
-    if (panel_rule != 0) msg(panel_rule, sel("removeFromSuperview"));
-    panel_home = PanelHome.Away;
-    panel_now_hidden();
-    if (root_vc != 0 && !reduce_motion()) fade_layer(msg(msg(root_vc, sel("view")),
-        sel("layer")), 0.2f64);
-    root_relayout()
-}
-
-// ---- the root's layout ----
-// The root laid out W by H: the panel moved to its home for this window if
-// it changed, the page beside the column (its place measured at its old
-// width first: ios/ipad.l8's width hooks), and core told whether Full
-// Screen can be.
-panel_place(W: f64, H: f64) {
-    beside_ensure();
-    panel_size_class(W);
-    column: bool = panel_column_fits(W);
-    if (panel_is_sheet() && column || panel_is_column() && !column) panel_rehome_soon();
-    panel_tell_fill();
-    pw: f64 = if (panel_is_column()) W - PANEL_W - 1.0f64 else W;
-    nv: int = msg(nav, sel("view"));
-    l8_msg_hfa(hfa, nv, sel("frame"), 0, 0, 0);
-    was: f64 = hfa[2];
-    if (was != pw && was > 0.0f64) width_will_change(was);
-    beside_frame(nv, 0.0f64, 0.0f64, pw, H);
-    if (panel_is_column()) {
-        msg_rect(panel_rule, sel("setFrame:"), pw, 0.0f64, 1.0f64, H);
-        beside_frame(msg(bs_nav, sel("view")), pw + 1.0f64, 0.0f64, PANEL_W, H)
-    }
-    if (was != pw && was > 0.0f64) width_changed(was, pw)
-}
-
-// An iPad window too narrow for the column takes the iPhone's width class,
-// so that the panel is a sheet at the window's foot with its heights, not a
-// card in the middle of the page; else the window's own.
-panel_told_class: int = 0;
-
-SIZE_CLASS_COMPACT: int = 1;
-
-panel_size_class(W: f64) {
-    if (!is_ipad() || root_vc == 0) return;
-    told: int = if (panel_column_fits(W) || window != 0 && msg(msg(window, sel("traitCollection")),
-        sel("horizontalSizeClass")) == SIZE_CLASS_COMPACT) 0 else SIZE_CLASS_COMPACT;
-    if (told == panel_told_class) return;
-    panel_told_class = told;
-    overrides: int = msg(root_vc, sel("traitOverrides"));
-    if (told == 0) msg1(overrides, sel("removeTrait:"), cls("UITraitHorizontalSizeClass")) else msg1(overrides,
-        sel("setHorizontalSizeClass:"), told)
-}
-
-// The panel moved to its other home (after this layout: not from inside
-// it): a sheet dismissed at once and shown again as a column
-// (panel_disappeared), a column taken away and presented as a sheet.
-panel_rehome_soon() {
-    _t: int = after_common(0.0f64, "panelRehome:")
-}
-
-panel_rehome(_self: int, _cmd: int, _timer: int): int {
-    if (root_vc == 0 || bs_nav == 0) return 0;
-    column: bool = panel_as_column();
-    if (panel_is_sheet() && column && msg(bs_nav, sel("presentingViewController")) != 0) {
-        match panel_leaving {
-            Staying -> {
-                panel_leaving = PanelLeaving.Rehoming;
-                msg2(msg(bs_nav, sel("presentingViewController")), sel("dismissViewControllerAnimated:completion:"),
-                    0, 0)
-            }
-            _ -> { }
-        }
-    } else if (panel_is_column() && !column) {
-        panel_detach_column();
-        panel_show()
-    }
+panel_close_tapped(_self: int, _cmd: int, _item: int): int {
+    send0("tap shelf");
     0
 }
 
-// `panelfill`: whether the panel may fill the screen (a sheet) or not (a
-// column), told to core as it changes.
-panel_told_fill: int = -1;
-
-panel_tell_fill() {
-    if (!restored || root_vc == 0) return;
-    fill: int = if (panel_as_column()) 0 else 1;
-    if (fill == panel_told_fill) return;
-    panel_told_fill = fill;
-    send1("panelfill", fill)
-}
-
-// ---- the wire's view of it ----
-// `!detent small|medium|large`: the sheet to that height by UIKit's
-// motion.
-panel_wire_detent(word: str) {
-    if (!panel_is_sheet()) {
-        note("bible: driven: the panel is not a sheet");
-        return
-    }
-    panel_select_detent(if (word == "small") PanelDetent.Small else if (word == "large") PanelDetent.Large else PanelDetent.Medium)
-}
-
-// For `!where`: the panel as a column, a sheet (its height) or closed;
-// core's open and full; panelfill; the page's inset for it.
-panel_where() {
-    tb_n = 0;
-    tb_str("bible: where panel ");
-    match panel_home {
-        Away -> tb_str("closed");
-        Column -> tb_str("column");
-        Sheet -> {
-            tb_str("sheet ");
-            tb_str(panel_detent_word(panel_detent_now()))
-        }
-    }
-    tb_str(" beside ");
-    tb_int(if (bs_open) 1 else 0);
-    tb_str(" ");
-    tb_int(if (bs_full) 1 else 0);
-    tb_str(" panelfill ");
-    tb_int(panel_told_fill);
-    tb_str(" page cover ");
-    tb_int(page_foot_cover as int);
-    tb_str(" floating lift ");
-    tb_int(floating_foot_lift() as int);
-    if (window != 0) {
-        tb_str(" room ");
-        tb_int(panel_room(view_width(window)) as int);
-        tb_str(" column needs ");
-        tb_int((PANEL_W + 1.0f64 + page_least_w()) as int)
-    }
-    tb_str(" bottom inset ");
-    tb_int(if (table == 0) 0 else bottom_inset(table) as int);
-    note_ns(tb_ns())
-}
-
-// ---- classes ----
-make_panel_classes() {
-    panel_sheet_delegate_class = class_make(cls("NSObject"), "L8PanelSheetDelegate");
-    add_method1(panel_sheet_delegate_class, sel("sheetPresentationControllerDidChangeSelectedDetentIdentifier:"),
-        &panel_detent_changed, "v@:@");
-    add_method1(panel_sheet_delegate_class, sel("presentationControllerDidDismiss:"),
-        &panel_sheet_dismissed, "v@:@");
-    add_protocol(panel_sheet_delegate_class, "UISheetPresentationControllerDelegate");
-    add_method0(bs_class, sel("viewDidLayoutSubviews"), &panel_laid_out, "v@:");
-    add_method1(bs_class, sel("viewDidDisappear:"), &panel_disappeared, "v@:B")
+panel_detach_fired(_self: int, _cmd: int, _timer: int): int {
+    if (!panel.shown) pane_detach(PANE_PANEL);
+    0
 }
 
 add_panel_methods(app: int) {
-    add_method1(app, sel("panelPresent:"), &panel_present_due, "v@:@");
-    add_method1(app, sel("panelSettled:"), &panel_settled, "v@:@");
-    add_method1(app, sel("panelRehome:"), &panel_rehome, "v@:@")
+    add_method1(cls("VellumList"), sel("vellumPanelMenuOne:"), &panel_menu_one_tapped,
+        "v@:@");
+    add_method1(app, sel("vellumPanelDetach:"), &panel_detach_fired, "v@:@");
+    add_method1(app, sel("vellumPanelCheck:"), &panel_check_fired, "v@:@");
+    add_method1(app, sel("vellumPanelSettle:"), &panel_settle_fired, "v@:@");
+    // (The dock's look at the sheets now and then: dock.l8.)
+    add_method1(app, sel("vellumDockSheets:"), &dock_sheets_fired, "v@:@")
 }

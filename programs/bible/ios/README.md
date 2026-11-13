@@ -1,11 +1,12 @@
-# Vellum
+# Vellum: the iPhone and iPad skin
 
-Vellum is a second iPhone and iPad skin for Smooth Bible, written for
-iOS 26 from the ground up. Like every skin it runs core on core's host
-and speaks only the line protocol ([SKINS.md](../SKINS.md)); it shares
-nothing with `ios/`, the first iPhone skin, but the platform's files: the
-same kept files (Application Support/SmoothBible), the same bundle and
-Info.plist class names, so either can be hot reloaded into the other.
+Vellum is Smooth Bible's iPhone and iPad skin, written for iOS 26 from
+the ground up. Like every skin it runs core on core's host and speaks
+only the line protocol ([SKINS.md](../SKINS.md)). Its kept files are in
+Application Support/SmoothBible. This directory also holds the app's
+bundle: `Info.plist`, `PrivacyInfo.xcprivacy`, the icons, `Colors/` and
+the compiled asset catalog (`assets/`), the frameworks it links
+(`frameworks`) and the data files it carries (`resources`).
 
 ## How it looks and moves
 
@@ -78,35 +79,28 @@ same near or far.
 ## Running it
 
 It needs iOS 26. With the hot reload host on the phone (RELOAD.md),
-serve this skin instead of `ios/`:
-
-```sh
-node web/dev.mjs --port 8777 --data .build/bible-folio -- programs/bible/vellum/app.l8 -o .build/dev/vellum-ios.wasm
-```
-
-and back:
+serve it:
 
 ```sh
 node web/dev.mjs --port 8777 --data .build/bible-folio -- programs/bible/ios/app.l8 -o .build/dev/bible-ios.wasm
 ```
 
-(then start the app again: the dock's window, which the first skin knows
-nothing of, would stay, empty, over its foot).
-
 The development wire takes core's lines (`node web/devctl.mjs wire tap
-goto`, lines split by `|`) and Vellum's own: `!state` (each pane's window,
+goto`, lines split by `|`) and the skin's own: `!state` (each pane's window,
 place and chrome, the panel's sheet, the dock, and the screens), `!scroll
 P DY`, `!flick P DY` (a finger's fling, frame by frame), `!dock
 open|close`, `!tap WORDS` (the top sheet's first row so titled),
 `!close`, `!back`, `!swipe` (the panel put away as a hand's swipe puts
 it), `!probe N` (for N frames, where the dock and the panel's sheet are
 drawn), `!part` (the panel's first part as core sent it: its words and
-styles), `!sheetviews` (the sheet's views, from the panel's up), and `!record on|off` (ReplayKit; the movie is posted
-to the server's `/video`, for checking animations frame by frame).
-`make .build/bible-vellum.s` builds it for a device (it is part of `make
-check`); `tools/ios/build-linux.sh device programs/bible/vellum/app.l8 OUT
-programs/bible/ios` bundles it with the first skin's Info.plist and
-resources.
+styles), `!sheetviews` (the sheet's views, from the panel's up), and `!record
+on|off` (ReplayKit; the movie is posted to the server's `/video`, for
+checking animations frame by frame).
+
+`make .build/bible-ios.s .build/bible-ios-sim` builds it for a device and
+the simulator (both are part of `make check`); `tools/ios/build-linux.sh
+device programs/bible/ios/app.l8 OUT programs/bible/ios` makes the app
+bundle (../README.md), as CI does for TestFlight.
 
 ## What else it does
 

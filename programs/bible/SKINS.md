@@ -476,15 +476,16 @@ new place mid-glide is glided to from where the pane is, at the speed it
 has, so a place that moves on frame by frame as the leader moves is
 followed as one smooth motion, not a step for each section. It holds
 however long a frame is (a slow device's). Where motion is reduced the
-pane is there at once. Every skin steps the glide itself, a frame at a
-time, by `follow_glide` (not a platform's scroll animation), so that the
-follower keeps up while the hand's pane moves and is done soon after it
-stops. On the iPhone a glide's step more than a screen past what the
-follower has laid out (a Bible flung beside a commentary's long comments)
-makes its window anew from the part guessed to be there, rather than
-laying out every part between in one frame (at that speed the words are
-a blur); where it goes, and the links, move with it, so the glide goes
-on at its speed. The positions of sections not laid out yet
+pane is there at once. The web, Android and the terminal step the glide
+themselves, a frame at a time, by `follow_glide` (not a platform's scroll
+animation), so that the follower keeps up while the hand's pane moves and
+is done soon after it stops. The iPhone doesn't glide: it puts the
+follower at the rule's place at once, cross-faded, every quarter second
+while the leader moves and as soon as it rests, so following looks the
+same near or far. A place more than a screen past what the follower has
+laid out (a Bible flung beside a commentary's long comments) makes its
+window anew from the part guessed to be there, rather than laying out
+every part between. The positions of sections not laid out yet
 are guessed: an anchor whose part isn't laid out counts where it would be
 were each part between it and what is laid out as tall for its bytes
 (`sizes`) as the parts of its document measured so far are on average (a
@@ -509,9 +510,8 @@ place while not (its nearest chapter, by the run rule, if it has none
 there); until core has sent the panel's reader its `go`, a place the skin
 tells for the panel is the old document's and core takes none. Opening, nothing in the panel moves
 as it comes: its reader is laid out at its place before its first frame
-shows (the iPhone from iOS 26 out of the window, then shown once placed,
-at most half a second; elsewhere it slides in only once laid out there,
-at most half a second); once in sight, the rule is checked once more
+shows, or slides in only once laid out there (at most half a second);
+once in sight, the rule is checked once more
 when it is still, a glide if it must move; closing, it goes the way it
 came. While what a pane reads changes (Swap Panes, a document picked),
 the iPhone keeps a picture of what each pane showed over it, and takes
@@ -548,7 +548,8 @@ measure exactly:
 
 - The iPhone: a `UIScrollView` of `UITextView`s, one a part (TextKit 2
   measuring each whole), so each part keeps UIKit's selection, menus,
-  Dynamic Type and VoiceOver; what comes in above is offset at once.
+  Dynamic Type and VoiceOver. The parts sit on a tall canvas, so one
+  coming in above is placed above the first and nothing in sight moves.
 - The web: a `section` a part in the document's flow; the browser's own
   scroll anchoring (`overflow-anchor`, done by hand where a browser lacks
   it); `content-visibility: auto` on parts far from sight.
@@ -929,25 +930,11 @@ calls `sk_use_version` again.
 
 ## The iPhone as a skin
 
-`ios/skin.l8` draws core's screens in the app's own lists: twelve slots in
-the table registry (`ios/tables.l8`). `ios/wire.l8` sends encoded commands
-to the protocol dispatcher, decodes screens into independently owned storage,
-and consumes presentation effects from the returned lines. A row's
-action is `act ID ACTION ARG VALUE`; its effects are done the iPhone's way
-(`push` into the navigation the action came from, `present` as a sheet,
-`update` a cross-fade and reload, a row deleted with the system's animation
-when that is all that changed, `dismiss`). The platform's work stays the
-app's: core's version switch is the iPhone's `switch_version`. A row's
-actions are UIKit's context menu on a long press (the system's lifted row,
-no preview of the app's; its delete action destructive) and its delete
-action UIKit's swipe (`ios/rowmenus.l8`): one provider and one handler
-block a process, each action telling its row by an object associated with
-it. The development wire's `!rowmenu` and `!rowswipe` call the same
-delegate methods and handlers, since no public API brings up either as a
-finger does. Core's screens
-are the app's own controller class (`L8CoreList`), made again as they come
-back from a screen pushed over them; Go To's and Search's are the app's own
-classes for their focus and keyboard.
+`ios/` is Vellum, written for iOS 26 ([its README](ios/README.md)):
+the page is the whole screen with a Liquid Glass dock at its foot, core's
+screens are sheets of `UICollectionView` lists in the system's list
+layout, and the panel is a sheet over the page (`panelfill 1`), or a
+column at its right on an iPad window with room for both (`panelfill 0`).
 
 For a lazy section (Search's verses, Show All's finds, the concordance), the
 iPhone sends `windowrows 1` before `start`. After the section's header,
@@ -956,24 +943,9 @@ core sends `lazy COUNT FIRST N`: COUNT is its logical row count; FIRST is
 N rows (32, fewer at the end) holding the requested row, whose ordinary
 `row` and `cell` lines follow. `model ID SECTION ROW` returns a fresh screen
 with that row's page included, and the iPhone reads rows from it until one
-outside it is wanted: a list scrolled makes its screen again once a page,
-and a search of a thousand verses sends only those in sight. Skins that
-use the default full sections continue receiving every row.
-
-On an iPhone with iOS 26, where a screen's search field floats at the
-list's foot, its `scopes` are its title, a segmented control (a choice is
-`scope ID N`, as ever): the search bar's own scope bar belongs to the
-navigation bar there, and on a pushed screen comes only once the push has
-ended and stays over the screen below as it is popped. Elsewhere they are
-the search bar's scope bar.
-
-The iPhone keeps each screen's latest bytes as core sent them (with a
-command's effects, or as a `model`'s answer) and the count of lines core
-had been given then. A list reloaded with no line given since (UIKit asks
-several times in one reload, and two lists in sight ask by turns) is read
-from those bytes; only after core has been given another line does it
-send `model` again. On the phone's interpreter a screen made again costs
-tens of milliseconds, a search's more.
+outside it is wanted: a search of a thousand verses sends only those in
+sight. Skins that use the default full sections continue receiving every
+row.
 
 Core drains complete lines through the host's output receiver as its buffer
 fills. A large screen can span multiple batches; a batch boundary does not
@@ -981,94 +953,10 @@ end a screen. Hosts must consume or copy each batch before returning. A
 single line that cannot fit, or a full buffer without a receiver, fails
 explicitly instead of reporting truncated output as a complete screen.
 
-Every list is core's (2026-10-22): Go To (its ribbons and plans too),
-Search (the ESV's results too: the iPhone asks its server, core keeps and
-shows them), History, the reading settings, Glosses, Voice and the
-voices, Downloads, the Manual's list, Acknowledgements and Changes, Reading
-Plans, a plan's days and its Daily Reminder, A Chapter a Day, Begin At, New
-Ribbon and a ribbon's screen, a document's page, the Library and Memory (Add Passage, a
-passage, its versions, Memory's reminder), Compare, a word's study, its
-grammar and concordance, the language page and what it pushes (Sounds
-Written As, the Alphabet, Your Words, Add Words and its preview, Verses You
-Can Read) and a lemma's Forms. What is kept (the settings among it) is
-core's, in the files its host keeps through the iPhone (`KeptStore`), as
-for every skin; a change of the look comes as the look's lines, Keep
-Screen On as `awake`. The iPhone's menus and keyboard commands are core's
-(`command`, `commands`), and so is what the panel beside the reader
-shows (`beside`): the iPhone draws them, and the panel beside the page
-(below).
-
-Both panes are `ios/pane.l8`'s window, one each: the page's table and the
-panel's reader screen's, each a table with no rows whose header holds its
-parts' `UITextView`s one after another, each measured whole as it comes
-in (TextKit 2), so that where anything shown is is known. Parts come in a
-screen and a half ahead while a pane moves and three at rest, those far
-behind go, and one coming in or going above what is in sight moves the
-table's offset by its height at once. A pane finds its places from its
-parts' anchors' lines, and tells core as its anchor changes and at rest.
-A `go` waits for its pane's table to be on the screen, and is carried to
-a new table as what the panel reads changes. Linked, the pane a finger
-last moved leads and the other follows each frame by core/follow.l8's
-rules. The iPhone keeps the links it follows by from frame to frame
-(moved by the shifts of parts coming and going above), making them again
-at once when what links the panes changes (anchors, sizes, maps) and
-otherwise at rest or at most once a second while a pane moves, so that a
-frame of following costs little on a slow device; it measures parts ahead
-as a pane moves only while frames keep up with the screen.
-
-The panel is an ordinary UIKit sheet the page presents (`ios/panel.l8`;
-the app needs iOS 26), or, on an iPad window with room for both (the
-page keeping 28 em and its margins beside 390 points), a column at the
-page's right after a hairline, laid out by the root's frames
-(`panelfill 0`: no Full Screen there). An iPad window too narrow for the
-column takes the iPhone's width class, so the panel is a sheet at its
-foot there too. The sheet (`panelfill 1`) stops at a third, a half or
-the whole height (the last its Full Screen), the page bright and usable
-behind it at every height, the system's grabber, drag and swipe; held
-sideways it is a card at the foot (edge-attached), the page beside it.
-It opens at the height it was last left at. Its delegate tells what a
-hand did: a height chosen (`tap full` as it reaches or leaves the whole
-height), the sheet swiped away (`tap shelf`). The panel's own layout
-says where UIKit puts the sheet's top: the tray, the way back's capsule
-and the mini player ride above it, and once it has been still a moment
-the page's bottom inset becomes what it covers (its offset untouched, so
-nothing on it moves), core's Full Screen is made to agree with its
-height, the page's place is told, and the panel is brought by the rule
-once if the page's top edge's link is out of its sight. The panel's
-reader is laid out at its place in its `viewIsAppearing:`, at its final
-size, before the first frame of its rise. A window that changes size
-moves the panel between sheet and column. Sheets (Go To, Reading) are
-presented over the panel's sheet, never in place of it, and the panel
-waits to be presented until the sheets over the page have gone.
-
-The reader has the system's navigation bar: its title the page's title's
-kind (the chapter with its chevron, what is read small and faint under
-it, a tap Go To aimed at the panel), Link at its left in the accent while
-linked, the menu at its right, plain glyphs, the same items moved to
-each new reader screen (Swap Panes) and changed in place; the bar opaque
-in the panel's color with a short fade below it, as the page's bar is,
-so that nothing is legible behind its title; its words at 0.9 of the
-page's size at every height. At a third and a half the sheet floats in
-from the screen's edges, the page's words passing behind its glass, as
-the system draws every floating sheet. Its other screens (Study) have
-the system's bar with Back and their buttons in the panel's toolbar; on
-the sheet no screen has a close of its own (the swipe, the page's panel
-button and Close Panel put it away), in a column each has one.
-
-A sheet's Done is a check on the bar's plain
-glass, not the system's filled Done; a row's ⓘ is faint, a check in the
-accent; a field floating at a list's foot is marked an element of its
-bottom edge (`UIScrollEdgeElementContainerInteraction`), so the rows
-soften under it.
-
-## Moving the iPhone
-
-One screen at a time, keeping its look: its rows come from core, drawn by a
-generic UIKit renderer plugged into the table registry (`ios/tables.l8`); its
-actions go to core. Each move is checked in a TestFlight build before the
-next, because the UI can't run on the development machine. What the screen
-model lacked was added to it for every skin (a row's glyph and side words, a
-grid's cells, a tool's menu, a time row), not as a custom cell.
+What is kept (the settings among it) is core's, in the files its host
+keeps through the iPhone (`KeptStore`), as for every skin. The iPhone's
+menus and key commands are core's (`command`, `commands`); it draws
+them, on an iPad in the menu bar too.
 
 ## Android, the first skin
 

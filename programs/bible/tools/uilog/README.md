@@ -11,8 +11,7 @@ and how the two linked panes keep together.
 | `uilog.js` | The web logger. The rig injects it; the site never ships it |
 | `rig.mjs` | Runs a steps file in headless Chromium and writes the log |
 | `steps/*.mjs` | Example steps: Go To, linked flicks, Swap Panes, opening and closing the panel |
-| `check.mjs` | Reads a log (web or iPhone) and prints the report or a timeline |
-| `../../ios/uilog.l8` | The iPhone logger, active only in the hot reload build (`ios/devwire.l8`) |
+| `check.mjs` | Reads a log and prints the report or a timeline |
 
 ## On the web
 
@@ -56,65 +55,12 @@ A steps file's default export receives these helpers:
 (Clarke's, downloaded through the Worker in a few seconds) in the panel, the
 way a person would through Go To.
 
-## On the iPhone
-
-The logger is part of the hot reload build only. It is driven through the
-development server (`web/dev.mjs`, RELOAD.md), which saves the logs. The
-server must include `POST /uilog`; restart a server started before that
-endpoint was added. Then:
-
-```sh
-node web/devctl.mjs wire '!uilog on'
-#   use the app by hand, or drive it:
-node web/devctl.mjs wire '!flick page 600'
-node web/devctl.mjs wire '!flick panel 600'
-node web/devctl.mjs wire '!uilog off'      # posts the log to the server
-node programs/bible/tools/uilog/check.mjs http://localhost:8777/uilog/latest
-#   or: .build/dev/uilog/N.jsonl (the server prints N)
-```
-
-While it is on, each frame walks the windows' view trees on devwire's
-display link. Every five seconds, and again at `!uilog off`, the walk's cost
-goes to the server's log (`bible: uilog: frames N views V walk ms mean M
-worst W`). Under the interpreter it costs about 4 ms a frame for about 35
-views (10–12 ms at worst). Each frame's `f` event records that cost (`c`),
-so the checker doesn't blame the app for gaps the logger caused. The log
-also records the lists' drags and glides (`drag-start`, `decel-end`, ...),
-every touch (a recognizer on the window that never cancels touches), and
-each wire line, so hand-made and app-made moves can be told apart. The log
-stays in memory until `!uilog off`, up to 48 MB. Past that, logging stops
-and a line in the server's log says so. A hot reload turns logging off
-without posting.
-
-Rectangles come from each view's presentation layer, so animations show as
-motion. They are added up in window points from each layer's frame. An
-ancestor's scale is not applied: the page shrinking behind a sheet shows
-only on the sheet's card. A presented controller's view (each sheet,
-popover or cover over the window's root, the panel's sheet among them) and
-any view whose layer UIKit has put under layers of its own (iOS 26's panel
-sheet is one) is placed instead by converting its layer's bounds through
-every presentation layer above it, transforms included (and only while
-that layer is in the window's tree: otherwise by the sum, for that
-frame), so a sheet's rise and fall between its heights is its rect frame
-by frame; what it holds is placed from there, without the sheet's
-transform, and the checker doesn't judge those views' pops while their
-sheet moves. A zoom (a sheet growing from the control that opened it,
-iOS 26) is not seen: UIKit draws it where the walk doesn't reach, so a
-zoomed sheet's first rect is already its last one, and it appears and
-goes in one frame. The app marks each zoom in the log (`zoom`), and the
-checker lists those sheets' coming and going as zoomed, not as pops. Each
-view gets an id of its own as it is first seen and keeps it
-while it is seen (UIKit reuses a freed view's address for another, so an
-address is not an id). The logger records bars, sheets
-(`UILayoutContainerView`, `UIDropShadowView`, popovers), lists, cells,
-labels, controls, text views (not their insides), the toast, and hairlines
-(a plain view at most 1.5 points tall).
-
 ## The log
 
 The log is JSON lines. `t` is milliseconds since logging began.
 Rectangles `r` are `[x, y, w, h]`: CSS pixels on the web, points on the
-iPhone.
+iPhone. Only the web has a logger now; the iPhone's fields below are the
+format an iPhone logger writes, which `check.mjs` still reads.
 
 | `e` | Fields |
 |---|---|
@@ -229,9 +175,3 @@ thresholds sit at the top of `check.mjs`:
   - `flick` is a mouse-source scroll gesture. With 1200×800 and no touch
     emulation, touch-source gestures don't scroll the page. The browser
     turns it into smooth wheel steps, so the log calls the hand `wheel`.
-- **iPhone.**
-  - The logger can't see the shipped app's menus while UIKit shows them in
-    a window of their own. It walks the windows of the scene, skipping the
-    keyboard's.
-  - `panes` offsets are the lists' model offsets. `scroll` events come from
-    the presentation layer, one frame later: what is on screen.
