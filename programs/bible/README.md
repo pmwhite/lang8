@@ -56,6 +56,7 @@ These commands build artifacts; they do not run UI tests.
 
 - `core/`: shared data, app state, persistence, screen models and actions.
 - `ios/`: UIKit skin and platform services on core's host, including the native reader.
+- `vellum/`: a second iPhone skin, written for iOS 26 from the ground up ([its README](vellum/README.md)).
 - `android/`: L8 host and Java skin using Android framework widgets.
 - `web/main.l8`: shared core's WebAssembly host.
 - `web/page/`: JavaScript skin, CSS, service worker, fonts, site builder and server.

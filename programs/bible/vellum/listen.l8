@@ -1,0 +1,688 @@
+tag vellum;
+
+use_tag std, ios, bible, bible_wire;
+
+// Listen, as core plays it (SKINS.md, the contract's part 3): the device's
+// voice saying what core gives it (`voices` once; `say` → `spoke`,
+// `spoken`), a recording played (`audio_play` → `audiotime`,
+// `audioended`, `audiofailed`), paused, on again and stopped, the lock
+// screen's controls and what it shows, and the player: a pill of glass
+// that rises out of the dock (in the dock's container, so it parts from
+// it as liquid does), its play or pause, what is heard (a tap: the page
+// to it) and its close.
+//
+// AVFoundation, AVFAudio and MediaPlayer are loaded at their first use.
+// Their delegates and observers are VellumMedia's.
+import "../../ios/objc.l8";
+
+import "../../ios/block.l8";
+
+import "kit.l8";
+
+extern dlopen(path: str, mode: int): int;
+
+media_target: int = 0;
+
+media_loaded: bool = false;
+
+media_frameworks() {
+    if (cls("AVSpeechSynthesizer") == 0) _a: int = dlopen("/System/Library/Frameworks/AVFAudio.framework/AVFAudio",
+        1);
+    if (cls("AVPlayer") == 0) _b: int = dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation",
+        1);
+    if (cls("MPRemoteCommandCenter") == 0) _c: int = dlopen("/System/Library/Frameworks/MediaPlayer.framework/MediaPlayer",
+        1)
+}
+
+// The frameworks, the lock screen's commands and the session's
+// notifications: once, at the first Listen.
+MEDIA_NOTES: []str = ["AVAudioSessionInterruptionNotification", "AVAudioSessionRouteChangeNotification",
+    "AVPlayerItemDidPlayToEndTimeNotification", "AVPlayerItemFailedToPlayToEndTimeNotification"];
+
+MEDIA_NOTE_ACTIONS: []str = ["vellumMediaInterrupted:", "vellumMediaRoute:", "vellumAudioEnded:",
+    "vellumAudioFailed:"];
+
+media_load() {
+    if (media_loaded) return;
+    media_loaded = true;
+    media_frameworks();
+    commands: int = msg(cls("MPRemoteCommandCenter"), sel("sharedCommandCenter"));
+    if (commands != 0) {
+        msg2(msg(commands, sel("playCommand")), sel("addTarget:action:"), media_target,
+            sel("vellumRemotePlay:"));
+        msg2(msg(commands, sel("pauseCommand")), sel("addTarget:action:"), media_target,
+            sel("vellumRemotePause:"));
+        msg2(msg(commands, sel("togglePlayPauseCommand")), sel("addTarget:action:"),
+            media_target, sel("vellumRemoteToggle:"));
+        msg2(msg(commands, sel("nextTrackCommand")), sel("addTarget:action:"), media_target,
+            sel("vellumRemoteNext:"));
+        msg2(msg(commands, sel("previousTrackCommand")), sel("addTarget:action:"),
+            media_target, sel("vellumRemotePrevious:"));
+        // (A chapter a skip on the lock screen, not 15 seconds.)
+        msg1(msg(commands, sel("skipForwardCommand")), sel("setEnabled:"), 0);
+        msg1(msg(commands, sel("skipBackwardCommand")), sel("setEnabled:"), 0)
+    }
+    center: int = msg(cls("NSNotificationCenter"), sel("defaultCenter"));
+    for k in 0..len(MEDIA_NOTES) {
+        name: int = objc_const(MEDIA_NOTES[k]);
+        if (name != 0) msg4(center, sel("addObserver:selector:name:object:"), media_target,
+            sel(MEDIA_NOTE_ACTIONS[k]), name, 0)
+    }
+}
+
+// The audio session: spoken audio, going on with the screen locked.
+session_on() {
+    media_load();
+    session: int = msg(cls("AVAudioSession"), sel("sharedInstance"));
+    if (session == 0) return;
+    msg4(session, sel("setCategory:mode:options:error:"), objc_const("AVAudioSessionCategoryPlayback"),
+        objc_const("AVAudioSessionModeSpokenAudio"), 0, 0);
+    msg3(session, sel("setActive:withOptions:error:"), 1, 0, 0)
+}
+
+// A call (an interruption begun) or headphones unplugged (the old device
+// gone): paused, not on again by itself.
+session_interrupted(_self: int, _cmd: int, note: int): int {
+    info: int = msg(note, sel("userInfo"));
+    kind: int = if (info != 0) msg1(info, sel("objectForKey:"), objc_const("AVAudioSessionInterruptionTypeKey")) else 0;
+    if (kind != 0 && msg(kind, sel("integerValue")) == 1 && player.playing) send0("listenpause");
+    0
+}
+
+session_route_changed(_self: int, _cmd: int, note: int): int {
+    info: int = msg(note, sel("userInfo"));
+    reason: int = if (info != 0) msg1(info, sel("objectForKey:"), objc_const("AVAudioSessionRouteChangeReasonKey")) else 0;
+    if (reason != 0 && msg(reason, sel("integerValue")) == 2 && player.playing) send0("listenpause");
+    0
+}
+
+// ---- the device's voice ----
+synth: int = 0;
+
+// What is being said (a ring): each utterance, and its chapter and verse
+// as core named them.
+UTTERANCES: int = 512;
+
+utterances: []int = new int[512](0);
+
+utterance_chapter: []int = new int[512](0);
+
+utterance_verse: []int = new int[512](0);
+
+utterance_n: int = 0;
+
+synth_make() {
+    if (synth != 0) return;
+    session_on();
+    synth = make("AVSpeechSynthesizer");
+    msg1(synth, sel("setDelegate:"), media_target)
+}
+
+// `voices Q:LANG:NAME...`: the device's voices (quality 2 the enhanced and
+// premium), once as the app begins.
+voices_tell() {
+    media_frameworks();
+    all: int = msg(cls("AVSpeechSynthesisVoice"), sel("speechVoices"));
+    if (all == 0) return;
+    out_word("voices");
+    for i in 0..msg(all, sel("count")) {
+        v: int = msg1(all, sel("objectAtIndex:"), i);
+        out_byte(9);
+        out_int(if (msg(v, sel("quality")) >= 2) 2 else 1);
+        out_byte(58);
+        out_ns(msg(v, sel("language")));
+        out_byte(58);
+        out_ns(msg(v, sel("name")))
+    }
+    out_end()
+}
+
+// The voice named, its best quality (0: the device's own).
+voice_named(name: int): int {
+    if (ns_length(name) == 0) return 0;
+    all: int = msg(cls("AVSpeechSynthesisVoice"), sel("speechVoices"));
+    if (all == 0) return 0;
+    best: int = 0;
+    for i in 0..msg(all, sel("count")) {
+        v: int = msg1(all, sel("objectAtIndex:"), i);
+        if (ns_equal(msg(v, sel("name")), name) && (best == 0 || msg(v, sel("quality")) > msg(best,
+            sel("quality")))) best = v
+    }
+    best
+}
+
+// Core's rate (1 the voice's own) as the synthesizer's (0.5 its own).
+speech_rate(rate: f64): f64 {
+    r: f64 = if (rate <= 1.0f64) 0.5f64 - (1.0f64 - rate) * 0.5333f64 else 0.5f64 + (rate - 1.0f64) * 0.24f64;
+    clamp_f(r, 0.1f64, 0.9f64)
+}
+
+// `say C V RATE WORDS VOICE`: said after what is being said.
+say_line(line: WireLine) {
+    synth_make();
+    c: int = word_n(line, 1);
+    v: int = word_n(line, 2);
+    rate: f64 = word_n(line, 3) as f64 / 1000.0f64;
+    u: int = msg1(cls("AVSpeechUtterance"), sel("speechUtteranceWithString:"), field_ns(line,
+        1));
+    if (u == 0) return;
+    msg_set_f32(u, sel("setRate:"), speech_rate(if (rate > 0.0f64) rate else 1.0f64) as f32);
+    voice: int = voice_named(field_ns(line, 2));
+    if (voice != 0) msg1(u, sel("setVoice:"), voice);
+    msg_set_f(u, sel("setPostUtteranceDelay:"), if (v == 0) 0.35f64 else 0.12f64);
+    i: int = utterance_n % UTTERANCES;
+    utterances[i] = held(utterances[i], u);
+    utterance_chapter[i] = c;
+    utterance_verse[i] = v;
+    utterance_n = utterance_n + 1;
+    msg1(synth, sel("speakUtterance:"), u)
+}
+
+utterance_find(u: int): int {
+    k: int = utterance_n - 1;
+    while (k >= 0 && k >= utterance_n - UTTERANCES) {
+        if (utterances[k % UTTERANCES] == u) return k % UTTERANCES;
+        k = k - 1
+    }
+    -1
+}
+
+utterance_began(
+    _self: int,
+    _cmd: int,
+    _synth: int,
+    u: int
+): int {
+    i: int = utterance_find(u);
+    if (i >= 0) send3("spoke", utterance_chapter[i], utterance_verse[i], clock_ms());
+    0
+}
+
+utterance_finished(
+    _self: int,
+    _cmd: int,
+    _synth: int,
+    u: int
+): int {
+    i: int = utterance_find(u);
+    if (i < 0) return 0;
+    utterances[i] = held(utterances[i], 0);
+    send2("spoken", utterance_chapter[i], utterance_verse[i]);
+    0
+}
+
+speech_stop() {
+    if (synth == 0) return;
+    for i in 0..UTTERANCES utterances[i] = held(utterances[i], 0);
+    msg1(synth, sel("stopSpeakingAtBoundary:"), 0)
+}
+
+// ---- a recording ----
+type Recording = {
+    player: int;
+    item: int;
+    // The play core asked for: its token, where it begins and ends
+    // (centiseconds; -1 the recording's end), its rate.
+    token: int;
+    from: int;
+    to: int;
+    rate: f64;
+    ready: bool;
+    paused: bool;
+    poll: int
+}
+
+recording: Recording = Recording {
+    player: 0,
+    item: 0,
+    token: -1,
+    from: 0,
+    to: -1,
+    rate: 1.0f64,
+    ready: false,
+    paused: false,
+    poll: 0
+};
+
+// A CMTime as passed: value, timescale | flags << 32, epoch.
+cm_time: []int = new int[3](0);
+
+cm_zero: []int = new int[3](0);
+
+// `audio_play TOK C FROM TO RATE URL` (a `kept:NAME` address: a chapter
+// core holds, if its file is there).
+audio_play_line(line: WireLine) {
+    speech_stop();
+    audio_stop();
+    session_on();
+    address: int = field_ns(line, 1);
+    url: int = if (address != 0) msg1(cls("NSURL"), sel("URLWithString:"), address) else 0;
+    kept: int = nsstring("kept:");
+    if (address != 0 && truth(msg1(address, sel("hasPrefix:"), kept))) {
+        path: int = kept_path_of(msg1(address, sel("substringFromIndex:"), ns_length(kept)));
+        there: bool = truth(msg1(msg(cls("NSFileManager"), sel("defaultManager")),
+            sel("fileExistsAtPath:"), path));
+        url = (if (there) msg1(cls("NSURL"), sel("fileURLWithPath:"), path) else 0)
+    }
+    recording.token = word_n(line, 1);
+    recording.from = word_n(line, 3);
+    recording.to = (if (has_word(line, 4)) word_n(line, 4) else -1);
+    rate: int = word_n(line, 5);
+    recording.rate = (if (rate > 0) rate as f64 / 1000.0f64 else 1.0f64);
+    recording.paused = false;
+    recording.ready = false;
+    if (url == 0) {
+        send1("audiofailed", recording.token);
+        return
+    }
+    if (recording.player == 0) {
+        recording.player = make("AVPlayer");
+        msg1(recording.player, sel("setAutomaticallyWaitsToMinimizeStalling:"), 1)
+    }
+    item: int = msg1(cls("AVPlayerItem"), sel("playerItemWithURL:"), url);
+    if (item == 0) {
+        send1("audiofailed", recording.token);
+        return
+    }
+    msg1(item, sel("setAudioTimePitchAlgorithm:"), objc_const("AVAudioTimePitchAlgorithmTimeDomain"));
+    msg_set_f(item, sel("setPreferredForwardBufferDuration:"), 60.0f64);
+    recording.item = retain(item);
+    msg4(item, sel("addObserver:forKeyPath:options:context:"), media_target, nsstring("status"),
+        1, 0);
+    msg1(recording.player, sel("replaceCurrentItemWithPlayerItem:"), item);
+    recording.poll = timer_stop(recording.poll);
+    recording.poll = msg_f4(cls("NSTimer"), sel("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
+        0.25f64, media_target, sel("vellumAudioPoll:"), 0, 1)
+}
+
+audio_stop() {
+    recording.poll = timer_stop(recording.poll);
+    if (recording.item != 0) {
+        msg2(recording.item, sel("removeObserver:forKeyPath:"), media_target, nsstring("status"));
+        if (recording.player != 0) {
+            msg(recording.player, sel("pause"));
+            msg1(recording.player, sel("replaceCurrentItemWithPlayerItem:"), 0)
+        }
+        recording.item = held(recording.item, 0)
+    }
+    recording.ready = false
+}
+
+// A CMTime in an NSValue as centiseconds (-1: not a valid time).
+cm_read(value: int): int {
+    cm_time[0] = 0;
+    cm_time[1] = 0;
+    cm_time[2] = 0;
+    msg2(value, sel("getValue:size:"), ints_address(cm_time), 24);
+    scale: int = cm_time[1] & 4294967295;
+    flags: int = cm_time[1] >> 32 & 4294967295;
+    if (scale <= 0 || (flags & 1) == 0 || (flags & 16) != 0) return -1;
+    cm_time[0] * 100 / scale
+}
+
+audio_time(): int {
+    if (recording.player == 0 || recording.item == 0) return -1;
+    value: int = msg1(recording.player, sel("valueForKey:"), nsstring("currentTime"));
+    if (value == 0) -1 else cm_read(value)
+}
+
+audio_duration(): int {
+    if (recording.item == 0) return -1;
+    value: int = msg1(recording.item, sel("valueForKey:"), nsstring("duration"));
+    if (value == 0) -1 else cm_read(value)
+}
+
+// To centisecond t (three CMTimes, each over 16 bytes: by address, on
+// arm64).
+audio_seek(t: int) {
+    cm_time[0] = t;
+    cm_time[1] = 100 | 1 << 32;
+    cm_time[2] = 0;
+    cm_zero[0] = 0;
+    cm_zero[1] = 1 | 1 << 32;
+    cm_zero[2] = 0;
+    msg3(recording.player, sel("seekToTime:toleranceBefore:toleranceAfter:"), ints_address(cm_time),
+        ints_address(cm_zero), ints_address(cm_zero))
+}
+
+audio_play_now() {
+    if (recording.player == 0 || !recording.ready || recording.paused) return;
+    if (responds(recording.player, "setDefaultRate:")) msg_set_f32(recording.player,
+        sel("setDefaultRate:"), recording.rate as f32);
+    msg_set_f32(recording.player, sel("setRate:"), recording.rate as f32)
+}
+
+// The item ready (to its time, playing) or failed.
+recording_observed(
+    _self: int,
+    _cmd: int,
+    _path: int,
+    object: int,
+    _change: int,
+    _context: int
+): int {
+    if (object == 0 || object != recording.item) return 0;
+    status: int = msg(object, sel("status"));
+    if (status == 1 && !recording.ready) {
+        recording.ready = true;
+        if (recording.from > 0) audio_seek(recording.from);
+        audio_play_now();
+        now_playing()
+    } else if (status == 2) {
+        token: int = recording.token;
+        audio_stop();
+        send1("audiofailed", token)
+    }
+    0
+}
+
+recording_polled(_self: int, _cmd: int, _timer: int): int {
+    if (recording.item == 0 || !recording.ready) return 0;
+    t: int = audio_time();
+    if (t < 0) return 0;
+    if (recording.to >= 0 && t >= recording.to) {
+        token: int = recording.token;
+        audio_stop();
+        send1("audioended", token);
+        return 0
+    }
+    if (!recording.paused) send3("audiotime", recording.token, t, audio_duration());
+    0
+}
+
+audio_ended(_self: int, _cmd: int, note: int): int {
+    if (recording.item == 0 || msg(note, sel("object")) != recording.item) return 0;
+    token: int = recording.token;
+    audio_stop();
+    send1("audioended", token);
+    0
+}
+
+audio_failed(_self: int, _cmd: int, note: int): int {
+    if (recording.item == 0 || msg(note, sel("object")) != recording.item) return 0;
+    token: int = recording.token;
+    audio_stop();
+    send1("audiofailed", token);
+    0
+}
+
+// ---- paused, on again, stopped ----
+listen_pause() {
+    recording.paused = true;
+    if (recording.player != 0) msg(recording.player, sel("pause"));
+    if (synth != 0) msg1(synth, sel("pauseSpeakingAtBoundary:"), 0)
+}
+
+listen_resume() {
+    recording.paused = false;
+    audio_play_now();
+    if (synth != 0) msg(synth, sel("continueSpeaking"))
+}
+
+listen_stop() {
+    speech_stop();
+    audio_stop();
+    hearing_line(-1, 0);
+    player_hide();
+    center: int = msg(cls("MPNowPlayingInfoCenter"), sel("defaultCenter"));
+    if (center != 0) msg1(center, sel("setNowPlayingInfo:"), 0)
+}
+
+// ---- the player ----
+type Player = {
+    shown: bool;
+    playing: bool;
+    glass: int;
+    play: int;
+    name: int;
+    title_label: int;
+    state_label: int;
+    close: int;
+    title: int;
+    state: int;
+    reader: int;
+    version: int
+}
+
+player: Player = Player {
+    shown: false,
+    playing: false,
+    glass: 0,
+    play: 0,
+    name: 0,
+    title_label: 0,
+    state_label: 0,
+    close: 0,
+    title: 0,
+    state: 0,
+    reader: 0,
+    version: 0
+};
+
+PLAYER_H: f64 = 50.0f64;
+
+// Made in the dock's container (so its glass merges with the dock's).
+player_make(content: int) {
+    player.glass = retain(glass_view(true));
+    add_sub(content, player.glass);
+    inside: int = glass_content(player.glass);
+    player.play = retain(chrome_button("vellumPlayPause:"));
+    player.name = retain(chrome_button("vellumPlayerName:"));
+    player.close = retain(chrome_button("vellumPlayerClose:"));
+    button_symbol(player.close, "xmark", 13.0f64);
+    msg1(player.close, sel("setAccessibilityLabel:"), nsstring("Stop Listening"));
+    player.title_label = retain(label_new(font_rounded(15.0f64, 0.45f64), colors.ink,
+        1));
+    player.state_label = retain(label_new(font_rounded(12.0f64, 0.0f64), colors.faint,
+        1));
+    msg1(player.title_label, sel("setUserInteractionEnabled:"), 0);
+    msg1(player.state_label, sel("setUserInteractionEnabled:"), 0);
+    add_sub(inside, player.play);
+    add_sub(inside, player.name);
+    add_sub(inside, player.close);
+    add_sub(player.name, player.title_label);
+    add_sub(player.name, player.state_label);
+    set_alpha(player.glass, 0.0f64);
+    set_hidden(player.glass, true)
+}
+
+// Its place: above the dock's top (or the tray's), given in the root's
+// coordinates; folded into the capsule while it isn't shown.
+player_place(x: f64, y: f64, w: f64) {
+    if (player.glass == 0) return;
+    h: f64 = PLAYER_H;
+    dock_place(player.glass, x, y, w, h, if (player.shown) 1.0f64 else 0.0f64);
+    set_frame4(player.play, 4.0f64, 0.0f64, 46.0f64, h);
+    set_frame4(player.name, 50.0f64, 0.0f64, w - 100.0f64, h);
+    set_frame4(player.title_label, 0.0f64, 7.0f64, w - 100.0f64, 20.0f64);
+    set_frame4(player.state_label, 0.0f64, 27.0f64, w - 100.0f64, 16.0f64);
+    set_frame4(player.close, w - 48.0f64, 0.0f64, 44.0f64, h)
+}
+
+player_dress() {
+    if (player.glass == 0) return;
+    msg1(player.title_label, sel("setTextColor:"), colors.ink);
+    msg1(player.state_label, sel("setTextColor:"), colors.faint);
+    msg1(player.play, sel("setTintColor:"), colors.ink);
+    msg1(player.close, sel("setTintColor:"), colors.faint);
+    glass_tint(player.glass, dock_tint())
+}
+
+// `player TITLE STATE PLAYING READER BUTTON SYMBOL` (the reader's field
+// naming the version too).
+player_line(line: WireLine) {
+    media_load();
+    player.title = held(player.title, field_ns(line, 1));
+    state: int = field_ns(line, 2);
+    playing: bool = wire_number(line, 3) == 1;
+    player.reader = held(player.reader, field_ns(line, 4));
+    player.version = held(player.version, version_words);
+    if (player.shown && !ns_equal(state, player.state)) cross_fade(player.state_label,
+        0.2f64);
+    if (player.shown && playing != player.playing) cross_fade(player.play, 0.15f64);
+    player.state = held(player.state, state);
+    player.playing = playing;
+    msg1(player.title_label, sel("setText:"), player.title);
+    msg1(player.state_label, sel("setText:"), player.state);
+    // (Its button's words and symbol are its last two fields.)
+    msg2(player.play, sel("setImage:forState:"), symbol_image(field_ns(line, line.count - 1),
+        20.0f64, 6), 0);
+    msg1(player.play, sel("setAccessibilityLabel:"), field_ns(line, line.count - 2));
+    words_begin();
+    words_add_ns(player.title);
+    words_add(", ");
+    words_add_ns(player.state);
+    msg1(player.name, sel("setAccessibilityLabel:"), words_ns());
+    player_dress();
+    now_playing();
+    listen_button_light(true);
+    if (!player.shown) {
+        player.shown = true;
+        set_hidden(player.glass, false);
+        dock_expand();
+        spring(ANIM_DOCK, 0.45f64, 0.15f64)
+    }
+}
+
+player_hide() {
+    player.playing = false;
+    listen_button_light(false);
+    if (!player.shown) return;
+    player.shown = false;
+    spring(ANIM_DOCK, 0.35f64, 0.0f64)
+}
+
+play_pause_tapped(_self: int, _cmd: int, _sender: int): int {
+    haptic_impact(0);
+    send0(if (player.playing) "listenpause" else "listenplay");
+    0
+}
+
+player_close_tapped(_self: int, _cmd: int, _sender: int): int {
+    send0("listenstop");
+    0
+}
+
+// What is heard's name: the page to the verse heard.
+player_name_tapped(_self: int, _cmd: int, _sender: int): int {
+    if (washes.heard_chapter < 0) return 0;
+    follow_lead(PANE_PAGE);
+    pane_go_to_verse(PANE_PAGE, washes.heard_chapter, washes.heard_verse, 1);
+    0
+}
+
+// ---- the lock screen's ----
+lock_screen_play(_self: int, _cmd: int, _event: int): int {
+    send0("listenplay");
+    0
+}
+
+lock_screen_pause(_self: int, _cmd: int, _event: int): int {
+    send0("listenpause");
+    0
+}
+
+lock_screen_toggle(_self: int, _cmd: int, _event: int): int {
+    send0(if (player.playing) "listenpause" else "listenplay");
+    0
+}
+
+lock_screen_next(_self: int, _cmd: int, _event: int): int {
+    send0("listennext");
+    0
+}
+
+lock_screen_previous(_self: int, _cmd: int, _event: int): int {
+    send0("listenprev");
+    0
+}
+
+// What the lock screen shows: core's title, the reader, the version, the
+// artwork; a recording's length and time; the rate.
+now_keys: []int = new int[8](0);
+
+now_values: []int = new int[8](0);
+
+now_artwork: int = 0;
+
+now_playing() {
+    center: int = msg(cls("MPNowPlayingInfoCenter"), sel("defaultCenter"));
+    if (center == 0 || player.title == 0) return;
+    n: int = 0;
+    now_keys[n] = objc_const("MPMediaItemPropertyTitle");
+    now_values[n] = player.title;
+    n = n + 1;
+    if (player.reader != 0) {
+        now_keys[n] = objc_const("MPMediaItemPropertyArtist");
+        now_values[n] = player.reader;
+        n = n + 1
+    }
+    if (player.version != 0) {
+        now_keys[n] = objc_const("MPMediaItemPropertyAlbumTitle");
+        now_values[n] = player.version;
+        n = n + 1
+    }
+    playing_recording: bool = recording.item != 0;
+    if (playing_recording) {
+        duration: int = audio_duration();
+        elapsed: int = audio_time();
+        if (duration > 0) {
+            now_keys[n] = objc_const("MPMediaItemPropertyPlaybackDuration");
+            now_values[n] = nsnumber_f(duration as f64 / 100.0f64);
+            n = n + 1
+        }
+        if (elapsed >= 0) {
+            now_keys[n] = objc_const("MPNowPlayingInfoPropertyElapsedPlaybackTime");
+            now_values[n] = nsnumber_f(elapsed as f64 / 100.0f64);
+            n = n + 1
+        }
+    }
+    now_keys[n] = objc_const("MPNowPlayingInfoPropertyPlaybackRate");
+    now_values[n] = nsnumber_f(if (!player.playing) 0.0f64 else if (playing_recording) recording.rate else 1.0f64);
+    n = n + 1;
+    if (now_artwork == 0) {
+        path: int = msg2(msg(cls("NSBundle"), sel("mainBundle")), sel("pathForResource:ofType:"),
+            nsstring("nowplaying"), nsstring("png"));
+        image: int = if (path != 0) msg1(cls("UIImage"), sel("imageWithContentsOfFile:"),
+            path) else 0;
+        // (The initializer that takes no block.)
+        if (image != 0) now_artwork = msg1(msg(cls("MPMediaItemArtwork"), sel("alloc")),
+            sel("initWithImage:"), image)
+    }
+    if (now_artwork != 0) {
+        now_keys[n] = objc_const("MPMediaItemPropertyArtwork");
+        now_values[n] = now_artwork;
+        n = n + 1
+    }
+    for k in 0..n
+        if (now_keys[k] == 0) return;
+    msg1(center, sel("setNowPlayingInfo:"), nsdictionary(now_keys, now_values, n))
+}
+
+listen_classes_make() {
+    media: int = class_make(cls("NSObject"), "VellumMedia");
+    add_method2(media, sel("speechSynthesizer:didStartSpeechUtterance:"), &utterance_began,
+        "v@:@@");
+    add_method2(media, sel("speechSynthesizer:didFinishSpeechUtterance:"), &utterance_finished,
+        "v@:@@");
+    add_method4(media, sel("observeValueForKeyPath:ofObject:change:context:"), &recording_observed,
+        "v@:@@@^v");
+    add_method1(media, sel("vellumAudioPoll:"), &recording_polled, "v@:@");
+    add_method1(media, sel("vellumAudioEnded:"), &audio_ended, "v@:@");
+    add_method1(media, sel("vellumAudioFailed:"), &audio_failed, "v@:@");
+    add_method1(media, sel("vellumMediaInterrupted:"), &session_interrupted, "v@:@");
+    add_method1(media, sel("vellumMediaRoute:"), &session_route_changed, "v@:@");
+    add_method1(media, sel("vellumRemotePlay:"), &lock_screen_play, "q@:@");
+    add_method1(media, sel("vellumRemotePause:"), &lock_screen_pause, "q@:@");
+    add_method1(media, sel("vellumRemoteToggle:"), &lock_screen_toggle, "q@:@");
+    add_method1(media, sel("vellumRemoteNext:"), &lock_screen_next, "q@:@");
+    add_method1(media, sel("vellumRemotePrevious:"), &lock_screen_previous, "q@:@");
+    add_protocol(media, "AVSpeechSynthesizerDelegate");
+    if (media_target == 0) media_target = make("VellumMedia")
+}
+
+add_player_methods(target: int) {
+    add_method1(target, sel("vellumPlayPause:"), &play_pause_tapped, "v@:@");
+    add_method1(target, sel("vellumPlayerClose:"), &player_close_tapped, "v@:@");
+    add_method1(target, sel("vellumPlayerName:"), &player_name_tapped, "v@:@")
+}

@@ -1,0 +1,843 @@
+tag vellum;
+
+use_tag std, ios, bible, bible_wire;
+
+// A pane's parts as core says them (SKINS.md, Panes: Parts), each decoded
+// into an arena of its own: its words, runs, verses, links, glossed words
+// and what is marked on its verses; what core says of its chapter (how
+// many parts it has, its anchors, their sizes, a commentary's run of
+// chapters without comments) is the pane's (pane.l8's facts). A part is
+// made into an attributed string for its text view, the marks put in (a
+// bookmark's glyph before its verse's number, a note's after its end), and
+// washed: the highlights, the verses selected, the verse flashed after a
+// jump, the verse heard.
+import "../../ios/objc.l8";
+
+import "../core/text.l8";
+
+import "kit.l8";
+
+import "look.l8";
+
+type Span = {
+    b: int;
+    e: int;
+    style: int;
+    para: int
+}
+
+// A verse (an anchor): its number, and where it is in the words as core
+// says them and as shown (the marks put in); whether its wash goes on over
+// the space after it.
+type Verse = {
+    number: int;
+    b: int;
+    e: int;
+    shown_b: int;
+    shown_e: int;
+    joins: bool
+}
+
+// A link in the words: KIND 0 a footnote's mark, 1 a reference, 2 a word of
+// the original, 3 the ESV's line; ARG what it opens.
+type TextLink = {
+    b: int;
+    e: int;
+    kind: int;
+    arg: int
+}
+
+LINK_FOOTNOTE: int = 0;
+
+LINK_REFERENCE: int = 1;
+
+LINK_WORD: int = 2;
+
+LINK_ESV: int = 3;
+
+// What is marked on a verse (0: the chapter's own note).
+type VerseMark = {
+    verse: int;
+    highlight: int;
+    bookmark: bool;
+    note: bool
+}
+
+// A mark put into the words shown: where (in the words as core says
+// them), how many UTF-16 units, what (MARK_), whose verse.
+type Inserted = {
+    at: int;
+    n: int;
+    kind: int;
+    verse: int
+}
+
+MARK_BOOKMARK: int = 0;
+
+MARK_NOTE: int = 1;
+
+MARK_CHAPTER_NOTE: int = 2;
+
+type Part = {
+    pane: int;
+    chapter: int;
+    index: int;
+    // The chapter's parts (0: not known yet: a commentary still opening).
+    count: int;
+    // It holds its place until it has been read (`coming`).
+    coming: bool;
+    flags: int;
+    opener: int;
+    label: int;
+    // The last chapter it stands for (a commentary's run without
+    // comments: `gap C0 C1`); its own chapter otherwise.
+    last: int;
+    // Its words (and the ESV's notice after them) and its name, as the
+    // pane's title says it: NSStrings, held while it is.
+    text: int;
+    name: int;
+    spans: []Span;
+    verses: []Verse;
+    links: []TextLink;
+    glosses: []TextLink;
+    marks: []VerseMark;
+    inserted: []Inserted
+}
+
+// ---- the parts kept ----
+// Both panes' parts, those shown and those asked for ahead: used longest
+// ago let go first.
+PARTS_MOST: int = 96;
+
+parts: []?owned *Part = new ?owned *Part[96](null);
+
+part_used: []int = new int[96](0);
+
+// Each slot's pane, chapter and part (-1: empty), to find one without
+// borrowing it.
+part_key: []int = new int[96](-1);
+
+part_clock: int = 0;
+
+PART_KEY_PANE: int = 16777216;
+
+PART_KEY_CHAPTER: int = 4096;
+
+key_of(p: int, c: int, k: int): int {
+    p * PART_KEY_PANE + c * PART_KEY_CHAPTER + k
+}
+
+part_slot(p: int, c: int, k: int): int {
+    key: int = key_of(p, c, k);
+    for s in 0..PARTS_MOST
+        if (part_key[s] == key) return s;
+    -1
+}
+
+part_touch(s: int) {
+    part_clock = part_clock + 1;
+    part_used[s] = part_clock
+}
+
+// The slot of pane p's part k of chapter c: kept, or asked of core now
+// (-1: core has none, or answered with a run's part for another chapter).
+part_need(p: int, c: int, k: int): int {
+    s: int = part_slot(p, c, k);
+    if (s >= 0) {
+        part_touch(s);
+        return s
+    }
+    if (c < 0 || c >= pane_chapters || k < 0) return -1;
+    // (Laid out by the pane that asks: not shown again as it comes.)
+    was: bool = asking_part;
+    asking_part = true;
+    came: bool = ask_part(p, c, k);
+    asking_part = was;
+    if (came) part_slot(p, c, k) else -1
+}
+
+part_free(s: int) {
+    if (parts[s] != null) {
+        borrow parts[s] as part {
+            release(part.text);
+            release(part.name)
+        }
+    }
+    drop parts[s];
+    part_key[s] = -1
+}
+
+// Pane p's parts of chapter c let go (-1: all of the pane's).
+parts_forget(p: int, c: int) {
+    for s in 0..PARTS_MOST {
+        key: int = part_key[s];
+        if (key >= 0 && key / PART_KEY_PANE == p && (c < 0 || key % PART_KEY_PANE / PART_KEY_CHAPTER == c)) part_free(s)
+    }
+}
+
+// A slot for a part: an empty one, else the one used longest ago that
+// no pane shows.
+part_room(): int {
+    best: int = -1;
+    for s in 0..PARTS_MOST {
+        if (part_key[s] < 0) return s;
+        if (!part_shown(s) && (best < 0 || part_used[s] < part_used[best])) best = s
+    }
+    if (best < 0) best = 0;
+    part_free(best);
+    best
+}
+
+// Whether a pane's window shows slot s's part.
+part_shown(s: int): bool {
+    key: int = part_key[s];
+    p: int = key / PART_KEY_PANE;
+    window_shows(p, key % PART_KEY_PANE / PART_KEY_CHAPTER, key % PART_KEY_CHAPTER)
+}
+
+// ---- a part's lines, read ----
+// Fields of a line, as numbers in turn: a cursor over the bytes.
+type Cursor = {
+    at: int;
+    end: int
+}
+
+cursor_number(data: []i8, c: *Cursor): int {
+    while (c.at < c.end && data[c.at] as int == 32) c.at = c.at + 1;
+    negative: bool = c.at < c.end && data[c.at] as int == 45;
+    if (negative) c.at = c.at + 1;
+    n: int = 0;
+    while (c.at < c.end && data[c.at] as int >= 48 && data[c.at] as int <= 57) {
+        n = n * 10 + data[c.at] as int - 48;
+        c.at = c.at + 1
+    }
+    if (negative) -n else n
+}
+
+cursor_word(data: []i8, c: *Cursor): Cursor {
+    while (c.at < c.end && data[c.at] as int == 32) c.at = c.at + 1;
+    b: int = c.at;
+    while (c.at < c.end && data[c.at] as int != 32) c.at = c.at + 1;
+    Cursor { at: b, end: c.at }
+}
+
+line_is(
+    data: []i8,
+    at: int,
+    e: int,
+    word: str
+): bool {
+    if (e - at < len(word)) return false;
+    for i in 0..len(word)
+        if (data[at + i] != word[i]) return false;
+    e - at == len(word) || data[at + len(word)] as int == 32 || data[at + len(word)] as int == 9
+}
+
+part_line_end(data: []i8, at: int, e: int): int {
+    p: int = at;
+    while (p < e && data[p] as int != 10) p = p + 1;
+    p
+}
+
+// A field's words (from at to its tab or e), unescaped, as an NSString;
+// where the field ends.
+field_scratch_part: []i8 = new i8[2097152](0i8);
+
+unescaped_ns(
+    data: []i8,
+    at: int,
+    e: int,
+    also: int
+): int {
+    n: int = 0;
+    p: int = at;
+    while (p < e && data[p] as int != 9) {
+        k: int = data[p] as int;
+        if (k == 92 && p + 1 < e) {
+            p = p + 1;
+            k = data[p] as int;
+            if (k == 110) k = 10 else if (k == 116) k = 9
+        }
+        if (n >= len(field_scratch_part)) link_fail("a part's words are too long");
+        field_scratch_part[n] = k trunc i8;
+        n = n + 1;
+        p = p + 1
+    }
+    // (A second field, the ESV's notice, joined after the words.)
+    if (also != 0 && p < e) {
+        q: int = p + 1;
+        while (q < e && data[q] as int != 9) {
+            k: int = data[q] as int;
+            if (k == 92 && q + 1 < e) {
+                q = q + 1;
+                k = data[q] as int;
+                if (k == 110) k = 10 else if (k == 116) k = 9
+            }
+            if (n >= len(field_scratch_part)) link_fail("a part's words are too long");
+            field_scratch_part[n] = k trunc i8;
+            n = n + 1;
+            q = q + 1
+        }
+    }
+    nsstring_lossy_at(bytes_address(field_scratch_part), n)
+}
+
+// The `part P C K N` block at data b to e: kept (in place of the same
+// part), and what it says of its chapter given to the pane.
+part_came(data: []i8, b: int, e: int) {
+    first_end: int = part_line_end(data, b, e);
+    head: Cursor = Cursor { at: b + len("part"), end: first_end };
+    p: int = cursor_number(data, &head);
+    c: int = cursor_number(data, &head);
+    k: int = cursor_number(data, &head);
+    count: int = cursor_number(data, &head);
+    if (p < 0 || p >= PANES || c < 0 || c >= pane_chapters || k < 0 || k >= PART_KEY_CHAPTER) return;
+    // (The words: the line's second field, the ESV's notice its third.)
+    tab: int = b;
+    while (tab < first_end && data[tab] as int != 9) tab = tab + 1;
+    text: int = retain(if (tab < first_end) unescaped_ns(data, tab + 1, first_end,
+        1) else nsstring(""));
+    // (Counted first: each list made as long as it is.)
+    n_spans: int = 0;
+    n_verses: int = 0;
+    n_links: int = 0;
+    n_glosses: int = 0;
+    n_marks: int = 0;
+    at: int = first_end + 1;
+    while (at < e) {
+        le: int = part_line_end(data, at, e);
+        if (line_is(data, at, le, "span")) n_spans = n_spans + 1 else if (line_is(data,
+            at, le, "verse")) n_verses = n_verses + 1 else if (line_is(data, at, le,
+            "link")) n_links = n_links + 1 else if (line_is(data, at, le, "gloss")) n_glosses = n_glosses + 1 else if (line_is(data,
+            at, le, "mark")) n_marks = n_marks + 1;
+        at = le + 1
+    }
+    if (count > 0) facts_anchors_begin(p, c, count);
+    s: int = part_slot(p, c, k);
+    if (s >= 0) part_free(s) else s = part_room();
+    parts[s] = own {
+        part_read(data, first_end + 1, e, p, c, k, count, text, n_spans, n_verses,
+            n_links, n_glosses, n_marks)
+    };
+    part_key[s] = key_of(p, c, k);
+    part_touch(s);
+    part_stored(p, c, k)
+}
+
+part_read(
+    data: []i8,
+    from: int,
+    e: int,
+    p: int,
+    c: int,
+    k: int,
+    count: int,
+    text: int,
+    n_spans: int,
+    n_verses: int,
+    n_links: int,
+    n_glosses: int,
+    n_marks: int
+): *Part@new {
+    part: *Part = new Part {
+        pane: p,
+        chapter: c,
+        index: k,
+        count: count,
+        coming: false,
+        flags: 0,
+        opener: 0,
+        label: 0,
+        last: c,
+        text: text,
+        name: 0,
+        spans: new Span[n_spans](Span {
+            b: 0,
+            e: 0,
+            style: 0,
+            para: 0
+        }),
+        verses: new Verse[n_verses](Verse {
+            number: 0,
+            b: 0,
+            e: 0,
+            shown_b: 0,
+            shown_e: 0,
+            joins: false
+        }),
+        links: new TextLink[n_links](TextLink {
+            b: 0,
+            e: 0,
+            kind: 0,
+            arg: 0
+        }),
+        glosses: new TextLink[n_glosses](TextLink {
+            b: 0,
+            e: 0,
+            kind: 0,
+            arg: 0
+        }),
+        marks: new VerseMark[n_marks](VerseMark {
+            verse: -1,
+            highlight: -1,
+            bookmark: false,
+            note: false
+        }),
+        inserted: new Inserted[0](Inserted {
+            at: 0,
+            n: 0,
+            kind: 0,
+            verse: 0
+        })
+    };
+    i_span: int = 0;
+    i_verse: int = 0;
+    i_link: int = 0;
+    i_gloss: int = 0;
+    i_mark: int = 0;
+    at: int = from;
+    while (at < e) {
+        le: int = part_line_end(data, at, e);
+        if (line_is(data, at, le, "span")) {
+            cur: Cursor = Cursor { at: at + 4, end: le };
+            part.spans[i_span] = Span {
+                b: cursor_number(data, &cur),
+                e: cursor_number(data, &cur),
+                style: cursor_number(data, &cur),
+                para: cursor_number(data, &cur)
+            };
+            i_span = i_span + 1
+        } else if (line_is(data, at, le, "verse")) {
+            cur: Cursor = Cursor { at: at + 5, end: le };
+            number: int = cursor_number(data, &cur);
+            vb: int = cursor_number(data, &cur);
+            ve: int = cursor_number(data, &cur);
+            part.verses[i_verse] = Verse {
+                number: number,
+                b: vb,
+                e: ve,
+                shown_b: vb,
+                shown_e: ve,
+                joins: false
+            };
+            i_verse = i_verse + 1
+        } else if (line_is(data, at, le, "link")) {
+            cur: Cursor = Cursor { at: at + 4, end: le };
+            part.links[i_link] = TextLink {
+                b: cursor_number(data, &cur),
+                e: cursor_number(data, &cur),
+                kind: cursor_number(data, &cur),
+                arg: cursor_number(data, &cur)
+            };
+            i_link = i_link + 1
+        } else if (line_is(data, at, le, "gloss")) {
+            cur: Cursor = Cursor { at: at + 5, end: le };
+            part.glosses[i_gloss] = TextLink {
+                b: cursor_number(data, &cur),
+                e: cursor_number(data, &cur),
+                kind: LINK_WORD,
+                arg: 0
+            };
+            i_gloss = i_gloss + 1
+        } else if (line_is(data, at, le, "mark")) {
+            cur: Cursor = Cursor { at: at + 4, end: le };
+            verse: int = cursor_number(data, &cur);
+            hex: Cursor = cursor_word(data, &cur);
+            part.marks[i_mark] = VerseMark {
+                verse: verse,
+                highlight: highlight_index(hex_at(data, hex.at, hex.end)),
+                bookmark: cursor_number(data, &cur) == 1,
+                note: cursor_number(data, &cur) == 1
+            };
+            i_mark = i_mark + 1
+        } else if (line_is(data, at, le, "layout")) {
+            cur: Cursor = Cursor { at: at + 6, end: le };
+            f: int = 0;
+            if (cursor_number(data, &cur) == 1) f = f | LAY_ORIG;
+            if (cursor_number(data, &cur) == 1) f = f | LAY_RTL;
+            if (cursor_number(data, &cur) == 1) f = f | LAY_LINES;
+            part.flags = f;
+            part.opener = cursor_number(data, &cur);
+            part.label = cursor_number(data, &cur)
+        } else if (line_is(data, at, le, "gap")) {
+            cur: Cursor = Cursor { at: at + 3, end: le };
+            gap_first: int = cursor_number(data, &cur);
+            gap_last: int = cursor_number(data, &cur);
+            part.last = gap_last;
+            facts_gap(p, gap_first, gap_last)
+        } else if (line_is(data, at, le, "anchor")) {
+            cur: Cursor = Cursor { at: at + 6, end: le };
+            verse: int = cursor_number(data, &cur);
+            in_part: int = cursor_number(data, &cur);
+            facts_anchor(p, c, verse, in_part, cursor_number(data, &cur))
+        } else if (line_is(data, at, le, "sizes")) {
+            cur: Cursor = Cursor { at: at + 5, end: le };
+            more: bool = true;
+            while (more) {
+                was: int = cur.at;
+                bytes: int = cursor_number(data, &cur);
+                more = cur.at > was;
+                if (more) facts_size(p, c, bytes)
+            }
+        } else if (line_is(data, at, le, "coming")) part.coming = true else if (line_is(data,
+            at, le, "name")) part.name = retain(unescaped_ns(data, if (at + 5 < le) at + 5 else le,
+            le, 0));
+        at = le + 1
+    }
+    part.inserted = new Inserted[inserted_count(part)](Inserted {
+        at: 0,
+        n: 0,
+        kind: 0,
+        verse: 0
+    });
+    part_shift_marks(part);
+    part
+}
+
+// How many marks are put into its words shown.
+inserted_count(part: *Part): int {
+    count: int = 0;
+    if (part.label > 0 && part_marked(part, 0).note) count = count + 1;
+    for i in 0..len(part.verses) {
+        v: int = part.verses[i].number;
+        m: VerseMark = part_marked(part, v);
+        if (v > 0 && m.bookmark) count = count + 1;
+        if (v > 0 && m.note) count = count + 1
+    }
+    count
+}
+
+// The marks to put into its words shown (a bookmark's glyph, a note's,
+// the chapter's note's), and each verse's place past them.
+part_shift_marks(part: *Part) {
+    n: int = ns_length(part.text);
+    j: int = 0;
+    if (part.label > 0 && part_marked(part, 0).note) {
+        part.inserted[j] = Inserted {
+            at: part.label,
+            n: 2,
+            kind: MARK_CHAPTER_NOTE,
+            verse: 0
+        };
+        j = j + 1
+    }
+    for i in 0..len(part.verses) {
+        verse: Verse = part.verses[i];
+        part.verses[i].joins = verse.e < n && msg1(part.text, sel("characterAtIndex:"),
+            verse.e) == 32;
+        m: VerseMark = part_marked(part, verse.number);
+        if (verse.number > 0 && m.bookmark) {
+            part.inserted[j] = Inserted {
+                at: verse.b,
+                n: 3,
+                kind: MARK_BOOKMARK,
+                verse: verse.number
+            };
+            j = j + 1
+        }
+        if (verse.number > 0 && m.note) {
+            part.inserted[j] = Inserted {
+                at: verse.e,
+                n: 2,
+                kind: MARK_NOTE,
+                verse: verse.number
+            };
+            j = j + 1
+        }
+    }
+    for i in 0..len(part.verses) {
+        part.verses[i].shown_b = shown_at(part, part.verses[i].b, true);
+        part.verses[i].shown_e = shown_at(part, part.verses[i].e, false)
+    }
+}
+
+// What is marked on verse v (none: no highlight, nothing).
+part_marked(part: *Part, v: int): VerseMark {
+    for m in part.marks
+        if (m.verse == v) return m;
+    VerseMark {
+        verse: v,
+        highlight: -1,
+        bookmark: false,
+        note: false
+    }
+}
+
+// A place in the words as core says them, as shown (the marks put in
+// before it, and at it for a beginning).
+shown_at(part: *Part, u: int, beginning: bool): int {
+    shift: int = 0;
+    for m in part.inserted
+        if (m.at < u || beginning && m.at == u) shift = shift + m.n;
+    u + shift
+}
+
+// A place in the words shown as core says them.
+core_at(part: *Part, shown: int): int {
+    u: int = shown;
+    for m in part.inserted {
+        p: int = shown_at(part, m.at, true) - m.n;
+        if (shown >= p + m.n) u = u - m.n else if (shown >= p) u = u - (shown - p)
+    }
+    if (u < 0) 0 else u
+}
+
+// The index of the verse whose words hold shown place k (-1: none).
+verse_index_at(part: *Part, k: int): int {
+    for i in 0..len(part.verses)
+        if (k >= part.verses[i].shown_b && k < part.verses[i].shown_e) return i;
+    -1
+}
+
+// ---- as an attributed string ----
+// What a tap finds, kept on the words as attributes of the app's own.
+KEY_LINK: str = "VellumLink";
+
+KEY_NOTE: str = "VellumNote";
+
+KEY_CHAPTER_NOTE: str = "VellumChapterNote";
+
+// The part in slot s as an attributed string for its pane's type
+// (autoreleased): its runs, links and marks; not yet washed.
+part_attributed(s: int): int {
+    a: int = 0;
+    borrow parts[s] as part {
+        a = part_attributed_of(part, type_of(part.pane))
+    }
+    a
+}
+
+part_attributed_of(part: *Part, t: *TypeSet): int {
+    text: int = part.text;
+    n: int = ns_length(text);
+    a: int = autoreleased(msg1(msg(cls("NSMutableAttributedString"), sel("alloc")),
+        sel("initWithString:"), text));
+    msg3(a, sel("setAttributes:range:"), run_attrs(t, part.flags, STYLE_BODY, 0),
+        0, n);
+    for span in part.spans {
+        e: int = if (span.e > n) n else span.e;
+        if (e > span.b) {
+            attrs: int = run_attrs(t, part.flags, span.style, span.para);
+            if (span.style == STYLE_RULE) attrs = rule_attrs(t, attrs) else if (span.style == STYLE_VERSE && verse_bookmarked_at(part,
+                span.b)) attrs = bookmarked_number_attrs(t, attrs);
+            msg3(a, sel("setAttributes:range:"), attrs, span.b, e - span.b)
+        }
+    }
+    key: int = nsstring(KEY_LINK);
+    for link in part.links {
+        e: int = if (link.e > n) n else link.e;
+        // (A link's kind and argument as one number: kind + 4 * (arg + 1).)
+        if (e > link.b) msg4(a, sel("addAttribute:value:range:"), key, nsnumber_int(link.kind + 4 * (link.arg + 1)),
+            link.b, e - link.b)
+    }
+    // (No line's end after the chapter's last words: the space between
+    // chapters is the next one's.)
+    if (n > 1 && msg1(text, sel("characterAtIndex:"), n - 1) == 10) msg2(a, sel("deleteCharactersInRange:"),
+        n - 1, 1);
+    j: int = len(part.inserted) - 1;
+    while (j >= 0) {
+        mark_put(a, part.inserted[j], t);
+        j = j - 1
+    }
+    a
+}
+
+verse_bookmarked_at(part: *Part, b: int): bool {
+    for v in part.verses
+        if (v.b == b && v.number > 0) return part_marked(part, v.number).bookmark;
+    false
+}
+
+// A bookmarked verse's number: the accent, firmer.
+bookmarked_number_attrs(t: *TypeSet, attrs: int): int {
+    d: int = autoreleased(msg(attrs, sel("mutableCopy")));
+    msg2(d, sel("setObject:forKey:"), colors.accent, objc_const("NSForegroundColorAttributeName"));
+    msg2(d, sel("setObject:forKey:"), font_monospaced_digits(t.em * 0.58f64, 0.5f64),
+        objc_const("NSFontAttributeName"));
+    d
+}
+
+// The rule between chapters: a short hairline, an attachment.
+rule_image: int = 0;
+
+rule_attrs(_t: *TypeSet, attrs: int): int {
+    if (rule_image == 0) rule_image = retain(hairline_image());
+    attachment: int = fresh("NSTextAttachment");
+    msg1(attachment, sel("setImage:"), rule_image);
+    msg_rect(attachment, sel("setBounds:"), 0.0f64, 0.0f64, 36.0f64, 0.5f64);
+    d: int = autoreleased(msg(attrs, sel("mutableCopy")));
+    msg2(d, sel("setObject:forKey:"), attachment, objc_const("NSAttachmentAttributeName"));
+    d
+}
+
+extern UIGraphicsBeginImageContextWithOptions(
+    w: f64,
+    h: f64,
+    opaque: int,
+    scale: f64
+): int;
+
+extern UIRectFill(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64
+): int;
+
+extern UIGraphicsGetImageFromCurrentImageContext(): int;
+
+extern UIGraphicsEndImageContext(): int;
+
+hairline_image(): int {
+    UIGraphicsBeginImageContextWithOptions(1.0f64, 1.0f64, 0, 1.0f64);
+    msg(colors.rule, sel("setFill"));
+    UIRectFill(0.0f64, 0.0f64, 1.0f64, 1.0f64);
+    image: int = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    image
+}
+
+// An attachment of a symbol's image, h points tall, its foot y above the
+// baseline, in the accent.
+symbol_attachment(
+    name: str,
+    h: f64,
+    y: f64,
+    label: str
+): int {
+    image: int = msg2(symbol(name, h * 1.2f64, 5), sel("imageWithTintColor:renderingMode:"),
+        colors.accent, 1);
+    attachment: int = msg1(cls("NSTextAttachment"), sel("textAttachmentWithImage:"),
+        image);
+    geo_of(image, "size");
+    w: f64 = if (geo[1] > 0.0f64) geo[0] * h / geo[1] else h;
+    msg_rect(attachment, sel("setBounds:"), 0.0f64, y, w, h);
+    msg1(attachment, sel("setAccessibilityLabel:"), nsstring(label));
+    attachment
+}
+
+// Mark m put into a (a bookmark's glyph held to the number after it by a
+// word joiner and a narrow no-break space; a note's after a thin space).
+mark_put(a: int, m: Inserted, t: *TypeSet) {
+    n: int = msg(a, sel("length"));
+    at: int = if (m.kind == MARK_BOOKMARK) m.at else m.at - 1;
+    if (at < 0) at = 0;
+    if (at >= n) at = n - 1;
+    if (at < 0) return;
+    base: int = msg2(a, sel("attributesAtIndex:effectiveRange:"), at, 0);
+    attachment: int = if (m.kind == MARK_BOOKMARK) symbol_attachment("bookmark.fill",
+        t.em * 0.55f64, t.em * 0.3f64, "Bookmark") else symbol_attachment("note.text",
+        t.em * 0.62f64, -t.em * 0.04f64, "Note");
+    d: int = autoreleased(msg(base, sel("mutableCopy")));
+    msg2(d, sel("setObject:forKey:"), attachment, objc_const("NSAttachmentAttributeName"));
+    msg1(d, sel("removeObjectForKey:"), nsstring(KEY_LINK));
+    if (m.kind == MARK_NOTE) msg2(d, sel("setObject:forKey:"), nsnumber_int(m.verse),
+        nsstring(KEY_NOTE));
+    if (m.kind == MARK_CHAPTER_NOTE) msg2(d, sel("setObject:forKey:"), nsnumber_int(1),
+        nsstring(KEY_CHAPTER_NOTE));
+    glyph: int = autoreleased(msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        char_string(65532, 0), d));
+    space: int = autoreleased(msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        if (m.kind == MARK_BOOKMARK) char_string(8288, 8239) else char_string(8201,
+        0), base));
+    put: int = fresh("NSMutableAttributedString");
+    if (m.kind == MARK_BOOKMARK) {
+        msg1(put, sel("appendAttributedString:"), glyph);
+        msg1(put, sel("appendAttributedString:"), space)
+    } else {
+        msg1(put, sel("appendAttributedString:"), space);
+        msg1(put, sel("appendAttributedString:"), glyph)
+    }
+    if (m.at <= n) msg2(a, sel("insertAttributedString:atIndex:"), put, m.at)
+}
+
+// ---- the washes ----
+// The verses selected (core's `selection`), the verse flashed after a
+// jump, the verse heard: the page's alone.
+type Washes = {
+    selected_chapter: int;
+    selected: []int;
+    selected_n: int;
+    flash_chapter: int;
+    flash_verse: int;
+    heard_chapter: int;
+    heard_verse: int
+}
+
+washes: Washes = Washes {
+    selected_chapter: -1,
+    selected: new int[256](0),
+    selected_n: 0,
+    flash_chapter: -1,
+    flash_verse: 0,
+    heard_chapter: -1,
+    heard_verse: 0
+};
+
+is_selected(c: int, v: int): bool {
+    if (c != washes.selected_chapter) return false;
+    for i in 0..washes.selected_n
+        if (washes.selected[i] == v) return true;
+    false
+}
+
+// Slot s's washes painted onto a (its words shown): highlights, the
+// selection, the flash, the verse heard, glossed words' dotted lines.
+part_wash(s: int, a: int) {
+    borrow parts[s] as part {
+        part_wash_of(part, a)
+    }
+}
+
+part_wash_of(part: *Part, a: int) {
+    n: int = msg(a, sel("length"));
+    background: int = objc_const("NSBackgroundColorAttributeName");
+    underline: int = objc_const("NSUnderlineStyleAttributeName");
+    underline_color: int = objc_const("NSUnderlineColorAttributeName");
+    msg3(a, sel("removeAttribute:range:"), background, 0, n);
+    msg3(a, sel("removeAttribute:range:"), underline, 0, n);
+    page: bool = part.pane == PANE_PAGE;
+    c: int = part.chapter;
+    for i in 0..len(part.verses) {
+        verse: Verse = part.verses[i];
+        b: int = verse.shown_b;
+        e: int = if (verse.shown_e > n) n else verse.shown_e;
+        h: int = part_marked(part, verse.number).highlight;
+        if (h >= 0 && verse.number > 0 && highlight_wash[h] != 0) {
+            // (Joined to the next verse's wash, if it is the same color.)
+            to: int = e;
+            if (i + 1 < len(part.verses) && verse.joins && part_marked(part, part.verses[i + 1].number).highlight == h) to = part.verses[i + 1].shown_b;
+            if (to > n) to = n;
+            if (to > b) msg4(a, sel("addAttribute:value:range:"), background, highlight_wash[h],
+                b, to - b)
+        }
+        if (page && e > b) {
+            if (is_selected(c, verse.number)) {
+                msg4(a, sel("addAttribute:value:range:"), background, colors.selection,
+                    b, e - b);
+                msg4(a, sel("addAttribute:value:range:"), underline, nsnumber_int(257),
+                    b, e - b);
+                msg4(a, sel("addAttribute:value:range:"), underline_color, colors.underline,
+                    b, e - b)
+            }
+            if (c == washes.flash_chapter && verse.number == washes.flash_verse) msg4(a,
+                sel("addAttribute:value:range:"), background, colors.flash, b, e - b);
+            if (c == washes.heard_chapter && verse.number == washes.heard_verse) msg4(a,
+                sel("addAttribute:value:range:"), background, colors.selection, b,
+                e - b)
+        }
+    }
+    for g in part.glosses {
+        b: int = shown_at(part, g.b, true);
+        e: int = shown_at(part, g.e, false);
+        if (e > n) e = n;
+        vi: int = verse_index_at(part, b);
+        selected: bool = page && vi >= 0 && is_selected(c, part.verses[vi].number);
+        if (e > b && !selected) {
+            msg4(a, sel("addAttribute:value:range:"), underline, nsnumber_int(257),
+                b, e - b);
+            msg4(a, sel("addAttribute:value:range:"), underline_color, colors.gloss_line,
+                b, e - b)
+        }
+    }
+}

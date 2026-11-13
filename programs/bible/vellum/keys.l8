@@ -1,0 +1,164 @@
+tag vellum;
+
+use_tag std, ios, bible, bible_wire;
+
+// A hardware keyboard's commands, core's (`command K MENU NAME MODS
+// TITLE`, at start and as a title changes; `commands MASK`, those that act
+// now): each a UIKeyCommand of the root's (so it acts whatever is focused,
+// and the ⌘ overlay lists it), sent to core as `key NAME MODS`; on an iPad,
+// its menu bar's Go menu after View, and View's own at View's end.
+import "../../ios/objc.l8";
+
+import "kit.l8";
+
+COMMANDS_MOST: int = 32;
+
+// UIKeyModifierFlags: ⌘, Shift, Option.
+KEY_COMMAND: int = 1048576;
+
+KEY_SHIFT: int = 131072;
+
+KEY_OPTION: int = 524288;
+
+type KeyCommand = {
+    // Its UIKeyCommand (held; 0: not said), its menu (0 Go, 1 View, 2
+    // none), its key's name and modifiers as core says them.
+    command: int;
+    menu: int;
+    name: int;
+    mods: int
+}
+
+key_commands: []KeyCommand = new KeyCommand[32](KeyCommand {
+    command: 0,
+    menu: 2,
+    name: 0,
+    mods: 0
+});
+
+// Those that act now (bit K).
+keys_acting: int = 0;
+
+command_line(line: WireLine) {
+    k: int = word_n(line, 1);
+    if (k < 0 || k >= COMMANDS_MOST) return;
+    name: int = retain(word_ns_at(line, 3));
+    mods: int = word_n(line, 4);
+    flags: int = (if ((mods & 1) != 0) KEY_COMMAND else 0) | (if ((mods & 2) != 0) KEY_SHIFT else 0) | (if ((mods & 4) != 0) KEY_OPTION else 0);
+    title: int = field_ns(line, 1);
+    command: int = msg6(cls("UIKeyCommand"), sel("commandWithTitle:image:action:input:modifierFlags:propertyList:"),
+        if (ns_length(title) > 0) title else nsstring(""), 0, sel("vellumKey:"), key_input(name),
+        flags, nsnumber_int(k));
+    if (ns_length(title) > 0) msg1(command, sel("setDiscoverabilityTitle:"), title);
+    if (responds(command, "setWantsPriorityOverSystemBehavior:")) msg1(command, sel("setWantsPriorityOverSystemBehavior:"),
+        1);
+    release(key_commands[k].name);
+    key_commands[k] = KeyCommand {
+        command: held(key_commands[k].command, command),
+        menu: word_n(line, 2),
+        name: name,
+        mods: mods
+    };
+    menus_rebuild()
+}
+
+extern msg6(
+    receiver: int,
+    selector: int,
+    a: int,
+    b: int,
+    c: int,
+    d: int,
+    e: int,
+    f: int
+): int = objc_msgSend;
+
+// A key's name as UIKit's input: an arrow, Space, Return, or the
+// character.
+key_input(name: int): int {
+    if (ns_equal(name, nsstring("left"))) return objc_const("UIKeyInputLeftArrow");
+    if (ns_equal(name, nsstring("right"))) return objc_const("UIKeyInputRightArrow");
+    if (ns_equal(name, nsstring("up"))) return objc_const("UIKeyInputUpArrow");
+    if (ns_equal(name, nsstring("down"))) return objc_const("UIKeyInputDownArrow");
+    if (ns_equal(name, nsstring("space"))) return nsstring(" ");
+    if (ns_equal(name, nsstring("return"))) return nsstring("\r");
+    if (name != 0) name else nsstring("")
+}
+
+commands_line(line: WireLine) {
+    keys_acting = word_n(line, 1)
+}
+
+key_acts(k: int): bool {
+    (keys_acting >> k & 1) != 0
+}
+
+// The root's key commands: those that act now.
+root_key_commands(_self: int, _cmd: int): int {
+    acting: int = fresh("NSMutableArray");
+    for k in 0..COMMANDS_MOST
+        if (key_commands[k].command != 0 && key_acts(k)) msg1(acting, sel("addObject:"),
+            key_commands[k].command);
+    acting
+}
+
+// A key command (or its menu item): core's key.
+key_fired(_self: int, _cmd: int, command: int): int {
+    if (command == 0 || !responds(command, "propertyList")) return 0;
+    k: int = msg(msg(command, sel("propertyList")), sel("longValue"));
+    if (k < 0 || k >= COMMANDS_MOST || key_commands[k].name == 0) return 0;
+    out_word("key ");
+    out_ns(key_commands[k].name);
+    out_arg(key_commands[k].mods);
+    out_end();
+    0
+}
+
+// A menu item off while its command doesn't act.
+key_validated(_self: int, _cmd: int, command: int): int {
+    if (command == 0 || !responds(command, "propertyList") || msg(command, sel("action")) != sel("vellumKey:")) return 0;
+    number: int = msg(command, sel("propertyList"));
+    if (number == 0 || !is_kind(number, "NSNumber")) return 0;
+    k: int = msg(number, sel("longValue"));
+    if (k >= 0 && k < COMMANDS_MOST && !key_acts(k)) msg1(command, sel("setAttributes:"),
+        1);
+    0
+}
+
+menus_rebuild() {
+    system: int = msg(cls("UIMenuSystem"), sel("mainSystem"));
+    if (system != 0) msg(system, sel("setNeedsRebuild"))
+}
+
+// The menu bar (iPadOS): a Go menu after View, View's own at its end.
+build_menu(self: int, cmd: int, builder: int): int {
+    _r: int = super1(self, cls("L8BibleApp"), cmd, builder);
+    if (msg(builder, sel("system")) != msg(cls("UIMenuSystem"), sel("mainSystem"))) return 0;
+    view_id: int = objc_const("UIMenuView");
+    if (view_id == 0 || msg1(builder, sel("menuForIdentifier:"), view_id) == 0) return 0;
+    go: int = fresh("NSMutableArray");
+    viewing: int = fresh("NSMutableArray");
+    for k in 0..COMMANDS_MOST {
+        command: int = key_commands[k].command;
+        if (command != 0 && key_commands[k].menu == 0) msg1(go, sel("addObject:"),
+            command);
+        if (command != 0 && key_commands[k].menu == 1) msg1(viewing, sel("addObject:"),
+            command)
+    }
+    if (msg(go, sel("count")) > 0) msg2(builder, sel("insertSiblingMenu:afterMenuForIdentifier:"),
+        msg5(cls("UIMenu"), sel("menuWithTitle:image:identifier:options:children:"),
+        nsstring("Go"), 0, nsstring("space.trailingwhite.smoothbible.go"), 0, go),
+        view_id);
+    if (msg(viewing, sel("count")) > 0) msg2(builder, sel("insertChildMenu:atEndOfMenuForIdentifier:"),
+        msg5(cls("UIMenu"), sel("menuWithTitle:image:identifier:options:children:"),
+        nsstring(""), 0, nsstring("space.trailingwhite.smoothbible.reading"), 1, viewing),
+        view_id);
+    0
+}
+
+add_key_methods(root: int, app: int) {
+    add_method0(root, sel("keyCommands"), &root_key_commands, "@@:");
+    add_method1(root, sel("vellumKey:"), &key_fired, "v@:@");
+    add_method1(root, sel("validateCommand:"), &key_validated, "v@:@");
+    add_method1(app, sel("buildMenuWithBuilder:"), &build_menu, "v@:@")
+}

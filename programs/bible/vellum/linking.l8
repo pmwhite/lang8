@@ -1,0 +1,472 @@
+tag vellum;
+
+use_tag std, ios, bible, bible_wire;
+
+// The two panes linked (SKINS.md, Panes: Linked): the pane a hand last
+// moved leads, and the other keeps a section linked with the one at the
+// top pane's top edge in sight, by core/follow.l8's rules, moving the
+// least it must, gliding there a frame at a time (glide_step: a
+// critically damped spring that carries its speed from frame to frame, so
+// that a place that moves on as the leader moves is followed smoothly).
+//
+// The links are made from core's link maps (the chapters about the
+// leader's place) and the panes' anchors as laid out, kept from frame to
+// frame while nothing they depend on changes (follow_links_stale), so that
+// a frame of following costs the rule alone. A jump holds both panes until
+// a hand moves either; the panel opened, its document come or the app
+// restored is placed by the rule at once, and again as parts come, until
+// then too.
+import "../../ios/objc.l8";
+
+import "../core/follow.l8";
+
+import "kit.l8";
+
+import "pane.l8";
+
+// Whether the panel's reader is linked with the page (its screen's
+// `reader 1`), and which pane leads.
+linked: bool = false;
+
+leader: int = PANE_PAGE;
+
+// A jump holds both panes (no following) until a hand moves either.
+jump_held: bool = false;
+
+// The panel to be placed by the rule at once, again as parts come, until a
+// hand moves either pane (`go 1 ... 2`).
+ruled: bool = false;
+
+// ---- the maps ----
+MAPS_MOST: int = 8;
+
+MATCHES_MOST: int = 2048;
+
+map_c: []int = new int[8](-1);
+
+map_mode: []int = new int[8](0);
+
+map_comments: []int = new int[8](1);
+
+map_n: []int = new int[8](0);
+
+map_i0: []int = new int[8 * 2048](0);
+
+map_i1: []int = new int[8 * 2048](0);
+
+map_j: []int = new int[8 * 2048](0);
+
+map_next: int = 0;
+
+// A `link C MODE COMMENTS` block and its `match I0 I1 J` lines: kept, in
+// place of the same chapter's, else the oldest's.
+link_map_came(data: []i8, b: int, e: int) {
+    first_end: int = part_line_end(data, b, e);
+    head: Cursor = Cursor { at: b + len("link"), end: first_end };
+    c: int = cursor_number(data, &head);
+    mode: int = cursor_number(data, &head);
+    comments: int = if (head.at < first_end) cursor_number(data, &head) else PANE_PANEL;
+    s: int = map_slot(c);
+    if (s < 0) {
+        s = map_next;
+        map_next = (map_next + 1) % MAPS_MOST
+    }
+    map_c[s] = c;
+    map_mode[s] = mode;
+    map_comments[s] = comments;
+    n: int = 0;
+    at: int = first_end + 1;
+    while (at < e) {
+        le: int = part_line_end(data, at, e);
+        if (line_is(data, at, le, "match") && n < MATCHES_MOST) {
+            cur: Cursor = Cursor { at: at + 5, end: le };
+            map_i0[s * MATCHES_MOST + n] = cursor_number(data, &cur);
+            map_i1[s * MATCHES_MOST + n] = cursor_number(data, &cur);
+            map_j[s * MATCHES_MOST + n] = cursor_number(data, &cur);
+            n = n + 1
+        }
+        at = le + 1
+    }
+    map_n[s] = n;
+    follow_links_stale()
+}
+
+map_slot(c: int): int {
+    for s in 0..MAPS_MOST
+        if (map_c[s] == c && c >= 0) return s;
+    -1
+}
+
+follow_maps_forget() {
+    for s in 0..MAPS_MOST map_c[s] = -1;
+    follow_links_stale()
+}
+
+map_of(s: int): LinkMap@new {
+    n: int = map_n[s];
+    map: LinkMap = LinkMap {
+        mode: map_mode[s],
+        comments: map_comments[s],
+        i0: new int[n](0),
+        i1: new int[n](0),
+        j: new int[n](0)
+    };
+    for k in 0..n {
+        map.i0[k] = map_i0[s * MATCHES_MOST + k];
+        map.i1[k] = map_i1[s * MATCHES_MOST + k];
+        map.j[k] = map_j[s * MATCHES_MOST + k]
+    }
+    map
+}
+
+// ---- a chapter's shape in a pane, as laid out or guessed ----
+// Each anchor's start where its part is in the window; where it isn't,
+// guessed (SKINS.md, Panes: Linked): each part between it and one laid out
+// as tall for its bytes (`sizes`) as the pane's parts measured so far are
+// on average, the anchor as far down its part as its bytes into it. The
+// chapter's top and end likewise. A chapter in a run of a commentary's
+// without comments is the run's part, top to end. A chapter none of whose
+// parts is laid out has no shape.
+shape_of(p: int, c: int): ChapterShape@new {
+    pane: *Pane = pane_of(p);
+    in_run: bool = c >= 0 && c < CHAPTERS_MOST && facts_of(p).gap_first[c] >= 0;
+    n: int = if (in_run) 0 else anchor_count(p, c);
+    shape: ChapterShape = ChapterShape {
+        starts: new f64[n](0.0f64),
+        known: new bool[n](false),
+        top: 0.0f64,
+        top_known: false,
+        end: 0.0f64,
+        end_known: false,
+        em: type_of(p).em
+    };
+    first: int = row_chapter(p, c);
+    count: int = if (in_run) 1 else part_count(p, first);
+    if (count <= 0) return shape;
+    // (Each part's top and end, laid out or guessed.)
+    tops: []f64 = new f64[count](0.0f64);
+    ends: []f64 = new f64[count](0.0f64);
+    rows: []int = new int[count](-1);
+    any: int = -1;
+    for r in 0..pane.n {
+        if (pane.chapter[r] <= c && c <= pane.last[r] && pane.part[r] < count) {
+            rows[pane.part[r]] = r;
+            tops[pane.part[r]] = pane.y[r];
+            ends[pane.part[r]] = pane.y[r] + pane.h[r];
+            if (any < 0) any = pane.part[r]
+        }
+    }
+    if (any < 0) return shape;
+    per_byte: f64 = height_per_byte(p);
+    for k in any + 1..count {
+        if (rows[k] < 0) {
+            tops[k] = ends[k - 1];
+            ends[k] = tops[k] + part_bytes(p, first, k) as f64 * per_byte
+        }
+    }
+    k: int = any - 1;
+    while (k >= 0) {
+        if (rows[k] < 0) {
+            ends[k] = tops[k + 1];
+            tops[k] = ends[k] - part_bytes(p, first, k) as f64 * per_byte
+        }
+        k = k - 1
+    }
+    shape.top = tops[0];
+    shape.top_known = true;
+    shape.end = ends[count - 1];
+    shape.end_known = true;
+    if (in_run) return shape;
+    for r in 0..pane.n {
+        if (pane.chapter[r] == c) {
+            for j in 0..pane.anchors[r] {
+                i: int = pane.anchor_first[r] + j;
+                if (i < n) {
+                    shape.starts[i] = pane.y[r] + pane.anchor_y[r * PART_ANCHORS_MOST + j];
+                    shape.known[i] = true
+                }
+            }
+        }
+    }
+    s: int = facts_slot(p, c);
+    f: *Facts = facts_of(p);
+    for i in 0..n {
+        if (!shape.known[i] && s >= 0) {
+            part: int = f.anchor_part[s * ANCHORS_MOST + i];
+            if (part >= 0 && part < count) {
+                shape.starts[i] = tops[part] + part_top_room(p, c, part) + f.anchor_bytes[s * ANCHORS_MOST + i] as f64 * per_byte;
+                shape.known[i] = true
+            }
+        }
+    }
+    shape
+}
+
+// A part's height for a byte of its source, as the pane's parts measured
+// so far are on average (a line's worth for every 60 bytes before any).
+height_per_byte(p: int): f64 {
+    f: *Facts = facts_of(p);
+    if (f.measured_bytes > 0) f.measured_height / f.measured_bytes as f64 else type_of(p).em * look.spacing / 60.0f64
+}
+
+// ---- the links, kept ----
+LINKS_MOST: int = 8192;
+
+links: ?owned *FollowLinks = null;
+
+links_stale: bool = true;
+
+// The chapter the links were made about.
+links_about: int = -1;
+
+follow_links_stale() {
+    links_stale = true
+}
+
+// The links of the chapters about chapter c (two either side), made
+// again if stale or made about another.
+links_make(c: int) {
+    if (!links_stale && links_about == c && links != null) return;
+    drop links;
+    links = own {
+        made: *FollowLinks = new FollowLinks {
+            top_from: new f64[LINKS_MOST](0.0f64),
+            top_to: new f64[LINKS_MOST](0.0f64),
+            bottom_from: new f64[LINKS_MOST](0.0f64),
+            bottom_to: new f64[LINKS_MOST](0.0f64),
+            n: 0
+        };
+        region {
+            for d in 0..5 {
+                ch: int = c - 2 + d;
+                s: int = map_slot(ch);
+                if (s >= 0) {
+                    map: LinkMap = map_of(s);
+                    page: ChapterShape = shape_of(PANE_PAGE, ch);
+                    panel: ChapterShape = shape_of(PANE_PANEL, ch);
+                    follow_links_add(made, &map, &page, &panel)
+                }
+            }
+        }
+        made
+    };
+    links_stale = false;
+    links_about = c
+}
+
+// ---- following ----
+// Whether the panes can follow now: linked, both laid out, no jump
+// holding them, the panel in sight.
+follow_can(): bool {
+    linked && !jump_held && page_pane.n > 0 && panel_pane.n > 0 && panel_pane.scroll != 0 && panel_shown()
+}
+
+// The chapter at pane p's top edge (-1: none).
+edge_chapter(p: int): int {
+    pane: *Pane = pane_of(p);
+    r: int = row_at(pane, pane_top(pane));
+    if (r < 0) -1 else pane.chapter[r]
+}
+
+// Where the follower is to go for the leader now (the top of its sight),
+// or nowhere.
+follow_target(lead: int): FollowMove {
+    c: int = edge_chapter(lead);
+    if (c < 0) return FollowMove.Stay;
+    // (The sections it is about known first: the other pane's anchors of
+    // the edge's chapter, asked for if not.)
+    s: int = map_slot(c);
+    if (s >= 0 && map_n[s] > 0 && !anchors_known(1 - lead, c)) return FollowMove.Stay;
+    links_make(c);
+    page: *Pane = pane_of(PANE_PAGE);
+    panel: *Pane = pane_of(PANE_PANEL);
+    move: FollowMove = FollowMove.Stay;
+    borrow links as made {
+        move = (if (lead == PANE_PAGE) follow_bottom_move(made, pane_top(page), pane_top(panel),
+            pane_seen(panel)) else follow_top_move(made, pane_top(page), pane_seen(page),
+            pane_top(panel), pane_seen(panel)))
+    }
+    move
+}
+
+// The leader moved (a hand, its fling): the other glides as the rule says.
+follow_moved(p: int) {
+    if (!follow_can() || p != leader) return;
+    follow_apply(p, false)
+}
+
+follow_apply(lead: int, at_once: bool) {
+    match follow_target(lead) {
+        Stay -> { }
+        ScrollTo target -> {
+            other: int = 1 - lead;
+            to: f64 = target.top - pane_of(other).chrome_top;
+            if (at_once || reduce_motion()) {
+                follow_glide_stop();
+                follow_place(other, to)
+            } else follow_glide_to(other, to)
+        }
+    }
+}
+
+// The follower put at offset to, its window filled about it.
+follow_place(p: int, to: f64) {
+    pane: *Pane = pane_of(p);
+    pane_aim_let_go(p);
+    pane_set_offset(p, to);
+    // (Gone past what it had laid out: parts made toward its sight, a few a
+    // frame, until they reach it.)
+    _full: bool = pane_fill(p, pane_seen(pane), 6);
+    pane_tell(p, false)
+}
+
+// A hand took pane p: it leads; the other's glide stopped.
+follow_lead(p: int) {
+    leader = p;
+    jump_held = false;
+    ruled = false;
+    follow_glide_stop()
+}
+
+// Pane p at rest: once both rest, the rule checked again.
+follow_rested(_p: int) {
+    if (!follow_can() || pane_in_motion(PANE_PAGE) || pane_in_motion(PANE_PANEL)) return;
+    follow_apply(leader, false)
+}
+
+// A jump (`go`): MODE 2, the panel to be placed by the rule; else both
+// held where their jumps put them.
+follow_jumped(p: int, mode: int) {
+    follow_glide_stop();
+    if (p == PANE_PANEL && mode == 2) {
+        ruled = true;
+        jump_held = false;
+        leader = PANE_PAGE;
+        if (follow_can()) follow_apply(PANE_PAGE, true);
+        return
+    }
+    jump_held = true;
+    ruled = false
+}
+
+// Between frames, at rest: the panel placed by the rule while it is ruled
+// (parts come in and tell where sections are better).
+follow_settled() {
+    if (ruled && linked && page_pane.n > 0 && panel_pane.n > 0 && panel_shown()) follow_apply(PANE_PAGE,
+        true)
+}
+
+// ---- the glide ----
+glide_pane: int = -1;
+
+glide_to: f64 = 0.0f64;
+
+glide_velocity: f64 = 0.0f64;
+
+glide_at: f64 = 0.0f64;
+
+glide_time: f64 = 0.0f64;
+
+// (The display link stepping it: made once, kept through a reload as the
+// class is, paused while nothing glides.)
+glide_link: int = 0;
+
+follow_gliding(p: int): bool {
+    glide_pane == p
+}
+
+// ---- the glide ----
+// A pane gliding to its place, as a critically damped spring (the form of
+// Unity's SmoothDamp, stable however long a frame is): from at, moving at
+// velocity (points a second), toward to. From rest it eases in, closes
+// most of the way in about three tenths of a second, and slows to its
+// place without passing it. A new place mid-glide is glided to from where
+// the pane is, at the speed it has, so a place that moves frame by frame
+// (the leader still moving) is followed as one motion. The last half point
+// at once.
+GLIDE_SECONDS: f64 = 0.1f64;
+
+type Glide = {
+    at: f64;
+    velocity: f64
+}
+
+glide_step(
+    at: f64,
+    to: f64,
+    velocity: f64,
+    seconds: f64
+): Glide {
+    dt: f64 = if (seconds < 0.0f64) 0.0f64 else seconds;
+    omega: f64 = 2.0f64 / GLIDE_SECONDS;
+    x: f64 = omega * dt;
+    // (e^-x, near enough for any frame's x.)
+    decay: f64 = 1.0f64 / (1.0f64 + x + 0.48f64 * x * x + 0.235f64 * x * x * x);
+    change: f64 = at - to;
+    pull: f64 = (velocity + omega * change) * dt;
+    next_velocity: f64 = (velocity - omega * pull) * decay;
+    next: f64 = to + (change + pull) * decay;
+    // (Never past its place: there, and still.)
+    if (change > 0.0f64 && next < to || change < 0.0f64 && next > to || abs_f(next - to) <= 0.5f64) return Glide { at: to, velocity: 0.0f64 };
+    Glide { at: next, velocity: next_velocity }
+}
+
+follow_glide_to(p: int, to: f64) {
+    if (glide_pane != p) {
+        glide_pane = p;
+        glide_velocity = 0.0f64;
+        glide_at = pane_offset(pane_of(p));
+        glide_time = CACurrentMediaTime()
+    }
+    glide_to = to;
+    pane_aim_let_go(p);
+    if (glide_link == 0) {
+        glide_link = retain(msg2(cls("CADisplayLink"), sel("displayLinkWithTarget:selector:"),
+            pane_delegate, sel("vellumFollowStep:")));
+        msg2(glide_link, sel("addToRunLoop:forMode:"), msg(cls("NSRunLoop"), sel("mainRunLoop")),
+            l8_run_loop_common_modes())
+    }
+    msg1(glide_link, sel("setPaused:"), 0)
+}
+
+follow_glide_stop() {
+    glide_pane = -1;
+    if (glide_link != 0) msg1(glide_link, sel("setPaused:"), 1)
+}
+
+follow_glide_stop_for(p: int) {
+    if (glide_pane == p) follow_glide_stop()
+}
+
+follow_step(_self: int, _cmd: int, _link: int): int {
+    p: int = glide_pane;
+    if (p < 0) {
+        follow_glide_stop();
+        return 0
+    }
+    now: f64 = CACurrentMediaTime();
+    dt: f64 = now - glide_time;
+    glide_time = now;
+    // (A hand on the follower meanwhile: it is the hand's.)
+    if (pane_in_motion(p)) {
+        follow_glide_stop();
+        return 0
+    }
+    // (Where it is now, if something else moved it.)
+    here: f64 = pane_offset(pane_of(p));
+    if (abs_f(here - glide_at) > 1.0f64) glide_at = here;
+    step: Glide = glide_step(glide_at, glide_to, glide_velocity, dt);
+    glide_at = step.at;
+    glide_velocity = step.velocity;
+    follow_place(p, step.at);
+    if (step.velocity == 0.0f64 && step.at == glide_to) {
+        follow_glide_stop();
+        pane_tell(p, true);
+        pane_settle_soon()
+    }
+    0
+}
+
+add_linking_methods(delegate: int) {
+    add_method1(delegate, sel("vellumFollowStep:"), &follow_step, "v@:@")
+}

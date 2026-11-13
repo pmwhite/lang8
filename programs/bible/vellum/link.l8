@@ -1,0 +1,419 @@
+tag vellum;
+
+use_tag std, ios, bible, bible_wire;
+
+// Vellum's end of the line protocol (SKINS.md): lines to core's host, in
+// the same process (core/host.l8), and core's lines read in order. Core
+// answers a line at once, while it is given it, so what the skin needs at
+// once (a part of a pane, a screen's model) is asked and taken out of what
+// core says; the rest is handed on as it comes: screens (screens.l8),
+// parts and link maps (pane.l8), every other line to app.l8's said().
+import "../../ios/objc.l8";
+
+import "../core/wire.l8";
+
+import "kit.l8";
+
+extern exit(code: int): noreturn;
+
+// A broken promise of the protocol: said, and the app ended (a skin that
+// read a line wrong would show what core never said).
+link_fail(what: str): noreturn {
+    raw::raw_write(2, "Vellum: ");
+    raw::raw_write(2, what);
+    raw::raw_write(2, "\n");
+    exit(1)
+}
+
+// ---- to core ----
+out_buf: []i8 = new i8[1048576](0i8);
+
+out_n: int = 0;
+
+out_byte(k: int) {
+    if (out_n >= len(out_buf)) link_fail("a line to core is too long");
+    out_buf[out_n] = k trunc i8;
+    out_n = out_n + 1
+}
+
+out_word(s: str) {
+    for c in s out_byte(c as int)
+}
+
+out_int(n: int) {
+    if (n < 0) {
+        out_byte(45);
+        out_int(-n);
+        return
+    }
+    if (n >= 10) out_int(n / 10);
+    out_byte(48 + n % 10)
+}
+
+// A space and a number.
+out_arg(n: int) {
+    out_byte(32);
+    out_int(n)
+}
+
+// Bytes as one field: a backslash, a newline and a tab escaped.
+out_text(data: []i8, b: int, e: int) {
+    for i in b..e {
+        k: int = data[i] as int;
+        if (k == 92) out_word("\\\\") else if (k == 10) out_word("\\n") else if (k == 9) out_word("\\t") else out_byte(k)
+    }
+}
+
+ns_scratch: []i8 = new i8[262144](0i8);
+
+// An NSString's words as a field.
+out_ns(s: int) {
+    if (s == 0) return;
+    if (msg1(s, sel("lengthOfBytesUsingEncoding:"), 4) > len(ns_scratch)) link_fail("words to core are too long");
+    n: int = nsstring_into(s, ns_scratch);
+    out_text(ns_scratch, 0, n)
+}
+
+// The line ended and given to core, with what core says read.
+out_end() {
+    out_byte(10);
+    feed()
+}
+
+send0(word: str) {
+    out_word(word);
+    out_end()
+}
+
+send1(word: str, a: int) {
+    out_word(word);
+    out_arg(a);
+    out_end()
+}
+
+send2(word: str, a: int, b: int) {
+    out_word(word);
+    out_arg(a);
+    out_arg(b);
+    out_end()
+}
+
+send3(
+    word: str,
+    a: int,
+    b: int,
+    c: int
+) {
+    out_word(word);
+    out_arg(a);
+    out_arg(b);
+    out_arg(c);
+    out_end()
+}
+
+send4(
+    word: str,
+    a: int,
+    b: int,
+    c: int,
+    d: int
+) {
+    out_word(word);
+    out_arg(a);
+    out_arg(b);
+    out_arg(c);
+    out_arg(d);
+    out_end()
+}
+
+// Whether lines are being given to core (a line written while core runs,
+// by a callback it caused, waits its turn), and how many have been that
+// may change what a screen shows (every one but `model`): a model read is
+// out of date once this moves on.
+feeding: bool = false;
+
+core_lines: int = 0;
+
+inbox_line_is_model(p: int, e: int): bool {
+    word: str = "model";
+    if (e - p < len(word) || e - p > len(word) && hs_inbox[p + len(word)] as int != 32) return false;
+    for k in 0..len(word)
+        if (hs_inbox[p + k] != word[k]) return false;
+    true
+}
+
+feed() {
+    if (feeding) return;
+    feeding = true;
+    while (out_n > 0) {
+        n: int = out_n;
+        for i in 0..n hs_inbox[i] = out_buf[i];
+        out_n = 0;
+        p: int = 0;
+        for i in 0..n {
+            if (hs_inbox[i] as int == 10) {
+                if (!inbox_line_is_model(p, i)) core_lines = core_lines + 1;
+                hs_line(p, i);
+                p = i + 1
+            }
+        }
+        hs_after()
+    }
+    feeding = false;
+    take_lines()
+}
+
+// ---- from core ----
+in_buf: []i8 = new i8[16777216](0i8);
+
+in_n: int = 0;
+
+in_at: int = 0;
+
+// Core's host saying lines (HostIO.say): kept until they are read.
+from_core(data: []i8, start: int, count: int) {
+    if (count > len(in_buf) - in_n) link_fail("core said too much at once");
+    for i in 0..count in_buf[in_n + i] = data[start + i];
+    in_n = in_n + count
+}
+
+// Whether the lines are being read, and how many asks wait for their
+// answers (nothing else is read meanwhile).
+taking: bool = false;
+
+asking: int = 0;
+
+line_end(at: int): int {
+    e: int = at;
+    while (e < in_n && in_buf[e] as int != 10) e = e + 1;
+    e
+}
+
+said_starts: []int = new int[48](0);
+
+said_ends: []int = new int[48](0);
+
+begins(at: int, e: int, word: str): bool {
+    if (e - at < len(word)) return false;
+    for i in 0..len(word)
+        if (in_buf[at + i] != word[i]) return false;
+    e - at == len(word) || in_buf[at + len(word)] as int == 32 || in_buf[at + len(word)] as int == 9
+}
+
+// Where the block beginning at at ends (past its `end`), or -1.
+block_end(at: int): int {
+    p: int = at;
+    while (p < in_n) {
+        e: int = line_end(p);
+        if (e >= in_n) return -1;
+        if (e - p == 3 && begins(p, e, "end")) return e + 1;
+        p = e + 1
+    }
+    -1
+}
+
+take_lines() {
+    if (taking || asking > 0) return;
+    taking = true;
+    while (in_at < in_n) {
+        at: int = in_at;
+        e: int = line_end(at);
+        if (e >= in_n) link_fail("core's line has no end");
+        in_at = e + 1;
+        if (begins(at, e, "screen")) {
+            end: int = block_end(at);
+            if (end < 0) link_fail("a screen has no end");
+            screen_came(in_buf, at, end);
+            in_at = end
+        } else if (begins(at, e, "link")) {
+            end: int = block_end(at);
+            if (end < 0) link_fail("a link map has no end");
+            link_map_came(in_buf, at, end);
+            in_at = end
+        } else if (begins(at, e, "part")) {
+            end: int = block_end(at);
+            if (end < 0) link_fail("a part has no end");
+            part_came(in_buf, at, end);
+            in_at = end
+        } else {
+            line: WireLine = WireLine {
+                data: in_buf,
+                starts: said_starts,
+                ends: said_ends,
+                count: 0,
+                end: e
+            };
+            wire_line(&line, at, e);
+            said(line)
+        }
+    }
+    in_n = 0;
+    in_at = 0;
+    taking = false
+}
+
+// ---- asking: a line whose answer is wanted now ----
+// The answer's block (its first line's word) taken out of what core said
+// and copied into answer_buf (answer_n bytes); false if core said none.
+answer_buf: []i8 = new i8[4194304](0i8);
+
+answer_n: int = 0;
+
+ask_mark: int = 0;
+
+ask_begin() {
+    asking = asking + 1;
+    ask_mark = in_n
+}
+
+ask_end(word: str): bool {
+    found: bool = false;
+    p: int = ask_mark;
+    answer_n = 0;
+    while (!found && p < in_n) {
+        e: int = line_end(p);
+        if (e >= in_n) p = in_n else if (begins(p, e, word)) {
+            end: int = block_end(p);
+            if (end > 0) {
+                n: int = end - p;
+                if (n > len(answer_buf)) link_fail("core's answer is too long");
+                for i in 0..n answer_buf[i] = in_buf[p + i];
+                answer_n = n;
+                for i in end..in_n in_buf[i - n] = in_buf[i];
+                in_n = in_n - n;
+                found = true
+            } else p = in_n
+        } else p = e + 1
+    }
+    asking = asking - 1;
+    // (What core said besides, read on the next turn: not in the middle of
+    // what asked.)
+    if (!taking && in_n > 0) take_lines_soon();
+    found
+}
+
+// A line's answer of one line (`studyable 1`): its number (-1: none).
+ask_line_end(word: str): int {
+    found: int = -1;
+    p: int = ask_mark;
+    while (found < 0 && p < in_n) {
+        e: int = line_end(p);
+        if (e >= in_n) p = in_n else if (begins(p, e, word)) {
+            found = wire_integer(in_buf, p + len(word) + 1, e);
+            n: int = e + 1 - p;
+            for i in e + 1..in_n in_buf[i - n] = in_buf[i];
+            in_n = in_n - n
+        } else p = e + 1
+    }
+    asking = asking - 1;
+    if (!taking && in_n > 0) take_lines_soon();
+    found
+}
+
+take_timer: int = 0;
+
+take_lines_soon() {
+    if (take_timer != 0 || app_obj == 0) return;
+    take_timer = timer_after(app_obj, 0.0f64, "vellumTakeLines:")
+}
+
+take_lines_fired(_self: int, _cmd: int, _timer: int): int {
+    take_timer = 0;
+    take_lines();
+    0
+}
+
+// Part k of chapter c of pane p, asked of core now and stored (pane.l8's
+// part_came): whether it came.
+ask_part(p: int, c: int, k: int): bool {
+    ask_begin();
+    out_word("want");
+    out_arg(p);
+    out_arg(c);
+    out_arg(k);
+    out_end();
+    if (!ask_end("part")) return false;
+    part_came(answer_buf, 0, answer_n);
+    true
+}
+
+// ---- a line's fields ----
+field_scratch: []i8 = new i8[262144](0i8);
+
+// Field f's words, unescaped, into out: how many bytes (-1: no field).
+field_into(line: WireLine, f: int, out: []i8): int {
+    if (f >= line.count) return -1;
+    n: int = 0;
+    at: int = line.starts[f];
+    while (at < line.ends[f]) {
+        k: int = line.data[at] as int;
+        if (k == 92 && at + 1 < line.ends[f]) {
+            at = at + 1;
+            k = line.data[at] as int;
+            if (k == 110) k = 10 else if (k == 116) k = 9
+        }
+        if (n >= len(out)) link_fail("core's words are too long to read");
+        out[n] = k trunc i8;
+        n = n + 1;
+        at = at + 1
+    }
+    n
+}
+
+// Field f's words as an NSString (autoreleased; 0: no field).
+field_ns(line: WireLine, f: int): int {
+    n: int = field_into(line, f, field_scratch);
+    if (n < 0) 0 else nsstring_of(field_scratch, n)
+}
+
+// Word w of the first field (0: the line's word) as a number.
+word_n(line: WireLine, w: int): int {
+    wire_word_number(line, w)
+}
+
+has_word(line: WireLine, w: int): bool {
+    field_word_at(line, w) < line.ends[0]
+}
+
+field_word_at(line: WireLine, w: int): int {
+    at: int = line.starts[0];
+    for _i in 0..w {
+        while (at < line.ends[0] && line.data[at] as int != 32) at = at + 1;
+        if (at < line.ends[0]) at = at + 1 else return line.ends[0]
+    }
+    at
+}
+
+word_end_at(line: WireLine, at: int): int {
+    e: int = at;
+    while (e < line.ends[0] && line.data[e] as int != 32) e = e + 1;
+    e
+}
+
+// A word RRGGBB as a number (-1: `-`, or not six hex digits).
+word_hex(line: WireLine, w: int): int {
+    at: int = field_word_at(line, w);
+    hex_at(line.data, at, word_end_at(line, at))
+}
+
+hex_at(data: []i8, at: int, e: int): int {
+    if (e - at != 6) return -1;
+    n: int = 0;
+    for i in at..e {
+        d: int = hex_value(data[i] as int);
+        if (d < 0) return -1;
+        n = n * 16 + d
+    }
+    n
+}
+
+hex_value(k: int): int {
+    if (k >= 48 && k <= 57) return k - 48;
+    if (k >= 65 && k <= 70) return k - 55;
+    if (k >= 97 && k <= 102) return k - 87;
+    -1
+}
+
+add_link_methods(app: int) {
+    add_method1(app, sel("vellumTakeLines:"), &take_lines_fired, "v@:@")
+}

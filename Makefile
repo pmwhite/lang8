@@ -61,7 +61,7 @@ all:
 
 check: $(OK)/stage1-tests l8 $(BUILD)/block-game $(BUILD)/skate $(BUILD)/skate-route $(BUILD)/race $(BUILD)/cad $(BUILD)/recipes \
 	$(BUILD)/profile-explorer \
-	$(BUILD)/better $(BUILD)/better-ios.s $(BUILD)/ios-check.s $(BUILD)/better-ios-sim $(BUILD)/better-android.s $(OK)/bible-web $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim $(BUILD)/hot-ios-sim \
+	$(BUILD)/better $(BUILD)/better-ios.s $(BUILD)/ios-check.s $(BUILD)/better-ios-sim $(BUILD)/better-android.s $(OK)/bible-web $(BUILD)/bible-ios.s $(BUILD)/bible-vellum.s $(BUILD)/bible-ios-sim $(BUILD)/hot-ios-sim \
 	$(BUILD)/bible-android.s $(BUILD)/skin-text $(BUILD)/smooth-bible
 
 # ---- compiler stages ----
@@ -293,6 +293,10 @@ bible-spoken: l8c3 $(PROGRAMS) $(RUNTIME) $(BIBLE_FOLIO)/$(VERSION).folio
 
 $(BUILD)/bible-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s $(ARM_ARENA_RUNTIME) | $(OK)
 	@$(STEP) 'bible for iOS' sh -c './l8c3 arm64 --target ios programs/bible/ios/app.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+# Vellum, the Bible's second iPhone skin (programs/bible/vellum/README.md).
+$(BUILD)/bible-vellum.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s $(ARM_ARENA_RUNTIME) | $(OK)
+	@$(STEP) 'bible (Vellum) for iOS' sh -c './l8c3 arm64 --target ios programs/bible/vellum/app.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 $(BUILD)/bible-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s $(ARM_ARENA_RUNTIME) tools/ios/imports.txt programs/bible/ios/frameworks | $(OK)
 	@$(STEP) 'bible for the simulator' sh -c '$(IOS_LINK) $(foreach f,$(shell cat programs/bible/ios/frameworks),--framework $(f)) programs/bible/ios/app.l8 -o $@.tmp && mv -f $@.tmp $@'

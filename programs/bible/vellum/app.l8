@@ -1,0 +1,779 @@
+tag vellum;
+
+use_tag std, ios, bible, bible_wire;
+
+// Vellum: Smooth Bible's iPhone and iPad skin, made for iOS 26 from the
+// ground up (README.md). Core runs in the app on its host
+// (core/host.l8, vellum/platform.l8) and the skin speaks the line protocol
+// to it (vellum/link.l8), like every other skin.
+//
+// The page is the whole screen: a scroll view of the words (vellum/pane.l8)
+// running under the status bar and the floating chrome (vellum/dock.l8): a
+// dock of Liquid Glass at the foot that draws in as you read, becomes the
+// tray when verses are selected, and the way back and toasts at the top.
+// Core's screens are the system's sheets and lists (vellum/screens.l8);
+// the panel beside the page is a sheet of its own over it
+// (vellum/panel.l8), its reader the second pane, following the page when
+// linked (vellum/linking.l8).
+import "../../../stdlib/print.l8";
+
+import "../../ios/objc.l8";
+
+import "../../ios/block.l8";
+
+import "../core/wire.l8";
+
+import "kit.l8";
+
+import "link.l8";
+
+import "look.l8";
+
+import "part.l8";
+
+import "pane.l8";
+
+import "linking.l8";
+
+import "platform.l8";
+
+import "dock.l8";
+
+import "screens.l8";
+
+import "panel.l8";
+
+import "services.l8";
+
+import "listen.l8";
+
+import "rows.l8";
+
+import "keys.l8";
+
+import "devwire.l8";
+
+extern getenv(name: str): ?*i8;
+
+// ---- diagnostics ----
+// Written only with L8_DEMO or L8_TIMING in the environment, or while the
+// development server drives the app. (Kept through a hot reload.)
+persistent diag_on: bool = false;
+
+note(what: str) {
+    if (!diag_on) return;
+    try {
+        eprint(what)
+    } with IoError _e -> { }
+}
+
+note_num(label: str, n: int) {
+    if (!diag_on) return;
+    words_begin();
+    words_add(label);
+    words_add_int(n);
+    note_ns(words_ns())
+}
+
+note_ns(words: int) {
+    if (!diag_on || words == 0) return;
+    region {
+        b: []i8 = nsstring_bytes(words);
+        try {
+            write_bytes_n(2, b, len(b));
+            write(2, "\n")
+        } with IoError _e -> { }
+    }
+}
+
+// ---- what UIKit made ----
+// (Kept across a hot reload, RELOAD.md: the app's delegate, its window and
+// scene are the first build's; a new build's reload() fills the window.)
+persistent app_obj: int = 0;
+
+persistent window: int = 0;
+
+persistent scene_obj: int = 0;
+
+// The root: its view holds the page and the chrome over it.
+root_vc: int = 0;
+
+root_view: int = 0;
+
+// Whether core has been started (`start`), and whether it said `ready`
+// before there was a window to measure.
+core_begun: bool = false;
+
+core_ready_due: bool = false;
+
+// Whether the dark appearance was last told core.
+told_dark: bool = false;
+
+// ---- the root ----
+root_load_view(self: int, _cmd: int): int {
+    view: int = autoreleased(view_new());
+    msg1(self, sel("setView:"), view);
+    root_view = view;
+    set_background(view, colors.page);
+    page: int = fresh("UIScrollView");
+    add_sub(view, page);
+    top_fade = retain(view_new());
+    msg1(top_fade, sel("setUserInteractionEnabled:"), 0);
+    add_sub(view, top_fade);
+    chrome_target = self;
+    dock_make(view);
+    pane_attach(PANE_PAGE, page);
+    edge_soften(page);
+    edge_element(page, dock.container);
+    0
+}
+
+// The page's color fading the words out under the status bar (the system's
+// edge effect doesn't draw over a page laid out by its own insets).
+top_fade: int = 0;
+
+top_fade_gradient: int = 0;
+
+top_fade_dress() {
+    if (top_fade == 0) return;
+    if (top_fade_gradient == 0) {
+        top_fade_gradient = make("CAGradientLayer");
+        msg1(msg(top_fade, sel("layer")), sel("addSublayer:"), top_fade_gradient)
+    }
+    four: []int = four_items;
+    four[0] = msg(rgb(look.page, 1.0f64), sel("CGColor"));
+    four[1] = msg(rgb(look.page, 0.92f64), sel("CGColor"));
+    four[2] = msg(rgb(look.page, 0.55f64), sel("CGColor"));
+    four[3] = msg(rgb(look.page, 0.0f64), sel("CGColor"));
+    msg1(top_fade_gradient, sel("setColors:"), nsarray(four, 4));
+    four[0] = nsnumber_f(0.0f64);
+    four[1] = nsnumber_f(0.6f64);
+    four[2] = nsnumber_f(0.8f64);
+    four[3] = nsnumber_f(1.0f64);
+    msg1(top_fade_gradient, sel("setLocations:"), nsarray(four, 4))
+}
+
+top_fade_layout() {
+    if (top_fade == 0) return;
+    h: f64 = chrome_safe.top + 16.0f64;
+    set_frame4(top_fade, 0.0f64, 0.0f64, chrome_bounds.w, h);
+    msg(cls("CATransaction"), sel("begin"));
+    msg1(cls("CATransaction"), sel("setDisableActions:"), 1);
+    msg_rect(top_fade_gradient, sel("setFrame:"), 0.0f64, 0.0f64, chrome_bounds.w,
+        h);
+    msg(cls("CATransaction"), sel("commit"))
+}
+
+// The words soften under the status bar, where the system's own lists do.
+edge_soften(scroll: int) {
+    if (!responds(scroll, "topEdgeEffect")) return;
+    style: int = msg(cls("UIScrollEdgeEffectStyle"), sel("softStyle"));
+    if (style != 0) msg1(msg(scroll, sel("topEdgeEffect")), sel("setStyle:"), style);
+    if (responds(scroll, "bottomEdgeEffect") && style != 0) msg1(msg(scroll, sel("bottomEdgeEffect")),
+        sel("setStyle:"), style)
+}
+
+// The dock an element of the page's foot (iOS 26): the words soften
+// under it, as under the system's own floating bars.
+edge_element(scroll: int, element: int) {
+    kind: int = cls("UIScrollEdgeElementContainerInteraction");
+    if (kind == 0 || element == 0) return;
+    interaction: int = fresh("UIScrollEdgeElementContainerInteraction");
+    if (!responds(interaction, "setScrollView:")) return;
+    msg1(interaction, sel("setScrollView:"), scroll);
+    msg1(interaction, sel("setEdge:"), 4);
+    msg1(element, sel("addInteraction:"), interaction)
+}
+
+root_layout(_self: int, _cmd: int): int {
+    chrome_relayout();
+    0
+}
+
+// The page and the chrome laid out for the root's bounds and safe area.
+chrome_relayout() {
+    if (root_view == 0) return;
+    whole: Rect = bounds_of(root_view);
+    chrome_safe = safe_insets(root_view);
+    // (The page, and the chrome over it, beside the panel's column.)
+    chrome_bounds = Rect {
+        x: 0.0f64,
+        y: 0.0f64,
+        w: page_width(whole.w),
+        h: whole.h
+    };
+    if (panel.column) chrome_safe.right = 0.0f64;
+    if (page_pane.scroll != 0) set_frame(page_pane.scroll, chrome_bounds);
+    panel_column_layout(whole.w, whole.h);
+    top_fade_layout();
+    dock_layout();
+    capsule_layout();
+    toast_layout();
+    page_chrome_set();
+    pane_settle_soon()
+}
+
+// The page's chrome: the status bar's at its top, the dock's (or the
+// panel's sheet, where it covers more) at its foot.
+page_chrome_set() {
+    bottom: f64 = chrome_bottom_cover();
+    if (panel.shown && panel.top < chrome_bounds.h) {
+        covered: f64 = chrome_bounds.h - panel.top;
+        if (covered > bottom) bottom = covered
+    }
+    pane_chrome(PANE_PAGE, chrome_top_cover(), bottom)
+}
+
+root_status_hidden(_self: int, _cmd: int): int {
+    if (dock.mode == DOCK_COMPACT) 1 else 0
+}
+
+root_status_style(_self: int, _cmd: int): int {
+    if (look.dark) 1 else 3
+}
+
+root_status_animation(_self: int, _cmd: int): int {
+    1
+}
+
+status_bar_update() {
+    if (root_vc != 0) msg(root_vc, sel("setNeedsStatusBarAppearanceUpdate"))
+}
+
+// The system's appearance: the scene's (the window's is the look's own,
+// overridden).
+system_dark(): bool {
+    traits: int = if (scene_obj != 0) msg(scene_obj, sel("traitCollection")) else msg(msg(cls("UIScreen"),
+        sel("mainScreen")), sel("traitCollection"));
+    msg(traits, sel("userInterfaceStyle")) == 2
+}
+
+// The scene's appearance watched (iOS 17's trait changes).
+appearance_watch() {
+    if (scene_obj == 0 || !responds(scene_obj, "registerForTraitChanges:withTarget:action:")) return;
+    one_item[0] = cls("UITraitUserInterfaceStyle");
+    _r: int = msg3(scene_obj, sel("registerForTraitChanges:withTarget:action:"), nsarray(one_item,
+        1), root_vc, sel("vellumAppearance:"))
+}
+
+// The system's appearance changed: told core (Auto follows it).
+root_traits_changed(_self: int, _cmd: int, _previous: int): int {
+    dark_tell();
+    0
+}
+
+root_appearance_changed(
+    _self: int,
+    _cmd: int,
+    _environment: int,
+    _previous: int
+): int {
+    dark_tell();
+    0
+}
+
+dark_tell() {
+    if (!core_begun) return;
+    dark: bool = system_dark();
+    if (dark == told_dark) return;
+    told_dark = dark;
+    send1("dark", if (dark) 1 else 0)
+}
+
+// ---- core ----
+// `ready`: core has its text: told the window's size, the screen's
+// density, the appearance and the time zone.
+core_ready() {
+    if (window == 0) {
+        core_ready_due = true;
+        return
+    }
+    core_ready_due = false;
+    size: Rect = bounds_of(window);
+    told_dark = system_dark();
+    send1("windowrows", 1);
+    out_word("start");
+    out_arg(size.w as int);
+    out_arg(size.h as int);
+    out_arg((msg_f(msg(cls("UIScreen"), sel("mainScreen")), sel("scale")) * 100.0f64) as int);
+    out_arg(if (told_dark) 1 else 0);
+    out_arg(msg(msg(cls("NSTimeZone"), sel("localTimeZone")), sel("secondsFromGMT")));
+    out_end();
+    core_begun = true;
+    voices_tell();
+    reminded_tell();
+    send1("panelfits", 1);
+    send1("panelfill", 1)
+}
+
+// `reader N`: the document has N chapters; every part asked for again.
+reader_count(n: int) {
+    pane_chapters = n;
+    for p in 0..PANES {
+        parts_forget(p, -1);
+        facts_forget(p);
+        pane_clear(p)
+    }
+    title_shown_c = -2
+}
+
+// The look changed: colors made, the views dressed; a change of what the
+// words are laid out by lays both panes out again where they are.
+look_changed(change: LookChange) {
+    colors_make();
+    if (window != 0) msg1(window, sel("setOverrideUserInterfaceStyle:"), look_style());
+    if (vellum_dock_window != 0) msg1(vellum_dock_window, sel("setOverrideUserInterfaceStyle:"),
+        look_style());
+    if (root_view != 0) set_background(root_view, colors.page);
+    if (panel.nav != 0) set_background(msg(panel.nav, sel("view")), colors.panel);
+    chrome_dress();
+    top_fade_dress();
+    status_bar_update();
+    types_make();
+    rule_image = held(rule_image, 0);
+    for p in 0..PANES {
+        parts_forget(p, -1);
+        pane_rebuild(p)
+    }
+    _c: LookChange = change
+}
+
+// The system's text size changed: the type made again, the panes laid out
+// again where they are.
+text_size_changed(_self: int, _cmd: int, _note: int): int {
+    types_make();
+    for p in 0..PANES {
+        parts_forget(p, -1);
+        pane_rebuild(p)
+    }
+    0
+}
+
+// A hand on pane p (the dock's mode follows the page; the way back goes
+// once read past).
+hand_on_pane(p: int) {
+    if (p == PANE_PAGE) dock.turned_at = pane_offset(&page_pane)
+}
+
+// Pane p moved: the page's title, the dock and the way back follow.
+pane_moved_shown(p: int) {
+    if (p != PANE_PAGE) return;
+    y: f64 = pane_offset(&page_pane);
+    by_hand: bool = pane_in_motion(PANE_PAGE);
+    dock_page_moved(y, by_hand);
+    capsule_page_moved(y);
+    title_update()
+}
+
+// Pane p's canvas moved by d under what it shows: what measures from its
+// offset moved with it.
+pane_shifted(p: int, d: f64) {
+    if (p != PANE_PAGE) return;
+    dock.turned_at = dock.turned_at + d;
+    capsule.from_y = capsule.from_y + d
+}
+
+// The status bar tapped over pane p: its chapter's top (else the one
+// before).
+status_bar_tapped(p: int) {
+    at: Place = pane_place(p);
+    if (!at.ok) return;
+    c: int = if (at.i < 0 && at.frac < 0.05f64 && at.c > 0) at.c - 1 else at.c;
+    pane_go_to(p, c, -1, 0, 1)
+}
+
+// `go P C I FRAC MODE`: a pane to a place; the page's flashes Go To's
+// verse after a `goto`.
+goto_due: bool = false;
+
+go_line(
+    p: int,
+    c: int,
+    i: int,
+    frac: int,
+    mode: int
+) {
+    if (p == PANE_PAGE) dock_expand();
+    pane_go_to(p, c, i, frac, mode);
+    if (p == PANE_PAGE && goto_due) {
+        goto_due = false;
+        v: int = anchor_verse(PANE_PAGE, c, i);
+        if (v > 0 && i >= 0) flash(c, v)
+    }
+}
+
+// The verse jumped to washed a moment.
+flash_timer: int = 0;
+
+flash(c: int, v: int) {
+    washes.flash_chapter = c;
+    washes.flash_verse = v;
+    pane_repaint(PANE_PAGE, c);
+    flash_timer = timer_stop(flash_timer);
+    flash_timer = timer_after(app_obj, 1.8f64, "vellumFlashDone:")
+}
+
+flash_faded(_self: int, _cmd: int, _timer: int): int {
+    flash_timer = 0;
+    c: int = washes.flash_chapter;
+    washes.flash_chapter = -1;
+    for i in 0..page_pane.n
+        if (page_pane.chapter[i] == c) cross_fade(page_pane.view[i], 0.6f64);
+    pane_repaint(PANE_PAGE, c);
+    0
+}
+
+// `selection C V...`: the verses selected (C -1: none), washed.
+selection_line(line: WireLine) {
+    was: int = washes.selected_chapter;
+    washes.selected_chapter = -1;
+    washes.selected_n = 0;
+    if (line.count > 1) {
+        at: int = line.starts[1];
+        e: int = line.ends[1];
+        first: bool = true;
+        while (at < e) {
+            while (at < e && line.data[at] as int == 32) at = at + 1;
+            if (at < e) {
+                b: int = at;
+                while (at < e && line.data[at] as int != 32) at = at + 1;
+                n: int = wire_integer(line.data, b, at);
+                if (first) washes.selected_chapter = n else if (washes.selected_n < len(washes.selected)) {
+                    washes.selected[washes.selected_n] = n;
+                    washes.selected_n = washes.selected_n + 1
+                }
+                first = false
+            }
+        }
+    }
+    if (washes.selected_n == 0) washes.selected_chapter = -1;
+    if (was >= 0 && was != washes.selected_chapter) pane_repaint(PANE_PAGE, was);
+    if (washes.selected_chapter >= 0) pane_repaint(PANE_PAGE, washes.selected_chapter)
+}
+
+// `hearing C V`: the verse being heard, washed.
+hearing_line(c: int, v: int) {
+    was: int = washes.heard_chapter;
+    washes.heard_chapter = c;
+    washes.heard_verse = v;
+    if (was >= 0 && was != c) pane_repaint(PANE_PAGE, was);
+    if (c >= 0) pane_repaint(PANE_PAGE, c)
+}
+
+// Screen effects, core's: done by the screens.
+SCREEN_EFFECTS: []str = ["present", "push", "update", "refill", "retext", "blur",
+    "pop", "pop_to", "close", "dismiss", "present_over", "panel", "focus", "reveal"];
+
+// Core's lines, each done the iPhone's way (a line the skin doesn't know
+// is let be).
+said(line: WireLine) {
+    for word in SCREEN_EFFECTS {
+        if (wire_is(line, word)) {
+            screen_effect(word, if (has_word(line, 1)) word_n(line, 1) else -1, if (has_word(line,
+                2)) word_n(line, 2) else -1);
+            return
+        }
+    }
+    if (wire_is(line, "ready")) core_ready() else if (wire_is(line, "reader")) reader_count(word_n(line,
+        1)) else if (wire_is(line, "look")) look_changed(look_line(line)) else if (wire_is(line,
+        "highlights")) highlights_line(line) else if (wire_is(line, "themes")) themes_line(line) else if (wire_is(line,
+        "go")) {
+        p: int = word_n(line, 1);
+        if (p >= 0 && p < PANES) go_line(p, word_n(line, 2), word_n(line, 3), word_n(line,
+            4), word_n(line, 5))
+    } else if (wire_is(line, "halt")) {
+        p: int = word_n(line, 1);
+        if (p >= 0 && p < PANES) pane_halt(p)
+    } else if (wire_is(line, "forget")) {
+        p: int = word_n(line, 1);
+        if (p >= 0 && p < PANES) pane_forget_chapter(p, word_n(line, 2))
+    } else if (wire_is(line, "line")) {
+        p: int = word_n(line, 1);
+        if (p >= 0 && p < PANES) pane_of(p).line = word_n(line, 2) as f64 / 1000.0f64
+    } else if (wire_is(line, "title")) title_line(field_ns(line, 1)) else if (wire_is(line,
+        "version")) version_line(field_ns(line, 1)) else if (wire_is(line, "goto")) {
+        send1("jumped", 0);
+        sheets_dismiss();
+        goto_due = true
+    } else if (wire_is(line, "selection")) selection_line(line) else if (wire_is(line,
+        "tray")) tray_shown_now() else if (wire_is(line, "tray_away")) tray_hide() else if (wire_is(line,
+        "clear_selection")) {
+        washes.selected_chapter = -1;
+        washes.selected_n = 0;
+        tray_hide();
+        pane_repaint(PANE_PAGE, -1)
+    } else if (wire_is(line, "highlighted") || wire_is(line, "bookmarked") || wire_is(line,
+        "marked")) {
+        haptic_impact(0);
+        pane_remake(PANE_PAGE, -1)
+    } else if (wire_is(line, "hearing")) hearing_line(word_n(line, 1), word_n(line,
+        2)) else if (wire_is(line, "follow")) pane_go_to_verse(PANE_PAGE, word_n(line,
+        1), word_n(line, 2), 1) else if (wire_is(line, "wake")) wake_line(word_n(line,
+        1)) else if (wire_is(line, "timer")) timer_line(word_n(line, 1), word_n(line,
+        2)) else if (wire_is(line, "next")) core_next_soon() else if (wire_is(line,
+        "beside")) beside_line(word_n(line, 1) == 1, word_n(line, 2) == 1) else if (wire_is(line,
+        "back")) back_line(line) else if (wire_is(line, "awake")) awake_line(word_n(line,
+        1)) else if (wire_is(line, "toast")) toast_line(line) else if (wire_is(line,
+        "copy")) {
+        copy_words(field_ns(line, 1));
+        toast_show(nsstring("Copied"), nsstring("doc.on.doc"))
+    } else if (wire_is(line, "share")) share_text(field_ns(line, 1)) else if (wire_is(line,
+        "share_image")) share_card() else if (wire_is(line, "savefile")) save_file(field_ns(line,
+        1), field_ns(line, 2)) else if (wire_is(line, "url")) open_address(field_ns(line,
+        1)) else if (wire_is(line, "study_verse")) {
+        tray_hide();
+        send2("versestudy", word_n(line, 1), word_n(line, 2))
+    } else if (wire_is(line, "page")) page_by_screen(word_n(line, 1) == 1) else if (wire_is(line,
+        "open_settings")) open_system_settings() else if (wire_is(line, "felt")) felt_line(word_n(line,
+        1)) else if (wire_is(line, "announce")) {
+        if (voice_over()) UIAccessibilityPostNotification(objc_const("UIAccessibilityAnnouncementNotification"),
+            field_ns(line, 1))
+    } else if (wire_is(line, "say")) say_line(line) else if (wire_is(line, "speech_stop")) speech_stop() else if (wire_is(line,
+        "audio_play")) audio_play_line(line) else if (wire_is(line, "audio_stop")) audio_stop() else if (wire_is(line,
+        "listen_pause")) listen_pause() else if (wire_is(line, "listen_resume")) listen_resume() else if (wire_is(line,
+        "listen_stop")) listen_stop() else if (wire_is(line, "player")) player_line(line) else if (wire_is(line,
+        "notify_ask")) notify_ask(word_n(line, 1)) else if (wire_is(line, "notify_clear")) notify_clear() else if (wire_is(line,
+        "notify")) notify_line(line) else if (wire_is(line, "editcommand")) editcommand_line(line) else if (wire_is(line,
+        "command")) command_line(line) else if (wire_is(line, "commands")) commands_line(line) else if (wire_is(line,
+        "credit")) credit_line(line) else if (wire_is(line, "accessory")) accessory_line(line) else if (wire_is(line,
+        "carried")) carried_line(line) else if (wire_is(line, "arriving")) arriving_line(word_n(line,
+        1), word_n(line, 2)) else if (wire_is(line, "arrived")) arrived_line(word_n(line,
+        1)) else if (wire_is(line, "study_moved")) {
+        follow_lead(PANE_PAGE);
+        pane_go_to_verse(PANE_PAGE, word_n(line, 1), word_n(line, 2), 1)
+    } else if (wire_is(line, "refresh")) send0("refresh")
+}
+
+// `page 1|0`: a screen down or up, less three lines.
+page_by_screen(down: bool) {
+    pane: *Pane = &page_pane;
+    if (pane.scroll == 0) return;
+    seen: f64 = pane_seen(pane) - 3.0f64 * page_type.em * look.spacing;
+    follow_lead(PANE_PAGE);
+    msg_ff1(pane.scroll, sel("setContentOffset:animated:"), 0.0f64, pane_offset(pane) + (if (down) seen else -seen),
+        if (reduce_motion()) 0 else 1)
+}
+
+// ---- animations, by kind (kit.l8's spring and ease) ----
+ANIM_DOCK: int = 1;
+
+ANIM_TOAST: int = 2;
+
+ANIM_CAPSULE: int = 3;
+
+ANIM_COVER_PAGE: int = 4;
+
+ANIM_COVER_PANEL: int = 5;
+
+ANIM_ARRIVED: int = 6;
+
+ANIM_CHROME: int = 7;
+
+ANIM_TRAY_WORDS: int = 8;
+
+ANIM_JUMP_PAGE: int = 9;
+
+ANIM_JUMP_PANEL: int = 10;
+
+anim_run(kind: int) {
+    if (kind == ANIM_DOCK) dock_animated() else if (kind == ANIM_TOAST) toast_layout() else if (kind == ANIM_CAPSULE) capsule_layout() else if (kind == ANIM_COVER_PAGE) covers_faded(PANE_PAGE) else if (kind == ANIM_COVER_PANEL) covers_faded(PANE_PANEL) else if (kind == ANIM_ARRIVED) arrived_faded() else if (kind == ANIM_CHROME) chrome_relayout() else if (kind == ANIM_TRAY_WORDS) tray_words_animated() else if (kind == ANIM_JUMP_PAGE) jump_revealed(PANE_PAGE) else if (kind == ANIM_JUMP_PANEL) jump_revealed(PANE_PANEL)
+}
+
+anim_ended(kind: int) {
+    if (kind == ANIM_DOCK) dock_animation_ended() else if (kind == ANIM_TOAST) toast_ended() else if (kind == ANIM_CAPSULE) capsule_ended() else if (kind == ANIM_COVER_PAGE) covers_gone(PANE_PAGE) else if (kind == ANIM_COVER_PANEL) covers_gone(PANE_PANEL)
+}
+
+// ---- the app ----
+app_launched(
+    self: int,
+    _cmd: int,
+    _application: int,
+    _options: int
+): int {
+    app_obj = self;
+    app_begin();
+    1
+}
+
+// Begun (at launch, and again at a hot reload): what the app observes,
+// core's host, the development wire.
+app_begin() {
+    center: int = msg(cls("NSNotificationCenter"), sel("defaultCenter"));
+    msg3(center, sel("removeObserver:name:object:"), app_obj, objc_const("UIContentSizeCategoryDidChangeNotification"),
+        0);
+    msg4(center, sel("addObserver:selector:name:object:"), app_obj, sel("vellumTextSize:"),
+        objc_const("UIContentSizeCategoryDidChangeNotification"), 0);
+    colors_make();
+    types_make();
+    reminders_begin();
+    platform_begin();
+    devwire_begin()
+}
+
+app_background(_self: int, _cmd: int, _application: int): int {
+    if (core_begun) send0("away");
+    0
+}
+
+// The app's one scene: its window, the root in it.
+scene_connected(
+    _self: int,
+    _cmd: int,
+    scene: int,
+    _session: int,
+    options: int
+): int {
+    if (window != 0) return 0;
+    window = msg1(msg(cls("UIWindow"), sel("alloc")), sel("initWithWindowScene:"),
+        scene);
+    scene_obj = scene;
+    ui_build();
+    contexts: int = msg(options, sel("URLContexts"));
+    if (contexts != 0) _l: int = scene_links(0, 0, scene, contexts);
+    if (core_ready_due) core_ready();
+    0
+}
+
+scene_window(_self: int, _cmd: int): int {
+    window
+}
+
+// A link into the app (bsb://JHN/3/16): core's to read.
+scene_links(
+    _self: int,
+    _cmd: int,
+    _scene: int,
+    contexts: int
+): int {
+    context: int = msg(contexts, sel("anyObject"));
+    if (context == 0) return 0;
+    url: int = msg(context, sel("URL"));
+    if (url == 0 || !core_begun) return 0;
+    out_word("link ");
+    out_ns(msg(url, sel("absoluteString")));
+    out_end();
+    0
+}
+
+scene_geometry(
+    _self: int,
+    _cmd: int,
+    _scene: int,
+    _previous: int
+): int {
+    panel_mode_check();
+    chrome_relayout();
+    0
+}
+
+// The window's root made: the page and the chrome.
+ui_build() {
+    root_vc = make("VellumRoot");
+    msg1(window, sel("setRootViewController:"), root_vc);
+    msg1(window, sel("setOverrideUserInterfaceStyle:"), if (look_said) look_style() else 0);
+    msg(window, sel("makeKeyAndVisible"));
+    msg(window, sel("layoutIfNeeded"));
+    chrome_dress();
+    top_fade_dress();
+    chrome_relayout();
+    appearance_watch()
+}
+
+// ---- hot reload (RELOAD.md) ----
+// This build's app in the window the old build made, core begun again on
+// what is kept. The old build's views are emptied first (their globals,
+// which kept them, are gone, so they would live on with their drawing).
+reload() {
+    if (window == 0 || app_obj == 0) return;
+    classes_make();
+    old: int = msg(window, sel("rootViewController"));
+    if (old != 0) {
+        shown: int = msg(old, sel("presentedViewController"));
+        while (shown != 0) {
+            emptied(msg(shown, sel("view")));
+            pc: int = msg(shown, sel("presentationController"));
+            if (pc != 0) msg1(pc, sel("setDelegate:"), 0);
+            shown = msg(shown, sel("presentedViewController"))
+        }
+        emptied(msg(old, sel("view")));
+        if (msg(old, sel("presentedViewController")) != 0) msg2(old, sel("dismissViewControllerAnimated:completion:"),
+            0, 0)
+    }
+    msg1(window, sel("setRootViewController:"), 0);
+    dock_window_empty();
+    app_begin();
+    ui_build()
+}
+
+// A view and those in it let go of their words, drawing and delegates.
+emptied(v: int) {
+    if (v == 0) return;
+    subs: int = msg(msg(v, sel("subviews")), sel("copy"));
+    for i in 0..msg(subs, sel("count")) emptied(msg1(subs, sel("objectAtIndex:"),
+        i));
+    release(subs);
+    if (is_kind(v, "UITableView") || is_kind(v, "UICollectionView")) {
+        msg1(v, sel("setDataSource:"), 0);
+        msg1(v, sel("setDelegate:"), 0)
+    } else if (is_kind(v, "UIScrollView")) msg1(v, sel("setDelegate:"), 0);
+    if (is_kind(v, "UITextView")) msg1(v, sel("setAttributedText:"), fresh("NSAttributedString"));
+    if (is_kind(v, "UIVisualEffectView")) msg1(v, sel("setEffect:"), 0);
+    msg1(msg(v, sel("layer")), sel("setContents:"), 0)
+}
+
+// ---- classes ----
+// (Made once: at a hot reload the host gives back the ones made before,
+// their methods entering this build's functions of the same names.)
+classes_make() {
+    root: int = class_make(cls("UIViewController"), "VellumRoot");
+    add_method0(root, sel("loadView"), &root_load_view, "v@:");
+    add_method0(root, sel("viewDidLayoutSubviews"), &root_layout, "v@:");
+    add_method0(root, sel("prefersStatusBarHidden"), &root_status_hidden, "B@:");
+    add_method0(root, sel("preferredStatusBarStyle"), &root_status_style, "q@:");
+    add_method0(root, sel("preferredStatusBarUpdateAnimation"), &root_status_animation,
+        "q@:");
+    add_method1(root, sel("traitCollectionDidChange:"), &root_traits_changed, "v@:@");
+    add_method2(root, sel("vellumAppearance:"), &root_appearance_changed, "v@:@@");
+    add_dock_methods(root);
+    add_edit_commands(root);
+    pane_classes_make();
+    listen_classes_make();
+    reminders_classes_make();
+    add_player_methods(root);
+    add_linking_methods(cls("VellumPanes"));
+    screens_classes_make();
+    platform_classes_make();
+    app: int = class_make(cls("UIResponder"), "L8BibleApp");
+    add_method2(app, sel("application:didFinishLaunchingWithOptions:"), &app_launched,
+        "B@:@@");
+    add_method1(app, sel("applicationDidEnterBackground:"), &app_background, "v@:@");
+    add_method1(app, sel("applicationWillTerminate:"), &app_background, "v@:@");
+    add_method1(app, sel("vellumTextSize:"), &text_size_changed, "v@:@");
+    add_method1(app, sel("vellumFlashDone:"), &flash_faded, "v@:@");
+    add_link_methods(app);
+    add_platform_methods(app);
+    add_service_methods(app);
+    add_panel_methods(app);
+    add_devwire_methods(app);
+    add_method1(app, sel("vellumPaneSettle:"), &pane_settle_fired, "v@:@");
+    add_method1(app, sel("vellumScreensForget:"), &screens_forget_fired, "v@:@");
+    add_method1(app, sel("vellumSearchFocus:"), &search_focus_fired, "v@:@");
+    add_method1(app, sel("vellumFocus:"), &focus_fired, "v@:@");
+    add_key_methods(root, app);
+    add_protocol(app, "UIApplicationDelegate");
+    scene: int = class_make(cls("UIResponder"), "L8BibleScene");
+    add_method3(scene, sel("scene:willConnectToSession:options:"), &scene_connected,
+        "v@:@@@");
+    add_method1(scene, sel("sceneDidEnterBackground:"), &app_background, "v@:@");
+    add_method2(scene, sel("scene:openURLContexts:"), &scene_links, "v@:@@");
+    add_method0(scene, sel("window"), &scene_window, "@@:");
+    add_method2(scene, sel("windowScene:didUpdateEffectiveGeometry:"), &scene_geometry,
+        "v@:@@");
+    add_protocol(scene, "UIWindowSceneDelegate")
+}
+
+main(): int {
+    diag_on = getenv("L8_DEMO") != null || getenv("L8_TIMING") != null;
+    classes_make();
+    UIApplicationMain(l8rt_argc(), l8rt_argv(), 0, nsstring("L8BibleApp"))
+}

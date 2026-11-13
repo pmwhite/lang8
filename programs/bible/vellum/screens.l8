@@ -1,0 +1,2246 @@
+tag vellum;
+
+use_tag std, ios, bible, bible_wire;
+
+// Core's screens (SKINS.md, Screens as data) drawn the system's way: each
+// a view controller of the app's own (VellumList) holding a collection
+// view in the system's list layout (inset grouped, or plain for a page),
+// its rows the system's list cells and content configurations, so they
+// look, size and read aloud as Settings' do. A sheet (group 0) is a
+// navigation controller presented from what is on top; the panel's
+// screens (group 1) are panel.l8's navigation controller's.
+//
+// Each screen's latest bytes, as core sent them, are kept by its slot,
+// with how many lines core had been given then: a list asked for its rows
+// with no line given since reads them from those; otherwise core is asked
+// for its model again.
+import "../../ios/objc.l8";
+
+import "../core/wire.l8";
+
+import "../core/ui.l8";
+
+import "kit.l8";
+
+import "look.l8";
+
+SLOTS_MOST: int = 16;
+
+SLOT_BYTES_MOST: int = 262144;
+
+type Slot = {
+    id: int;
+    kind: int;
+    arg: int;
+    group: int;
+    // Its controller (held) and its list (0: none yet, or a reader).
+    controller: int;
+    list: int;
+    // Its bytes' count and core's lines when they were kept.
+    bytes_n: int;
+    lines: int;
+    // Closed by core (pop, dismiss): not said back as `closed`.
+    closing: bool;
+    // Its search's words as typed, waiting to be sent, and its timer.
+    query_timer: int
+}
+
+slots: []Slot = new Slot[16](Slot {
+    id: -1,
+    kind: 0,
+    arg: 0,
+    group: 0,
+    controller: 0,
+    list: 0,
+    bytes_n: 0,
+    lines: -1,
+    closing: false,
+    query_timer: 0
+});
+
+slot_bytes: []i8 = new i8[16 * 262144](0i8);
+
+// The screen decoded now, and which slot's it is (-1: none), as of which
+// of core's lines.
+ui: WireScreen = wire_screen();
+
+ui_slot: int = -1;
+
+ui_lines: int = -1;
+
+slot_of_id(id: int): int {
+    for s in 0..SLOTS_MOST
+        if (slots[s].id == id && id > 0) return s;
+    -1
+}
+
+slot_of_controller(controller: int): int {
+    for s in 0..SLOTS_MOST
+        if (slots[s].controller == controller && controller != 0) return s;
+    -1
+}
+
+slot_of_list(list: int): int {
+    for s in 0..SLOTS_MOST
+        if (slots[s].list == list && list != 0) return s;
+    -1
+}
+
+// A screen's block from core (`screen ID KIND ARG GROUP` ... `end`): the
+// tray's (id 0) decoded at once; any other kept by its slot.
+screen_came(data: []i8, at: int, end: int) {
+    e: int = at;
+    while (e < end && data[e] as int != 10) e = e + 1;
+    head: Cursor = Cursor { at: at + len("screen"), end: e };
+    id: int = cursor_number(data, &head);
+    kind: int = cursor_number(data, &head);
+    arg: int = cursor_number(data, &head);
+    group: int = cursor_number(data, &head);
+    if (id == 0) {
+        if (!wire_decode_span(&tray_screen, data, at, end)) link_fail("the tray could not be read");
+        return
+    }
+    s: int = slot_of_id(id);
+    if (s < 0) s = slot_new(id);
+    slots[s].kind = kind;
+    slots[s].arg = arg;
+    slots[s].group = group;
+    slot_keep(s, data, at, end)
+}
+
+slot_new(id: int): int {
+    s: int = -1;
+    for k in 0..SLOTS_MOST
+        if (s < 0 && slots[k].id < 0) s = k;
+    // (Full: the oldest screen not shown let go.)
+    if (s < 0) {
+        for k in 0..SLOTS_MOST
+            if (s < 0 && slots[k].controller == 0) s = k
+    }
+    if (s < 0) link_fail("too many screens at once");
+    slot_free(s);
+    slots[s].id = id;
+    s
+}
+
+slot_free(s: int) {
+    if (ui_slot == s) ui_slot = -1;
+    slots[s].query_timer = timer_stop(slots[s].query_timer);
+    slot_reads[s] = false;
+    if (slots[s].list != 0) {
+        msg1(slots[s].list, sel("setDataSource:"), 0);
+        msg1(slots[s].list, sel("setDelegate:"), 0)
+    }
+    slots[s] = Slot {
+        id: -1,
+        kind: 0,
+        arg: 0,
+        group: 0,
+        controller: held(slots[s].controller, 0),
+        list: 0,
+        bytes_n: 0,
+        lines: -1,
+        closing: false,
+        query_timer: 0
+    }
+}
+
+slot_keep(
+    s: int,
+    data: []i8,
+    at: int,
+    end: int
+) {
+    n: int = end - at;
+    slots[s].bytes_n = 0;
+    if (ui_slot == s) ui_slot = -1;
+    if (n > SLOT_BYTES_MOST) return;
+    base: int = s * SLOT_BYTES_MOST;
+    for i in 0..n slot_bytes[base + i] = data[at + i];
+    slots[s].bytes_n = n;
+    slots[s].lines = core_lines
+}
+
+// Slot s's screen decoded into ui, as it is now: from its bytes if no line
+// has been given core since, else core's model asked for. Whether it is.
+screen_load(s: int): bool {
+    if (s < 0 || slots[s].id <= 0) return false;
+    if (ui_slot == s && ui_lines == core_lines) return true;
+    if (slots[s].bytes_n > 0 && slots[s].lines == core_lines) {
+        base: int = s * SLOT_BYTES_MOST;
+        if (wire_decode_span(&ui, slot_bytes, base, base + slots[s].bytes_n)) {
+            ui_slot = s;
+            ui_lines = core_lines;
+            return true
+        }
+    }
+    ask_begin();
+    out_word("model");
+    out_arg(slots[s].id);
+    out_end();
+    if (!ask_end("screen")) return false;
+    if (!wire_decode_span(&ui, answer_buf, 0, answer_n)) link_fail("a screen could not be read");
+    slot_keep(s, answer_buf, 0, answer_n);
+    ui_slot = s;
+    ui_lines = core_lines;
+    true
+}
+
+// ---- words ----
+// Words of a screen's pool as an NSString (autoreleased; 0: none).
+screen_text(screen: *WireScreen, t: UiText): int {
+    if (t.n <= 0) 0 else nsstring_lossy_at(bytes_address(screen.pool) + t.at, t.n)
+}
+
+ui_text(t: UiText): int {
+    screen_text(&ui, t)
+}
+
+// A hex color in a screen's words (RRGGBB) as a UIColor (0: none).
+screen_color(screen: *WireScreen, t: UiText): int {
+    if (t.n != 6) return 0;
+    hex: int = hex_at(screen.pool, t.at, t.at + t.n);
+    if (hex < 0) 0 else rgb(hex, 1.0f64)
+}
+
+// The k-th of words split by | (autoreleased; 0: none).
+split_word(screen: *WireScreen, t: UiText, k: int): int {
+    at: int = t.at;
+    i: int = 0;
+    for x in t.at..t.at + t.n + 1 {
+        if (x == t.at + t.n || screen.pool[x] as int == 124) {
+            if (i == k) return nsstring_lossy_at(bytes_address(screen.pool) + at,
+                x - at);
+            i = i + 1;
+            at = x + 1
+        }
+    }
+    0
+}
+
+split_count(screen: *WireScreen, t: UiText): int {
+    if (t.n == 0) return 0;
+    n: int = 1;
+    for x in t.at..t.at + t.n
+        if (screen.pool[x] as int == 124) n = n + 1;
+    n
+}
+
+// Words set by runs (end:style pairs from runs, n of them) as an attributed
+// string in a list's type: base font and color for plain words.
+rich_text(
+    screen: *WireScreen,
+    t: UiText,
+    runs: int,
+    n: int,
+    font: int,
+    color: int
+): int {
+    words: int = screen_text(screen, t);
+    if (words == 0) words = nsstring("");
+    a: int = autoreleased(msg1(msg(cls("NSMutableAttributedString"), sel("alloc")),
+        sel("initWithString:"), words));
+    length: int = msg(a, sel("length"));
+    msg4(a, sel("addAttribute:value:range:"), objc_const("NSFontAttributeName"), font,
+        0, length);
+    msg4(a, sel("addAttribute:value:range:"), objc_const("NSForegroundColorAttributeName"),
+        color, 0, length);
+    from: int = 0;
+    size: f64 = msg_f(font, sel("pointSize"));
+    for k in 0..n {
+        end: int = clamp_i(screen.runs[runs + 2 * k], 0, length);
+        style: int = screen.runs[runs + 2 * k + 1];
+        if (end > from) run_style(a, from, end, style, size);
+        from = end
+    }
+    a
+}
+
+// A run's look in a list: core's runs (RUN_*) and the reader's styles.
+run_style(
+    a: int,
+    from: int,
+    end: int,
+    style: int,
+    size: f64
+) {
+    font: int = 0;
+    tint: int = 0;
+    if (style == RUN_NUMBER) {
+        font = font_monospaced_digits(size * 0.7f64, 0.3f64);
+        tint = colors.faint
+    } else if (style == RUN_MISSING || style == RUN_TRANSLIT) {
+        font = face_traits(&page_type, size, 1);
+        tint = colors.faint
+    } else if (style == RUN_GREEK || style == RUN_GREEK_FAINT) {
+        font = new_york(size * 1.05f64);
+        if (style == RUN_GREEK_FAINT) tint = colors.faint
+    } else if (style == RUN_HEBREW || style == RUN_HEBREW_FAINT) {
+        font = font_system(size * 1.15f64, 0.0f64);
+        if (style == RUN_HEBREW_FAINT) tint = colors.faint
+    } else if (style == RUN_CODE) font = msg_ff(cls("UIFont"), sel("monospacedSystemFontOfSize:weight:"),
+        size * 0.9f64, 0.0f64) else if (style == RUN_FAINT) tint = colors.faint else if (style == RUN_STRONG) font = font_system(size,
+        0.4f64) else if (style == RUN_SMALL || style == RUN_SMALL_UNDERLINED) {
+        font = font_system(size * 0.8f64, 0.0f64);
+        tint = colors.faint;
+        if (style == RUN_SMALL_UNDERLINED) msg4(a, sel("addAttribute:value:range:"),
+            objc_const("NSUnderlineStyleAttributeName"), nsnumber_int(1), from, end - from)
+    } else if (style == RUN_READING || style == RUN_SCRIPTURE) font = face_font(&page_type,
+        size * 1.05f64) else if (style == RUN_DIVINE) font = with_feature(face_font(&page_type,
+        size * 1.05f64), 38, 1) else if (style == RUN_ITALIC) font = face_traits(&page_type,
+        size, 1) else if (style == RUN_ACCENT) tint = colors.accent else if (style >= 0 && style < STYLES) {
+        font = run_font(&page_type, 0, style);
+        tint = style_color(style)
+    }
+    if (font != 0) msg4(a, sel("addAttribute:value:range:"), objc_const("NSFontAttributeName"),
+        font, from, end - from);
+    if (tint != 0) msg4(a, sel("addAttribute:value:range:"), objc_const("NSForegroundColorAttributeName"),
+        tint, from, end - from)
+}
+
+// ---- the sheets ----
+// The sheet's navigation controller (0: no sheet), and one presented over
+// it (a note over the Library).
+sheet_nav: int = 0;
+
+over_nav: int = 0;
+
+// What is on top: the controller a sheet is presented from.
+top_controller(): int {
+    top: int = root_vc;
+    next: int = msg(top, sel("presentedViewController"));
+    while (next != 0 && !truth(msg(next, sel("isBeingDismissed")))) {
+        top = next;
+        next = msg(top, sel("presentedViewController"))
+    }
+    top
+}
+
+// A navigation controller of the app's for a screen's controller.
+nav_new(root: int): int {
+    nav: int = autoreleased(msg1(msg(cls("VellumNav"), sel("alloc")), sel("initWithRootViewController:"),
+        root));
+    msg1(nav, sel("setDelegate:"), screens_delegate);
+    nav
+}
+
+// A sheet's presentation: medium and large heights (Go To and the
+// settings large), its grabber, the page dimmed only at the largest.
+sheet_dress(nav: int, kind: int) {
+    msg1(nav, sel("setModalPresentationStyle:"), 2);
+    sheet: int = msg(nav, sel("sheetPresentationController"));
+    if (sheet == 0) return;
+    medium: int = msg(cls("UISheetPresentationControllerDetent"), sel("mediumDetent"));
+    large: int = msg(cls("UISheetPresentationControllerDetent"), sel("largeDetent"));
+    pair: []int = two_items;
+    pair[0] = medium;
+    pair[1] = large;
+    msg1(sheet, sel("setDetents:"), nsarray(pair, 2));
+    msg1(sheet, sel("setPrefersGrabberVisible:"), 1);
+    msg1(sheet, sel("setPrefersScrollingExpandsWhenScrolledToEdge:"), 1);
+    msg1(sheet, sel("setPrefersEdgeAttachedInCompactHeight:"), 1);
+    // (Go To opens at its full height: it is a place to search.)
+    if (kind == SCR_GOTO || kind == SCR_SEARCH) msg1(sheet, sel("setSelectedDetentIdentifier:"),
+        msg(large, sel("identifier")));
+    // (Reading's changes seen as they are made: the page bright behind it.)
+    if (kind == SCR_SETTINGS) msg1(sheet, sel("setLargestUndimmedDetentIdentifier:"),
+        msg(medium, sel("identifier")));
+    msg1(sheet, sel("setDelegate:"), screens_delegate)
+}
+
+two_items: []int = new int[2](0);
+
+// `present ID`: a sheet of its own, in place of one shown.
+screen_present(id: int) {
+    s: int = slot_of_id(id);
+    if (s < 0) return;
+    if (slots[s].group == 1) {
+        panel_screen_show(s);
+        return
+    }
+    controller: int = slot_controller(s);
+    if (sheet_nav != 0 && msg(sheet_nav, sel("presentingViewController")) != 0 && !truth(msg(sheet_nav,
+        sel("isBeingDismissed")))) {
+        old: int = msg(sheet_nav, sel("viewControllers"));
+        sheet_mark_closing(old);
+        one_item[0] = controller;
+        cross_fade(msg(sheet_nav, sel("view")), 0.2f64);
+        msg2(sheet_nav, sel("setViewControllers:animated:"), nsarray(one_item, 1),
+            0);
+        screens_forget_gone();
+        return
+    }
+    nav: int = nav_new(controller);
+    sheet_dress(nav, slots[s].kind);
+    sheet_nav = held(sheet_nav, nav);
+    dock_expand();
+    msg3(top_controller(), sel("presentViewController:animated:completion:"), nav,
+        1, 0);
+    dock_along(nav, true)
+}
+
+// `present_over ID`: a sheet over the sheet.
+screen_present_over(id: int) {
+    s: int = slot_of_id(id);
+    if (s < 0) return;
+    nav: int = nav_new(slot_controller(s));
+    sheet_dress(nav, slots[s].kind);
+    over_nav = held(over_nav, nav);
+    msg3(top_controller(), sel("presentViewController:animated:completion:"), nav,
+        1, 0);
+    dock_along(nav, true)
+}
+
+// The navigation controller a screen of group g goes on.
+nav_of_group(g: int): int {
+    if (g == 1) return panel_nav();
+    if (over_nav != 0 && msg(over_nav, sel("presentingViewController")) != 0) return over_nav;
+    sheet_nav
+}
+
+// `push ID`: onto its group's navigation.
+screen_push(id: int) {
+    s: int = slot_of_id(id);
+    if (s < 0) return;
+    nav: int = nav_of_group(slots[s].group);
+    if (nav == 0) {
+        screen_present(id);
+        return
+    }
+    msg2(nav, sel("pushViewController:animated:"), slot_controller(s), 1)
+}
+
+// `pop`: the top screen of the sheet (else the panel's) taken off.
+screen_pop() {
+    nav: int = nav_of_group(0);
+    if (nav == 0 || msg(msg(nav, sel("viewControllers")), sel("count")) < 2) nav = panel_nav();
+    if (nav == 0) return;
+    top: int = msg(nav, sel("topViewController"));
+    s: int = slot_of_controller(top);
+    if (s >= 0) slots[s].closing = true;
+    msg1(nav, sel("popViewControllerAnimated:"), 1)
+}
+
+// `pop_to ID`: back to that screen.
+screen_pop_to(id: int) {
+    s: int = slot_of_id(id);
+    if (s < 0 || slots[s].controller == 0) return;
+    nav: int = msg(slots[s].controller, sel("navigationController"));
+    if (nav == 0) return;
+    stack: int = msg(nav, sel("viewControllers"));
+    n: int = msg(stack, sel("count"));
+    above: bool = false;
+    for i in 0..n {
+        c: int = msg1(stack, sel("objectAtIndex:"), i);
+        if (above) {
+            k: int = slot_of_controller(c);
+            if (k >= 0) slots[k].closing = true
+        }
+        if (c == slots[s].controller) above = true
+    }
+    msg2(nav, sel("popToViewController:animated:"), slots[s].controller, 1)
+}
+
+// `dismiss` (`close`): the sheets put away, as the platform puts them.
+sheets_dismiss() {
+    if (sheet_nav == 0 && over_nav == 0) return;
+    for nav in [over_nav, sheet_nav] {
+        if (nav != 0) sheet_mark_closing(msg(nav, sel("viewControllers")))
+    }
+    presenter: int = if (sheet_nav != 0) msg(sheet_nav, sel("presentingViewController")) else 0;
+    if (presenter != 0) {
+        msg2(presenter, sel("dismissViewControllerAnimated:completion:"), 1, 0);
+        dock_along(sheet_nav, false)
+    }
+    sheet_nav = held(sheet_nav, 0);
+    over_nav = held(over_nav, 0);
+    screens_forget_gone_soon();
+    panel_check_soon()
+}
+
+sheet_mark_closing(stack: int) {
+    if (stack == 0) return;
+    for i in 0..msg(stack, sel("count")) {
+        k: int = slot_of_controller(msg1(stack, sel("objectAtIndex:"), i));
+        if (k >= 0) slots[k].closing = true
+    }
+}
+
+// Screens whose controllers are on no navigation any more let go, each
+// said `closed` unless core closed it.
+screens_forget_gone() {
+    for s in 0..SLOTS_MOST {
+        c: int = slots[s].controller;
+        if (c != 0 && slots[s].group == 0 && msg(c, sel("navigationController")) == 0 && msg(c,
+            sel("parentViewController")) == 0) {
+            id: int = slots[s].id;
+            closing: bool = slots[s].closing;
+            slot_free(s);
+            if (!closing) send1("closed", id)
+        }
+    }
+}
+
+forget_due: bool = false;
+
+screens_forget_gone_soon() {
+    if (forget_due) return;
+    forget_due = true;
+    _t: int = timer_after(app_obj, 0.6f64, "vellumScreensForget:")
+}
+
+screens_forget_fired(_self: int, _cmd: int, _timer: int): int {
+    forget_due = false;
+    screens_forget_gone();
+    0
+}
+
+// ---- effects ----
+// A screen's effect from core (SKINS.md: present, push, update, refill,
+// retext, blur, pop, pop_to, close, dismiss, present_over, panel, reveal).
+screen_effect(word: str, a: int, b: int) {
+    if (word == "present") screen_present(a) else if (word == "push") screen_push(a) else if (word == "present_over") screen_present_over(a) else if (word == "update") screen_update(a,
+        false) else if (word == "refill") screen_update(a, b == 1) else if (word == "retext") screen_retext(a) else if (word == "blur") screen_blur(a) else if (word == "pop") screen_pop() else if (word == "pop_to") screen_pop_to(a) else if (word == "close" || word == "dismiss") sheets_dismiss() else if (word == "panel") panel_screen_show(slot_of_id(a)) else if (word == "reveal") screen_reveal(a) else if (word == "focus") {
+        s: int = slot_of_id(a);
+        if (s >= 0) focus_soon(s)
+    }
+}
+
+// `update ID` (`refill ID FADE`): its list made again from its model.
+screen_update(id: int, fade: bool) {
+    s: int = slot_of_id(id);
+    if (s < 0 || slots[s].controller == 0) return;
+    if (!screen_load(s)) return;
+    // (A reader that was a list while its document opened, or the other
+    // way: its view made anew.)
+    if (ui.reader != slot_reads[s]) {
+        list_view_fill(s, msg(slots[s].controller, sel("view")));
+        return
+    }
+    list_dress(s);
+    if (slots[s].list != 0) {
+        if (fade) cross_fade(slots[s].list, 0.15f64);
+        msg(slots[s].list, sel("reloadData"))
+    }
+}
+
+// `retext ID`: its search field's words, core's again.
+screen_retext(id: int) {
+    s: int = slot_of_id(id);
+    if (s < 0 || !screen_load(s)) return;
+    search: int = slot_search(s);
+    if (search != 0) msg1(msg(search, sel("searchBar")), sel("setText:"), ui_text(ui.search_text))
+}
+
+screen_blur(id: int) {
+    s: int = slot_of_id(id);
+    if (s < 0 || slots[s].controller == 0) return;
+    msg1(msg(slots[s].controller, sel("view")), sel("endEditing:"), 1)
+}
+
+// `reveal ID`: its focus row in sight.
+screen_reveal(id: int) {
+    s: int = slot_of_id(id);
+    if (s < 0 || slots[s].list == 0 || !screen_load(s) || ui.focus < 0) return;
+    path: int = row_path(ui.focus);
+    if (path != 0) msg3(slots[s].list, sel("scrollToItemAtIndexPath:atScrollPosition:animated:"),
+        path, 0, 1)
+}
+
+// Row index r (of all) as an index path (0: none).
+row_path(r: int): int {
+    for k in 0..ui.sections_n {
+        section: UiSection = ui.sections[k];
+        if (r >= section.first && r < section.first + section.n) return msg2(cls("NSIndexPath"),
+            sel("indexPathForItem:inSection:"), r - section.first, k + ui_head())
+    }
+    0
+}
+
+// ---- a screen's controller ----
+// Its controller, made the first time it is wanted (held by its slot).
+slot_controller(s: int): int {
+    if (slots[s].controller == 0) slots[s].controller = make("VellumList");
+    slots[s].controller
+}
+
+// (Its view made: the list, or for the panel's reader the pane.)
+list_load_view(self: int, _cmd: int): int {
+    s: int = slot_of_controller(self);
+    view: int = autoreleased(view_new());
+    msg1(self, sel("setView:"), view);
+    if (s < 0 || !screen_load(s)) {
+        note("vellum: a screen's view made with no model");
+        return 0
+    }
+    list_view_fill(s, view);
+    0
+}
+
+// Whether slot s's view shows the pane (a reader) or a list.
+slot_reads: []bool = new bool[16](false);
+
+// Its view given what the model is: the panel's reader, or a list.
+list_view_fill(s: int, view: int) {
+    subs: int = msg(msg(view, sel("subviews")), sel("copy"));
+    for i in 0..msg(subs, sel("count")) msg(msg1(subs, sel("objectAtIndex:"), i),
+        sel("removeFromSuperview"));
+    release(subs);
+    if (slots[s].list != 0) {
+        msg1(slots[s].list, sel("setDataSource:"), 0);
+        msg1(slots[s].list, sel("setDelegate:"), 0);
+        slots[s].list = 0
+    }
+    slot_reads[s] = ui.reader;
+    if (ui.reader) {
+        panel_reader_install(s, view);
+        list_dress(s);
+        return
+    }
+    if (slots[s].group == 1 && panel.reader_slot == s) {
+        pane_detach(PANE_PANEL);
+        panel.reader_slot = -1
+    }
+    controller: int = slots[s].controller;
+    layout: int = list_layout_for(&ui);
+    list: int = autoreleased(msg_rect1(msg(cls("UICollectionView"), sel("alloc")),
+        sel("initWithFrame:collectionViewLayout:"), 0.0f64, 0.0f64, 100.0f64, 100.0f64,
+        layout));
+    msg1(list, sel("setAutoresizingMask:"), 18);
+    msg2(list, sel("registerClass:forCellWithReuseIdentifier:"), cls("UICollectionViewListCell"),
+        nsstring("item"));
+    msg2(list, sel("registerClass:forCellWithReuseIdentifier:"), cls("UICollectionViewListCell"),
+        nsstring("text"));
+    msg2(list, sel("registerClass:forCellWithReuseIdentifier:"), cls("UICollectionViewListCell"),
+        nsstring("field"));
+    msg2(list, sel("registerClass:forCellWithReuseIdentifier:"), cls("UICollectionViewListCell"),
+        nsstring("grid"));
+    msg2(list, sel("registerClass:forCellWithReuseIdentifier:"), cls("UICollectionViewListCell"),
+        nsstring("custom"));
+    msg3(list, sel("registerClass:forSupplementaryViewOfKind:withReuseIdentifier:"),
+        cls("UICollectionViewListCell"), objc_const("UICollectionElementKindSectionHeader"),
+        nsstring("header"));
+    msg3(list, sel("registerClass:forSupplementaryViewOfKind:withReuseIdentifier:"),
+        cls("UICollectionViewListCell"), objc_const("UICollectionElementKindSectionFooter"),
+        nsstring("footer"));
+    msg1(list, sel("setDataSource:"), controller);
+    msg1(list, sel("setDelegate:"), controller);
+    msg1(list, sel("setKeyboardDismissMode:"), 1);
+    msg1(list, sel("setPrefetchingEnabled:"), 0);
+    msg1(list, sel("setBackgroundColor:"), clear_color());
+    set_frame(list, bounds_of(view));
+    add_sub(view, list);
+    slots[s].list = list;
+    list_dress(s);
+    if (ui.focus >= 0) focus_soon(s)
+}
+
+// A screen opened at its focus row (`focus N MODE`): at the top, or in
+// the middle, once its list is laid out.
+focus_slot: int = -1;
+
+focus_soon(s: int) {
+    focus_slot = s;
+    _t: int = timer_after(app_obj, 0.05f64, "vellumFocus:")
+}
+
+focus_fired(_self: int, _cmd: int, _timer: int): int {
+    s: int = focus_slot;
+    focus_slot = -1;
+    if (s < 0 || slots[s].list == 0 || !screen_load(s) || ui.focus < 0) return 0;
+    path: int = row_path(ui.focus);
+    if (path == 0) return 0;
+    middle: bool = ui.focus_middle || ui.focus_select;
+    msg3(slots[s].list, sel("scrollToItemAtIndexPath:atScrollPosition:animated:"),
+        path, if (middle) 2 else 1, 0);
+    if (ui.focus_select) msg3(slots[s].list, sel("selectItemAtIndexPath:animated:scrollPosition:"),
+        path, 0, 0);
+    0
+}
+
+// The layout for a screen: a grid's squares, a page's paragraphs (plain,
+// no lines between), or the inset grouped list (plain where it says so).
+list_layout_for(screen: *WireScreen): int {
+    if (screen.grid) return grid_layout();
+    appearance: int = if (screen.page || screen.plain) 0 else 2;
+    config: int = autoreleased(msg1(msg(cls("UICollectionLayoutListConfiguration"),
+        sel("alloc")), sel("initWithAppearance:"), appearance));
+    if (screen.page) msg1(config, sel("setShowsSeparators:"), 0);
+    msg1(config, sel("setHeaderMode:"), if (screen_has_headers(screen)) 1 else 0);
+    msg1(config, sel("setFooterMode:"), if (screen_has_footers(screen)) 1 else 0);
+    msg1(config, sel("setBackgroundColor:"), clear_color());
+    list_swipes_attach(config);
+    msg1(cls("UICollectionViewCompositionalLayout"), sel("layoutWithListConfiguration:"),
+        config)
+}
+
+screen_has_headers(screen: *WireScreen): bool {
+    for k in 0..screen.sections_n
+        if (screen.sections[k].header.n > 0) return true;
+    false
+}
+
+screen_has_footers(screen: *WireScreen): bool {
+    for k in 0..screen.sections_n
+        if (screen.sections[k].footer.n > 0) return true;
+    false
+}
+
+extern msg_f_obj(receiver: int, selector: int, x: f64): int = objc_msgSend;
+
+// A grid of squares: as many 64-point columns as fit, a little apart.
+grid_layout(): int {
+    width: int = msg_f_obj(cls("NSCollectionLayoutDimension"), sel("fractionalWidthDimension:"),
+        0.2f64);
+    height: int = msg_f_obj(cls("NSCollectionLayoutDimension"), sel("absoluteDimension:"),
+        58.0f64);
+    item_size: int = msg2(cls("NSCollectionLayoutSize"), sel("sizeWithWidthDimension:heightDimension:"),
+        width, height);
+    item: int = msg1(cls("NSCollectionLayoutItem"), sel("itemWithLayoutSize:"), item_size);
+    msg_insets(item, sel("setContentInsets:"), 4.0f64, 4.0f64, 4.0f64, 4.0f64);
+    row_size: int = msg2(cls("NSCollectionLayoutSize"), sel("sizeWithWidthDimension:heightDimension:"),
+        msg_f_obj(cls("NSCollectionLayoutDimension"), sel("fractionalWidthDimension:"),
+        1.0f64), height);
+    one_item[0] = item;
+    group: int = msg2(cls("NSCollectionLayoutGroup"), sel("horizontalGroupWithLayoutSize:subitems:"),
+        row_size, nsarray(one_item, 1));
+    section: int = msg1(cls("NSCollectionLayoutSection"), sel("sectionWithGroup:"),
+        group);
+    msg_insets(section, sel("setContentInsets:"), 12.0f64, 16.0f64, 24.0f64, 16.0f64);
+    autoreleased(msg1(msg(cls("UICollectionViewCompositionalLayout"), sel("alloc")),
+        sel("initWithSection:"), section))
+}
+
+// The controller's bar and what is around its list, as the model says:
+// its title and subtitle, its confirm and left buttons, Done on a sheet's
+// first, its search, its segments, its tools, what it shows empty.
+list_dress(s: int) {
+    if (ui_slot != s) return;
+    controller: int = slots[s].controller;
+    if (controller == 0) return;
+    if (ui.reader) {
+        panel_reader_dress(s);
+        return
+    }
+    item: int = msg(controller, sel("navigationItem"));
+    msg1(item, sel("setTitle:"), ui_text(ui.title));
+    if (responds(item, "setSubtitle:")) msg1(item, sel("setSubtitle:"), ui_text(ui.subtitle));
+    msg1(item, sel("setLargeTitleDisplayMode:"), 2);
+    // (The right: confirm, a button with a menu, or the sheet's close.)
+    right: int = 0;
+    if (ui.confirm.n > 0) {
+        right = bar_item_symbol("checkmark", "vellumConfirm:", controller);
+        if (responds(right, "setStyle:")) msg1(right, sel("setStyle:"), 2);
+        msg1(right, sel("setEnabled:"), if (ui.confirm_off) 0 else 1);
+        msg1(right, sel("setAccessibilityLabel:"), ui_text(ui.confirm))
+    } else if (ui.button.n > 0) right = bar_item_menu() else if (slots[s].group == 0 && list_is_first(controller)) right = bar_item_symbol("xmark",
+        "vellumDone:", controller) else if (slots[s].group == 1 && panel.column && list_is_first(controller)) right = bar_item_symbol("xmark",
+        "vellumPanelClose:", controller);
+    rights: int = fresh("NSMutableArray");
+    if (right != 0) msg1(rights, sel("addObject:"), right);
+    if (split_count(&ui, ui.sorts) > 1 || split_count(&ui, ui.filter_colors) > 0) msg1(rights,
+        sel("addObject:"), view_menu_item());
+    msg1(item, sel("setRightBarButtonItems:"), rights);
+    left: int = 0;
+    if (ui.left.n > 0 || ui.left_icon.n > 0) {
+        left = (if (ui.left_icon.n > 0) bar_item_symbol_ns(ui_text(ui.left_icon),
+            "vellumLeft:", controller) else autoreleased(msg3(msg(cls("UIBarButtonItem"),
+            sel("alloc")), sel("initWithTitle:style:target:action:"), ui_text(ui.left),
+            0, controller)));
+        if (ui.left_icon.n == 0) msg1(left, sel("setAction:"), sel("vellumLeft:"));
+        if (ui.left_action == 0) msg1(left, sel("setEnabled:"), 0)
+    }
+    msg1(item, sel("setLeftBarButtonItem:"), left);
+    list_search_dress(s, item);
+    list_segments_dress(s, item);
+    list_tools_dress(s);
+    list_empty_dress(s);
+    list_keys_check(s);
+    view: int = msg(controller, sel("view"));
+    set_background(view, if (ui.page) colors.page else colors.sheet)
+}
+
+list_is_first(controller: int): bool {
+    nav: int = msg(controller, sel("navigationController"));
+    nav == 0 || msg(msg(nav, sel("viewControllers")), sel("firstObject")) == controller
+}
+
+bar_item_symbol(name: str, action: str, target: int): int {
+    bar_item_symbol_ns(nsstring(name), action, target)
+}
+
+bar_item_symbol_ns(name: int, action: str, target: int): int {
+    autoreleased(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
+        symbol_image(name, 17.0f64, 5), 0, target, sel(action)))
+}
+
+// How the rows are shown: one menu of the sort (the chosen checked, each
+// its index the sort's action's value) and the filter by color (All, then
+// each color, a dot of it; -1 All), as Mail's is.
+view_menu_item(): int {
+    groups: int = fresh("NSMutableArray");
+    if (split_count(&ui, ui.sorts) > 1) {
+        kids: int = fresh("NSMutableArray");
+        for k in 0..split_count(&ui, ui.sorts) {
+            c: int = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+                split_word(&ui, ui.sorts, k), 0, sel("vellumSort:"), nsnumber_int(k));
+            if (k == ui.sort) msg1(c, sel("setState:"), 1);
+            msg1(kids, sel("addObject:"), c)
+        }
+        msg1(groups, sel("addObject:"), msg5(cls("UIMenu"), sel("menuWithTitle:image:identifier:options:children:"),
+            nsstring("Sort"), 0, 0, 1, kids))
+    }
+    if (split_count(&ui, ui.filter_colors) > 0) {
+        kids: int = fresh("NSMutableArray");
+        all: int = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+            nsstring("All Colors"), symbol("circle.dashed", 16.0f64, 4), sel("vellumFilter:"),
+            nsnumber_int(-1));
+        if (ui.filter < 0) msg1(all, sel("setState:"), 1);
+        msg1(kids, sel("addObject:"), all);
+        for k in 0..split_count(&ui, ui.filter_colors) {
+            color: int = hex_color_ns(split_word(&ui, ui.filter_colors, k));
+            dot: int = symbol("circle.fill", 16.0f64, 4);
+            if (color != 0) dot = msg2(dot, sel("imageWithTintColor:renderingMode:"),
+                color, 1);
+            c: int = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+                split_word(&ui, ui.filter_labels, k), dot, sel("vellumFilter:"), nsnumber_int(k));
+            if (k == ui.filter) msg1(c, sel("setState:"), 1);
+            msg1(kids, sel("addObject:"), c)
+        }
+        msg1(groups, sel("addObject:"), msg5(cls("UIMenu"), sel("menuWithTitle:image:identifier:options:children:"),
+            nsstring("Filter"), 0, 0, 1, kids))
+    }
+    filtered: bool = ui.filter >= 0;
+    autoreleased(msg2(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:menu:"),
+        symbol(if (filtered) "line.3.horizontal.decrease.circle.fill" else "line.3.horizontal.decrease.circle",
+        17.0f64, 5), msg2(cls("UIMenu"), sel("menuWithTitle:children:"), nsstring(""),
+        groups)))
+}
+
+sort_chosen(self: int, _cmd: int, sender: int): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s) || sender == 0 || !responds(sender, "propertyList")) return 0;
+    act(s, ui.sort_action, 0, msg(msg(sender, sel("propertyList")), sel("longValue")));
+    0
+}
+
+filter_chosen(self: int, _cmd: int, sender: int): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s) || sender == 0 || !responds(sender, "propertyList")) return 0;
+    act(s, ui.filter_action, 0, msg(msg(sender, sel("propertyList")), sel("longValue")));
+    0
+}
+
+// The bar's button with a menu (History's Clear): core's commands.
+bar_item_menu(): int {
+    kids: int = fresh("NSMutableArray");
+    for k in 0..ui.commands_n {
+        command: UiCommand = ui.commands[k];
+        c: int = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+            ui_text(command.title), 0, sel("vellumCommand:"), nsnumber_int(command.action * 1000000 + command.arg));
+        if (command.destructive) msg1(c, sel("setAttributes:"), 2);
+        msg1(kids, sel("addObject:"), c)
+    }
+    menu: int = msg2(cls("UIMenu"), sel("menuWithTitle:children:"), nsstring(""),
+        kids);
+    item: int = autoreleased(msg2(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:menu:"),
+        ui_text(ui.button), menu));
+    item
+}
+
+// A search field: the system's search controller in the bar, its words
+// core's (sent as typing rests: query), Return its submit.
+slot_search(s: int): int {
+    c: int = slots[s].controller;
+    if (c == 0) 0 else msg(msg(c, sel("navigationItem")), sel("searchController"))
+}
+
+list_search_dress(s: int, item: int) {
+    if (ui.search.n == 0) return;
+    search: int = msg(item, sel("searchController"));
+    if (search == 0) {
+        search = autoreleased(msg1(msg(cls("UISearchController"), sel("alloc")), sel("initWithSearchResultsController:"),
+            0));
+        msg1(search, sel("setObscuresBackgroundDuringPresentation:"), 0);
+        msg1(search, sel("setHidesNavigationBarDuringPresentation:"), 0);
+        msg1(search, sel("setAutomaticallyShowsCancelButton:"), 0);
+        bar: int = msg(search, sel("searchBar"));
+        msg1(bar, sel("setDelegate:"), slots[s].controller);
+        msg1(bar, sel("setText:"), ui_text(ui.search_text));
+        msg1(item, sel("setSearchController:"), search);
+        msg1(item, sel("setHidesSearchBarWhenScrolling:"), 0);
+        if (responds(item, "setPreferredSearchBarPlacement:")) msg1(item, sel("setPreferredSearchBarPlacement:"),
+            2);
+        if (ui.search_focus) search_focus_soon(s)
+    }
+    bar: int = msg(search, sel("searchBar"));
+    msg1(bar, sel("setPlaceholder:"), ui_text(ui.search));
+    msg1(bar, sel("setTintColor:"), colors.accent);
+    msg1(bar, sel("setReturnKeyType:"), if (ui.search_go) 1 else 6);
+    n: int = split_count(&ui, ui.scopes);
+    if (n > 1) {
+        titles: int = fresh("NSMutableArray");
+        for k in 0..n msg1(titles, sel("addObject:"), split_word(&ui, ui.scopes, k));
+        msg1(bar, sel("setScopeButtonTitles:"), titles);
+        msg1(bar, sel("setSelectedScopeButtonIndex:"), ui.scope);
+        msg1(bar, sel("setShowsScopeBar:"), 1)
+    }
+}
+
+search_focus_slot: int = -1;
+
+search_focus_soon(s: int) {
+    search_focus_slot = s;
+    _t: int = timer_after(app_obj, 0.45f64, "vellumSearchFocus:")
+}
+
+search_focus_fired(_self: int, _cmd: int, _timer: int): int {
+    s: int = search_focus_slot;
+    search_focus_slot = -1;
+    if (s < 0) return 0;
+    search: int = slot_search(s);
+    if (search != 0) msg(msg(search, sel("searchBar")), sel("becomeFirstResponder"));
+    0
+}
+
+// The search's words changed: sent once typing has rested its wait.
+search_typed(
+    self: int,
+    _cmd: int,
+    _bar: int,
+    _text: int
+): int {
+    s: int = slot_of_controller(self);
+    if (s < 0) return 0;
+    wait: f64 = 0.15f64;
+    if (screen_load(s) && ui.search_wait > 0) wait = ui.search_wait as f64 / 1000.0f64;
+    slots[s].query_timer = timer_stop(slots[s].query_timer);
+    slots[s].query_timer = timer_after(self, wait, "vellumQuery:");
+    0
+}
+
+search_query_fired(self: int, _cmd: int, _timer: int): int {
+    s: int = slot_of_controller(self);
+    if (s < 0) return 0;
+    slots[s].query_timer = 0;
+    search_send(s);
+    0
+}
+
+search_send(s: int) {
+    search: int = slot_search(s);
+    if (search == 0) return;
+    text: int = msg(msg(search, sel("searchBar")), sel("text"));
+    out_word("query");
+    out_arg(slots[s].id);
+    out_byte(32);
+    out_ns(text);
+    out_end()
+}
+
+search_returned(self: int, _cmd: int, _bar: int): int {
+    s: int = slot_of_controller(self);
+    if (s < 0) return 0;
+    if (slots[s].query_timer != 0) {
+        slots[s].query_timer = timer_stop(slots[s].query_timer);
+        search_send(s)
+    }
+    send1("submit", slots[s].id);
+    0
+}
+
+search_scope_chosen(
+    self: int,
+    _cmd: int,
+    _bar: int,
+    scope: int
+): int {
+    s: int = slot_of_controller(self);
+    if (s >= 0) send2("scope", slots[s].id, scope);
+    0
+}
+
+// Segments over the list (the Library's): the bar's title view (they are
+// what the screen shows), a segmented control.
+// (Segments core puts in the bar are its title; those over the list are
+// the head of the list: head_cell.)
+list_segments_dress(s: int, item: int) {
+    n: int = split_count(&ui, ui.segments);
+    if (n < 2 || !ui.segments_title) {
+        if (ui.scopes.n == 0) msg1(item, sel("setTitleView:"), 0);
+        return
+    }
+    msg1(item, sel("setTitleView:"), segments_control(s))
+}
+
+segments_control(s: int): int {
+    titles: int = fresh("NSMutableArray");
+    for k in 0..split_count(&ui, ui.segments) msg1(titles, sel("addObject:"), split_word(&ui,
+        ui.segments, k));
+    control: int = autoreleased(msg1(msg(cls("UISegmentedControl"), sel("alloc")),
+        sel("initWithItems:"), titles));
+    msg1(control, sel("setSelectedSegmentIndex:"), ui.segment);
+    msg3(control, sel("addTarget:action:forControlEvents:"), slots[s].controller,
+        sel("vellumSegment:"), 4096);
+    control
+}
+
+segment_chosen(self: int, _cmd: int, control: int): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s)) return 0;
+    act(s, ui.segments_action, 0, msg(control, sel("selectedSegmentIndex")));
+    0
+}
+
+// Its tools at its foot: the navigation's toolbar.
+list_tools_dress(s: int) {
+    controller: int = slots[s].controller;
+    items: int = fresh("NSMutableArray");
+    for place in 0..3 {
+        for k in 0..ui.tools_n {
+            tool: UiTool = ui.tools[k];
+            if (tool.place == place) {
+                b: int = if (tool.icon.n > 0) bar_item_symbol_ns(ui_text(tool.icon),
+                    "vellumTool:", controller) else autoreleased(msg3(msg(cls("UIBarButtonItem"),
+                    sel("alloc")), sel("initWithTitle:style:target:action:"), ui_text(tool.title),
+                    if (tool.style == 1) 2 else 0, controller));
+                if (tool.icon.n == 0) msg1(b, sel("setAction:"), sel("vellumTool:"));
+                msg1(b, sel("setTag:"), k);
+                if (tool.style == 3) msg1(b, sel("setEnabled:"), 0);
+                if (tool.style == 2) msg1(b, sel("setTintColor:"), system_color("systemRedColor"));
+                if (tool.label.n > 0) msg1(b, sel("setAccessibilityLabel:"), ui_text(tool.label));
+                msg1(items, sel("addObject:"), b)
+            }
+        }
+        if (place < 2 && ui.tools_n > 0) msg1(items, sel("addObject:"), msg(cls("UIBarButtonItem"),
+            sel("flexibleSpaceItem")))
+    }
+    msg2(controller, sel("setToolbarItems:animated:"), if (ui.tools_n > 0) items else 0,
+        0);
+    nav: int = msg(controller, sel("navigationController"));
+    if (nav != 0 && msg(nav, sel("topViewController")) == controller) msg2(nav, sel("setToolbarHidden:animated:"),
+        if (ui.tools_n > 0) 0 else 1, 1)
+}
+
+// Nothing to show: the system's content-unavailable view, core's words.
+list_empty_dress(s: int) {
+    controller: int = slots[s].controller;
+    if (!responds(controller, "setContentUnavailableConfiguration:")) return;
+    rows: int = 0;
+    for k in 0..ui.sections_n rows = rows + ui.sections[k].n;
+    if (rows > 0 || ui.empty_title.n == 0 || ui.reader) {
+        msg1(controller, sel("setContentUnavailableConfiguration:"), 0);
+        return
+    }
+    config: int = msg(cls("UIContentUnavailableConfiguration"), sel("emptyConfiguration"));
+    msg1(config, sel("setText:"), ui_text(ui.empty_title));
+    msg1(config, sel("setSecondaryText:"), ui_text(ui.empty_line));
+    if (ui.empty_symbol.n > 0) msg1(config, sel("setImage:"), symbol_image(ui_text(ui.empty_symbol),
+        40.0f64, 4));
+    msg1(controller, sel("setContentUnavailableConfiguration:"), config)
+}
+
+// ---- its rows ----
+list_sections(self: int, _cmd: int, _list: int): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s)) 0 else ui.sections_n + ui_head()
+}
+
+// Whether the screen has words above its sections (its hero, its intro):
+// a section of its own, first.
+ui_head(): int {
+    if (ui.hero.n > 0 || ui.intro.n > 0 || split_count(&ui, ui.segments) > 1 && !ui.segments_title) 1 else 0
+}
+
+list_items(
+    self: int,
+    _cmd: int,
+    _list: int,
+    section: int
+): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s)) return 0;
+    k: int = section - ui_head();
+    if (k < 0) 1 else if (k >= ui.sections_n) 0 else ui.sections[k].n
+}
+
+// The row an index path names in ui (-1: none). A lazy section's rows
+// come a page at a time (`windowrows 1`): one outside the page decoded is
+// asked for (`model ID SECTION ROW`), its page then decoded in its place.
+row_at_path(s: int, path: int): int {
+    k: int = msg(path, sel("section")) - ui_head();
+    i: int = msg(path, sel("item"));
+    if (k < 0 || k >= ui.sections_n || i < 0 || i >= ui.sections[k].n) return -1;
+    if (!ui.sections[k].lazy) return ui.sections[k].first + i;
+    if (!(ui.window_section == k && i >= ui.window_row && i < ui.window_row + ui.window_n)) {
+        ask_begin();
+        out_word("model");
+        out_arg(slots[s].id);
+        out_arg(k);
+        out_arg(i);
+        out_end();
+        if (!ask_end("screen") || !wire_decode_span(&ui, answer_buf, 0, answer_n)) return -1;
+        ui_slot = s;
+        ui_lines = core_lines
+    }
+    if (k >= ui.sections_n || !(ui.window_section == k && i >= ui.window_row && i < ui.window_row + ui.window_n)) return -1;
+    ui.sections[k].first + i - ui.window_row
+}
+
+list_cell(
+    self: int,
+    _cmd: int,
+    list: int,
+    path: int
+): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s)) return msg2(list, sel("dequeueReusableCellWithReuseIdentifier:forIndexPath:"),
+        nsstring("item"), path);
+    if (msg(path, sel("section")) < ui_head()) return head_cell(s, list, path);
+    r: int = row_at_path(s, path);
+    if (r < 0) return msg2(list, sel("dequeueReusableCellWithReuseIdentifier:forIndexPath:"),
+        nsstring("item"), path);
+    row: UiRow = ui.rows[r];
+    if (ui.grid) return grid_cell(list, path, row);
+    if (row_is_custom(row)) return custom_cell(s, list, path, row, r);
+    if (row.kind == UI_TEXT || row.kind == UI_TILES) return text_cell(s, list, path,
+        row, r);
+    if (row.kind == UI_FIELD) return field_cell(s, list, path, row, r);
+    cell: int = msg2(list, sel("dequeueReusableCellWithReuseIdentifier:forIndexPath:"),
+        nsstring("item"), path);
+    item_cell_dress(s, cell, row, r);
+    cell
+}
+
+// A list row's cell: the system's content configuration, its accessories.
+item_cell_dress(
+    s: int,
+    cell: int,
+    row: UiRow,
+    r: int
+) {
+    value_style: bool = row.value_detail;
+    config: int = if (value_style) msg(cls("UIListContentConfiguration"), sel("valueCellConfiguration")) else if (row.detail.n > 0) msg(cls("UIListContentConfiguration"),
+        sel("subtitleCellConfiguration")) else msg(cell, sel("defaultContentConfiguration"));
+    body: int = font_style("UIFontTextStyleBody");
+    ink: int = if (row.destructive) system_color("systemRedColor") else if (row.tinted) colors.accent else if (row.faint || row.disabled) colors.faint else colors.ink;
+    title_font: int = if (row.strong) font_system(msg_f(body, sel("pointSize")), 0.4f64) else body;
+    // (A font's row in its own face.)
+    if (row.custom == CUSTOM_FONT) title_font = font_face_sample(row.arg, msg_f(body,
+        sel("pointSize")));
+    if (row.kind == UI_BUTTON) {
+        title_font = font_system(msg_f(body, sel("pointSize")), 0.3f64);
+        if (!row.destructive) ink = colors.accent
+    }
+    // (A verse found, a mark, a passage, verses: the reference small, the
+    // words the reader's.)
+    reading: bool = row.custom == CUSTOM_HIT || row.custom == CUSTOM_MARK || row.custom == CUSTOM_PASSAGE || row.custom == CUSTOM_VERSES;
+    if (reading) {
+        title_font = font_system(msg_f(font_style("UIFontTextStyleFootnote"), sel("pointSize")),
+            0.4f64);
+        if (!row.tinted && !row.destructive) ink = colors.faint
+    }
+    title: int = rich_text(&ui, row.title, row.truns, row.truns_n, title_font, ink);
+    if (row.suffix.n > 0) piece_add(title, ui_text(row.suffix), title_font, colors.faint);
+    msg1(config, sel("setAttributedText:"), title);
+    tp: int = msg(config, sel("textProperties"));
+    msg1(tp, sel("setNumberOfLines:"), if (row.title_lines > 0) row.title_lines else 0);
+    if (row.kind == UI_BUTTON) msg1(tp, sel("setAlignment:"), 1);
+    if (row.detail.n > 0) {
+        detail_font: int = font_style(if (value_style) "UIFontTextStyleBody" else if (row.small) "UIFontTextStyleFootnote" else "UIFontTextStyleSubheadline");
+        detail_color: int = if (value_style) colors.faint else colors.faint;
+        scripture: bool = row.scripture || reading;
+        detail_size: f64 = if (reading) msg_f(font_style("UIFontTextStyleBody"), sel("pointSize")) else msg_f(detail_font,
+            sel("pointSize")) * 1.05f64;
+        detail: int = rich_text(&ui, row.detail, row.runs, row.runs_n, if (scripture) face_font(&page_type,
+            detail_size) else detail_font, if (scripture) colors.ink else detail_color);
+        marks_stress(detail, row);
+        if (row.query_marks || row.custom == CUSTOM_HIT && row.marks_n == 0) query_stress(s,
+            detail);
+        if (row.custom == CUSTOM_HIT && row.value == HIT_HEBREW || row.custom == CUSTOM_VERSES && row.value == 1) {
+            para: int = fresh("NSMutableParagraphStyle");
+            msg1(para, sel("setBaseWritingDirection:"), 1);
+            msg1(para, sel("setAlignment:"), 2);
+            msg4(detail, sel("addAttribute:value:range:"), objc_const("NSParagraphStyleAttributeName"),
+                para, 0, msg(detail, sel("length")))
+        }
+        if (row.note.n > 0) {
+            piece_add(detail, nsstring("\n"), font_style("UIFontTextStyleCaption1"),
+                colors.faint);
+            piece_add(detail, ui_text(row.note), font_style("UIFontTextStyleCaption1"),
+                colors.faint)
+        }
+        msg1(config, sel("setSecondaryAttributedText:"), detail);
+        stp: int = msg(config, sel("secondaryTextProperties"));
+        msg1(stp, sel("setNumberOfLines:"), if (row.lines > 0) row.lines else if (row.custom == CUSTOM_HIT) 4 else 0);
+        if (reading) msg_set_f(config, sel("setTextToSecondaryTextVerticalPadding:"),
+            4.0f64)
+    } else if (row.note.n > 0) {
+        msg1(config, sel("setSecondaryText:"), ui_text(row.note));
+        msg1(msg(config, sel("secondaryTextProperties")), sel("setColor:"), colors.faint)
+    }
+    if (row.custom == CUSTOM_LISTEN && !row.disabled) {
+        msg1(config, sel("setImage:"), symbol(if (player.shown) "stop.fill" else "play.fill",
+            16.0f64, 6));
+        msg1(msg(config, sel("imageProperties")), sel("setTintColor:"), colors.accent)
+    }
+    if (row.custom == CUSTOM_DOWNLOAD) msg1(config, sel("setImage:"), progress_ring(row.value));
+    if (row.icon.n > 0) {
+        msg1(config, sel("setImage:"), symbol_image(ui_text(row.icon), 17.0f64, 4));
+        ip: int = msg(config, sel("imageProperties"));
+        tint: int = screen_color(&ui, row.icon_color);
+        msg1(ip, sel("setTintColor:"), if (tint != 0) tint else if (row.icon_faint) colors.faint else colors.accent)
+    }
+    msg1(cell, sel("setContentConfiguration:"), config);
+    background: int = msg(cls("UIBackgroundConfiguration"), sel(if (ui.page || ui.plain) "listPlainCellConfiguration" else "listGroupedCellConfiguration"));
+    msg1(background, sel("setBackgroundColor:"), if (ui.page) colors.page else colors.cell);
+    msg1(cell, sel("setBackgroundConfiguration:"), background);
+    msg1(cell, sel("setAccessories:"), row_accessories(s, row, r));
+    msg1(cell, sel("setAccessibilityLabel:"), if (row.label.n > 0) ui_text(row.label) else 0);
+    // (A faint check: what VoiceOver says of it, core's words.)
+    msg1(cell, sel("setAccessibilityValue:"), if (row.acc == 4) done_words else 0);
+    msg1(cell, sel("setAccessibilityHint:"), if (row.hint.n > 0) ui_text(row.hint) else 0)
+}
+
+// Font k of the settings' (LOOK_FONT_NAMES) at size, for its row.
+font_face_sample(k: int, size: f64): int {
+    if (k <= 0 || k >= len(LOOK_FONT_FACES)) return if (k == 4) font_system(size,
+        0.0f64) else new_york(size);
+    if (k == 4) return font_system(size, 0.0f64);
+    named: int = msg1_f(cls("UIFont"), sel("fontWithName:size:"), nsstring(LOOK_FONT_FACES[k]),
+        size);
+    if (named != 0) named else new_york(size)
+}
+
+// The words a search found, stressed in a detail (marks: UTF-16 pairs).
+marks_stress(a: int, row: UiRow) {
+    n: int = msg(a, sel("length"));
+    for k in 0..row.marks_n {
+        b: int = clamp_i(ui.marks[row.marks + 2 * k], 0, n);
+        e: int = clamp_i(ui.marks[row.marks + 2 * k + 1], 0, n);
+        if (e > b) {
+            msg4(a, sel("addAttribute:value:range:"), objc_const("NSForegroundColorAttributeName"),
+                colors.ink, b, e - b);
+            msg4(a, sel("addAttribute:value:range:"), objc_const("NSBackgroundColorAttributeName"),
+                colors.selection, b, e - b)
+        }
+    }
+}
+
+// The words the screen's field searches for, stressed wherever they
+// begin a word in a detail (`q`), in any case.
+query_stress(s: int, a: int) {
+    search: int = slot_search(s);
+    typed: int = if (search != 0) msg(msg(search, sel("searchBar")), sel("text")) else 0;
+    if (ns_length(typed) == 0) typed = ui_text(ui.search_text);
+    if (ns_length(typed) == 0) return;
+    text: int = msg(a, sel("string"));
+    n: int = ns_length(text);
+    query_words: int = msg1(typed, sel("componentsSeparatedByCharactersInSet:"), msg(cls("NSCharacterSet"),
+        sel("whitespaceCharacterSet")));
+    for w in 0..msg(query_words, sel("count")) {
+        word: int = msg1(query_words, sel("objectAtIndex:"), w);
+        k: int = ns_length(word);
+        at: int = 0;
+        while (k > 0 && at < n) {
+            found: int = msg4(text, sel("rangeOfString:options:range:"), word, 1 | 128,
+                at, n - at);
+            if (found < 0 || found >= n) at = n else {
+                begins: bool = found == 0 || !truth(msg1(msg(cls("NSCharacterSet"),
+                    sel("letterCharacterSet")), sel("characterIsMember:"), msg1(text,
+                    sel("characterAtIndex:"), found - 1)));
+                if (begins) {
+                    msg4(a, sel("addAttribute:value:range:"), objc_const("NSForegroundColorAttributeName"),
+                        colors.ink, found, k);
+                    msg4(a, sel("addAttribute:value:range:"), objc_const("NSBackgroundColorAttributeName"),
+                        colors.selection, found, k)
+                }
+                at = found + k
+            }
+        }
+    }
+}
+
+// A row's accessories: its words at its end, a switch, a choice's menu,
+// a slider, a spinner, its ⓘ, its disclosure, check or link.
+row_accessories(s: int, row: UiRow, r: int): int {
+    items: int = fresh("NSMutableArray");
+    controller: int = slots[s].controller;
+    if (row.circle > 0) msg1(items, sel("addObject:"), circle_accessory(controller,
+        row, r));
+    if (row.lead.n > 0) msg1(items, sel("addObject:"), lead_accessory(row));
+    if (row.side.n > 0) msg1(items, sel("addObject:"), side_accessory(row));
+    if (row.menu && row.actions_n > 0) msg1(items, sel("addObject:"), menu_accessory(row));
+    if (row.trailing.n > 0) {
+        label: int = autoreleased(msg1(msg(cls("UICellAccessoryLabel"), sel("alloc")),
+            sel("initWithText:"), ui_text(row.trailing)));
+        msg1(items, sel("addObject:"), label)
+    }
+    if (row.kind == UI_TOGGLE) {
+        toggle: int = fresh("UISwitch");
+        msg2(toggle, sel("setOn:animated:"), if (row.on || row.value == 1) 1 else 0,
+            0);
+        msg1(toggle, sel("setOnTintColor:"), colors.accent);
+        msg1(toggle, sel("setTag:"), r);
+        msg1(toggle, sel("setEnabled:"), if (row.disabled) 0 else 1);
+        msg3(toggle, sel("addTarget:action:forControlEvents:"), controller, sel("vellumToggle:"),
+            4096);
+        msg1(items, sel("addObject:"), accessory_view(toggle))
+    }
+    if (row.kind == UI_CHOICE) msg1(items, sel("addObject:"), accessory_view(choice_button(row,
+        r)));
+    if (row.kind == UI_SLIDER) {
+        slider: int = autoreleased(msg_rect(msg(cls("UISlider"), sel("alloc")), sel("initWithFrame:"),
+            0.0f64, 0.0f64, 132.0f64, 34.0f64));
+        msg_set_f32(slider, sel("setMinimumValue:"), row.lo as f32);
+        msg_set_f32(slider, sel("setMaximumValue:"), row.hi as f32);
+        msg_set_f32(slider, sel("setValue:"), row.value as f32);
+        msg1(slider, sel("setMinimumTrackTintColor:"), colors.accent);
+        msg1(slider, sel("setTag:"), r);
+        msg3(slider, sel("addTarget:action:forControlEvents:"), controller, sel("vellumSlider:"),
+            64 | 128);
+        msg1(items, sel("addObject:"), accessory_view(slider))
+    }
+    if (row.kind == UI_TIME) msg1(items, sel("addObject:"), accessory_view(time_picker(controller,
+        row, r)));
+    if (row.busy) {
+        spinner: int = autoreleased(msg1(msg(cls("UIActivityIndicatorView"), sel("alloc")),
+            sel("initWithActivityIndicatorStyle:"), 100));
+        msg(spinner, sel("startAnimating"));
+        msg1(items, sel("addObject:"), accessory_view(spinner))
+    }
+    if (row.info_action != 0 || row.acc == 3) {
+        info: int = msg1(cls("UIButton"), sel("buttonWithType:"), 3);
+        msg1(info, sel("setTintColor:"), colors.faint);
+        msg1(info, sel("setTag:"), r);
+        msg3(info, sel("addTarget:action:forControlEvents:"), controller, sel("vellumInfo:"),
+            64);
+        msg1(items, sel("addObject:"), accessory_view(info))
+    }
+    if (row.acc == 1) msg1(items, sel("addObject:"), fresh("UICellAccessoryDisclosureIndicator"));
+    if (row.acc == 2 || row.acc == 4) {
+        check: int = fresh("UICellAccessoryCheckmark");
+        msg1(check, sel("setTintColor:"), if (row.acc == 2) colors.accent else colors.faint);
+        msg1(items, sel("addObject:"), check)
+    }
+    if (row.acc == 5) {
+        arrow: int = autoreleased(msg1(msg(cls("UIImageView"), sel("alloc")), sel("initWithImage:"),
+            symbol("arrow.up.right", 13.0f64, 5)));
+        msg1(arrow, sel("setTintColor:"), colors.faint);
+        msg1(items, sel("addObject:"), accessory_view(arrow))
+    }
+    items
+}
+
+accessory_view(view: int): int {
+    accessory: int = autoreleased(msg2(msg(cls("UICellAccessoryCustomView"), sel("alloc")),
+        sel("initWithCustomView:placement:"), view, 1));
+    // (At the size it was made: a slider would take the row's width.)
+    if (is_kind(view, "UISlider")) msg1(accessory, sel("setMaintainsFixedSize:"),
+        1);
+    accessory
+}
+
+// A choice: a pop-up button of its options (UICommands up the responder
+// chain: the row and option its property list).
+choice_button(row: UiRow, r: int): int {
+    kids: int = fresh("NSMutableArray");
+    n: int = split_count(&ui, row.options);
+    for k in 0..n {
+        c: int = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+            split_word(&ui, row.options, k), 0, sel("vellumChoice:"), nsnumber_int(r * 1000 + k));
+        if (k == row.value) msg1(c, sel("setState:"), 1);
+        msg1(kids, sel("addObject:"), c)
+    }
+    b: int = msg1(cls("UIButton"), sel("buttonWithType:"), 1);
+    config: int = msg(cls("UIButtonConfiguration"), sel("plainButtonConfiguration"));
+    msg1(config, sel("setTitle:"), split_word(&ui, row.options, row.value));
+    msg1(config, sel("setImage:"), symbol("chevron.up.chevron.down", 11.0f64, 5));
+    msg1(config, sel("setImagePlacement:"), 8);
+    msg_set_f(config, sel("setImagePadding:"), 5.0f64);
+    msg1(config, sel("setBaseForegroundColor:"), colors.faint);
+    msg1(b, sel("setConfiguration:"), config);
+    msg1(b, sel("setMenu:"), msg2(cls("UIMenu"), sel("menuWithTitle:children:"), nsstring(""),
+        kids));
+    msg1(b, sel("setShowsMenuAsPrimaryAction:"), 1);
+    msg(b, sel("sizeToFit"));
+    b
+}
+
+extern msg_date(receiver: int, selector: int, seconds: f64): int = objc_msgSend;
+
+// A time of day: the system's compact time picker.
+time_picker(controller: int, row: UiRow, r: int): int {
+    picker: int = fresh("UIDatePicker");
+    msg1(picker, sel("setDatePickerMode:"), 0);
+    msg1(picker, sel("setPreferredDatePickerStyle:"), 2);
+    calendar: int = msg(cls("NSCalendar"), sel("currentCalendar"));
+    midnight: int = msg1(calendar, sel("startOfDayForDate:"), msg(cls("NSDate"), sel("date")));
+    msg1(picker, sel("setDate:"), msg_date(midnight, sel("dateByAddingTimeInterval:"),
+        (row.value * 60) as f64));
+    msg1(picker, sel("setTag:"), r);
+    msg3(picker, sel("addTarget:action:forControlEvents:"), controller, sel("vellumTime:"),
+        4096);
+    picker
+}
+
+// A page's paragraph (or the interlinear's words, as text for now): a text
+// view of its words by its runs, its links acting.
+TEXT_VIEW_TAG: int = 7101;
+
+text_cell(
+    s: int,
+    list: int,
+    path: int,
+    row: UiRow,
+    r: int
+): int {
+    cell: int = msg2(list, sel("dequeueReusableCellWithReuseIdentifier:forIndexPath:"),
+        nsstring("text"), path);
+    content: int = msg(cell, sel("contentView"));
+    tv: int = msg1(content, sel("viewWithTag:"), TEXT_VIEW_TAG);
+    if (tv == 0) {
+        tv = autoreleased(msg_rect(msg(cls("UITextView"), sel("alloc")), sel("initWithFrame:"),
+            0.0f64, 0.0f64, 100.0f64, 40.0f64));
+        msg1(tv, sel("setTag:"), TEXT_VIEW_TAG);
+        msg1(tv, sel("setScrollEnabled:"), 0);
+        msg1(tv, sel("setEditable:"), 0);
+        msg1(tv, sel("setBackgroundColor:"), clear_color());
+        msg_set_f(msg(tv, sel("textContainer")), sel("setLineFragmentPadding:"), 0.0f64);
+        msg1(tv, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+        add_sub(content, tv);
+        margins: int = msg(content, sel("layoutMarginsGuide"));
+        pin_edges(tv, margins)
+    }
+    msg1(tv, sel("setDelegate:"), slots[s].controller);
+    size: f64 = if (ui.page) page_type.em * 0.92f64 else msg_f(font_style("UIFontTextStyleBody"),
+        sel("pointSize"));
+    base: int = if (ui.page) face_font(&page_type, size) else font_style("UIFontTextStyleBody");
+    if (row.heading) base = font_system(size * 1.05f64, 0.5f64);
+    a: int = rich_text(&ui, row.title, row.truns, row.truns_n, base, colors.ink);
+    para: int = para_style(0, 0.0f64, 0.0f64, 0.0f64, 0.0f64, if (ui.page) look.spacing * 0.92f64 else 1.15f64);
+    msg4(a, sel("addAttribute:value:range:"), objc_const("NSParagraphStyleAttributeName"),
+        para, 0, msg(a, sel("length")));
+    // (Its links: an address of the app's own, vellum:ACTION/ARG/ROW.)
+    n: int = msg(a, sel("length"));
+    for k in 0..row.links_n {
+        link: UiLink = ui.links[row.links + k];
+        b: int = clamp_i(link.b, 0, n);
+        e: int = clamp_i(link.e, 0, n);
+        if (e > b) {
+            words_begin();
+            words_add("vellum:");
+            words_add_int(link.action);
+            words_add("/");
+            words_add_int(link.arg);
+            msg4(a, sel("addAttribute:value:range:"), objc_const("NSLinkAttributeName"),
+                msg1(cls("NSURL"), sel("URLWithString:"), words_ns()), b, e - b)
+        }
+    }
+    msg1(tv, sel("setAttributedText:"), a);
+    keys: []int = dict_keys;
+    values: []int = dict_values;
+    keys[0] = objc_const("NSForegroundColorAttributeName");
+    values[0] = colors.accent;
+    msg1(tv, sel("setLinkTextAttributes:"), nsdictionary(keys, values, 1));
+    background: int = msg(cls("UIBackgroundConfiguration"), sel(if (ui.page || ui.plain) "listPlainCellConfiguration" else "listGroupedCellConfiguration"));
+    msg1(background, sel("setBackgroundColor:"), if (ui.page) colors.page else colors.cell);
+    msg1(cell, sel("setBackgroundConfiguration:"), background);
+    _r: int = r;
+    cell
+}
+
+// A view pinned to a layout guide's edges.
+pin_edges(view: int, guide: int) {
+    for edge in ["topAnchor", "bottomAnchor", "leadingAnchor", "trailingAnchor"] msg1(msg1(msg(view,
+        sel(edge)), sel("constraintEqualToAnchor:"), msg(guide, sel(edge))), sel("setActive:"),
+        1)
+}
+
+// A link in a page's words tapped: its action.
+text_link(
+    self: int,
+    _cmd: int,
+    _tv: int,
+    url: int,
+    _range_at: int,
+    _range_n: int,
+    _interaction: int
+): int {
+    s: int = slot_of_controller(self);
+    if (s < 0) return 0;
+    path: int = msg(url, sel("resourceSpecifier"));
+    if (path == 0) return 0;
+    parts: int = msg1(path, sel("componentsSeparatedByString:"), nsstring("/"));
+    if (msg(parts, sel("count")) < 2) return 0;
+    action: int = msg(msg1(parts, sel("objectAtIndex:"), 0), sel("integerValue"));
+    arg: int = msg(msg1(parts, sel("objectAtIndex:"), 1), sel("integerValue"));
+    act(s, action, arg, 0);
+    0
+}
+
+// A field: a text field (a note's many lines: a text view), its words
+// core's as its editing ends (or as typed, `l`).
+FIELD_TAG: int = 7102;
+
+field_cell(
+    s: int,
+    list: int,
+    path: int,
+    row: UiRow,
+    r: int
+): int {
+    cell: int = msg2(list, sel("dequeueReusableCellWithReuseIdentifier:forIndexPath:"),
+        nsstring("field"), path);
+    content: int = msg(cell, sel("contentView"));
+    field: int = msg1(content, sel("viewWithTag:"), FIELD_TAG);
+    if (field == 0) {
+        field = fresh("UITextField");
+        msg1(field, sel("setTag:"), FIELD_TAG);
+        msg1(field, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+        msg1(field, sel("setClearButtonMode:"), 1);
+        add_sub(content, field);
+        pin_edges(field, msg(content, sel("layoutMarginsGuide")));
+        msg1(msg1(msg(field, sel("heightAnchor")), sel("constraintGreaterThanOrEqualToConstant:"),
+            0), sel("setActive:"), 0);
+        msg3(field, sel("addTarget:action:forControlEvents:"), slots[s].controller,
+            sel("vellumFieldEnded:"), 262144 | 524288);
+        msg3(field, sel("addTarget:action:forControlEvents:"), slots[s].controller,
+            sel("vellumFieldChanged:"), 131072)
+    }
+    msg1(field, sel("setDelegate:"), slots[s].controller);
+    msg1(field, sel("setText:"), ui_text(row.detail));
+    msg1(field, sel("setPlaceholder:"), ui_text(row.title));
+    msg1(field, sel("setFont:"), font_style("UIFontTextStyleBody"));
+    msg1(field, sel("setTextColor:"), colors.ink);
+    msg1(field, sel("setTintColor:"), colors.accent);
+    msg1(field, sel("setAutocapitalizationType:"), if (row.field_kind == 3) 0 else if (row.field_kind == 1) 1 else 2);
+    msg1(field, sel("setAutocorrectionType:"), if (row.field_kind == 1 || row.field_kind == 3) 1 else 0);
+    msg1(field, sel("setReturnKeyType:"), if (row.field_go) 9 else 0);
+    msg1(field, sel("setTag:"), FIELD_TAG);
+    msg1(cell, sel("setTag:"), r);
+    background: int = msg(cls("UIBackgroundConfiguration"), sel("listGroupedCellConfiguration"));
+    msg1(background, sel("setBackgroundColor:"), colors.cell);
+    msg1(cell, sel("setBackgroundConfiguration:"), background);
+    cell
+}
+
+// The row a control in a cell is in (its cell's tag; -1: none).
+row_of_control(control: int): int {
+    v: int = control;
+    while (v != 0 && !is_kind(v, "UICollectionViewCell")) v = msg(v, sel("superview"));
+    if (v == 0) -1 else msg(v, sel("tag"))
+}
+
+field_send(self: int, field: int) {
+    s: int = slot_of_controller(self);
+    r: int = row_of_control(field);
+    if (s < 0 || r < 0 || !screen_load(s) || r >= ui.rows_n) return;
+    row: UiRow = ui.rows[r];
+    out_word("text");
+    out_arg(slots[s].id);
+    out_arg(row.action);
+    out_arg(row.arg);
+    out_byte(32);
+    out_ns(msg(field, sel("text")));
+    out_end()
+}
+
+field_ended(self: int, _cmd: int, field: int): int {
+    field_send(self, field);
+    0
+}
+
+field_changed(self: int, _cmd: int, field: int): int {
+    s: int = slot_of_controller(self);
+    r: int = row_of_control(field);
+    if (s >= 0 && r >= 0 && screen_load(s) && r < ui.rows_n && ui.rows[r].field_live) field_send(self,
+        field);
+    0
+}
+
+field_returned(self: int, _cmd: int, field: int): int {
+    s: int = slot_of_controller(self);
+    r: int = row_of_control(field);
+    if (s < 0 || r < 0 || !screen_load(s) || r >= ui.rows_n) return 1;
+    row: UiRow = ui.rows[r];
+    field_send(self, field);
+    if (row.field_go && ui.confirm_action != 0) act(s, ui.confirm_action, 0, 0) else if (row.field_keeps) send1("submit",
+        slots[s].id) else msg(field, sel("resignFirstResponder"));
+    0
+}
+
+// A grid's square: its words centered, on the cells' ground.
+grid_cell(list: int, path: int, row: UiRow): int {
+    cell: int = msg2(list, sel("dequeueReusableCellWithReuseIdentifier:forIndexPath:"),
+        nsstring("grid"), path);
+    config: int = msg(cell, sel("defaultContentConfiguration"));
+    // (A square's words are its value, its title what a screen reader says:
+    // Chapter 3.)
+    words_begin();
+    words_add_int(row.value);
+    msg1(config, sel("setText:"), words_ns());
+    msg1(cell, sel("setAccessibilityLabel:"), if (row.label.n > 0) ui_text(row.label) else ui_text(row.title));
+    tp: int = msg(config, sel("textProperties"));
+    msg1(tp, sel("setAlignment:"), 1);
+    msg1(tp, sel("setFont:"), font_rounded(18.0f64, if (row.strong) 0.5f64 else 0.2f64));
+    msg1(tp, sel("setColor:"), if (row.tinted || row.strong) colors.accent else colors.ink);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    background: int = msg(cls("UIBackgroundConfiguration"), sel("listGroupedCellConfiguration"));
+    msg1(background, sel("setBackgroundColor:"), colors.cell);
+    msg_set_f(background, sel("setCornerRadius:"), 14.0f64);
+    msg1(cell, sel("setBackgroundConfiguration:"), background);
+    cell
+}
+
+// A section's header and footer: the system's grouped header and footer.
+list_supplementary(
+    self: int,
+    _cmd: int,
+    list: int,
+    kind: int,
+    path: int
+): int {
+    header: bool = ns_equal(kind, objc_const("UICollectionElementKindSectionHeader"));
+    view: int = msg3(list, sel("dequeueReusableSupplementaryViewOfKind:withReuseIdentifier:forIndexPath:"),
+        kind, nsstring(if (header) "header" else "footer"), path);
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s)) return view;
+    k: int = msg(path, sel("section")) - ui_head();
+    if (k < 0 || k >= ui.sections_n) {
+        msg1(view, sel("setContentConfiguration:"), msg(cls("UIListContentConfiguration"),
+            sel("groupedHeaderConfiguration")));
+        msg1(view, sel("setAccessories:"), fresh("NSArray"));
+        return view
+    }
+    section: UiSection = ui.sections[k];
+    config: int = msg(cls("UIListContentConfiguration"), sel(if (header) if (ui.plain || ui.page) "plainHeaderConfiguration" else "groupedHeaderConfiguration" else "groupedFooterConfiguration"));
+    words: int = ui_text(if (header) section.header else section.footer);
+    if (header && section.header_suffix.n > 0 && words != 0) {
+        words_begin();
+        words_add_ns(words);
+        words_add_ns(ui_text(section.header_suffix));
+        words = words_ns()
+    }
+    msg1(config, sel("setText:"), words);
+    // (A button in its header: Recent Searches' Clear.)
+    accessories: int = fresh("NSMutableArray");
+    if (header && section.button.n > 0 && section.button_action != 0) {
+        b: int = row_button(self, "vellumSectionButton:", k);
+        msg2(b, sel("setTitle:forState:"), ui_text(section.button), 0);
+        msg1(b, sel("setTintColor:"), colors.accent);
+        msg1(accessories, sel("addObject:"), accessory_view(b))
+    }
+    msg1(view, sel("setAccessories:"), accessories);
+    // (A credit under it, the ESV's: its words and link; a tap opens it.)
+    credit: int = section.credit;
+    if (!header && credit > 0 && credit < CREDITS_MOST && credit_words[credit] != 0) {
+        a: int = fresh("NSMutableAttributedString");
+        footer_font: int = font_style("UIFontTextStyleFootnote");
+        if (words != 0) {
+            piece_add(a, words, footer_font, colors.faint);
+            piece_add(a, nsstring("\n"), footer_font, colors.faint)
+        }
+        piece_add(a, credit_words[credit], footer_font, colors.faint);
+        piece_add(a, nsstring(" "), footer_font, colors.faint);
+        piece_add(a, credit_links[credit], footer_font, colors.accent);
+        msg1(config, sel("setAttributedText:"), a);
+        msg1(view, sel("setTag:"), credit);
+        msg1(view, sel("setAccessibilityLabel:"), credit_labels[credit]);
+        if (msg(view, sel("gestureRecognizers")) == 0 || msg(msg(view, sel("gestureRecognizers")),
+            sel("count")) == 0) msg1(view, sel("addGestureRecognizer:"), autoreleased(msg2(msg(cls("UITapGestureRecognizer"),
+            sel("alloc")), sel("initWithTarget:action:"), self, sel("vellumCredit:"))))
+    } else if (!header) msg1(view, sel("setTag:"), 0);
+    msg1(view, sel("setContentConfiguration:"), config);
+    view
+}
+
+section_button_tapped(self: int, _cmd: int, b: int): int {
+    s: int = slot_of_controller(self);
+    k: int = msg(b, sel("tag"));
+    if (s < 0 || !screen_load(s) || k < 0 || k >= ui.sections_n) return 0;
+    act(s, ui.sections[k].button_action, 0, 0);
+    0
+}
+
+// The words above a screen's sections: its hero (a word large in its
+// script, its transliteration, a line under them) and its intro (a
+// quote's with the accent's bar beside it).
+head_cell(s: int, list: int, path: int): int {
+    cell: int = custom_cell_new(list, path);
+    background: int = msg(cls("UIBackgroundConfiguration"), sel("listPlainCellConfiguration"));
+    msg1(background, sel("setBackgroundColor:"), clear_color());
+    msg1(cell, sel("setBackgroundConfiguration:"), background);
+    content: int = msg(cell, sel("contentView"));
+    column: int = stack_new(1, 6.0f64);
+    msg1(column, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    // (Segments over the list: the whole width, first.)
+    if (split_count(&ui, ui.segments) > 1 && !ui.segments_title) msg1(column, sel("addArrangedSubview:"),
+        segments_control(s));
+    if (ui.hero.n > 0) {
+        msg1(column, sel("setAlignment:"), 3);
+        size: f64 = if (ui.hero_large) 64.0f64 else 44.0f64;
+        word: int = label_new(if (ui.hero_script == RUN_HEBREW) font_system(size * 1.1f64,
+            0.0f64) else if (ui.hero_script == RUN_GREEK) new_york(size) else face_font(&page_type,
+            size), colors.ink, 0);
+        msg1(word, sel("setText:"), ui_text(ui.hero));
+        msg1(word, sel("setTextAlignment:"), 1);
+        msg1(column, sel("addArrangedSubview:"), word);
+        if (ui.hero_sub.n > 0) {
+            sub: int = label_new(face_traits(&page_type, 17.0f64, 1), colors.faint,
+                0);
+            msg1(sub, sel("setText:"), ui_text(ui.hero_sub));
+            msg1(column, sel("addArrangedSubview:"), sub)
+        }
+        if (ui.hero_line.n > 0) {
+            line: int = label_new(font_style("UIFontTextStyleSubheadline"), colors.ink,
+                0);
+            msg1(line, sel("setAttributedText:"), rich_text(&ui, ui.hero_line, ui.hero_runs,
+                ui.hero_runs_n, font_style("UIFontTextStyleSubheadline"), colors.ink));
+            msg1(line, sel("setTextAlignment:"), 1);
+            msg1(column, sel("addArrangedSubview:"), line)
+        }
+    }
+    if (ui.intro.n > 0) {
+        words: int = label_new(font_style("UIFontTextStyleBody"), colors.ink, 0);
+        msg1(words, sel("setAttributedText:"), rich_text(&ui, ui.intro, ui.intro_runs,
+            ui.intro_runs_n, if (ui.intro_quote) face_traits(&page_type, msg_f(font_style("UIFontTextStyleBody"),
+            sel("pointSize")), 1) else font_style("UIFontTextStyleBody"), if (ui.intro_quote) colors.ink else colors.faint));
+        if (ui.intro_quote) {
+            quote: int = stack_new(0, 12.0f64);
+            bar: int = fresh("UIView");
+            set_background(bar, colors.accent);
+            fixed_size(bar, 3.0f64, 0.0f64);
+            msg1(quote, sel("addArrangedSubview:"), bar);
+            msg1(quote, sel("addArrangedSubview:"), words);
+            msg1(column, sel("addArrangedSubview:"), quote)
+        } else msg1(column, sel("addArrangedSubview:"), words)
+    }
+    add_sub(content, column);
+    pin_edges(column, msg(content, sel("layoutMarginsGuide")));
+    cell
+}
+
+// ---- a screen's index down its side (a concordance's books) ----
+list_index_titles(self: int, _cmd: int, _list: int): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s) || ui.index.n == 0) return 0;
+    titles: int = fresh("NSMutableArray");
+    for k in 0..split_count(&ui, ui.index) msg1(titles, sel("addObject:"), split_word(&ui,
+        ui.index, k));
+    titles
+}
+
+list_index_path(
+    self: int,
+    _cmd: int,
+    _list: int,
+    _title: int,
+    at: int
+): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s)) return 0;
+    msg2(cls("NSIndexPath"), sel("indexPathForItem:inSection:"), 0, clamp_i(at, 0,
+        ui.sections_n - 1) + ui_head())
+}
+
+// `accessory done WORDS` (at start): what VoiceOver says of a faint check.
+done_words: int = 0;
+
+accessory_line(line: WireLine) {
+    if (ns_equal(word_ns_at(line, 1), nsstring("done"))) done_words = held(done_words,
+        field_ns(line, 1))
+}
+
+// `felt KIND`: a grade given (a tick), a letter typed wrong (the top
+// screen shaken a little).
+felt_line(kind: int) {
+    if (kind != PX_FELT_WRONG) {
+        haptic_tick();
+        return
+    }
+    haptic_impact(1);
+    nav: int = nav_of_group(0);
+    if (nav == 0 || reduce_motion()) return;
+    shake: int = msg1(cls("CAKeyframeAnimation"), sel("animationWithKeyPath:"), nsstring("transform.translation.x"));
+    four: []int = four_items;
+    four[0] = nsnumber_f(0.0f64);
+    four[1] = nsnumber_f(-8.0f64);
+    four[2] = nsnumber_f(6.0f64);
+    four[3] = nsnumber_f(0.0f64);
+    msg1(shake, sel("setValues:"), nsarray(four, 4));
+    msg_set_f(shake, sel("setDuration:"), 0.25f64);
+    msg2(msg(msg(msg(nav, sel("topViewController")), sel("view")), sel("layer")),
+        sel("addAnimation:forKey:"), shake, nsstring("felt"))
+}
+
+// `credit K WORDS LINK ADDRESS LABEL` (at start): a section's credit.
+CREDITS_MOST: int = 8;
+
+credit_words: []int = new int[8](0);
+
+credit_links: []int = new int[8](0);
+
+credit_addresses: []int = new int[8](0);
+
+credit_labels: []int = new int[8](0);
+
+credit_line(line: WireLine) {
+    k: int = word_n(line, 1);
+    if (k <= 0 || k >= CREDITS_MOST) return;
+    credit_words[k] = held(credit_words[k], field_ns(line, 1));
+    credit_links[k] = held(credit_links[k], field_ns(line, 2));
+    credit_addresses[k] = held(credit_addresses[k], field_ns(line, 3));
+    credit_labels[k] = held(credit_labels[k], field_ns(line, 4))
+}
+
+credit_tapped(_self: int, _cmd: int, tap: int): int {
+    k: int = msg(msg(tap, sel("view")), sel("tag"));
+    if (k > 0 && k < CREDITS_MOST) open_address(credit_addresses[k]);
+    0
+}
+
+// ---- acting ----
+// An action on screen slot s, as core takes it.
+act(
+    s: int,
+    action: int,
+    arg: int,
+    value: int
+) {
+    if (action == 0) return;
+    // (An act on the panel's reader: both panes' places told exactly
+    // first, so that core sends each where it is.)
+    if (slots[s].group == 1) panes_tell_exactly();
+    out_word("act");
+    out_arg(slots[s].id);
+    out_arg(action);
+    out_arg(arg);
+    out_arg(value);
+    out_end()
+}
+
+list_selected(
+    self: int,
+    _cmd: int,
+    list: int,
+    path: int
+): int {
+    msg2(list, sel("deselectItemAtIndexPath:animated:"), path, 1);
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s)) return 0;
+    r: int = row_at_path(s, path);
+    if (r < 0) return 0;
+    row: UiRow = ui.rows[r];
+    if (row.disabled || row.kind == UI_TOGGLE || row.kind == UI_FIELD) return 0;
+    haptic_tick();
+    act(s, row.action, row.arg, row.value);
+    0
+}
+
+// A row whose tap does nothing isn't highlighted.
+list_should_highlight(
+    self: int,
+    _cmd: int,
+    _list: int,
+    path: int
+): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s)) return 0;
+    r: int = row_at_path(s, path);
+    if (r < 0) return 0;
+    row: UiRow = ui.rows[r];
+    if (row.disabled || row.action == 0 || row.kind == UI_TOGGLE || row.kind == UI_FIELD || row.kind == UI_TEXT || row.kind == UI_SLIDER || row.kind == UI_CHOICE) 0 else 1
+}
+
+toggle_changed(self: int, _cmd: int, toggle: int): int {
+    s: int = slot_of_controller(self);
+    r: int = msg(toggle, sel("tag"));
+    if (s < 0 || !screen_load(s) || r < 0 || r >= ui.rows_n) return 0;
+    haptic_tick();
+    act(s, ui.rows[r].action, ui.rows[r].arg, if (truth(msg(toggle, sel("isOn")))) 1 else 0);
+    0
+}
+
+extern msg_ret_f32(receiver: int, selector: int): f32 = objc_msgSend;
+
+slider_changed(self: int, _cmd: int, slider: int): int {
+    s: int = slot_of_controller(self);
+    r: int = msg(slider, sel("tag"));
+    if (s < 0 || !screen_load(s) || r < 0 || r >= ui.rows_n) return 0;
+    value: f32 = msg_ret_f32(slider, sel("value"));
+    act(s, ui.rows[r].action, ui.rows[r].arg, (value as f64 + 0.5f64) as int);
+    0
+}
+
+time_changed(self: int, _cmd: int, picker: int): int {
+    s: int = slot_of_controller(self);
+    r: int = msg(picker, sel("tag"));
+    if (s < 0 || !screen_load(s) || r < 0 || r >= ui.rows_n) return 0;
+    calendar: int = msg(cls("NSCalendar"), sel("currentCalendar"));
+    parts: int = msg2(calendar, sel("components:fromDate:"), 32 | 64, msg(picker,
+        sel("date")));
+    minutes: int = msg(parts, sel("hour")) * 60 + msg(parts, sel("minute"));
+    act(s, ui.rows[r].action, ui.rows[r].arg, minutes);
+    0
+}
+
+choice_chosen(self: int, _cmd: int, sender: int): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s) || sender == 0 || !responds(sender, "propertyList")) return 0;
+    k: int = msg(msg(sender, sel("propertyList")), sel("longValue"));
+    r: int = k / 1000;
+    if (r < 0 || r >= ui.rows_n) return 0;
+    act(s, ui.rows[r].action, ui.rows[r].arg, k % 1000);
+    0
+}
+
+info_tapped(self: int, _cmd: int, button: int): int {
+    s: int = slot_of_controller(self);
+    r: int = msg(button, sel("tag"));
+    if (s < 0 || !screen_load(s) || r < 0 || r >= ui.rows_n) return 0;
+    act(s, ui.rows[r].info_action, ui.rows[r].arg, 0);
+    0
+}
+
+confirm_tapped(self: int, _cmd: int, _item: int): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s)) return 0;
+    msg1(msg(self, sel("view")), sel("endEditing:"), 1);
+    act(s, ui.confirm_action, 0, 0);
+    0
+}
+
+left_tapped(self: int, _cmd: int, _item: int): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s)) return 0;
+    act(s, ui.left_action, 0, 0);
+    0
+}
+
+done_tapped(_self: int, _cmd: int, _item: int): int {
+    sheets_close_all();
+    0
+}
+
+tool_tapped(self: int, _cmd: int, item: int): int {
+    s: int = slot_of_controller(self);
+    k: int = msg(item, sel("tag"));
+    if (s < 0 || !screen_load(s) || k < 0 || k >= ui.tools_n) return 0;
+    act(s, ui.tools[k].action, ui.tools[k].arg, 0);
+    0
+}
+
+command_chosen(self: int, _cmd: int, sender: int): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || sender == 0 || !responds(sender, "propertyList")) return 0;
+    k: int = msg(msg(sender, sel("propertyList")), sel("longValue"));
+    act(s, k / 1000000, k % 1000000, 0);
+    0
+}
+
+// The sheets closed as their close does: each screen said closed.
+sheets_close_all() {
+    if (sheet_nav == 0) return;
+    presenter: int = msg(sheet_nav, sel("presentingViewController"));
+    if (presenter != 0) {
+        msg2(presenter, sel("dismissViewControllerAnimated:completion:"), 1, 0);
+        dock_along(sheet_nav, false)
+    }
+    screens_forget_gone_soon();
+    send1("closegroup", 0);
+    panel_check_soon()
+}
+
+// The top sheet's screen back one (the development wire's `!back`).
+sheets_back() {
+    nav: int = nav_of_group(0);
+    if (nav != 0) msg1(nav, sel("popViewControllerAnimated:"), 1)
+}
+
+// The top sheet's first row whose title begins with words, tapped.
+sheets_tap_titled(b: []i8, from: int, to: int) {
+    nav: int = nav_of_group(0);
+    if (nav == 0) nav = panel_nav();
+    if (nav == 0) return;
+    s: int = slot_of_controller(msg(nav, sel("topViewController")));
+    if (s < 0 || !screen_load(s)) return;
+    want: int = nsstring_of_range(b, from, to);
+    for r in 0..ui.rows_n {
+        title: int = ui_text(ui.rows[r].title);
+        if (title != 0 && truth(msg1(title, sel("hasPrefix:"), want))) {
+            act(s, ui.rows[r].action, ui.rows[r].arg, ui.rows[r].value);
+            return
+        }
+    }
+    note("vellum: no row so titled")
+}
+
+nsstring_of_range(b: []i8, from: int, to: int): int {
+    words_begin();
+    for i in from..to {
+        words_buf[words_n] = b[i];
+        words_n = words_n + 1
+    }
+    words_ns()
+}
+
+sheets_state() {
+    for s in 0..SLOTS_MOST {
+        if (slots[s].id > 0) {
+            words_begin();
+            words_add("vellum: screen ");
+            words_add_int(slots[s].id);
+            words_add(" kind ");
+            words_add_int(slots[s].kind);
+            words_add(" group ");
+            words_add_int(slots[s].group);
+            words_add(if (slots[s].controller != 0) " shown" else " kept");
+            note_ns(words_ns())
+        }
+    }
+}
+
+// ---- a row's menu and swipe ----
+// A row's actions (core/row_menus.l8) are the system's context menu on a
+// long press, its delete action its trailing swipe. The menu's items are
+// UICommands up the responder chain (the list's vellumCommand:, each its
+// action and the row's argument); the swipe's action tells core when it
+// is done, its row the one the swipe began on.
+row_menu_provider: int = 0;
+
+row_menu_slot: int = -1;
+
+row_menu_row: int = -1;
+
+list_context_menu(
+    self: int,
+    _cmd: int,
+    _list: int,
+    paths: int
+): int {
+    s: int = slot_of_controller(self);
+    if (s < 0 || !screen_load(s) || msg(paths, sel("count")) != 1) return 0;
+    r: int = row_at_path(s, msg(paths, sel("firstObject")));
+    if (r < 0 || ui.rows[r].actions_n == 0 || ui.rows[r].disabled) return 0;
+    if (row_menu_provider == 0) row_menu_provider = block1(&row_menu_built, 0, "@16@?0@8");
+    if (row_menu_provider == 0) return 0;
+    row_menu_slot = s;
+    row_menu_row = r;
+    msg3(cls("UIContextMenuConfiguration"), sel("configurationWithIdentifier:previewProvider:actionProvider:"),
+        0, 0, row_menu_provider)
+}
+
+row_menu_built(_context: int, _suggested: int): int {
+    s: int = row_menu_slot;
+    if (s < 0 || !screen_load(s) || row_menu_row < 0 || row_menu_row >= ui.rows_n) return 0;
+    row: UiRow = ui.rows[row_menu_row];
+    kids: int = fresh("NSMutableArray");
+    for k in 0..row.actions_n {
+        a: UiAction = ui.actions[row.actions + k];
+        image: int = if (a.icon.n > 0) symbol_image(ui_text(a.icon), 17.0f64, 4) else 0;
+        c: int = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+            ui_text(a.title), image, sel("vellumCommand:"), nsnumber_int(a.action * 1000000 + row.arg));
+        if (a.action == row.delete_action) msg1(c, sel("setAttributes:"), 2);
+        msg1(kids, sel("addObject:"), c)
+    }
+    msg2(cls("UIMenu"), sel("menuWithTitle:children:"), nsstring(""), kids)
+}
+
+// The trailing swipe: the row's delete action, destructive.
+row_swipe_provider: int = 0;
+
+row_swipe_handler: int = 0;
+
+row_swipe_slot: int = -1;
+
+row_swipe_action: int = 0;
+
+row_swipe_arg: int = 0;
+
+list_swipes_attach(config: int) {
+    if (row_swipe_provider == 0) row_swipe_provider = block1(&row_swipe_actions, 0,
+        "@16@?0@8");
+    if (row_swipe_provider == 0 || !responds(config, "setTrailingSwipeActionsConfigurationProvider:")) return;
+    msg1(config, sel("setTrailingSwipeActionsConfigurationProvider:"), row_swipe_provider)
+}
+
+// (Which list asks is the one a finger is on: the top sheet's, else the
+// panel's.)
+row_swipe_actions(_context: int, path: int): int {
+    nav: int = nav_of_group(0);
+    if (nav == 0) nav = panel_nav();
+    if (nav == 0) return 0;
+    s: int = slot_of_controller(msg(nav, sel("topViewController")));
+    if (s < 0 || !screen_load(s)) return 0;
+    r: int = row_at_path(s, path);
+    if (r < 0 || ui.rows[r].delete_action == 0) return 0;
+    row: UiRow = ui.rows[r];
+    if (row_swipe_handler == 0) row_swipe_handler = block3(&row_swipe_done, 0, "v32@?0@8@16@?24");
+    if (row_swipe_handler == 0) return 0;
+    title: int = nsstring("Delete");
+    icon: int = nsstring("trash");
+    for k in 0..row.actions_n {
+        a: UiAction = ui.actions[row.actions + k];
+        if (a.action == row.delete_action) {
+            title = ui_text(a.title);
+            if (a.icon.n > 0) icon = ui_text(a.icon)
+        }
+    }
+    action: int = msg3(cls("UIContextualAction"), sel("contextualActionWithStyle:title:handler:"),
+        1, title, row_swipe_handler);
+    msg1(action, sel("setImage:"), symbol_image(icon, 17.0f64, 5));
+    row_swipe_slot = s;
+    row_swipe_action = row.delete_action;
+    row_swipe_arg = row.arg;
+    one_item[0] = action;
+    msg1(cls("UISwipeActionsConfiguration"), sel("configurationWithActions:"), nsarray(one_item,
+        1))
+}
+
+row_swipe_done(
+    _context: int,
+    _action: int,
+    _view: int,
+    completion: int
+): int {
+    _done: int = l8_block_invoke(completion, 1, 0, 0);
+    if (row_swipe_slot >= 0 && slots[row_swipe_slot].id > 0) act(row_swipe_slot, row_swipe_action,
+        row_swipe_arg, 0);
+    0
+}
+
+// ---- the navigations' and sheets' delegate ----
+screens_delegate: int = 0;
+
+// A screen shown: those popped by a hand (its Back, its swipe) said closed.
+nav_showed(
+    _self: int,
+    _cmd: int,
+    _nav: int,
+    _controller: int,
+    _animated: int
+): int {
+    screens_forget_gone();
+    panel_nav_showed();
+    0
+}
+
+// A sheet swiped away: its screens said closed (the panel's: panel.l8).
+sheets_swiped(_self: int, _cmd: int, presentation: int): int {
+    if (panel_presentation_is(presentation)) {
+        panel_swiped_away();
+        return 0
+    }
+    for nav in [over_nav, sheet_nav] {
+        if (nav != 0) sheet_mark_closing(msg(nav, sel("viewControllers")))
+    }
+    sheet_nav = held(sheet_nav, 0);
+    over_nav = held(over_nav, 0);
+    screens_forget_gone_soon();
+    send1("closegroup", 0);
+    panel_check_soon();
+    dock_sheets_check();
+    0
+}
+
+// A sheet's swipe away begun (it may yet be given up).
+sheets_will_swipe(_self: int, _cmd: int, presentation: int): int {
+    dock_sheet_will_go(presentation);
+    0
+}
+
+sheet_detent_changed(_self: int, _cmd: int, sheet: int): int {
+    panel_height_chosen(sheet);
+    0
+}
+
+// ---- classes ----
+screens_classes_make() {
+    nav: int = class_make(cls("UINavigationController"), "VellumNav");
+    add_method0(nav, sel("viewDidLayoutSubviews"), &nav_laid_out, "v@:");
+    add_method0(nav, sel("childViewControllerForStatusBarHidden"), &nav_status_top,
+        "@@:");
+    list: int = class_make(cls("UIViewController"), "VellumList");
+    add_method0(list, sel("loadView"), &list_load_view, "v@:");
+    add_method0(list, sel("viewWillLayoutSubviews"), &list_will_layout, "v@:");
+    add_method1(list, sel("numberOfSectionsInCollectionView:"), &list_sections, "q@:@");
+    add_method2(list, sel("collectionView:numberOfItemsInSection:"), &list_items,
+        "q@:@q");
+    add_method2(list, sel("collectionView:cellForItemAtIndexPath:"), &list_cell, "@@:@@");
+    add_method3(list, sel("collectionView:viewForSupplementaryElementOfKind:atIndexPath:"),
+        &list_supplementary, "@@:@@@");
+    add_method2(list, sel("collectionView:didSelectItemAtIndexPath:"), &list_selected,
+        "v@:@@");
+    add_method2(list, sel("collectionView:shouldHighlightItemAtIndexPath:"), &list_should_highlight,
+        "B@:@@");
+    add_method2(list, sel("collectionView:contextMenuConfigurationForItemsAtIndexPaths:point:"),
+        &list_context_menu, "@@:@@{CGPoint=dd}");
+    add_method1(list, sel("vellumToggle:"), &toggle_changed, "v@:@");
+    add_rows_methods(list);
+    add_method1(list, sel("vellumSectionButton:"), &section_button_tapped, "v@:@");
+    add_method1(list, sel("vellumFilter:"), &filter_chosen, "v@:@");
+    add_method1(list, sel("vellumSort:"), &sort_chosen, "v@:@");
+    add_method1(list, sel("indexTitlesForCollectionView:"), &list_index_titles, "@@:@");
+    add_method3(list, sel("collectionView:indexPathForIndexTitle:atIndex:"), &list_index_path,
+        "@@:@@q");
+    add_method1(list, sel("vellumPanelClose:"), &panel_close_tapped, "v@:@");
+    add_method1(list, sel("vellumCredit:"), &credit_tapped, "v@:@");
+    add_method1(list, sel("vellumSlider:"), &slider_changed, "v@:@");
+    add_method1(list, sel("vellumTime:"), &time_changed, "v@:@");
+    add_method1(list, sel("vellumChoice:"), &choice_chosen, "v@:@");
+    add_method1(list, sel("vellumInfo:"), &info_tapped, "v@:@");
+    add_method1(list, sel("vellumConfirm:"), &confirm_tapped, "v@:@");
+    add_method1(list, sel("vellumLeft:"), &left_tapped, "v@:@");
+    add_method1(list, sel("vellumDone:"), &done_tapped, "v@:@");
+    add_method1(list, sel("vellumTool:"), &tool_tapped, "v@:@");
+    add_method1(list, sel("vellumCommand:"), &command_chosen, "v@:@");
+    add_method1(list, sel("vellumSegment:"), &segment_chosen, "v@:@");
+    add_method1(list, sel("vellumQuery:"), &search_query_fired, "v@:@");
+    add_method1(list, sel("vellumFieldEnded:"), &field_ended, "v@:@");
+    add_method1(list, sel("vellumFieldChanged:"), &field_changed, "v@:@");
+    add_method1(list, sel("textFieldShouldReturn:"), &field_returned, "B@:@");
+    add_method2(list, sel("searchBar:textDidChange:"), &search_typed, "v@:@@");
+    add_method1(list, sel("searchBarSearchButtonClicked:"), &search_returned, "v@:@");
+    add_method2(list, sel("searchBar:selectedScopeButtonIndexDidChange:"), &search_scope_chosen,
+        "v@:@q");
+    add_method5(list, sel("textView:shouldInteractWithURL:inRange:interaction:"),
+        &text_link, "B@:@@{_NSRange=QQ}q");
+    add_protocol(list, "UICollectionViewDataSource");
+    add_protocol(list, "UICollectionViewDelegate");
+    add_protocol(list, "UISearchBarDelegate");
+    add_protocol(list, "UITextFieldDelegate");
+    add_protocol(list, "UITextViewDelegate");
+    delegate: int = class_make(cls("NSObject"), "VellumScreens");
+    add_method3(delegate, sel("navigationController:didShowViewController:animated:"),
+        &nav_showed, "v@:@@B");
+    add_method1(delegate, sel("presentationControllerDidDismiss:"), &sheets_swiped,
+        "v@:@");
+    add_method1(delegate, sel("presentationControllerWillDismiss:"), &sheets_will_swipe,
+        "v@:@");
+    add_method1(delegate, sel("sheetPresentationControllerDidChangeSelectedDetentIdentifier:"),
+        &sheet_detent_changed, "v@:@");
+    add_protocol(delegate, "UINavigationControllerDelegate");
+    add_protocol(delegate, "UIAdaptivePresentationControllerDelegate");
+    add_protocol(delegate, "UISheetPresentationControllerDelegate");
+    if (screens_delegate == 0) screens_delegate = make("VellumScreens")
+}
+
+// (The panel's navigation laid out: where its sheet's top is, whatever
+// screen it shows.)
+nav_laid_out(self: int, cmd: int): int {
+    _r: int = super1(self, cls("VellumNav"), cmd, 0);
+    if (self == panel.nav && self != 0) panel_top_measure();
+    0
+}
+
+nav_status_top(self: int, _cmd: int): int {
+    msg(self, sel("topViewController"))
+}
+
+// (The list kept the view's size; the panel's reader laid out.)
+list_will_layout(self: int, _cmd: int): int {
+    s: int = slot_of_controller(self);
+    if (s >= 0 && slots[s].list == 0) panel_reader_layout(self);
+    0
+}

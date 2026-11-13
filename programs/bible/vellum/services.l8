@@ -1,0 +1,276 @@
+tag vellum;
+
+use_tag std, ios, bible, bible_wire;
+
+// What only the phone can do, as core asks (SKINS.md, the contract's
+// part 3): the time core keeps (`timer`, `wake`), the screen kept on
+// (`awake`), the pasteboard, sharing, a page outside the app, files saved,
+// the system's settings, reminders asked for.
+import "../../ios/objc.l8";
+
+import "../../ios/block.l8";
+
+import "kit.l8";
+
+extern mach_absolute_time(): int;
+
+// The skin's clock, in milliseconds (as core's `moving`, `rest` and `tick`
+// count it).
+clock_ms(): int {
+    (CACurrentMediaTime() * 1000.0f64) as int
+}
+
+// ---- core's time ----
+// `timer TOK MS`: TOK said back after MS (`timer TOK`).
+TIMERS_MOST: int = 16;
+
+timer_tokens: []int = new int[16](-1);
+
+timer_objects: []int = new int[16](0);
+
+timer_line(token: int, ms: int) {
+    k: int = -1;
+    for i in 0..TIMERS_MOST
+        if (k < 0 && timer_tokens[i] < 0) k = i;
+    if (k < 0) return;
+    timer_tokens[k] = token;
+    timer_objects[k] = timer_after(app_obj, clamp_i(ms, 0, 86400000) as f64 / 1000.0f64,
+        "vellumCoreTimer:")
+}
+
+core_timer_fired(_self: int, _cmd: int, timer: int): int {
+    for i in 0..TIMERS_MOST {
+        if (timer_objects[i] == timer && timer != 0) {
+            token: int = timer_tokens[i];
+            timer_tokens[i] = -1;
+            timer_objects[i] = 0;
+            send1("timer", token)
+        }
+    }
+    0
+}
+
+// `wake MS`: core's tick at that time of the skin's clock.
+wake_timer: int = 0;
+
+wake_line(at: int) {
+    wake_timer = timer_stop(wake_timer);
+    d: int = at - clock_ms();
+    wake_timer = timer_after(app_obj, (if (d < 50) 50 else d) as f64 / 1000.0f64,
+        "vellumWake:")
+}
+
+wake_fired(_self: int, _cmd: int, _timer: int): int {
+    wake_timer = 0;
+    send1("tick", clock_ms());
+    0
+}
+
+// ---- the screen kept on ----
+awake_timer: int = 0;
+
+awake_line(ms: int) {
+    app: int = msg(cls("UIApplication"), sel("sharedApplication"));
+    awake_timer = timer_stop(awake_timer);
+    msg1(app, sel("setIdleTimerDisabled:"), if (ms > 0) 1 else 0);
+    if (ms > 0) awake_timer = timer_after(app_obj, ms as f64 / 1000.0f64, "vellumAwakeEnd:")
+}
+
+awake_ended(_self: int, _cmd: int, _timer: int): int {
+    awake_timer = 0;
+    msg1(msg(cls("UIApplication"), sel("sharedApplication")), sel("setIdleTimerDisabled:"),
+        0);
+    0
+}
+
+// ---- the pasteboard, sharing, pages outside ----
+copy_words(words: int) {
+    msg1(msg(cls("UIPasteboard"), sel("generalPasteboard")), sel("setString:"), words);
+    g: int = fresh("UINotificationFeedbackGenerator");
+    msg1(g, sel("notificationOccurred:"), 0)
+}
+
+// The system's share sheet for items (from the tray's Share where it was
+// tapped, else the dock).
+share_items(items: int) {
+    sheet: int = autoreleased(msg2(msg(cls("UIActivityViewController"), sel("alloc")),
+        sel("initWithActivityItems:applicationActivities:"), items, 0));
+    popover: int = msg(sheet, sel("popoverPresentationController"));
+    if (popover != 0) msg1(popover, sel("setSourceView:"), if (share_from != 0) share_from else dock.title_button);
+    msg3(top_controller(), sel("presentViewController:animated:completion:"), sheet,
+        1, 0);
+    dock_along(sheet, true)
+}
+
+share_text(words: int) {
+    if (words == 0) return;
+    one_item[0] = words;
+    share_items(nsarray(one_item, 1))
+}
+
+open_address(words: int) {
+    if (words == 0) return;
+    url: int = msg1(cls("NSURL"), sel("URLWithString:"), words);
+    if (url == 0) return;
+    // (A page of the web in Safari's own view, over the app.)
+    scheme: int = msg(url, sel("scheme"));
+    if (ns_equal(scheme, nsstring("https")) || ns_equal(scheme, nsstring("http"))) {
+        if (cls("SFSafariViewController") == 0) _h: int = dlopen_services("/System/Library/Frameworks/SafariServices.framework/SafariServices",
+            1);
+        safari: int = cls("SFSafariViewController");
+        if (safari != 0) {
+            page: int = autoreleased(msg1(msg(safari, sel("alloc")), sel("initWithURL:"),
+                url));
+            msg1(page, sel("setPreferredControlTintColor:"), colors.accent);
+            msg3(top_controller(), sel("presentViewController:animated:completion:"),
+                page, 1, 0);
+            dock_along(page, true);
+            return
+        }
+    }
+    msg3(msg(cls("UIApplication"), sel("sharedApplication")), sel("openURL:options:completionHandler:"),
+        url, msg(cls("NSDictionary"), sel("dictionary")), 0)
+}
+
+// `savefile NAME TEXT`: written to a temporary file, shared (Save to
+// Files is the share sheet's).
+save_file(name: int, text: int) {
+    if (name == 0 || text == 0) return;
+    path: int = msg1(msg(msg(msg(cls("NSFileManager"), sel("defaultManager")), sel("temporaryDirectory")),
+        sel("path")), sel("stringByAppendingPathComponent:"), name);
+    msg4(text, sel("writeToFile:atomically:encoding:error:"), path, 1, 4, 0);
+    one_item[0] = msg1(cls("NSURL"), sel("fileURLWithPath:"), path);
+    share_items(nsarray(one_item, 1))
+}
+
+// `open_settings`: the app's page in the system's Settings.
+open_system_settings() {
+    open_address(objc_const("UIApplicationOpenSettingsURLString"))
+}
+
+// ---- reminders ----
+extern dlopen_services(path: str, mode: int): int = dlopen;
+
+reminders_center(): int {
+    if (cls("UNUserNotificationCenter") == 0) _h: int = dlopen_services("/System/Library/Frameworks/UserNotifications.framework/UserNotifications",
+        1);
+    center: int = cls("UNUserNotificationCenter");
+    if (center == 0) 0 else msg(center, sel("currentNotificationCenter"))
+}
+
+// `notify_ask WHO`: the phone's permission asked for (a prompt the first
+// time), answered `notifyok WHO 1|0`. (The system answers on a queue of
+// its own: block2_main brings the answer to the main thread.)
+reminders_answer_block: int = 0;
+
+reminders_asker: int = 0;
+
+notify_ask(who: int) {
+    center: int = reminders_center();
+    if (center == 0) {
+        send2("notifyok", who, 0);
+        return
+    }
+    if (reminders_answer_block == 0) reminders_answer_block = block2_main(&reminders_answered,
+        0, 2, "v20@?0B8@12");
+    reminders_asker = who;
+    msg2(center, sel("requestAuthorizationWithOptions:completionHandler:"), 6, reminders_answer_block)
+}
+
+reminders_answered(_context: int, granted: int, _error: int): int {
+    send2("notifyok", reminders_asker, granted & 255);
+    0
+}
+
+notify_clear() {
+    center: int = reminders_center();
+    if (center != 0) msg(center, sel("removeAllPendingNotificationRequests"))
+}
+
+reminder_keys: []int = new int[4](0);
+
+reminder_values: []int = new int[4](0);
+
+// `notify AT PLAN MEMORY TITLE BODY`: a reminder at AT (seconds since
+// 1970), naming the plan's file (0: none) and Memory (1).
+notify_line(line: WireLine) {
+    center: int = reminders_center();
+    if (center == 0) return;
+    at: int = word_n(line, 1);
+    content: int = fresh("UNMutableNotificationContent");
+    msg1(content, sel("setTitle:"), field_ns(line, 1));
+    msg1(content, sel("setBody:"), field_ns(line, 2));
+    reminder_keys[0] = nsstring("plan");
+    reminder_values[0] = nsnumber_int(word_n(line, 2));
+    reminder_keys[1] = nsstring("memory");
+    reminder_values[1] = nsnumber_int(word_n(line, 3));
+    msg1(content, sel("setUserInfo:"), nsdictionary(reminder_keys, reminder_values,
+        2));
+    msg1(content, sel("setSound:"), msg(cls("UNNotificationSound"), sel("defaultSound")));
+    msg1(content, sel("setThreadIdentifier:"), nsstring("daily"));
+    date: int = msg_set_f(cls("NSDate"), sel("dateWithTimeIntervalSince1970:"), at as f64);
+    // (Year, month, day, hour and minute, in the phone's calendar.)
+    parts: int = msg2(msg(cls("NSCalendar"), sel("currentCalendar")), sel("components:fromDate:"),
+        124, date);
+    trigger: int = msg2(cls("UNCalendarNotificationTrigger"), sel("triggerWithDateMatchingComponents:repeats:"),
+        parts, 0);
+    words_begin();
+    words_add("daily-");
+    words_add_int(at);
+    request: int = msg3(cls("UNNotificationRequest"), sel("requestWithIdentifier:content:trigger:"),
+        words_ns(), content, trigger);
+    msg2(center, sel("addNotificationRequest:withCompletionHandler:"), request, 0)
+}
+
+// A reminder opened: core told (`reminded PLAN MEMORY`) once it has begun.
+// (Kept through a hot reload: the delegate set before launching ends, as
+// a reminder that launched the app is given to it then.)
+persistent vellum_reminders_delegate: int = 0;
+
+reminded_plan: int = -1;
+
+reminded_memory: int = 0;
+
+reminders_classes_make() {
+    k: int = class_make(cls("NSObject"), "VellumReminders");
+    add_method3(k, sel("userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:"),
+        &reminder_opened, "v@:@@@?");
+    add_protocol(k, "UNUserNotificationCenterDelegate")
+}
+
+reminders_begin() {
+    center: int = reminders_center();
+    if (center == 0) return;
+    if (vellum_reminders_delegate == 0) vellum_reminders_delegate = make("VellumReminders");
+    msg1(center, sel("setDelegate:"), vellum_reminders_delegate)
+}
+
+reminder_opened(
+    _self: int,
+    _cmd: int,
+    _center: int,
+    response: int,
+    handler: int
+): int {
+    info: int = msg(msg(msg(msg(response, sel("notification")), sel("request")), sel("content")),
+        sel("userInfo"));
+    plan: int = if (info != 0) msg1(info, sel("objectForKey:"), nsstring("plan")) else 0;
+    memory: int = if (info != 0) msg1(info, sel("objectForKey:"), nsstring("memory")) else 0;
+    reminded_plan = (if (plan != 0) msg(plan, sel("longValue")) else 0);
+    reminded_memory = (if (memory != 0) msg(memory, sel("longValue")) else 0);
+    reminded_tell();
+    call_block(handler);
+    0
+}
+
+reminded_tell() {
+    if (reminded_plan < 0 || !core_begun) return;
+    send2("reminded", reminded_plan, reminded_memory);
+    reminded_plan = -1
+}
+
+add_service_methods(app: int) {
+    add_method1(app, sel("vellumCoreTimer:"), &core_timer_fired, "v@:@");
+    add_method1(app, sel("vellumWake:"), &wake_fired, "v@:@");
+    add_method1(app, sel("vellumAwakeEnd:"), &awake_ended, "v@:@")
+}
