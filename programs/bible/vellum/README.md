@@ -55,7 +55,7 @@ Info.plist class names, so either can be hot reloaded into the other.
 | `look.l8` | Core's look, highlights and themes; each pane's type set and every style's attributes |
 | `part.l8` | A part decoded into an arena of its own; its attributed words, marks and washes |
 | `pane.l8` | A pane: a scroll view of measured parts on a tall canvas; places, jumps, telling core, taps |
-| `linking.l8` | Link maps, chapter shapes (laid out or guessed by bytes), following and its glide |
+| `linking.l8` | Link maps, chapter shapes (laid out or guessed by bytes), following |
 | `dock.l8` | The dock and its window, the tray, the way back, toasts, the title's menu |
 | `screens.l8` | Core's screens as sheets of lists; effects; rows, menus and swipes |
 | `panel.l8` | The panel's sheet and its reader |
@@ -69,8 +69,11 @@ far from the middle, the canvas is moved back under what is read in one
 unseen frame. The document's first and last parts, once in the window,
 bound the scroll by the content's insets. Following uses
 `core/follow.l8`'s rules, with sections not laid out yet guessed by their
-bytes (`sizes`) as SKINS.md says, the follower filling its window toward
-where it glides.
+bytes (`sizes`) as SKINS.md says. The follower doesn't glide: it is put at
+the rule's place at once, cross-faded, every quarter second while the
+leader moves and as soon as it rests, its window made anew where that is
+more than a screen past what it has laid out, so that following looks the
+same near or far.
 
 ## Running it
 

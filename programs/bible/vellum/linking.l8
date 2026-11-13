@@ -5,9 +5,9 @@ use_tag std, ios, bible, bible_wire;
 // The two panes linked (SKINS.md, Panes: Linked): the pane a hand last
 // moved leads, and the other keeps a section linked with the one at the
 // top pane's top edge in sight, by core/follow.l8's rules, moving the
-// least it must, gliding there a frame at a time (glide_step: a
-// critically damped spring that carries its speed from frame to frame, so
-// that a place that moves on as the leader moves is followed smoothly).
+// least it must: put there at once, every quarter second while the leader
+// moves and as soon as it rests, cross-faded (a jump, near or far, always
+// the same).
 //
 // The links are made from core's link maps (the chapters about the
 // leader's place) and the panes' anchors as laid out, kept from frame to
@@ -289,6 +289,70 @@ part_height_average(p: int): f64 {
     h / pane.n as f64
 }
 
+// The part guessed to hold y down pane p's canvas, beyond its window (by
+// the same guesses as guessed_top): its chapter (a run's first), part, and
+// where its top would be.
+type GuessAt = {
+    c: int;
+    k: int;
+    top: f64;
+    ok: bool
+}
+
+guessed_part_at(p: int, y: f64): GuessAt {
+    pane: *Pane = pane_of(p);
+    none: GuessAt = GuessAt {
+        c: -1,
+        k: 0,
+        top: 0.0f64,
+        ok: false
+    };
+    if (pane.n == 0) return none;
+    last: int = pane.n - 1;
+    steps: int = 0;
+    if (y >= pane.y[last] + pane.h[last]) {
+        at: f64 = pane.y[last] + pane.h[last];
+        next: PartAt = part_after(p, pane.chapter[last], pane.part[last]);
+        while (next.c >= 0 && steps < 4000) {
+            h: f64 = part_guessed(p, next.c, next.k);
+            if (y < at + h) return GuessAt {
+                c: next.c,
+                k: next.k,
+                top: at,
+                ok: true
+            };
+            at = at + h;
+            next = part_after(p, next.c, next.k);
+            steps = steps + 1
+        }
+        return none
+    }
+    if (y < pane.y[0]) {
+        at: f64 = pane.y[0];
+        before: PartAt = part_before(p, pane.chapter[0], pane.part[0]);
+        while (before.c >= 0 && steps < 4000) {
+            h: f64 = part_guessed(p, before.c, before.k);
+            at = at - h;
+            if (y >= at) return GuessAt {
+                c: before.c,
+                k: before.k,
+                top: at,
+                ok: true
+            };
+            before = part_before(p, before.c, before.k);
+            steps = steps + 1
+        }
+    }
+    none
+}
+
+// Part k of chapter c, guessed: as tall for its bytes as those measured,
+// or, its chapter's sizes not known, as a part laid out on average.
+part_guessed(p: int, c: int, k: int): f64 {
+    if (facts_slot(p, c) < 0) return part_height_average(p);
+    part_bytes(p, c, k) as f64 * height_per_byte(p)
+}
+
 // ---- the links, kept ----
 LINKS_MOST: int = 8192;
 
@@ -378,46 +442,82 @@ follow_target(lead: int): FollowMove {
     move
 }
 
-// The leader moved (a hand, its fling): the other glides as the rule says.
+// The leader moved (a hand, its fling): the other put where the rule
+// says, at most every FOLLOW_EVERY seconds (the last move in each told at
+// its end).
+FOLLOW_EVERY: f64 = 0.25f64;
+
+follow_time: f64 = 0.0f64;
+
 follow_moved(p: int) {
     if (!follow_can() || p != leader) return;
-    follow_apply(p, false)
+    since: f64 = CACurrentMediaTime() - follow_time;
+    if (since >= FOLLOW_EVERY) {
+        follow_time = CACurrentMediaTime();
+        follow_apply(p)
+    } else follow_tick_soon(FOLLOW_EVERY - since)
+}
+
+follow_tick_due: bool = false;
+
+follow_tick_soon(after: f64) {
+    if (follow_tick_due || pane_delegate == 0) return;
+    follow_tick_due = true;
+    _t: int = timer_after(pane_delegate, after, "vellumFollowTick:")
+}
+
+follow_tick_fired(_self: int, _cmd: int, _timer: int): int {
+    follow_tick_due = false;
+    if (!follow_can()) return 0;
+    follow_time = CACurrentMediaTime();
+    follow_apply(leader);
+    0
 }
 
 // (The rule's last word, for the development wire: 0 stay, 1 move.)
 follow_last: int = -1;
 
-follow_apply(lead: int, at_once: bool) {
+follow_apply(lead: int) {
     match follow_target(lead) {
         Stay -> follow_last = 0;
         ScrollTo target -> {
             follow_last = 1;
             other: int = 1 - lead;
+            to: f64 = target.top - pane_of(other).chrome_top;
+            // (A move of more than a couple of points cross-faded: what it
+            // showed laid over it as it moves, fading in a fifth of a
+            // second, within the quarter before the next.)
+            far: bool = follow_far(other, target.top);
+            faded: bool = (far || abs_f(to - pane_offset(pane_of(other))) > 2.0f64) && !reduce_motion() && pane_of(other).cover == 0;
+            if (faded) pane_cover(other);
             // (More than a screen past what it has laid out (a Bible flung
             // beside a commentary's long comments): its window made anew at
-            // the leader's chapter, under the quick fade of a far jump, and
-            // the rule's place, known now, taken at once.)
-            if (follow_far(other, target.top)) {
-                // (Not while the leader still moves: a commentary beside a
-                // Bible flung would be made anew every frame. Once both
-                // rest, once.)
-                if (!at_once && pane_in_motion(lead)) {
-                    follow_pending = true;
-                    return
+            // the part guessed to hold the rule's place, there, and the rule
+            // asked again of what is laid out now, until it is near (a few
+            // times at most); then taken.)
+            if (far) {
+                // (Each time the window is made anew the pane is at the
+                // place guessed; the rule's place after is of the new
+                // window, and taken once near.)
+                place: f64 = target.top;
+                tries: int = 0;
+                while (tries < 3) {
+                    follow_window_anew_at(other, place, lead);
+                    tries = tries + 1;
+                    match follow_target(lead) {
+                        Stay -> tries = 3;
+                        ScrollTo again -> {
+                            place = again.top;
+                            if (!follow_far(other, place)) {
+                                follow_place(other, place - pane_of(other).chrome_top);
+                                tries = 3
+                            }
+                        }
+                    }
                 }
-                follow_glide_stop();
-                follow_window_anew(other, edge_chapter(lead));
-                match follow_target(lead) {
-                    Stay -> { }
-                    ScrollTo again -> follow_place(other, again.top - pane_of(other).chrome_top)
-                }
-                return
-            }
-            to: f64 = target.top - pane_of(other).chrome_top;
-            if (at_once || reduce_motion()) {
-                follow_glide_stop();
-                follow_place(other, to)
-            } else follow_glide_to(other, to)
+                _seen: bool = pane_fill(other, 0.0f64, 12)
+            } else follow_place(other, to);
+            if (faded) pane_uncover(other)
         }
     }
 }
@@ -430,13 +530,30 @@ follow_far(p: int, top: f64): bool {
     top < pane.y[0] - screen || top > pane.y[pane.n - 1] + pane.h[pane.n - 1] + screen
 }
 
-// Pane p's window made anew at chapter c's top, under a far jump's fade.
-follow_window_anew(p: int, c: int) {
+// Pane p's window made anew at the part guessed to hold top (its canvas
+// moved so that the place stays where it was guessed to be), else at its
+// first section on the verse at the leader's reading line.
+follow_window_anew_at(p: int, top: f64, lead: int) {
+    g: GuessAt = guessed_part_at(p, top);
+    if (!g.ok) {
+        follow_window_anew(p, lead);
+        return
+    }
+    pane: *Pane = pane_of(p);
+    pane_window_at(p, g.c, g.k);
+    pane_set_offset(p, PANE_MIDDLE + (top - g.top) - pane.chrome_top);
+    follow_links_stale()
+}
+
+// Pane p's window made anew at its first section on the verse at the
+// leader's reading line (its chapter's top, if it has none on it).
+follow_window_anew(p: int, lead: int) {
+    at: Place = pane_place(lead);
+    c: int = if (at.ok) at.c else edge_chapter(lead);
     if (c < 0) return;
-    covered: bool = !reduce_motion();
-    if (covered) pane_cover(p);
-    pane_put(p, c, -1, 0, false);
-    if (covered) pane_jump_reveal(p);
+    v: int = if (at.ok && at.i >= 0) anchor_verse(lead, c, at.i) else 0;
+    i: int = if (v > 0) anchor_of_verse(p, c, v) else -1;
+    pane_put(p, c, i, 0, false);
     follow_links_stale()
 }
 
@@ -445,35 +562,34 @@ follow_place(p: int, to: f64) {
     pane: *Pane = pane_of(p);
     pane_aim_let_go(p);
     pane_set_offset(p, to);
-    // (Gone past what it had laid out: parts made toward its sight, a few a
-    // frame, until they reach it.)
-    _full: bool = pane_fill(p, pane_seen(pane), 6);
+    // (Gone past what it had laid out: parts made toward its sight, enough
+    // to cover it now, a margin about it later.)
+    _seen: bool = pane_fill(p, 0.0f64, 12);
+    _full: bool = pane_fill(p, pane_seen(pane), 2);
     pane_tell(p, false)
 }
 
-// A hand took pane p: it leads; the other's glide stopped.
+// A hand took pane p: it leads.
 follow_lead(p: int) {
     leader = p;
     jump_held = false;
-    ruled = false;
-    follow_glide_stop()
+    ruled = false
 }
 
 // Pane p at rest: once both rest, the rule checked again.
 follow_rested(_p: int) {
     if (!follow_can() || pane_in_motion(PANE_PAGE) || pane_in_motion(PANE_PANEL)) return;
-    follow_apply(leader, false)
+    follow_apply(leader)
 }
 
 // A jump (`go`): MODE 2, the panel to be placed by the rule; else both
 // held where their jumps put them.
 follow_jumped(p: int, mode: int) {
-    follow_glide_stop();
     if (p == PANE_PANEL && mode == 2) {
         ruled = true;
         jump_held = false;
         leader = PANE_PAGE;
-        if (follow_can()) follow_apply(PANE_PAGE, true);
+        if (follow_can()) follow_apply(PANE_PAGE);
         return
     }
     jump_held = true;
@@ -484,14 +600,14 @@ follow_jumped(p: int, mode: int) {
 // (parts come in and tell where sections are better).
 follow_settled() {
     if (ruled && linked && page_pane.n > 0 && panel_pane.n > 0 && panel_shown()) {
-        follow_apply(PANE_PAGE, true);
+        follow_apply(PANE_PAGE);
         return
     }
     // (What the rule waited for came, or parts came of themselves, as a
     // commentary's still opening come once read: the rule checked again.)
     if (!follow_pending || !follow_can() || pane_in_motion(PANE_PAGE) || pane_in_motion(PANE_PANEL)) return;
     follow_pending = false;
-    follow_apply(leader, false)
+    follow_apply(leader)
 }
 
 // Whether the rule is to be checked again once the panes rest.
@@ -505,117 +621,6 @@ follow_part_came() {
     pane_settle_soon()
 }
 
-// ---- the glide ----
-glide_pane: int = -1;
-
-glide_to: f64 = 0.0f64;
-
-glide_velocity: f64 = 0.0f64;
-
-glide_at: f64 = 0.0f64;
-
-glide_time: f64 = 0.0f64;
-
-// (The display link stepping it: made once, kept through a reload as the
-// class is, paused while nothing glides.)
-glide_link: int = 0;
-
-follow_gliding(p: int): bool {
-    glide_pane == p
-}
-
-// ---- the glide ----
-// A pane gliding to its place, as a critically damped spring (the form of
-// Unity's SmoothDamp, stable however long a frame is): from at, moving at
-// velocity (points a second), toward to. From rest it eases in, closes
-// most of the way in about three tenths of a second, and slows to its
-// place without passing it. A new place mid-glide is glided to from where
-// the pane is, at the speed it has, so a place that moves frame by frame
-// (the leader still moving) is followed as one motion. The last half point
-// at once.
-GLIDE_SECONDS: f64 = 0.1f64;
-
-type Glide = {
-    at: f64;
-    velocity: f64
-}
-
-glide_step(
-    at: f64,
-    to: f64,
-    velocity: f64,
-    seconds: f64
-): Glide {
-    dt: f64 = if (seconds < 0.0f64) 0.0f64 else seconds;
-    omega: f64 = 2.0f64 / GLIDE_SECONDS;
-    x: f64 = omega * dt;
-    // (e^-x, near enough for any frame's x.)
-    decay: f64 = 1.0f64 / (1.0f64 + x + 0.48f64 * x * x + 0.235f64 * x * x * x);
-    change: f64 = at - to;
-    pull: f64 = (velocity + omega * change) * dt;
-    next_velocity: f64 = (velocity - omega * pull) * decay;
-    next: f64 = to + (change + pull) * decay;
-    // (Never past its place: there, and still.)
-    if (change > 0.0f64 && next < to || change < 0.0f64 && next > to || abs_f(next - to) <= 0.5f64) return Glide { at: to, velocity: 0.0f64 };
-    Glide { at: next, velocity: next_velocity }
-}
-
-follow_glide_to(p: int, to: f64) {
-    if (glide_pane != p) {
-        glide_pane = p;
-        glide_velocity = 0.0f64;
-        glide_at = pane_offset(pane_of(p));
-        glide_time = CACurrentMediaTime()
-    }
-    glide_to = to;
-    pane_aim_let_go(p);
-    if (glide_link == 0) {
-        glide_link = retain(msg2(cls("CADisplayLink"), sel("displayLinkWithTarget:selector:"),
-            pane_delegate, sel("vellumFollowStep:")));
-        msg2(glide_link, sel("addToRunLoop:forMode:"), msg(cls("NSRunLoop"), sel("mainRunLoop")),
-            l8_run_loop_common_modes())
-    }
-    msg1(glide_link, sel("setPaused:"), 0)
-}
-
-follow_glide_stop() {
-    glide_pane = -1;
-    if (glide_link != 0) msg1(glide_link, sel("setPaused:"), 1)
-}
-
-follow_glide_stop_for(p: int) {
-    if (glide_pane == p) follow_glide_stop()
-}
-
-follow_step(_self: int, _cmd: int, _link: int): int {
-    p: int = glide_pane;
-    if (p < 0) {
-        follow_glide_stop();
-        return 0
-    }
-    now: f64 = CACurrentMediaTime();
-    dt: f64 = now - glide_time;
-    glide_time = now;
-    // (A hand on the follower meanwhile: it is the hand's.)
-    if (pane_in_motion(p)) {
-        follow_glide_stop();
-        return 0
-    }
-    // (Where it is now, if something else moved it.)
-    here: f64 = pane_offset(pane_of(p));
-    if (abs_f(here - glide_at) > 1.0f64) glide_at = here;
-    step: Glide = glide_step(glide_at, glide_to, glide_velocity, dt);
-    glide_at = step.at;
-    glide_velocity = step.velocity;
-    follow_place(p, step.at);
-    if (step.velocity == 0.0f64 && step.at == glide_to) {
-        follow_glide_stop();
-        pane_tell(p, true);
-        pane_settle_soon()
-    }
-    0
-}
-
 add_linking_methods(delegate: int) {
-    add_method1(delegate, sel("vellumFollowStep:"), &follow_step, "v@:@")
+    add_method1(delegate, sel("vellumFollowTick:"), &follow_tick_fired, "v@:@")
 }
