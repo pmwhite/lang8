@@ -88,7 +88,9 @@ link_map_came(data: []i8, b: int, e: int) {
         at = le + 1
     }
     map_n[s] = n;
-    follow_links_stale()
+    follow_links_stale();
+    // (The rule may have waited for it: checked again at rest.)
+    follow_part_came()
 }
 
 map_slot(c: int): int {
@@ -126,7 +128,7 @@ map_of(s: int): LinkMap@new {
 // on average, the anchor as far down its part as its bytes into it. The
 // chapter's top and end likewise. A chapter in a run of a commentary's
 // without comments is the run's part, top to end. A chapter none of whose
-// parts is laid out has no shape.
+// parts is laid out is placed from the window's nearer end (guessed_top).
 shape_of(p: int, c: int): ChapterShape@new {
     pane: *Pane = pane_of(p);
     in_run: bool = c >= 0 && c < CHAPTERS_MOST && facts_of(p).gap_first[c] >= 0;
@@ -156,8 +158,15 @@ shape_of(p: int, c: int): ChapterShape@new {
             if (any < 0) any = pane.part[r]
         }
     }
-    if (any < 0) return shape;
     per_byte: f64 = height_per_byte(p);
+    // (None laid out: its top guessed from what is, its parts after it.)
+    if (any < 0) {
+        top: f64 = guessed_top(p, first);
+        if (top == GUESS_NONE) return shape;
+        tops[0] = top;
+        ends[0] = top + parts_guessed(p, first, 0, 1);
+        any = 0
+    }
     for k in any + 1..count {
         if (rows[k] < 0) {
             tops[k] = ends[k - 1];
@@ -207,6 +216,77 @@ shape_of(p: int, c: int): ChapterShape@new {
 height_per_byte(p: int): f64 {
     f: *Facts = facts_of(p);
     if (f.measured_bytes > 0) f.measured_height / f.measured_bytes as f64 else type_of(p).em * look.spacing / 60.0f64
+}
+
+// ---- where chapters not laid out would be ----
+// Chapter c's top down pane p's canvas, none of its parts laid out
+// (SKINS.md, Panes: Linked): from the nearer end of what is, each part
+// between as tall for its bytes as the parts measured so far are on
+// average; a chapter whose sizes aren't known, as tall as a part laid out
+// is on average. GUESS_NONE: too far to say (a few hundred chapters).
+GUESS_NONE: f64 = -1.0e18f64;
+
+guessed_top(p: int, c: int): f64 {
+    pane: *Pane = pane_of(p);
+    if (pane.n == 0) return GUESS_NONE;
+    last: int = pane.n - 1;
+    if (c > pane.last[last]) {
+        y: f64 = pane.y[last] + pane.h[last];
+        first: int = pane.chapter[last];
+        y = y + parts_guessed(p, first, pane.part[last] + 1, part_count(p, first));
+        ch: int = pane.last[last] + 1;
+        steps: int = 0;
+        while (ch < c && steps < 400) {
+            y = y + chapter_guessed(p, ch);
+            ch = ch + 1;
+            steps = steps + 1
+        }
+        return if (ch < c) GUESS_NONE else y
+    }
+    if (c < pane.chapter[0]) {
+        y: f64 = pane.y[0] - parts_guessed(p, pane.chapter[0], 0, pane.part[0]);
+        ch: int = pane.chapter[0] - 1;
+        steps: int = 0;
+        while (ch >= c && steps < 400) {
+            y = y - chapter_guessed(p, ch);
+            ch = ch - 1;
+            steps = steps + 1
+        }
+        return if (ch >= c) GUESS_NONE else y
+    }
+    GUESS_NONE
+}
+
+// Parts from to to of chapter c, guessed.
+parts_guessed(
+    p: int,
+    c: int,
+    from: int,
+    to: int
+): f64 {
+    h: f64 = 0.0f64;
+    known: bool = facts_slot(p, c) >= 0;
+    per_byte: f64 = height_per_byte(p);
+    for k in from..to h = h + (if (known) part_bytes(p, c, k) as f64 * per_byte else part_height_average(p));
+    h
+}
+
+// Chapter c, guessed: a run's part counts once, at its first chapter.
+chapter_guessed(p: int, c: int): f64 {
+    if (c < 0 || c >= CHAPTERS_MOST) return 0.0f64;
+    f: *Facts = facts_of(p);
+    if (f.gap_first[c] >= 0 && f.gap_first[c] != c) return 0.0f64;
+    if (facts_slot(p, c) < 0) return part_height_average(p);
+    parts_guessed(p, c, 0, part_count(p, c))
+}
+
+// A part laid out in pane p, on average.
+part_height_average(p: int): f64 {
+    pane: *Pane = pane_of(p);
+    if (pane.n == 0) return pane_screen(pane);
+    h: f64 = 0.0f64;
+    for r in 0..pane.n h = h + pane.h[r];
+    h / pane.n as f64
 }
 
 // ---- the links, kept ----
@@ -276,7 +356,16 @@ follow_target(lead: int): FollowMove {
     // (The sections it is about known first: the other pane's anchors of
     // the edge's chapter, asked for if not.)
     s: int = map_slot(c);
-    if (s >= 0 && map_n[s] > 0 && !anchors_known(1 - lead, c)) return FollowMove.Stay;
+    // (Its chapter's map not come yet (core sends those about the places
+    // it is told): the rule checked again when it comes.)
+    if (s < 0) {
+        follow_pending = true;
+        return FollowMove.Stay
+    }
+    if (map_n[s] > 0 && !anchors_known(1 - lead, c)) {
+        follow_pending = true;
+        return FollowMove.Stay
+    }
     links_make(c);
     page: *Pane = pane_of(PANE_PAGE);
     panel: *Pane = pane_of(PANE_PANEL);
@@ -295,11 +384,28 @@ follow_moved(p: int) {
     follow_apply(p, false)
 }
 
+// (The rule's last word, for the development wire: 0 stay, 1 move.)
+follow_last: int = -1;
+
 follow_apply(lead: int, at_once: bool) {
     match follow_target(lead) {
-        Stay -> { }
+        Stay -> follow_last = 0;
         ScrollTo target -> {
+            follow_last = 1;
             other: int = 1 - lead;
+            // (More than a screen past what it has laid out (a Bible flung
+            // beside a commentary's long comments): its window made anew at
+            // the leader's chapter, under the quick fade of a far jump, and
+            // the rule's place, known now, taken at once.)
+            if (follow_far(other, target.top)) {
+                follow_glide_stop();
+                follow_window_anew(other, edge_chapter(lead));
+                match follow_target(lead) {
+                    Stay -> { }
+                    ScrollTo again -> follow_place(other, again.top - pane_of(other).chrome_top)
+                }
+                return
+            }
             to: f64 = target.top - pane_of(other).chrome_top;
             if (at_once || reduce_motion()) {
                 follow_glide_stop();
@@ -307,6 +413,24 @@ follow_apply(lead: int, at_once: bool) {
             } else follow_glide_to(other, to)
         }
     }
+}
+
+// Whether top is more than a screen past what pane p has laid out.
+follow_far(p: int, top: f64): bool {
+    pane: *Pane = pane_of(p);
+    if (pane.n == 0) return false;
+    screen: f64 = pane_screen(pane);
+    top < pane.y[0] - screen || top > pane.y[pane.n - 1] + pane.h[pane.n - 1] + screen
+}
+
+// Pane p's window made anew at chapter c's top, under a far jump's fade.
+follow_window_anew(p: int, c: int) {
+    if (c < 0) return;
+    covered: bool = !reduce_motion();
+    if (covered) pane_cover(p);
+    pane_put(p, c, -1, 0, false);
+    if (covered) pane_jump_reveal(p);
+    follow_links_stale()
 }
 
 // The follower put at offset to, its window filled about it.
@@ -352,8 +476,26 @@ follow_jumped(p: int, mode: int) {
 // Between frames, at rest: the panel placed by the rule while it is ruled
 // (parts come in and tell where sections are better).
 follow_settled() {
-    if (ruled && linked && page_pane.n > 0 && panel_pane.n > 0 && panel_shown()) follow_apply(PANE_PAGE,
-        true)
+    if (ruled && linked && page_pane.n > 0 && panel_pane.n > 0 && panel_shown()) {
+        follow_apply(PANE_PAGE, true);
+        return
+    }
+    // (What the rule waited for came, or parts came of themselves, as a
+    // commentary's still opening come once read: the rule checked again.)
+    if (!follow_pending || !follow_can() || pane_in_motion(PANE_PAGE) || pane_in_motion(PANE_PANEL)) return;
+    follow_pending = false;
+    follow_apply(leader, false)
+}
+
+// Whether the rule is to be checked again once the panes rest.
+follow_pending: bool = false;
+
+// A part came that wasn't asked for (sent again, once read): the rule
+// checked again at rest.
+follow_part_came() {
+    if (!linked) return;
+    follow_pending = true;
+    pane_settle_soon()
 }
 
 // ---- the glide ----
