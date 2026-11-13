@@ -100,7 +100,8 @@ P DY`, `!flick P DY` (a finger's fling, frame by frame), `!dock
 open|close`, `!tap WORDS` (the top sheet's first row so titled),
 `!close`, `!back`, `!swipe` (the panel put away as a hand's swipe puts
 it), `!probe N` (for N frames, where the dock and the panel's sheet are
-drawn), `!sheetviews` (the sheet's views, from the panel's up), and `!record on|off` (ReplayKit; the movie is posted
+drawn), `!part` (the panel's first part as core sent it: its words and
+styles), `!sheetviews` (the sheet's views, from the panel's up), and `!record on|off` (ReplayKit; the movie is posted
 to the server's `/video`, for checking animations frame by frame).
 `make .build/bible-vellum.s` builds it for a device (it is part of `make
 check`); `tools/ios/build-linux.sh device programs/bible/vellum/app.l8 OUT
