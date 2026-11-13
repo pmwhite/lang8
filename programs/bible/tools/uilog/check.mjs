@@ -57,6 +57,9 @@ const T = {
   sheetStillMs: 40, // ...with no move of it this near before or after has jumped
   sheetCoversWidth: 0.9, // a sheet over this much of an element's width hides what is under it
   zoomMs: 600, // a presented sheet added this soon after the app's `zoom` mark is the zoomed one
+  zoomSpanMs: 1000, // ...and its zoom, and the hand-over at its end, this long from its coming
+  flipFrames: 2, // what is drawn at a place, changed and back within this many frames, is a flip
+  flipEasePx: 2, // ...unless its words are still drawn this close to the place (eased, not gone)
   turnBackPx: 6, // a sheet's height going back less than this in all is its spring settling
   blankRowsLeast: 3, // this many rows and headers of a list on screen gone in a frame, none in their place...
 };
@@ -195,9 +198,10 @@ function sign(x) {
   return (x > 0 ? "+" : "") + (Math.round(x * 10) / 10);
 }
 
-// 2. Flicker: gone and back, back and gone, text changed and back, faded
-// down and up, within T.flickerMs; or an element replaced by a new one
-// like it a frame or more later.
+// 2. Flicker: gone and back, back and gone, faded down and up, within
+// T.flickerMs; or an element replaced by a new one like it a frame or more
+// later. (Words changed and back, and moves undone, are judged by place:
+// below.)
 {
   const last = new Map();
   const removedByDesc = new Map();
@@ -213,13 +217,6 @@ function sign(x) {
       const twin = removedByDesc.get(e.d);
       if (twin && twin.id !== e.id && e.t - twin.t > 12 && e.t - twin.t <= T.flickerMs && !e.off && sameRect(twin.r, e.r)) find("flicker", `${e.d}|replaced`, twin.t, `${e.d} was taken away and a new one put in its place ${ms(e.t - twin.t)} later (blank between)`);
       last.set(e.id, { type: "add", t: e.t });
-    } else if (e.e === "text") {
-      const was = last.get(`text${e.id}`);
-      if (was && was.to === e.to) {
-        // (nothing: unchanged)
-      }
-      if (was && was.from === e.to && e.t - was.t <= T.flickerMs) find("flicker", `${desc(e.id)}|text`, was.t, `${desc(e.id)} text "${was.from}" → "${was.to}" → back within ${ms(e.t - was.t)}`);
-      last.set(`text${e.id}`, { t: e.t, from: e.from, to: e.to });
     } else if (e.e === "fade") {
       const was = last.get(`fade${e.id}`);
       if (was && was.down && e.to > e.from && e.t - was.t <= T.flickerMs && was.from - was.low >= 0.3) find("flicker", `${desc(e.id)}|dip`, was.t, `${desc(e.id)} dipped in opacity (${was.from} → ${was.low} → up) within ${ms(e.t - was.t)}`);
@@ -289,6 +286,88 @@ function coveredBySheets(items) {
   }
 }
 
+// What is drawn where, frame by frame: a place on the screen is a kind of
+// view (its class) at a rect (rounded to the point), and what is drawn there
+// is the words of the view at it. A flip: what is drawn at a place changes
+// (other words, or none) and comes back within T.flipFrames frames. Judged
+// by place, not by view: on a reload UIKit hands a reused cell or header
+// another row's place and words, which changes nothing that is seen, and a
+// view that moves away and back for a frame is a flip of the places it
+// left. Not judged: while a finger drags (the hand's), under a pane's
+// cover, and inside a zoomed sheet while it comes (the zoom isn't seen).
+{
+  const state = new Map();
+  // (A hand's: from a touch's or a drag's start to its end, and a list's
+  // glide after it to the glide's end.)
+  const handSpans = [];
+  {
+    let from = null;
+    for (const x of inputs) {
+      if (/^(touchstart|drag-start|decel-start)$/.test(x.type)) from = from ?? x.t;
+      else if (/^(touchend|drag-end|decel-end)$/.test(x.type) && from !== null) {
+        handSpans.push([from, x.t]);
+        from = null;
+      }
+    }
+    if (from !== null) handSpans.push([from, Infinity]);
+  }
+  const dragging = (t) => handSpans.some(([a, b]) => t >= a && t <= b + T.scrollJumpQuietMs);
+  const inZoom = (id, t) => {
+    const sheet = presentedSheetOf(id);
+    const life = sheet && zoomed.has(sheet) ? events.find((x) => x.e === "add" && x.id === sheet) : null;
+    return life && t >= life.t && t - life.t <= T.zoomSpanMs;
+  };
+  const cls = (d) => (d || "").split(/[ "]/)[0];
+  const snaps = [];
+  for (const e of events) {
+    if (e.e === "add") state.set(e.id, { cls: cls(e.d), r: e.r, tx: e.tx ?? null, off: !!e.off });
+    else if (e.e === "move" && state.has(e.id)) state.get(e.id).r = e.r;
+    else if (e.e === "text" && state.has(e.id)) state.get(e.id).tx = e.to;
+    else if (e.e === "remove") state.delete(e.id);
+    else if (e.e === "f") {
+      const drawn = new Map();
+      // (And where each kind of view with each words is, to tell a place
+      // emptied from words that eased a point or two across its rounding.)
+      const near = new Map();
+      for (const [id, v] of state) {
+        if (v.tx == null || v.off || !v.r) continue;
+        const key = `${v.cls}|${v.r.map((x) => Math.round(x)).join(",")}`;
+        drawn.set(key, { tx: v.tx, id });
+        const what = `${v.cls}|${v.tx}`;
+        if (!near.has(what)) near.set(what, []);
+        near.get(what).push(v.r);
+      }
+      snaps.push({ t: e.t, drawn, near });
+    }
+  }
+  for (let n = 1; n < snaps.length; n++) {
+    const before = snaps[n - 1];
+    for (const [key, was] of before.drawn) {
+      const now = snaps[n].drawn.get(key);
+      if (now && now.tx === was.tx) continue;
+      // (Changed at frame n: back within T.flipFrames?)
+      let back = -1;
+      for (let m = n + 1; m <= n + T.flipFrames && m < snaps.length; m++) {
+        const later = snaps[m].drawn.get(key);
+        if (later && later.tx === was.tx) {
+          back = m;
+          break;
+        }
+      }
+      if (back < 0) continue;
+      // (Its words still drawn within T.flipEasePx of the place: moved, not
+      // gone.)
+      const place = key.split("|")[1].split(",").map(Number);
+      const still = (snaps[n].near.get(`${key.split("|")[0]}|${was.tx}`) || []).some((r) => r.every((x, q) => Math.abs(x - place[q]) <= T.flipEasePx));
+      if (still) continue;
+      const t = snaps[n].t;
+      if (dragging(t) || covered(t, null, was.id) || inZoom(was.id, t)) continue;
+      const what = now ? `"${now.tx}"` : "nothing";
+      find("flicker", `${key}|flip`, t, `at ${key.split("|")[1]}, ${key.split("|")[0]} "${was.tx}" gave way to ${what} and came back ${ms(snaps[back].t - t)} later (what is drawn there)`);
+    }
+  }
+}
+
 function sameRect(a, b) {
   return a && b && Math.abs(a[0] - b[0]) < 2 && Math.abs(a[1] - b[1]) < 2 && Math.abs(a[2] - b[2]) < 2 && Math.abs(a[3] - b[3]) < 2;
 }
@@ -350,6 +429,13 @@ function sameRect(a, b) {
   };
   for (const e of events)
     if (e.e === "fade" && T.popKinds.has(kind(e.id)) && Math.abs(e.to - e.from) >= 0.8 && !coveredBySheetChange(e.id, e.t)) find("pop", `${desc(e.id)}|fade`, e.t, `${desc(e.id)} opacity ${e.from} → ${e.to} in a single frame`);
+  // A zoomed sheet moving while it comes (UIKit's hand-over at the zoom's
+  // end): listed with the zoom, which the log can't see.
+  for (const id of zoomed) {
+    const add = events.find((x) => x.e === "add" && x.id === id);
+    const moves = events.filter((x) => x.e === "move" && x.id === id && x.t - add.t <= T.zoomSpanMs);
+    if (moves.length) find("zoomed (not seen by the log)", `${desc(id)}|handover`, moves[0].t, `${desc(id)} moved ${moves.length} time(s) within ${ms(T.zoomSpanMs)} of coming by a zoom (UIKit's hand-over; the zoom itself isn't seen)`);
+  }
   // A presented sheet that changes its place or height in one frame, not
   // moving in the frames around it (a detent set without animation): it
   // jumped. (Its rect is where the screen shows it: the iPhone logs a

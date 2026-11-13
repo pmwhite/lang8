@@ -157,16 +157,28 @@ thresholds sit at the top of `check.mjs`:
   within 300 ms of appearing, in at most two frames, with no input in
   between. More frames than that is an animation.
 - **Flicker.** An element goes and comes back within 250 ms, is replaced by
-  a twin a frame or more later, has its text changed and changed back, or
-  dips in opacity and recovers. A list blanks: three or more of its rows
-  and headers on screen go in one frame with none put in their place, and
-  rows come back into it within 250 ms.
+  a twin a frame or more later, or dips in opacity and recovers. A list
+  blanks: three or more of its rows and headers on screen go in one frame
+  with none put in their place, and rows come back into it within 250 ms.
+  A flip, judged by place: what is drawn at a place (a kind of view at a
+  rect, to the point) changes, to other words or none, and comes back
+  within two frames, unless the same words are drawn within 2 of the
+  place in that frame (a row easing a point at a time crosses the
+  rounding of its place without anything going). By place, not by view, because on a reload UIKit
+  hands a reused cell or header another row's place and words, which no
+  one sees; a view moving away and back for a frame is a flip of the place
+  it left. Not judged while a hand moves a list (from a touch or a drag to
+  its end, and through the list's glide after it), under a pane's cover,
+  or in a zoomed sheet as it comes. A flip while the list cross-fades (an
+  update's or a typed refill's 0.15–0.2 s fade) is blended on the screen,
+  so it shows milder than the log's frame says; it is still reported.
 - **Pop.** A sheet, toast, bar, or pane appears or goes at full opacity in
   one frame, with no fade or slide nearby. Only the outermost of elements
   that appear together is reported. A presented sheet that moves or
   changes its height by 20 or more in one frame, not moving in the frames
   around it, jumped (a height set without animation) and is a pop too.
-  Not pops: a zoomed sheet's coming and going (listed apart as zoomed),
+  Not pops: a zoomed sheet's coming and going and its moves within a second
+  of coming (UIKit's hand-over at the zoom's end: listed apart as zoomed),
   and a presented sheet hidden while a later one covers it (UIKit's).
 - **Scroll jump.** A container in sight scrolls more than 40 in one frame
   with no input in the 100 ms before.
