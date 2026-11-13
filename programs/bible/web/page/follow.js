@@ -17,9 +17,7 @@ const PANEL = 1;
 
 const SLACK = 0.5;
 const SAME = 0.001;
-const GLIDE_SECONDS = 0.05;
-// How long a glide may go on after its place was last new (s).
-export const GLIDE_MOST = 0.3;
+const GLIDE_SECONDS = 0.1;
 
 // The links: pairs of a section of the top pane and one of the bottom pane
 // linked with it.
@@ -155,17 +153,20 @@ export function topMove(links, topTop, topHeight, bottomTop, bottomHeight) {
   return !found || Math.abs(best - topTop) <= SLACK ? null : best;
 }
 
-// A pane gliding to its place: where it is after seconds more, there by
-// left seconds from now at the latest (core's follow_glide).
-export function glide(at, to, seconds, left) {
+// A pane gliding to its place, as a critically damped spring: from at,
+// moving at velocity (points a second), toward to; where it is after
+// seconds more and how fast it goes then (core's follow_glide).
+export function glide(at, to, velocity, seconds) {
   const dt = Math.max(0, seconds);
-  if (left <= dt) return to;
-  const x = dt / GLIDE_SECONDS;
-  const grown = 1 + x + (x * x) / 2 + (x * x * x) / 6;
-  const after = (left - dt) / left;
-  const kept = Math.min(after * after * after, 1 / grown);
-  const next = to + (at - to) * kept;
-  return Math.abs(next - to) <= SLACK ? to : next;
+  const omega = 2 / GLIDE_SECONDS;
+  const x = omega * dt;
+  const decay = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+  const change = at - to;
+  const pull = (velocity + omega * change) * dt;
+  const nextVelocity = (velocity - omega * pull) * decay;
+  const next = to + (change + pull) * decay;
+  if ((change > 0 && next < to) || (change < 0 && next > to) || Math.abs(next - to) <= SLACK) return { at: to, velocity: 0 };
+  return { at: next, velocity: nextVelocity };
 }
 
 // A pane's place and its reading line's position, each way (core's

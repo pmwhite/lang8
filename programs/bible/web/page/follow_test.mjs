@@ -43,11 +43,11 @@ for (let i = 0; i < lines.length; i++) {
     if (!same(got, want)) fail(l.split(" ")[0], show(got), want);
     i += 1;
   } else if (l.startsWith("glide ")) {
-    const [at, to, s, left] = nums(l).map(Number);
-    const want = Number(lines[i + 1].slice(7));
+    const [at, to, velocity, s] = nums(l).map(Number);
+    const [wantAt, wantVelocity] = nums(lines[i + 1]).map(Number);
     n++;
-    const got = glide(at, to, s, left);
-    if (Math.abs(got - want) > 0.01) fail("glide", got, want);
+    const got = glide(at, to, velocity, s);
+    if (Math.abs(got.at - wantAt) > 0.01 || Math.abs(got.velocity - wantVelocity) > 0.01) fail("glide", `${got.at} ${got.velocity}`, `${wantAt} ${wantVelocity}`);
     i += 1;
   } else if (l.startsWith("place ")) {
     const [pi, frac] = nums(l).map(Number);

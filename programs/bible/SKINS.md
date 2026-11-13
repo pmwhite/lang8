@@ -468,16 +468,23 @@ makes it hold, starting in the frame it broke in:
   whose linked section shows most below is taken; none showing at all, the
   page stays.
 
-The moving pane glides there quickly (`follow_glide`: each frame closing
-all but e^(−t / 50 ms) of the way, so most of it at once and slowing; about
-a quarter of a second), a new place mid-glide glided to from where it is.
-However far it has to go, it is there 0.3 s (`FOLLOW_GLIDE_MOST`) after its
-place was last new: the way left shrinks at least as the cube of the time
-left, so a long glide slows smoothly to its end in time;
-where motion is reduced it is there at once. Every skin steps the glide
-itself, a frame at a time, by `follow_glide` (not a platform's scroll
-animation), so that the follower keeps up while the hand's pane moves
-and is done soon after it stops. The positions of sections not laid out yet
+The moving pane glides there (`follow_glide`): a critically damped
+spring, carrying the speed it has from frame to frame, so that from rest
+it eases in (no kick of speed in its first frame), is most of the way in
+about a third of a second, and slows to its place without passing it. A
+new place mid-glide is glided to from where the pane is, at the speed it
+has, so a place that moves on frame by frame as the leader moves is
+followed as one smooth motion, not a step for each section. It holds
+however long a frame is (a slow device's). Where motion is reduced the
+pane is there at once. Every skin steps the glide itself, a frame at a
+time, by `follow_glide` (not a platform's scroll animation), so that the
+follower keeps up while the hand's pane moves and is done soon after it
+stops. On the iPhone a glide's step more than a screen past what the
+follower has laid out (a Bible flung beside a commentary's long comments)
+makes its window anew from the part guessed to be there, rather than
+laying out every part between in one frame (at that speed the words are
+a blur); where it goes, and the links, move with it, so the glide goes
+on at its speed. The positions of sections not laid out yet
 are guessed: an anchor whose part isn't laid out counts where it would be
 were each part between it and what is laid out as tall for its bytes
 (`sizes`) as the parts of its document measured so far are on average (a
@@ -883,7 +890,7 @@ From the skin:
 | `panelanchor ID` | the panel's Back (or a swipe) shows ID on top: core lets the panel's screens above it go, any sheet's kept |
 | `closegroup GROUP` | close the sheet's screens (0) or the side panel's screens (1) |
 | `panelfits 0/1`, `panelvisible 0/1` | tell core whether the skin has a panel beside the reader (at its right or under it), and whether it is currently visible, including when the platform temporarily detaches it |
-| `panelfill 0/1` | tell core whether the panel may fill the screen now: 0 where it is a column beside the page (UIKit's inspector column on a wide window), and core's reader menu has no Full Screen then; a skin that never says keeps Full Screen |
+| `panelfill 0/1` | tell core whether the panel may fill the screen now: 0 where it is a column beside the page (an iPad's wide window), and core's reader menu has no Full Screen then; a skin that never says keeps Full Screen |
 | `model ID [SECTION ROW]` | return the screen's current description without a presentation effect; with windowed rows, include the requested lazy row |
 | `windowrows 0/1` | choose full lazy sections (the default) or their counts with rows fetched on demand, a page at a time (`model ID SECTION ROW`); available to every skin |
 | `editmenu COMMAND` | perform one of core's text-selection menu commands on the current selection |
@@ -1002,70 +1009,53 @@ parts' anchors' lines, and tells core as its anchor changes and at rest.
 A `go` waits for its pane's table to be on the screen, and is carried to
 a new table as what the panel reads changes. Linked, the pane a finger
 last moved leads and the other follows each frame by core/follow.l8's
-rules (a commentary waiting while the page decelerates).
+rules. The iPhone keeps the links it follows by from frame to frame
+(moved by the shifts of parts coming and going above), making them again
+at once when what links the panes changes (anchors, sizes, maps) and
+otherwise at rest or at most once a second while a pane moves, so that a
+frame of following costs little on a slow device; it measures parts ahead
+as a pane moves only while frames keep up with the screen.
 
-From iOS 26 the panel is UIKit's (`ios/inspector.l8`): the window's root
-holds a `UISplitViewController` (two columns), the page's navigation
-controller moved between two hosts of the app's (the secondary column's,
-expanded; the compact column's, collapsed), so that UIKit never wraps it
-and the page never has a Back; the panel's navigation controller is the
-split's inspector column. On a wide window the panel is a column at the
-page's right (320 to 390 points, at most 480 or 0.4 of the window, its
-divider dragged; the page keeps 28 em and its margins, `panelfill 0`: no
-Full Screen there). Collapsed (an iPhone, held either way: sideways its
-split lays the inspector over the page, not beside it; and an iPad window
-too narrow for both, the room inside its safe area; the root tells the
-split its size class) UIKit shows
-it as a sheet over the page, `panelfill 1`: at a third, a half or the
-whole height (the last its Full Screen, `tap full` sent as the sheet
-reaches or leaves it), the page bright and usable above the first two,
-the system's grabber and its swipe away (`tap shelf`). The sheet's
-heights and the page undimmed are set before each showing (UIKit makes a
-new presentation each time); it opens at the height it was last left at.
-UIKit calls nothing as the sheet moves, so a display link watches it from
-the move's start to three still frames: each frame the tray, the way
-back's capsule and the mini player ride above its top; once still, the
-page's bottom inset becomes what the sheet covers (its offset untouched,
-so nothing on it moves), its place is told, and the panel is brought by
-the rule once if the page's top edge's link is out of its sight (at the
-whole height the page is left as it was). The panel's reader is laid out
-at its place out of the window before the sheet is asked for, at the
-size the sheet last had at that height, with the window's display scale,
-text size and style lent to it (TextKit measures by them), and corrected
-in its `viewIsAppearing:` at its final size, before the sheet's first
-frame.
-Sheets (Go To, Reading) present over the panel's sheet, never in place
-of it. The reader has the system's navigation bar: its title the page's
-title's kind (the chapter with its chevron, what is read small and faint
-under it, a tap Go To aimed at the panel), Link at its left in the
-accent while linked, the menu at its right, plain glyphs, the same items
-moved to each new reader screen (Swap Panes) and changed in place; the
-bar opaque in the panel's color with a short fade below it, as the page's
-bar is, so that nothing is legible behind its title; its words at 0.9 of
-the page's size at every height. At a third and a half the sheet floats
-a little in from the screen's edges: a cover in the page's color, placed
-each frame with the sheet, keeps the page's words out of that gap. Its other screens (Study) have
-the system's bar with Back and their buttons in the panel's toolbar, as
-in Study's own sheet; on the sheet no screen has a close of its own (the
-swipe, the page's panel button and Close Panel put it away), in a column
-each has one.
+The panel is an ordinary UIKit sheet the page presents (`ios/panel.l8`;
+the app needs iOS 26), or, on an iPad window with room for both (the
+page keeping 28 em and its margins beside 390 points), a column at the
+page's right after a hairline, laid out by the root's frames
+(`panelfill 0`: no Full Screen there). An iPad window too narrow for the
+column takes the iPhone's width class, so the panel is a sheet at its
+foot there too. The sheet (`panelfill 1`) stops at a third, a half or
+the whole height (the last its Full Screen), the page bright and usable
+behind it at every height, the system's grabber, drag and swipe; held
+sideways it is a card at the foot (edge-attached), the page beside it.
+It opens at the height it was last left at. Its delegate tells what a
+hand did: a height chosen (`tap full` as it reaches or leaves the whole
+height), the sheet swiped away (`tap shelf`). The panel's own layout
+says where UIKit puts the sheet's top: the tray, the way back's capsule
+and the mini player ride above it, and once it has been still a moment
+the page's bottom inset becomes what it covers (its offset untouched, so
+nothing on it moves), core's Full Screen is made to agree with its
+height, the page's place is told, and the panel is brought by the rule
+once if the page's top edge's link is out of its sight. The panel's
+reader is laid out at its place in its `viewIsAppearing:`, at its final
+size, before the first frame of its rise. A window that changes size
+moves the panel between sheet and column. Sheets (Go To, Reading) are
+presented over the panel's sheet, never in place of it, and the panel
+waits to be presented until the sheets over the page have gone.
 
-Before iOS 26 the panel is the app's own, laid out by frames
-(`ios/beside.l8`): at the page's right on a wide window, under it on an
-iPhone, its grabber resizing it. The panel opened (or its grabber
-dragged) makes the page shorter under a place core sent the panel to:
-once the panel's reader is laid out, the page's place is told again and
-the panel brought to it by the same rules. Its reader has no navigation
-bar: a row of its
-own, 48 points, the grabber over its top, core's `left` as the
-document's name, then "· " and the chapter faint after it while core's
-title names one (the chapter at most half the row, cut at its end), then
-a small chevron, all one button; Link (the accent while linked, else
-faint) and the menu as glyphs; its words a short fade under it, and at 0.9 of the
-page's size (the page's look made again at that size, `look_swap`). Its
-other screens keep the system's bar under the same grabber. The page's
-last 24 points over the panel fade into the page's color, as its top
-bar's do, over one hairline. A sheet's Done is a check on the bar's plain
+The reader has the system's navigation bar: its title the page's title's
+kind (the chapter with its chevron, what is read small and faint under
+it, a tap Go To aimed at the panel), Link at its left in the accent while
+linked, the menu at its right, plain glyphs, the same items moved to
+each new reader screen (Swap Panes) and changed in place; the bar opaque
+in the panel's color with a short fade below it, as the page's bar is,
+so that nothing is legible behind its title; its words at 0.9 of the
+page's size at every height. At a third and a half the sheet floats in
+from the screen's edges, the page's words passing behind its glass, as
+the system draws every floating sheet. Its other screens (Study) have
+the system's bar with Back and their buttons in the panel's toolbar; on
+the sheet no screen has a close of its own (the swipe, the page's panel
+button and Close Panel put it away), in a column each has one.
+
+A sheet's Done is a check on the bar's plain
 glass, not the system's filled Done; a row's ⓘ is faint, a check in the
 accent; a field floating at a list's foot is marked an element of its
 bottom edge (`UIScrollEdgeElementContainerInteraction`), so the rows

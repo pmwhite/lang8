@@ -111,9 +111,11 @@ final class FollowCheck {
           break;
         }
         case "glide": {
-          double y = Follow.glide(numbers[0], numbers[1], numbers[2], numbers[3]);
-          got = String.format("%.4f", y);
-          same = Math.abs(y - Double.parseDouble(expected)) <= CLOSE_ENOUGH;
+          Follow.Glide g = Follow.glide(numbers[0], numbers[1], numbers[2], numbers[3]);
+          got = String.format("%.4f %.4f", g.at, g.velocity);
+          String[] want = expected.split(" ");
+          same = Math.abs(g.at - Double.parseDouble(want[0])) <= CLOSE_ENOUGH
+              && Math.abs(g.velocity - Double.parseDouble(want[1])) <= CLOSE_ENOUGH;
           break;
         }
         case "place": {

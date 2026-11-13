@@ -7,7 +7,7 @@
 // (UTF-8, `\n`-ended, fields split by tabs), as Android's skin does.
 import { runResumable, pausing } from "../../../../web/l8-runtime.js";
 import { Reloader, watchBuilds } from "../../../../web/reload.js";
-import { PLACE_SLACK, newLinks, addLinks, bottomMove, topMove, glide, GLIDE_MOST } from "./follow.js";
+import { PLACE_SLACK, newLinks, addLinks, bottomMove, topMove, glide } from "./follow.js";
 
 const meta = (n) => document.querySelector(`meta[name="${n}"]`)?.content || "";
 const DATA = "/read/data/" + meta("sb-data");
@@ -2013,21 +2013,18 @@ function followNow(lead) {
 // The pane following glides (its sight's top going to a place kept as a
 // spot in a part, so that parts coming and going above it leave it the
 // same), a frame at a time by follow.js's glide; a new place mid-glide is
-// glided to from where it is.
+// glided to from where it is, at the speed it has.
 let followGlide = null;
 
 function followGlideTo(r, to) {
   if (followGlide && followGlide.r !== r) stopFollowGlide();
   const spot = r.spotOf(to);
   if (followGlide) {
-    // (There at most GLIDE_MOST after its place was last new.)
-    const was = r.spotY(followGlide.to);
-    if (was === null || Math.abs(to - was) > 0.5) followGlide.new = performance.now();
     followGlide.to = spot;
     return;
   }
   // (Its first step now, in the frame the rule broke in.)
-  followGlide = { r, to: spot, at: performance.now() - FRAME_MS, new: performance.now(), frame: 0 };
+  followGlide = { r, to: spot, at: performance.now() - FRAME_MS, velocity: 0, frame: 0 };
   followGlideFrame(performance.now());
 }
 
@@ -2044,8 +2041,9 @@ function followGlideFrame(now) {
     followGlide = null;
     return;
   }
-  const seconds = Math.min(0.1, (now - g.at) / 1000);
-  const next = glide(from, to, seconds, GLIDE_MOST - ((now - g.new) / 1000 - seconds));
+  const step = glide(from, to, g.velocity, (now - g.at) / 1000);
+  const next = step.at;
+  g.velocity = step.velocity;
   g.at = now;
   r.scrollBy(next - from);
   const moved = sightTop(r);

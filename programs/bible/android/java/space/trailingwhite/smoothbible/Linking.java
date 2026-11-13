@@ -232,23 +232,21 @@ final class Linking implements Reader.Moves {
   private boolean following;
 
   // The pane following glides (its sight's top going to glideAim), a frame
-  // at a time by Follow.glide; a new place mid-glide is glided to from
-  // where it is.
+  // at a time by Follow.glide, at glideVelocity; a new place mid-glide is
+  // glided to from where it is, at the speed it has.
   private Reader gliding;
-  private double glideAim;
-  // When it last stepped, and when its place was last new (there at most
-  // Follow.GLIDE_MOST after).
-  private long glideAt, glideNew;
+  private double glideAim, glideVelocity;
+  // When it last stepped.
+  private long glideAt;
 
   private void glideTo(Reader r, double to) {
     if (gliding != null && gliding != r) stopGlide();
-    long now = android.os.SystemClock.uptimeMillis();
-    if (gliding == null || Math.abs(to - glideAim) > Follow.SLACK) glideNew = now;
     glideAim = to;
     if (gliding != null) return;
     gliding = r;
+    glideVelocity = 0;
     // (Its first step now, in the frame the rule broke in.)
-    glideAt = now - 16;
+    glideAt = android.os.SystemClock.uptimeMillis() - 16;
     glideFrame.run();
   }
 
@@ -257,8 +255,9 @@ final class Linking implements Reader.Moves {
     if (r == null) return;
     long now = android.os.SystemClock.uptimeMillis();
     double from = r.sightTop();
-    double seconds = Math.min(0.1, (now - glideAt) / 1000.0);
-    double next = Follow.glide(from, glideAim, seconds, Follow.GLIDE_MOST - ((now - glideNew) / 1000.0 - seconds));
+    Follow.Glide g = Follow.glide(from, glideAim, glideVelocity, (now - glideAt) / 1000.0);
+    double next = g.at;
+    glideVelocity = g.velocity;
     glideAt = now;
     r.followSight(next);
     double at = r.sightTop();

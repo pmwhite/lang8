@@ -134,9 +134,7 @@ final class Follow {
 
   // How far from where it should be a pane may be and still count as there,
   // how near two distances are to be one section's, and a glide's time.
-  static final double SLACK = 0.5, SAME = 0.001, GLIDE_SECONDS = 0.05;
-  // How long a glide may go on after its place was last new (s).
-  static final double GLIDE_MOST = 0.3;
+  static final double SLACK = 0.5, SAME = 0.001, GLIDE_SECONDS = 0.1;
 
   private static double[] range(double from, double to, double height) {
     double a = to - height;
@@ -218,17 +216,29 @@ final class Follow {
     return !found || Math.abs(best - topTop) <= SLACK ? OptionalDouble.empty() : OptionalDouble.of(best);
   }
 
-  // A pane gliding to its place: where it is after seconds more, there by
-  // left seconds from now at the latest (core's follow_glide).
-  static double glide(double at, double to, double seconds, double left) {
+  // A pane gliding to its place, as a critically damped spring: from at,
+  // moving at velocity (points a second), toward to; where it is after
+  // seconds more and how fast it goes then (core's follow_glide).
+  static final class Glide {
+    final double at, velocity;
+
+    Glide(double at, double velocity) {
+      this.at = at;
+      this.velocity = velocity;
+    }
+  }
+
+  static Glide glide(double at, double to, double velocity, double seconds) {
     double dt = Math.max(0, seconds);
-    if (left <= dt) return to;
-    double x = dt / GLIDE_SECONDS;
-    double grown = 1 + x + x * x / 2 + x * x * x / 6;
-    double after = (left - dt) / left;
-    double kept = Math.min(after * after * after, 1 / grown);
-    double next = to + (at - to) * kept;
-    return Math.abs(next - to) <= SLACK ? to : next;
+    double omega = 2 / GLIDE_SECONDS;
+    double x = omega * dt;
+    double decay = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+    double change = at - to;
+    double pull = (velocity + omega * change) * dt;
+    double nextVelocity = (velocity - omega * pull) * decay;
+    double next = to + (change + pull) * decay;
+    if (change > 0 && next < to || change < 0 && next > to || Math.abs(next - to) <= SLACK) return new Glide(to, 0);
+    return new Glide(next, nextVelocity);
   }
 
   // A pane's place and its reading line's position, each way (core's
