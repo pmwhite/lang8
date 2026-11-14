@@ -364,7 +364,8 @@ screen_present(id: int) {
         quick_show(s);
         return
     }
-    quick_covered();
+    // (In place of Go To: it goes.)
+    quick_close(false);
     controller: int = slot_controller(s);
     if (sheet_nav != 0 && msg(sheet_nav, sel("presentingViewController")) != 0 && !truth(msg(sheet_nav,
         sel("isBeingDismissed")))) {
@@ -409,6 +410,12 @@ nav_of_group(g: int): int {
 screen_push(id: int) {
     s: int = slot_of_id(id);
     if (s < 0) return;
+    // (Over Go To's quick form: the first screen it opens fills the room
+    // above its field, goto.l8.)
+    if (slots[s].group == 0 && quick.slot >= 0 && !quick_drilled()) {
+        quick_drill_begin(s);
+        return
+    }
     nav: int = nav_of_group(slots[s].group);
     if (nav == 0) {
         screen_present(id);
@@ -420,6 +427,12 @@ screen_push(id: int) {
 // `pop`: the top screen of the sheet (else the panel's) taken off.
 screen_pop() {
     nav: int = nav_of_group(0);
+    // (The first screen Go To opened: Go To again.)
+    if (nav != 0 && nav == quick.drill_nav && msg(msg(nav, sel("viewControllers")),
+        sel("count")) < 2) {
+        quick_drill_home(false);
+        return
+    }
     if (nav == 0 || msg(msg(nav, sel("viewControllers")), sel("count")) < 2) nav = panel_nav();
     if (nav == 0) return;
     top: int = msg(nav, sel("topViewController"));
@@ -431,6 +444,10 @@ screen_pop() {
 // `pop_to ID`: back to that screen.
 screen_pop_to(id: int) {
     s: int = slot_of_id(id);
+    if (quick_shows(s)) {
+        quick_drill_home(false);
+        return
+    }
     if (s < 0 || slots[s].controller == 0) return;
     nav: int = msg(slots[s].controller, sel("navigationController"));
     if (nav == 0) return;
@@ -746,7 +763,7 @@ list_dress(s: int) {
         if (responds(right, "setStyle:")) msg1(right, sel("setStyle:"), 2);
         msg1(right, sel("setEnabled:"), if (ui.confirm_off) 0 else 1);
         msg1(right, sel("setAccessibilityLabel:"), ui_text(ui.confirm))
-    } else if (ui.button.n > 0) right = bar_item_menu() else if (slots[s].group == 0 && list_is_first(controller)) right = bar_item_symbol("xmark",
+    } else if (ui.button.n > 0) right = bar_item_menu() else if (slots[s].group == 0 && list_is_first(controller) && !quick_drill_holds(controller)) right = bar_item_symbol("xmark",
         "vellumDone:", controller) else if (slots[s].group == 1 && panel.column && list_is_first(controller)) right = bar_item_symbol("xmark",
         "vellumPanelClose:", controller);
     rights: int = fresh("NSMutableArray");
@@ -762,6 +779,10 @@ list_dress(s: int) {
             0, controller)));
         if (ui.left_icon.n == 0) msg1(left, sel("setAction:"), sel("vellumLeft:"));
         if (ui.left_action == 0) msg1(left, sel("setEnabled:"), 0)
+    } else if (quick_drill_holds(controller) && list_is_first(controller)) {
+        // (The first screen Go To opened: back to Go To.)
+        left = bar_item_symbol("chevron.backward", "vellumDrillBack:", controller);
+        msg1(left, sel("setAccessibilityLabel:"), nsstring("Go To"))
     }
     msg1(item, sel("setLeftBarButtonItem:"), left);
     list_search_dress(s, item);
@@ -770,7 +791,8 @@ list_dress(s: int) {
     list_empty_dress(s);
     list_keys_check(s);
     view: int = msg(controller, sel("view"));
-    set_background(view, if (ui.page) colors.page else colors.sheet)
+    // (A screen Go To opened: on Go To's glass.)
+    set_background(view, if (ui.page) colors.page else if (quick_drill_holds(controller)) clear_color() else colors.sheet)
 }
 
 list_is_first(controller: int): bool {
@@ -1588,16 +1610,24 @@ grid_cell(list: int, path: int, row: UiRow): int {
     cell: int = msg2(list, sel("dequeueReusableCellWithReuseIdentifier:forIndexPath:"),
         nsstring("grid"), path);
     config: int = msg(cell, sel("defaultContentConfiguration"));
-    // (A square's words are its value, its title what a screen reader says:
-    // Chapter 3.)
-    words_begin();
-    words_add_int(row.value);
-    msg1(config, sel("setText:"), words_ns());
+    // (A square's words are its short words, else its value; its title what
+    // a screen reader says: Chapter 3.)
+    if (row.short.n > 0) msg1(config, sel("setText:"), ui_text(row.short)) else {
+        words_begin();
+        words_add_int(row.value);
+        msg1(config, sel("setText:"), words_ns())
+    }
     msg1(cell, sel("setAccessibilityLabel:"), if (row.label.n > 0) ui_text(row.label) else ui_text(row.title));
     tp: int = msg(config, sel("textProperties"));
     msg1(tp, sel("setAlignment:"), 1);
-    msg1(tp, sel("setFont:"), font_rounded(18.0f64, if (row.strong) 0.5f64 else 0.2f64));
+    msg1(tp, sel("setFont:"), font_rounded(if (row.short.n > 0) 15.0f64 else 18.0f64,
+        if (row.strong) 0.5f64 else 0.2f64));
     msg1(tp, sel("setColor:"), if (row.tinted || row.strong) colors.accent else colors.ink);
+    if (row.short.n > 0) {
+        msg1(tp, sel("setNumberOfLines:"), 1);
+        msg1(tp, sel("setAdjustsFontSizeToFitWidth:"), 1);
+        msg_set_f(tp, sel("setMinimumScaleFactor:"), 0.7f64)
+    }
     msg1(cell, sel("setContentConfiguration:"), config);
     background: int = msg(cls("UIBackgroundConfiguration"), sel("listGroupedCellConfiguration"));
     msg1(background, sel("setBackgroundColor:"), colors.cell);
@@ -2216,6 +2246,7 @@ screens_classes_make() {
     add_method1(list, sel("vellumConfirm:"), &confirm_tapped, "v@:@");
     add_method1(list, sel("vellumLeft:"), &left_tapped, "v@:@");
     add_method1(list, sel("vellumDone:"), &done_tapped, "v@:@");
+    add_method1(list, sel("vellumDrillBack:"), &quick_drill_back_tapped, "v@:@");
     add_method1(list, sel("vellumTool:"), &tool_tapped, "v@:@");
     add_method1(list, sel("vellumCommand:"), &command_chosen, "v@:@");
     add_method1(list, sel("vellumSegment:"), &segment_chosen, "v@:@");

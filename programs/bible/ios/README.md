@@ -35,24 +35,28 @@ the compiled asset catalog (`assets/`), the frameworks it links
   next turn, so the keys wait on nothing, and its rows form as they come.
   Closed, the field sinks back into the capsule. Above the field, nearest first,
   all of Go To on one shape of glass, made to fit the room above the keys
-  so that nothing scrolls: Recent, the documents and Browse a line each,
-  its name in a column at its left and its places plain words after it
-  (the one read in the accent), as many as fit whole, its button or All
-  at its right; the ribbons and the plan's day rows under their headers
-  (New, Plans), a ribbon's strip in its color, its place at its right;
-  what the words find rows under theirs (All 77 at a header's right);
-  hairlines between. What doesn't fit is a last line, More, of links to
-  the whole lists (it is made for the keys' height as last seen, and made
-  again when the keys rise to another). The field, its close, the book
-  chips and the grid are the other glass.
-  While the words name
-  books, the books as chips and the chosen one's chapters as a grid (the
-  one read last ringed); Books of the Bible makes the grid every book's.
-  A chapter's tap goes there; held, the grid grows into the chapter's
-  verses, and a finger slid to one and lifted goes there. Return goes to
-  the ringed chapter or the washed row. There is no sheet of Go To: a
-  screen it opens (a document's page, History, every verse found) is a
-  sheet over it, the keys down, and swiped away, Go To again.
+  so that nothing scrolls: the ribbons and the plan's day a row each (a
+  ribbon's strip in its color, its place at its right), Recent and the
+  documents a line each (its name in a column at its left, its places
+  plain words after it, the one read in the accent, as many as fit
+  whole), and at the top its ways to more, quiet buttons: Books, History,
+  Plans, Browse. Typed, what the words find are rows under their headers
+  (All 77 at a header's right); what doesn't fit is a last line, More, of
+  links to the whole lists (made for the keys' height as last seen, and
+  again when they rise to another). While the words name books, the
+  books as chips and the chosen one's chapters as a grid (the one read
+  last ringed). A chapter's tap goes there; held, the grid grows into the
+  chapter's verses, and a finger slid to one and lifted goes there.
+  Return goes to the ringed chapter or the washed row. The field, its
+  close, the book chips and the grid are the other glass.
+- **Deeper, still in Go To.** A screen Go To opens (Books of the Bible,
+  a grid of their names, then a book's chapters; History; Plans; Browse;
+  a document's page; every verse found) fills the room above the field
+  on Go To's glass, the keys down and the field's words kept: the lists
+  of the app's own navigation, a child of the overlay's controller. Back
+  (‹) is the screen before, from the first Go To again; a tap on the
+  field is Go To again too, the keys up; the close closes Go To from
+  anywhere, and a place picked anywhere goes there.
 - **The tray is the dock.** Verses selected, the capsule grows up into a
   glass panel of core's tray (the reference, the highlights' colors, Copy,
   Share, Bookmark, Note, Study, Compare, Memorize), and goes back into the
@@ -119,7 +123,7 @@ place and chrome, the panel's sheet, the dock, and the screens), `!scroll
 P DY`, `!flick P DY` (a finger's fling, frame by frame), `!dock
 open|close`, `!tap WORDS` (the top sheet's first row so titled, or the quick form's row),
 `!close`, `!back`, `!swipe` (the panel put away as a hand's swipe puts
-it), `!capsule` (a tap on the dock's capsule), in Go To's quick form `!type WORDS`, `!return`
+it), `!capsule` (a tap on the dock's capsule), `!home` (Back from the first screen Go To opened), in Go To's quick form `!type WORDS`, `!return`
 and `!hold N V` (chapter N held, the finger on verse V; `!hold 0` lets
 go), `!probe N` (for N frames, where the dock and the panel's sheet are
 drawn), `!part` (the panel's first part as core sent it: its words and

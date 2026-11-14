@@ -61,6 +61,13 @@ type QuickGoTo = {
     rows_content: int;
     rows_height: f64;
     rows_top: f64;
+    // The screens Go To opened: their navigation (held; 0: none, Go To's
+    // home shows) and the shape it is shown on; and the controller whose
+    // view the overlay is (held), their navigation's parent (UIKit wants a
+    // child's view within its parent's).
+    drill_nav: int;
+    host: int;
+    drill_box: int;
     // The keys' height as last seen (0: not yet), what the rows are made
     // to fit above; the width of the column of its lines' names (as wide
     // as the widest of them).
@@ -79,9 +86,6 @@ type QuickGoTo = {
     // chapter (of the Bible's), its name, how many chapters, the chapter
     // marked and whether Return goes there.
     has_passage: bool;
-    // The chooser's book (-1: none, its grid every book's, Books of the
-    // Bible).
-    chosen_book: int;
     first_chapter: int;
     book_name: int;
     chapters: int;
@@ -121,6 +125,9 @@ quick: QuickGoTo = QuickGoTo {
     rows_content: 0,
     rows_height: 0.0f64,
     rows_top: 0.0f64,
+    drill_nav: 0,
+    host: 0,
+    drill_box: 0,
     keys_h: 0.0f64,
     name_w: 0.0f64,
     rows_at_foot: true,
@@ -131,7 +138,6 @@ quick: QuickGoTo = QuickGoTo {
     grid_content: 0,
     verses_view: 0,
     has_passage: false,
-    chosen_book: -1,
     first_chapter: 0,
     book_name: 0,
     chapters: 0,
@@ -238,6 +244,9 @@ quick_root_make(from_capsule: bool) {
         0.0f64, 0.0f64, b.w, b.h));
     msg1(root, sel("setAutoresizingMask:"), 18);
     quick.root = held(quick.root, root);
+    host: int = autoreleased(make("UIViewController"));
+    msg1(host, sel("setView:"), root);
+    quick.host = held(quick.host, host);
     quick.slot = -1;
     quick.asking = false;
     quick.from_capsule = from_capsule;
@@ -306,8 +315,12 @@ quick_remove_now() {
     v: int = quick.leaving;
     if (v == 0) return;
     quick.leaving = 0;
+    quick_drill_detach();
     msg(v, sel("removeFromSuperview"));
-    if (v == quick.root) quick.root = held(quick.root, 0);
+    if (v == quick.root) {
+        quick.root = held(quick.root, 0);
+        quick.host = held(quick.host, 0)
+    }
     if (dock.title_glass != 0) glass_shown(dock.title_glass, dock_visible() || quick.from_capsule,
         true, dock_tint())
 }
@@ -430,6 +443,12 @@ quick_views_make(view: int) {
     quick.verses_view = autoreleased(view_new());
     set_hidden(quick.verses_view, true);
     add_sub(glass_content(quick.grid_glass), quick.verses_view);
+    // (The screens Go To opens, on a shape of their own, hidden till then.)
+    quick.drill_box = glass_view(false);
+    set_corners(quick.drill_box, QUICK_PANEL_CORNER);
+    msg1(quick.drill_box, sel("setClipsToBounds:"), 1);
+    set_hidden(quick.drill_box, true);
+    add_sub(view, quick.drill_box);
     // (The field, where the capsule was, and the close beside it.)
     quick.field_box = glass_container(14.0f64);
     add_sub(view, quick.field_box);
@@ -465,6 +484,8 @@ quick_views_make(view: int) {
     msg1(field, sel("setDelegate:"), target);
     msg3(field, sel("addTarget:action:forControlEvents:"), target, sel("vellumGoToTyped:"),
         131072);
+    msg3(field, sel("addTarget:action:forControlEvents:"), target, sel("vellumGoToBegan:"),
+        65536);
     if (screen_load(quick.slot)) msg1(field, sel("setPlaceholder:"), ui_text(ui.search));
     add_sub(glass, field);
     quick.field = field;
@@ -541,7 +562,6 @@ quick_passage_take() {
         NoPassage -> quick.has_passage = false;
         Passage p -> {
             quick.has_passage = true;
-            quick.chosen_book = p.book;
             quick.first_chapter = p.first_chapter;
             quick.mark = p.mark;
             quick.goes = p.goes;
@@ -586,17 +606,12 @@ quick_chip_name(chip: int): int {
 
 QUICK_CHIP_FONT_SIZE: f64 = 16.0f64;
 
-// Whether the chooser's grid is every book's (none chosen).
-quick_books_shown(): bool {
-    quick.has_passage && quick.chosen_book < 0
-}
-
 // The chips, the chosen one tinted and in sight, in a row that scrolls
-// edge to edge (none while the grid is every book's).
+// edge to edge.
 quick_chips_make(w: f64) {
     subviews_cleared(quick.chips_content);
-    set_hidden(quick.chips, !quick.has_passage || quick_books_shown());
-    if (!quick.has_passage || quick_books_shown()) return;
+    set_hidden(quick.chips, !quick.has_passage);
+    if (!quick.has_passage) return;
     chosen_x: f64 = 0.0f64;
     chosen_w: f64 = 0.0f64;
     chosen: int = -1;
@@ -659,10 +674,6 @@ quick_grid_make() {
     set_hidden(quick.grid, false);
     set_hidden(quick.grid_glass, !quick.has_passage);
     if (!quick.has_passage) return;
-    if (quick_books_shown()) {
-        quick_book_cells_make();
-        return
-    }
     for n in 1..quick.chapters + 1 {
         button: int = msg1(cls("UIButton"), sel("buttonWithType:"), 1);
         words_begin();
@@ -685,45 +696,6 @@ quick_grid_make() {
             64);
         add_sub(quick.grid_content, button)
     }
-}
-
-// Every book's cell (Books of the Bible), its chips' short names, each
-// tagged its book plus one.
-quick_book_cells_make() {
-    match ui.passage {
-        NoPassage -> { }
-        Passage p -> {
-            for k in 0..split_count(&ui, p.books) {
-                chip: int = split_word(&ui, p.books, k);
-                button: int = msg1(cls("UIButton"), sel("buttonWithType:"), 1);
-                msg2(button, sel("setTitle:forState:"), quick_chip_name(chip), 0);
-                label: int = msg(button, sel("titleLabel"));
-                msg1(label, sel("setFont:"), font_system(15.0f64, 0.0f64));
-                msg1(label, sel("setAdjustsFontSizeToFitWidth:"), 1);
-                msg_set_f(label, sel("setMinimumScaleFactor:"), 0.75f64);
-                msg1(button, sel("setTintColor:"), colors.ink);
-                msg1(button, sel("setTag:"), quick_chip_book(chip) + 1);
-                msg3(button, sel("addTarget:action:forControlEvents:"), quick.root,
-                    sel("vellumGoToChapter:"), 64);
-                add_sub(quick.grid_content, button)
-            }
-        }
-    }
-}
-
-// Where cell n (from 1) of the grid is, as an index of its places, and
-// the grid's columns: a chapter's, seven a row; a book's, six a row, the
-// New Testament on a row of its own after the Old.
-QUICK_BOOK_COLUMNS: int = 6;
-
-quick_cell_columns(): int {
-    if (quick_books_shown()) QUICK_BOOK_COLUMNS else QUICK_COLUMNS
-}
-
-quick_cell_place(n: int): int {
-    if (!quick_books_shown()) return n - 1;
-    b: int = n - 1;
-    if (b < 39) b else b + (QUICK_BOOK_COLUMNS - 39 % QUICK_BOOK_COLUMNS)
 }
 
 // What a screen reader says of chapter n's button.
@@ -872,7 +844,7 @@ quick_section_shows(k: int): bool {
 // Whether section k is one line: chips with no notes.
 quick_section_is_line(k: int): bool {
     section: UiSection = ui.sections[k];
-    if (!section.chips) return false;
+    if (section.style != UI_SECTION_CHIPS) return false;
     for r in section.first..section.first + section.n
         if (ui.rows[r].note.n > 0) return false;
     true
@@ -897,7 +869,7 @@ quick_blocks_choose(
                 left = left - quick_block_heights[k]
             } else {
                 all = false;
-                if (!quick_section_is_line(k)) {
+                if (!quick_section_is_line(k) && ui.sections[k].style != UI_SECTION_BUTTONS) {
                     fit: int = quick_rows_fitting(k, cw, left);
                     if (fit > 0) {
                         quick_block_views[k] = quick_block_make(k, cw, fit, outlined);
@@ -941,7 +913,7 @@ quick_link_row(k: int): int {
 // name at its left instead).
 quick_section_has_head(k: int): bool {
     section: UiSection = ui.sections[k];
-    !quick_section_is_line(k) && (section.header.n > 0 || section.button.n > 0 || quick_link_row(k) >= 0)
+    !quick_section_is_line(k) && section.style != UI_SECTION_BUTTONS && (section.header.n > 0 || section.button.n > 0 || quick_link_row(k) >= 0)
 }
 
 // Section k's block (autoreleased) cw wide, with its first rows rows
@@ -952,6 +924,7 @@ quick_block_make(
     rows: int,
     outlined: int
 ): int {
+    if (ui.sections[k].style == UI_SECTION_BUTTONS) return quick_ways_make(k, cw);
     if (quick_section_is_line(k)) return quick_line_make(k, cw, outlined);
     section: UiSection = ui.sections[k];
     block: int = autoreleased(view_new());
@@ -1091,6 +1064,42 @@ quick_line_make(k: int, cw: f64, outlined: int): int {
     line
 }
 
+// Section k as its buttons, its ways to more (Books, History, Plans,
+// Browse): as wide each, its symbol over its words, quiet.
+QUICK_WAYS_H: f64 = 60.0f64;
+
+quick_ways_make(k: int, cw: f64): int {
+    section: UiSection = ui.sections[k];
+    line: int = autoreleased(view_new());
+    n: int = section.n;
+    each: f64 = if (n > 0) (cw - 2.0f64 * 8.0f64) / n as f64 else cw;
+    for i in 0..n {
+        r: int = section.first + i;
+        row: UiRow = ui.rows[r];
+        button: int = quick_row_button(r);
+        if (row.icon.n > 0) {
+            icon: int = autoreleased(msg1(msg(cls("UIImageView"), sel("alloc")), sel("initWithImage:"),
+                symbol_image(ui_text(row.icon), 19.0f64, 4)));
+            msg1(icon, sel("setTintColor:"), colors.accent);
+            msg1(icon, sel("setContentMode:"), 4);
+            msg1(icon, sel("setUserInteractionEnabled:"), 0);
+            set_frame4(icon, 0.0f64, 9.0f64, each, 24.0f64);
+            add_sub(button, icon)
+        }
+        words: int = label_new(font_system(12.0f64, 0.0f64), colors.faint, 1);
+        msg1(words, sel("setText:"), ui_text(if (row.short.n > 0) row.short else row.title));
+        msg1(words, sel("setTextAlignment:"), 1);
+        msg1(words, sel("setUserInteractionEnabled:"), 0);
+        set_frame4(words, 2.0f64, 36.0f64, each - 4.0f64, 16.0f64);
+        add_sub(button, words);
+        set_frame4(button, 8.0f64 + i as f64 * each, 0.0f64, each, QUICK_WAYS_H);
+        add_sub(line, button)
+    }
+    set_frame4(line, 0.0f64, 0.0f64, cw, QUICK_WAYS_H);
+    quick_block_made_h = QUICK_WAYS_H;
+    line
+}
+
 // The width of the column of the lines' names: the widest of the names of
 // the n sections that are lines, and More's.
 quick_names_width(n: int): f64 {
@@ -1153,7 +1162,7 @@ quick_row_make(
 ): f64 {
     row: UiRow = ui.rows[r];
     button: int = quick_row_button(r);
-    chip: bool = ui.sections[k].chips;
+    chip: bool = ui.sections[k].style == UI_SECTION_CHIPS;
     ink: int = if (row.tinted) colors.accent else if (row.faint || row.disabled) colors.faint else colors.ink;
     lx: f64 = QUICK_INSET;
     mark: int = quick_row_mark(row);
@@ -1363,6 +1372,13 @@ quick_rows_room(): f64 {
 quick_layout() {
     if (quick.root == 0) return;
     view: int = quick.root;
+    // (A screen Go To opened shows: its home's own glass kept hidden, as
+    // they are made again.)
+    if (quick_drilled()) {
+        set_hidden(quick.rows, true);
+        set_hidden(quick.chips, true);
+        set_hidden(quick.grid_glass, true)
+    }
     b: Rect = bounds_of(view);
     if (b.w <= 0.0f64) return;
     if (quick.slot >= 0 && b.w != quick.built_width) quick_fill();
@@ -1388,14 +1404,13 @@ quick_layout() {
     quick_field_place(x, cw, field_y);
     top: f64 = field_y - QUICK_GAP;
     if (quick.has_passage) {
-        if (!quick_books_shown()) {
-            top = top - QUICK_CHIP_H;
-            set_frame4(quick.chips, 0.0f64, top, b.w, QUICK_CHIP_H);
-            top = top - 8.0f64
-        }
+        top = top - QUICK_CHIP_H;
+        set_frame4(quick.chips, 0.0f64, top, b.w, QUICK_CHIP_H);
+        top = top - 8.0f64;
         top = top - quick_grid_place(x, cw, top, safe.top + 8.0f64);
         top = top - QUICK_GAP
     }
+    set_frame4(quick.drill_box, x, safe.top + 8.0f64, cw, field_y - QUICK_GAP - safe.top - 8.0f64);
     rows_h: f64 = top - safe.top;
     if (rows_h < 0.0f64) rows_h = 0.0f64;
     set_frame4(quick.rows, 0.0f64, safe.top, b.w, rows_h);
@@ -1458,18 +1473,14 @@ quick_field_place(x: f64, cw: f64, field_y: f64) {
 // as quick_layout places it: none without one.
 quick_chooser_height(): f64 {
     if (!quick.has_passage) return 0.0f64;
-    chips: f64 = if (quick_books_shown()) 0.0f64 else QUICK_CHIP_H + 8.0f64;
     rows: int = quick_grid_rows_shown();
-    chips + rows as f64 * QUICK_CELL_H + 2.0f64 * QUICK_GRID_PAD + QUICK_GAP
+    QUICK_CHIP_H + 8.0f64 + rows as f64 * QUICK_CELL_H + 2.0f64 * QUICK_GRID_PAD + QUICK_GAP
 }
 
 // How many of the grid's rows show (more scroll inside it).
 quick_grid_rows_shown(): int {
-    columns: int = quick_cell_columns();
-    cells: int = if (quick_books_shown()) quick_cell_place(66) + 1 else quick.chapters;
-    rows: int = (cells + columns - 1) / columns;
-    most_shown: int = if (quick_books_shown()) QUICK_GRID_ROWS + 1 else QUICK_GRID_ROWS;
-    if (rows < most_shown) rows else most_shown
+    rows: int = (quick.chapters + QUICK_COLUMNS - 1) / QUICK_COLUMNS;
+    if (rows < QUICK_GRID_ROWS) rows else QUICK_GRID_ROWS
 }
 
 // The grid's glass placed with its foot at foot (x, cw as the content's;
@@ -1491,9 +1502,8 @@ quick_grid_place(
         quick_verses_place(shape, inner_w);
         return h
     }
-    columns: int = quick_cell_columns();
-    cells: int = if (quick_books_shown()) quick_cell_place(66) + 1 else quick.chapters;
-    rows: int = (cells + columns - 1) / columns;
+    columns: int = QUICK_COLUMNS;
+    rows: int = (quick.chapters + columns - 1) / columns;
     shown: int = quick_grid_rows_shown();
     h: f64 = shown as f64 * QUICK_CELL_H + 2.0f64 * pad;
     set_frame4(quick.grid_glass, x, foot - h, cw, h);
@@ -1504,7 +1514,7 @@ quick_grid_place(
         button: int = msg1(subs, sel("objectAtIndex:"), i);
         n: int = msg(button, sel("tag"));
         if (n >= 1) {
-            place: int = quick_cell_place(n);
+            place: int = n - 1;
             column: int = place % columns;
             row: int = place / columns;
             set_frame4(button, column as f64 * cell_w + 2.0f64, row as f64 * QUICK_CELL_H + 2.0f64,
@@ -1721,9 +1731,7 @@ quick_chip_tapped(_self: int, _cmd: int, sender: int): int {
     if (s < 0) return 0;
     haptic_tick();
     quick_send_now();
-    // (The chosen one again: none chosen, every book, Books of the Bible.)
-    b: int = msg(sender, sel("tag"));
-    act(s, ACT_GT_PASSAGE_BOOK, if (b == quick.chosen_book) -1 else b, 0);
+    act(s, ACT_GT_PASSAGE_BOOK, msg(sender, sel("tag")), 0);
     0
 }
 
@@ -1732,8 +1740,7 @@ quick_chapter_tapped(_self: int, _cmd: int, sender: int): int {
     n: int = msg(sender, sel("tag"));
     if (s < 0 || n < 1 || quick.held_chapter > 0) return 0;
     haptic_tick();
-    if (quick_books_shown()) act(s, ACT_GT_PASSAGE_BOOK, n - 1, 0) else act(s, ACT_CHAPTER,
-        quick.first_chapter + n - 1, 0);
+    act(s, ACT_CHAPTER, quick.first_chapter + n - 1, 0);
     0
 }
 
@@ -1847,6 +1854,7 @@ goto_classes_make() {
     c: int = class_make(cls("UIView"), "VellumGoToView");
     add_method0(c, sel("layoutSubviews"), &quick_laid_out, "v@:");
     add_method1(c, sel("vellumGoToAsk:"), &quick_ask_fired, "v@:@");
+    add_method1(c, sel("vellumGoToBegan:"), &quick_field_began, "v@:@");
     add_method1(c, sel("vellumGoToTyped:"), &quick_typed, "v@:@");
     add_method1(c, sel("vellumGoToQuery:"), &quick_query_fired, "v@:@");
     add_method1(c, sel("textFieldShouldReturn:"), &quick_returned, "B@:@");
@@ -1940,4 +1948,94 @@ goto_views_removed(view: int) {
         if (is_kind(v, "VellumGoToView")) msg(v, sel("removeFromSuperview"))
     }
     release(subs)
+}
+
+// ---- deeper: a screen Go To opens ----
+// A screen Go To opens (Books of the Bible, History, Plans, Browse, a
+// document's page, every verse found) fills the room above the field, the
+// keys down, the field's words kept: a navigation of the app's (screens.l8's
+// lists, the system's) on a shape of its own, a child of the overlay's
+// controller, its
+// first screen's Back (‹) Go To again, each deeper one's the one before.
+// The field's tap is Go To again too, the keys up; a place picked in it
+// closes Go To, as anywhere.
+quick_drilled(): bool {
+    quick.drill_nav != 0
+}
+
+// Whether controller is on the navigation of the screens Go To opened.
+quick_drill_holds(controller: int): bool {
+    quick.drill_nav != 0 && msg(controller, sel("navigationController")) == quick.drill_nav
+}
+
+// Slot s's screen, pushed over Go To: the first of them, the navigation
+// made (later ones are pushed onto it, screens.l8's sheet navigation).
+quick_drill_begin(s: int) {
+    controller: int = slot_controller(s);
+    nav: int = nav_new(controller);
+    quick.drill_nav = held(quick.drill_nav, nav);
+    sheet_nav = held(sheet_nav, nav);
+    msg1(quick.host, sel("addChildViewController:"), nav);
+    view: int = msg(nav, sel("view"));
+    msg1(view, sel("setAutoresizingMask:"), 18);
+    set_background(view, clear_color());
+    add_sub(glass_content(quick.drill_box), view);
+    set_frame(view, bounds_of(quick.drill_box));
+    msg1(nav, sel("didMoveToParentViewController:"), quick.host);
+    quick_covered();
+    quick_drill_shown()
+}
+
+// Back to Go To: the screens it opened let go (said `closed` to core,
+// the first and those over it, unless core closed them), the keys up.
+quick_drill_home(said: bool) {
+    nav: int = quick.drill_nav;
+    if (nav == 0) return;
+    first: int = msg(msg(nav, sel("viewControllers")), sel("firstObject"));
+    s: int = slot_of_controller(first);
+    id: int = if (s >= 0) slots[s].id else 0;
+    quick_drill_detach();
+    if (said && id > 0) send1("closed", id);
+    quick_drill_shown();
+    quick_focus()
+}
+
+// The navigation let go of: its screens marked closing (they are said
+// closed, if at all, by quick_drill_home), off the root, the sheet's
+// navigation none.
+quick_drill_detach() {
+    nav: int = quick.drill_nav;
+    if (nav == 0) return;
+    sheet_mark_closing(msg(nav, sel("viewControllers")));
+    msg1(nav, sel("willMoveToParentViewController:"), 0);
+    msg(msg(nav, sel("view")), sel("removeFromSuperview"));
+    msg(nav, sel("removeFromParentViewController"));
+    if (sheet_nav == nav) sheet_nav = held(sheet_nav, 0);
+    quick.drill_nav = held(quick.drill_nav, 0);
+    screens_forget_gone_soon()
+}
+
+// Go To's home or the screen it opened shown, cross-faded, laid out anew.
+quick_drill_shown() {
+    if (quick.root == 0) return;
+    drilled: bool = quick_drilled();
+    cross_fade(quick.root, 0.2f64);
+    set_hidden(quick.drill_box, !drilled);
+    set_hidden(quick.rows, drilled);
+    set_hidden(quick.chips, drilled || !quick.has_passage);
+    set_hidden(quick.grid_glass, drilled || !quick.has_passage);
+    msg(quick.root, sel("setNeedsLayout"))
+}
+
+// The field begun to be typed in while a screen Go To opened shows: Go To
+// again.
+quick_field_began(_self: int, _cmd: int, _field: int): int {
+    if (quick_drilled()) quick_drill_home(true);
+    0
+}
+
+// The first screen's Back (screens.l8's list_dress gives it).
+quick_drill_back_tapped(_self: int, _cmd: int, _item: int): int {
+    quick_drill_home(true);
+    0
 }

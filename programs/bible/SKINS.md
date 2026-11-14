@@ -724,14 +724,19 @@ any screen.
   typed) `submit`, which goes there. A skin without one ignores it.
 - A skin that shows Go To as its quick form says so
   (`sk_has_quick_goto`; the iPhone's, its README): Go To over the keys,
-  every row of it, never a sheet. Its chooser lists the books, so no rows
-  of them come (nor a book's own reference row, `rom`); Books of the
-  Bible (`ACT_GT_BOOKS`) is the chooser's every book, nothing typed (BOOK
-  -1, their names short enough for a grid: "Ruth", "Gen", "1 Cor"), a
-  book's tap its chapters (every book's name a chip, the chosen in sight;
-  -1 the grid again); New Ribbon (with a ribbon), Reading Plans (with a
-  plan followed) and History (`ACT_GT_HISTORY`, 417) are their sections'
-  headers' buttons, not rows. A screen Go To opens is a sheet over it.
+  every row of it, never a sheet of it. Its chooser lists the books, so
+  no rows of them come (nor a book's own reference row, `rom`). Nothing
+  typed, its places have no headers (the ribbons, the plans' days,
+  Recent, the documents read) and its ways to more are a last section of
+  buttons: the contents of what a pane reads in its own divisions, Books
+  of the Bible (`ACT_GT_BOOKS`: the books' screen, a grid of their names
+  short enough for one, "Ruth", "Gen", "1 Cor", their chapters a tap
+  away), History (`ACT_GT_HISTORY`, 417), Plans (`ACT_GT_PLANS`) and
+  Browse (`ACT_GT_BROWSE`, 418: `SCR_BROWSE`, 72, each kind with its
+  count, a tap its every one, Show All's screen; Languages, the word
+  typed in Go To, back there). A screen Go To opens is pushed over it, as
+  ever; such a skin shows it in Go To's room, Go To's field kept, its
+  Back to Go To.
   Its places are chips (CHIPS sections, each row's SHORT words, its NOTE
   where it is): the ribbons (a ribbon's name, its place), the plans' days
   (the passages, "Day 26"), Recent, the documents read (the one a pane
@@ -833,12 +838,12 @@ A screen, from core:
 | `field` TEXT WAIT FLAGS | its field's words, how long typing rests before they are sent (ms), `g` Return goes (Go To), `f` it takes the keys as the screen opens |
 | `scopes` VALUE TITLES LABELS | the field's scopes, the one chosen |
 | `plain` | a plain list, not grouped |
-| `page`, `grid` | its rows a page's paragraphs; its rows square buttons, their VALUE their words |
+| `page`, `grid` | its rows a page's paragraphs; its rows square buttons, their SHORT words (else their VALUE) their words |
 | `passage` BOOK FIRST MARK GOES BOOKS VERSES | Go To's passage chooser (see Go To): BOOK the book whose chapters it shows (-1: none, BOOKS every book for a grid of them), FIRST its first chapter of the Bible's (its chapter n is FIRST + n - 1), MARK the chapter marked, GOES 1 where Return goes there; BOOKS the chips (`BOOK:NAME` split by `\|`), VERSES each chapter's verses (split by spaces) |
 | `reader LINKED` | the screen is the panel's reader (pane 1, below: the version or commentary read beside the page) in place of rows; LINKED 1 while it is linked with the page |
 | `empty` SYMBOL TITLE LINE | what it shows with no rows |
 | `button` TITLE, then `command` ACTION ARG TITLE FLAGS | its button at the top and its menu (`x`: destructive) |
-| `section` HEADER FOOTER BUTTON ACTION SUFFIX CREDIT COLUMNS CHIPS | a section: a button in its header doing ACTION; faint words after its header; CREDIT the credit under it (0 none; each said at `start` by a `credit` line); COLUMNS a grid's columns' names; CHIPS 1, its rows chips: places named by their short words (Go To's quick form, below) |
+| `section` HEADER FOOTER BUTTON ACTION SUFFIX CREDIT COLUMNS STYLE | a section: a button in its header doing ACTION; faint words after its header; CREDIT the credit under it (0 none; each said at `start` by a `credit` line); COLUMNS a grid's columns' names; STYLE how its rows show (`UI_SECTION_`: 0 rows; 1 chips, places named by their short words; 2 buttons, their icons over their words: Go To's quick form, below) |
 | `row` ... | a row (below) |
 | `cell` ACTION ARG SCRIPT TEXT SUB COUNT LABEL TR FLAGS ACTIONS | after its row, a grid's cell or a tile: its words in a script (0 none: a faint "—"), what it does, its count, what a screen reader says, and its tap (ACTION 0: none); a tile's transliteration and its flags (`UI_TILE_`: what it hides; the one being chosen for, ringed; an answer wrong, in red over what was chosen, struck through; a choice offered, its words alone as a button), and the actions a screen reader offers |
 
