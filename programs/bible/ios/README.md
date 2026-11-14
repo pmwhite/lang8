@@ -82,10 +82,23 @@ the compiled asset catalog (`assets/`), the frameworks it links
   so a change is seen as it is made.
 - **The panel** is a sheet over the page at a third, a half or the whole
   height, never dimming the page, UIKit's own in every way it moves. Its
-  reader is the second pane under the system's bar (the chapter and what
-  it reads, a tap Go To aimed at the panel; Link at its left, the menu at
-  its right). The dock floats over its foot (the panel's safe area made
-  larger there), and the page's reading area ends at its top.
+  reader is the second pane, with no bar of its own: while it shows, the
+  dock is the header of both readers. The capsule is the page's (its
+  chapter, the version) and beside it is the panel's (what it reads, where
+  it is), the two joined by the link (⛓), one shape of glass while they
+  are linked, parting as liquid does when they aren't (a tap links or
+  unlinks). The panel's capsule's tap is Go To aimed at the panel, its
+  field rising out of that capsule (unlinked, a passage picked moves the
+  panel alone, and the field says so); its long press, the panel's menu
+  (Swap Panes, Close Panel; filling the screen is a drag up, closing it
+  a swipe down too). The left pair goes, the panel's capsule being the
+  panel, and the right draws in to ⋯ (the Library, Listen, Reading). A
+  document read in its own divisions (a book, a dictionary) can't be
+  linked: no link, the capsules apart. Drawn in, the dock shows both: the
+  chapter, the link, the panel's short name. Study pushed over the reader has the system's bar and its Back;
+  in an iPad's column the reader keeps its own bar. The dock floats over
+  the panel's foot (its safe area made larger there), and the page's
+  reading area ends at its top.
 
 ## How it is built
 
@@ -134,7 +147,7 @@ place and chrome, the panel's sheet, the dock, and the screens), `!scroll
 P DY`, `!flick P DY` (a finger's fling, frame by frame), `!dock
 open|close`, `!tap WORDS` (the top sheet's first row so titled, or the quick form's row),
 `!close`, `!back`, `!swipe` (the panel put away as a hand's swipe puts
-it), `!capsule` (a tap on the dock's capsule), `!home` (Back from the first screen Go To opened), `!theme N` (theme N chosen, the one it was logged), in Go To's quick form `!type WORDS`, `!return`
+it), `!capsule` (a tap on the dock's capsule), `!panelcapsule` (on the panel's), `!link` (on the link), `!shot` (every window of the app's, the dock's too, drawn to the server's /shot: its glass left out), `!home` (Back from the first screen Go To opened), `!theme N` (theme N chosen, the one it was logged), in Go To's quick form `!type WORDS`, `!return`
 and `!hold N V` (chapter N held, the finger on verse V; `!hold 0` lets
 go), `!probe N` (for N frames, where the dock and the panel's sheet are
 drawn), `!part` (the panel's first part as core sent it: its words and

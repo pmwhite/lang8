@@ -775,7 +775,10 @@ any screen.
   words typed.
 - `tap shelf` opens or closes the panel; with nothing to read there it
   presents Go To aimed at the panel (no `beside` line), and the panel
-  opens (`beside 1 0`) only when a document is picked. Without a panel
+  opens (`beside 1 0`) only when a document is picked.
+- Aimed at the panel while it is unlinked, a passage picked moves the
+  panel alone, and Go To's field says so ("A passage for the panel, or
+  words"). Without a panel
   that fits, it presents Go To aimed at the page.
 ## Practice
 
