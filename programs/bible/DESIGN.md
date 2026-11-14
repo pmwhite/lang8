@@ -63,8 +63,9 @@ the reader's Library of highlights, notes, bookmarks and Memory), and
 whether a module is on the device is never shown: documents open wherever
 they are kept. A module is made as part of its download: a Bible becomes
 a version in a text slot of its own, and a commentary, dictionary or book
-a folio (`programs/folio`), read a chapter, an entry or a part at a time
-while a screen shows it, so opening it reads only the folio's head. An
+a folio (`programs/folio`), read a part of a chapter, an entry or a book's
+part at a time while a pane shows it, so opening it reads only the folio's
+head; a few are open at once (each pane's, Study's). An
 update is fetched quietly once the catalog says there is one (not on a
 metered connection) and made beside the copy read (a made module's file
 has two names, its line in `shelf.tsv` saying which it is), which is read
@@ -109,8 +110,16 @@ reader's), a check on what the page and the panel show, a ⓘ to its page
 in no pane, a link to remove it). A pick lands: a passage moves the page
 (linked, the panel follows; from the panel's name, unlinked, the panel
 alone); a Bible becomes the page's version, or is read in the panel; a
-commentary is read in the panel where it fits (or picked for it), else on
-the page; a dictionary or a book opens its own screens in Go To's sheet.
+commentary, a book, a dictionary or a devotional is read in the panel
+where it fits (or picked for it), else on the page. A book, a dictionary
+and a devotional are read as the Bible is, one chapter after another:
+their chapters are their own divisions (a book's parts, a dictionary's
+entries, a devotional's days), after a front with the document's title,
+so that a book reads through and a dictionary scrolls from entry to
+entry; such a document has no verses to link with the Bible, and opens
+where it was read last (a devotional at today's). Go To lists its
+contents while a pane reads it, and the text's menu's Look Up reads the
+words selected in a dictionary at their entry.
 A document not on the device opens all the same (an arrival): the pane
 keeps showing what it shows, named at once for the new document with a
 hairline filling under its bar as it comes, and changes to it at the same

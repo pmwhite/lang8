@@ -300,8 +300,8 @@ shelf_document_kept(i: int, ok: bool, source: MakingSource) {
                 slot: int = shelf_slot_at(i);
                 shelf_update_swap(i, ShelfForm.Folio, BibleOpened { red: false, report: no_report });
                 shelf_close_slot(slot);
-                shelf_decoded_forget();
-                if (pane_reads_commentary(PANE_PAGE, slot) || pane_reads_commentary(PANE_PANEL,
+                shelf_decoded_forget(slot);
+                if (pane_reads_module(PANE_PAGE, slot) || pane_reads_module(PANE_PANEL,
                     slot)) shelf_rereading = slot
             } else shelf_update_failed(i, false);
             shelf_work_rests();
@@ -321,10 +321,10 @@ shelf_document_kept(i: int, ok: bool, source: MakingSource) {
 
 // ---- a folio opened ----
 // Its head read (the file's first bytes, which say how many the head is;
-// then the head), and the module put to its use.
-shelf_folio_open(i: int, use: int) {
+// then the head), and the module open in a place of its own.
+shelf_folio_open(i: int) {
     if (!shelf_kept_made_at(i)) return;
-    shelf_work = ShelfWork.OpeningFolio { slot: shelf_slot_at(i), use: use, head: 0 };
+    shelf_work = ShelfWork.OpeningFolio { slot: shelf_slot_at(i), head: 0 };
     shelf_work_done = 0;
     shelf_read_named_range(i, 0, folio::FOLIO_PREFIX)
 }
@@ -333,7 +333,6 @@ shelf_folio_got(
     i: int,
     id: int,
     size: int,
-    use: int,
     head: int
 ) {
     if (size <= 0) {
@@ -350,7 +349,7 @@ shelf_folio_got(
                 head_size = folio::folio_head_size(prefix, size)
             }
             if (!shelf_kept_made_at(i)) return;
-            shelf_work = ShelfWork.OpeningFolio { slot: shelf_slot_at(i), use: use, head: head_size };
+            shelf_work = ShelfWork.OpeningFolio { slot: shelf_slot_at(i), head: head_size };
             shelf_read_named_range(i, 0, head_size);
             return
         }
@@ -378,10 +377,13 @@ shelf_folio_got(
             shelf_file_gone(i);
             return
         }
-        drop shelf_open[use];
-        shelf_decoded_forget();
-        shelf_open[use] = move next;
-        shelf_open_slots[use] = shelf_slot_at(i);
+        place: int = shelf_open_place_for(shelf_slot_at(i));
+        drop shelf_open[place];
+        shelf_decoded_forget(shelf_slot_at(i));
+        shelf_open[place] = move next;
+        shelf_open_slots[place] = shelf_slot_at(i);
+        shelf_open_clock = shelf_open_clock + 1;
+        shelf_open_used[place] = shelf_open_clock;
         shelf_set_broken(i, false)
     } with folio::FolioError _error -> {
         shelf_set_broken(i, true)
@@ -519,9 +521,11 @@ shelf_decoded_clock: int = 0;
 
 shelf_decoded_bytes: []i8 = new i8[SHELF_DECODED_MOST * SHELF_DECODED_ROOM](0i8);
 
-// (A folio opened: what was decoded may be another's.)
-shelf_decoded_forget() {
-    for k in 0..SHELF_DECODED_MOST shelf_decoded_slot[k] = -1
+// (Slot's folio opened, or made again: what was decoded of it may be of
+// another copy.)
+shelf_decoded_forget(slot: int) {
+    for k in 0..SHELF_DECODED_MOST
+        if (shelf_decoded_slot[k] == slot) shelf_decoded_slot[k] = -1
 }
 
 shelf_decoded_at(slot: int, block: int): int {
@@ -1013,12 +1017,12 @@ lay_quoted_words(
 // out in a frame or two.
 COMMENT_PART_BYTES: int = 1536;
 
-// The open commentary's chapter c read in parts: its division (-1: no
-// comment on it, one part; -2: the commentary isn't open yet, its parts
-// not known), where each part begins in the content and
-// where the last ends, and each verse its marks begin with the part it is
-// in.
-type CommentParts = {
+// A module's chapter read in parts: its division (-1: none, one part (a
+// commentary's chapter it has no comment on; a document's front); -2: the
+// module isn't open yet, its parts not known), where each part begins in
+// the content and where the last ends, and each verse its marks begin with
+// the part it is in.
+type ChapterParts = {
     division: int;
     starts: []int;
     end: int;
@@ -1032,7 +1036,7 @@ type CommentParts = {
     gap_to: int
 }
 
-comment_parts(folio: *folio::Folio, c: int): CommentParts@new {
+comment_parts(folio: *folio::Folio, c: int): ChapterParts@new {
     d: int = folio_chapter_division(folio, c);
     if (d < 0) {
         // (Its gap: the chapters either side of it without comments too.)
@@ -1040,7 +1044,7 @@ comment_parts(folio: *folio::Folio, c: int): CommentParts@new {
         while (from > 0 && folio_chapter_division(folio, from - 1) < 0) from = from - 1;
         to: int = c;
         while (to + 1 < chapters && folio_chapter_division(folio, to + 1) < 0) to = to + 1;
-        return CommentParts {
+        return ChapterParts {
             division: -1,
             starts: new int[1](0),
             end: 0,
@@ -1051,6 +1055,11 @@ comment_parts(folio: *folio::Folio, c: int): CommentParts@new {
             gap_to: to
         }
     }
+    marked_parts(folio, d)
+}
+
+// Division d of folio in parts, by its marks.
+marked_parts(folio: *folio::Folio, d: int): ChapterParts@new {
     start: int = folio::folio_division_start(folio, d);
     marks: []folio::FolioMark = folio::folio_division_marks(folio, d);
     // (Counted, then placed.)
@@ -1064,7 +1073,7 @@ comment_parts(folio: *folio::Folio, c: int): CommentParts@new {
         }
         if (m.verse > 0) verses = verses + 1
     }
-    made: CommentParts = CommentParts {
+    made: ChapterParts = ChapterParts {
         division: d,
         starts: new int[parts](start),
         end: folio::folio_division_end(folio, d),
@@ -1094,30 +1103,32 @@ comment_parts(folio: *folio::Folio, c: int): CommentParts@new {
 }
 
 // Where part p of parts ends in the content.
-comment_part_end(parts: *CommentParts, p: int): int {
+chapter_part_end(parts: *ChapterParts, p: int): int {
     if (p + 1 < len(parts.starts)) parts.starts[p + 1] else parts.end
 }
 
 // How many bytes of content each part is.
-comment_part_bytes(parts: *CommentParts): []int@new {
+chapter_part_bytes(parts: *ChapterParts): []int@new {
     bytes: []int = new int[len(parts.starts)](0);
-    for p in 0..len(parts.starts) bytes[p] = comment_part_end(parts, p) - parts.starts[p];
+    for p in 0..len(parts.starts) bytes[p] = chapter_part_end(parts, p) - parts.starts[p];
     bytes
 }
 
-// Chapter c of the commentary open in slot read in parts (not open yet:
-// one, not known).
-shelf_comment_parts(slot: int, c: int): CommentParts@new {
-    if (shelf_open_is(SHELF_USE_STUDY, slot)) {
-        borrow shelf_open[SHELF_USE_STUDY] as open {
-            match open.reader {
-                Document d -> return comment_parts(d.folio, c);
-                _ -> { }
-            }
-        }
-    }
-    CommentParts {
-        division: -2,
+// Chapter c of the module in slot in parts, as a pane reads it: a
+// commentary's, the Bible's chapter c; a document read in its own
+// divisions, its front (0) or division c - 1 (module_chapter_parts).
+module_chapter_parts(slot: int, folio: *folio::Folio, c: int): ChapterParts@new {
+    if (shelf_kind_by_divisions(shelf_kind_at(shelf_find_slot(slot)))) return division_chapter_parts(folio,
+        c);
+    if (c < 0 || c >= chapters) return chapter_parts_none(-1);
+    comment_parts(folio, c)
+}
+
+// A chapter of no parts but one with nothing in it (division -1: not
+// one, -2: the module not open yet).
+chapter_parts_none(division: int): ChapterParts@new {
+    ChapterParts {
+        division: division,
         starts: new int[1](0),
         end: 0,
         verses: new int[0](0),
@@ -1128,29 +1139,77 @@ shelf_comment_parts(slot: int, c: int): CommentParts@new {
     }
 }
 
-// Part p of chapter c of the commentary open in slot laid out into ctx
-// (its first, after the chapter's number); whether it could be (else its
-// blocks are coming, or the module is opening).
-shelf_lay_comment_part(
+// Whether a chapter's parts hold any of its module's content to read (not
+// a commentary's run without comments, nor an empty front).
+chapter_parts_read(parts: *ChapterParts): bool {
+    parts.division != -2 && parts.end > parts.starts[0]
+}
+
+// A document read in its own divisions (a book's parts, a dictionary's
+// entries, a devotional's days), as a pane reads it: its front (its title,
+// and what it has before its first division) chapter 0, one part; division
+// d chapter d + 1, in parts by its marks.
+division_chapter_parts(folio: *folio::Folio, c: int): ChapterParts@new {
+    count: int = folio::folio_division_count(folio);
+    if (c >= 1 && c <= count) return marked_parts(folio, c - 1);
+    made: ChapterParts = chapter_parts_none(-1);
+    if (c == 0) made.end = (if (count > 0) folio::folio_division_start(folio, 0) else folio::folio_content_size(folio));
+    made
+}
+
+// How many chapters a document read in its own divisions has, as a pane
+// reads it (its front and each division; 0: not open yet).
+shelf_division_chapters(slot: int): int {
+    if (!shelf_open_is(slot)) return 0;
+    count: int = 0;
+    borrow shelf_open[shelf_open_place(slot)] as open {
+        match open.reader {
+            Document d -> count = folio::folio_division_count(d.folio) + 1;
+            _ -> { }
+        }
+    }
+    count
+}
+
+// Chapter c of the module open in slot read in parts (not open yet: one,
+// not known).
+shelf_chapter_parts(slot: int, c: int): ChapterParts@new {
+    if (shelf_open_is(slot)) {
+        borrow shelf_open[shelf_open_place(slot)] as open {
+            match open.reader {
+                Document d -> return module_chapter_parts(slot, d.folio, c);
+                _ -> { }
+            }
+        }
+    }
+    chapter_parts_none(-2)
+}
+
+// Part p of chapter c of the module open in slot laid out into ctx (its
+// first, after the chapter's opener); whether it could be (else its blocks
+// are coming, or the module is opening).
+shelf_lay_chapter_part(
     slot: int,
     c: int,
     p: int,
     ctx: *ChapterLayout
 ): bool {
+    if (shelf_kind_by_divisions(shelf_kind_at(shelf_find_slot(slot)))) return shelf_lay_division_part(slot,
+        c, p, ctx);
     if (c < 0 || c >= chapters || !shelf_ensure_open(slot)) return false;
     ready: bool = false;
-    borrow shelf_open[SHELF_USE_STUDY] as open {
+    borrow shelf_open[shelf_open_place(slot)] as open {
         match open.reader {
             Document d -> {
                 region {
-                    parts: CommentParts = comment_parts(d.folio, c);
+                    parts: ChapterParts = comment_parts(d.folio, c);
                     if (parts.division < 0) {
                         lay_comment_gap(parts.gap_from, parts.gap_to, ctx);
                         ready = true
                     } else {
                         part: int = if (p < 0) 0 else if (p >= len(parts.starts)) len(parts.starts) - 1 else p;
                         match shelf_folio_range(slot, d.folio, parts.starts[part],
-                            comment_part_end(&parts, part)) {
+                            chapter_part_end(&parts, part)) {
                             ChapterWaiting -> { }
                             ChapterRecords r -> {
                                 if (part == 0) lay_comment_opener(c, ctx) else layout_begin(ctx);
@@ -1204,20 +1263,164 @@ lay_comment_gap(from: int, to: int, ctx: *ChapterLayout) {
     lay_byte(ctx, 10)
 }
 
-// The blocks of the parts beside part p of chapter c read ahead (the next
-// first), if the commentary in slot is open; whether they are held.
-shelf_comment_part_ahead(slot: int, c: int, p: int): bool {
-    if (!shelf_open_is(SHELF_USE_STUDY, slot)) return true;
-    held: bool = true;
-    borrow shelf_open[SHELF_USE_STUDY] as open {
+// Part p of chapter c of the document in slot read in its own divisions
+// laid out into ctx (shelf_lay_chapter_part): its first opened by the
+// chapter's name (division_chapter_parts), then its records as a
+// comment's are set.
+shelf_lay_division_part(
+    slot: int,
+    c: int,
+    p: int,
+    ctx: *ChapterLayout
+): bool {
+    if (c < 0 || !shelf_ensure_open(slot)) return false;
+    ready: bool = false;
+    borrow shelf_open[shelf_open_place(slot)] as open {
         match open.reader {
             Document d -> {
                 region {
-                    parts: CommentParts = comment_parts(d.folio, c);
-                    if (parts.division >= 0) {
+                    if (c <= folio::folio_division_count(d.folio)) {
+                        parts: ChapterParts = division_chapter_parts(d.folio, c);
+                        part: int = if (p < 0) 0 else if (p >= len(parts.starts)) len(parts.starts) - 1 else p;
+                        match shelf_folio_range(slot, d.folio, parts.starts[part],
+                            chapter_part_end(&parts, part)) {
+                            ChapterWaiting -> { }
+                            ChapterRecords r -> {
+                                from: int = 0;
+                                layout_begin(ctx);
+                                if (part == 0) from = lay_division_opener(slot, d.folio,
+                                    c, r.data, ctx);
+                                if (lay_comment_lines(r.data, from, len(r.data), -1,
+                                    comment_plain, ctx)) {
+                                    lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
+                                    lay_str(ctx, "The rest of this part is too long to show here.");
+                                    lay_byte(ctx, 10)
+                                }
+                                ready = true
+                            }
+                            ChapterNone -> {
+                                layout_begin(ctx);
+                                _from: int = lay_division_opener(slot, d.folio, c,
+                                    new i8[0](0i8), ctx);
+                                ready = true
+                            }
+                            ChapterDamaged -> {
+                                layout_begin(ctx);
+                                if (part == 0) _from: int = lay_division_opener(slot,
+                                    d.folio, c, new i8[0](0i8), ctx);
+                                lay_begin(ctx, STYLE_REF, PARA_PROSE, 0);
+                                lay_str(ctx, "This part is damaged.");
+                                lay_byte(ctx, 10);
+                                ready = true
+                            }
+                        }
+                    }
+                }
+            }
+            _ -> { }
+        }
+    }
+    ready
+}
+
+// A chapter of a document read in its own divisions opened by its name
+// (the opener): the front by the document's title, centered as a book's
+// name; a division by its name as a heading, a book's part deeper in its
+// outline as a lesser one. Its records' first heading saying the same name,
+// or its first words saying it alone in their paragraph (a dictionary's
+// headword, Easton's "Aaron"), is left out: where the records go on from
+// (data's first record, or the one after them).
+lay_division_opener(
+    slot: int,
+    folio: *folio::Folio,
+    c: int,
+    data: []i8,
+    ctx: *ChapterLayout
+): int {
+    fbuf_n = 0;
+    if (c == 0) {
+        fput_shelf_title(shelf_find_slot(slot));
+        lay_begin(ctx, STYLE_BOOK, PARA_CENTER, 0)
+    } else {
+        fput_division_name(folio, c - 1);
+        lay_begin(ctx, if (folio_part_depth(folio, c - 1) > 1 && shelf_kind_at(shelf_find_slot(slot)) == SHELF_KIND_BOOK) STYLE_SUBHEAD else STYLE_HEAD,
+            PARA_PROSE, 0)
+    }
+    ctx.opener_at = ctx.out_n;
+    for k in 0..fbuf_n lay_byte(ctx, fbuf[k] as int);
+    lay_byte(ctx, 10);
+    // (Its records' first heading or words, if they are the name again.)
+    at: int = 0;
+    while (at < len(data) && data[at] == 'P') at = record_line(data, at).next;
+    if (at >= len(data)) return 0;
+    kind: i8 = data[at];
+    line: RecordLine = record_line(data, at);
+    if (!heading_is_fbuf(data, line.from + 1, line.to)) return 0;
+    if (kind == 'S' || kind == 's') return line.next;
+    alone: bool = line.next >= len(data) || data[line.next] == 'P' || data[line.next] == 'S' || data[line.next] == 's';
+    if ((kind == 'T' || kind == 'I' || kind == 'G') && alone) line.next else 0
+}
+
+// Whether the words data[from..to) are fbuf's, letters in either case (a
+// stop or a colon after them passed over).
+heading_is_fbuf(data: []i8, from: int, to: int): bool {
+    while (to > from && (data[to - 1] == '.' || data[to - 1] == ':' || data[to - 1] == ' ')) to = to - 1;
+    if (to - from != fbuf_n) return false;
+    for k in 0..fbuf_n {
+        a: int = data[from + k] as int;
+        b: int = fbuf[k] as int;
+        if (a >= 65 && a <= 90) a = a + 32;
+        if (b >= 65 && b <= 90) b = b + 32;
+        if (a != b) return false
+    }
+    true
+}
+
+// Division d's name onto fbuf, as a reader names it: a book's part's
+// title; an entry's key (fput_folio_entry_key: a date, a Strong's number).
+fput_division_name(folio: *folio::Folio, d: int) {
+    region {
+        title: []i8 = folio::folio_division_title(folio, d);
+        if (len(title) > 0) fput_bytes(title, 0, len(title)) else fput_folio_entry_key(folio,
+            d)
+    }
+}
+
+// Chapter c of the document in slot read in its own divisions named onto
+// fbuf, as a pane's title names it: its front by the document's short
+// title, a division by its name (not open yet: the document's short
+// title).
+fput_division_chapter_name(slot: int, c: int) {
+    i: int = shelf_find_slot(slot);
+    if (c <= 0 || !shelf_open_is(slot)) {
+        fput_shelf_short_title(i);
+        return
+    }
+    borrow shelf_open[shelf_open_place(slot)] as open {
+        match open.reader {
+            Document d -> {
+                if (c <= folio::folio_division_count(d.folio)) fput_division_name(d.folio,
+                    c - 1) else fput_shelf_short_title(i)
+            }
+            _ -> { }
+        }
+    }
+}
+
+// The blocks of the parts beside part p of chapter c read ahead (the next
+// first), if the module in slot is open; whether they are held.
+shelf_chapter_part_ahead(slot: int, c: int, p: int): bool {
+    if (!shelf_open_is(slot)) return true;
+    held: bool = true;
+    borrow shelf_open[shelf_open_place(slot)] as open {
+        match open.reader {
+            Document d -> {
+                region {
+                    parts: ChapterParts = module_chapter_parts(slot, d.folio, c);
+                    if (chapter_parts_read(&parts)) {
                         for q in [p + 1, p - 1] {
                             if (held && q >= 0 && q < len(parts.starts)) held = shelf_span_ready(slot,
-                                folio_range_span(slot, d.folio, parts.starts[q], comment_part_end(&parts,
+                                folio_range_span(slot, d.folio, parts.starts[q], chapter_part_end(&parts,
                                 q)))
                         }
                     }
@@ -1229,45 +1432,45 @@ shelf_comment_part_ahead(slot: int, c: int, p: int): bool {
     held
 }
 
-// Whether the part of chapter c of the commentary in slot that holds its
+// Whether the part of chapter c of the module in slot that holds its
 // anchor i (-1: the chapter's top), and the parts beside it, can be laid
-// out now; if not, what they need is asked for (the commentary opened,
-// a span read), once the bookshelf rests.
-shelf_comment_place_ready(slot: int, c: int, i: int): bool {
-    if (c < 0 || c >= chapters) return true;
+// out now; if not, what they need is asked for (the module opened, a span
+// read), once the bookshelf rests.
+shelf_chapter_place_ready(slot: int, c: int, i: int): bool {
+    if (c < 0) return true;
     if (!shelf_ensure_open(slot)) return false;
     ready: bool = true;
     part: int = 0;
-    borrow shelf_open[SHELF_USE_STUDY] as open {
+    borrow shelf_open[shelf_open_place(slot)] as open {
         match open.reader {
             Document d -> {
                 region {
-                    parts: CommentParts = comment_parts(d.folio, c);
-                    if (parts.division >= 0) {
+                    parts: ChapterParts = module_chapter_parts(slot, d.folio, c);
+                    if (chapter_parts_read(&parts)) {
                         part = (if (i >= 0 && i < len(parts.verse_parts)) parts.verse_parts[i] else 0);
                         ready = shelf_span_ready(slot, folio_range_span(slot, d.folio,
-                            parts.starts[part], comment_part_end(&parts, part)))
+                            parts.starts[part], chapter_part_end(&parts, part)))
                     }
                 }
             }
             _ -> { }
         }
     }
-    ready && shelf_comment_part_ahead(slot, c, part)
+    ready && shelf_chapter_part_ahead(slot, c, part)
 }
 
 // Whether the commentary in slot can show verse v of chapter c at once
-// (shelf_comment_place_ready at its last comment beginning at or before
+// (shelf_chapter_place_ready at its last comment beginning at or before
 // the verse; the chapter's top before its first): asked for if not.
 shelf_comment_verse_ready(slot: int, c: int, v: int): bool {
     if (c < 0 || c >= chapters) return true;
     if (!shelf_ensure_open(slot)) return false;
     anchor: int = -1;
-    borrow shelf_open[SHELF_USE_STUDY] as open {
+    borrow shelf_open[shelf_open_place(slot)] as open {
         match open.reader {
             Document d -> {
                 region {
-                    parts: CommentParts = comment_parts(d.folio, c);
+                    parts: ChapterParts = comment_parts(d.folio, c);
                     for k in 0..len(parts.verses)
                         if (parts.verses[k] > 0 && parts.verses[k] <= v) anchor = k
                 }
@@ -1275,7 +1478,7 @@ shelf_comment_verse_ready(slot: int, c: int, v: int): bool {
             _ -> { }
         }
     }
-    shelf_comment_place_ready(slot, c, anchor)
+    shelf_chapter_place_ready(slot, c, anchor)
 }
 
 // The reader's style for a record of words.
@@ -1465,7 +1668,7 @@ shelf_commentary_rows(data: []i8, c: int, focus_v: int): int {
 shelf_lay_commentary(slot: int, c: int, ctx: *ChapterLayout): bool {
     if (c < 0 || c >= chapters || !shelf_ensure_open(slot)) return false;
     ready: bool = false;
-    borrow shelf_open[SHELF_USE_STUDY] as open {
+    borrow shelf_open[shelf_open_place(slot)] as open {
         match open.reader {
             Document d -> {
                 region {
@@ -1500,9 +1703,9 @@ shelf_lay_commentary(slot: int, c: int, ctx: *ChapterLayout): bool {
 // that a reader coming to it lays it out at once, not a line saying it is
 // coming. Whether it is held already (or has nothing to read).
 shelf_commentary_ahead(slot: int, c: int): bool {
-    if (c < 0 || c >= chapters || !shelf_open_is(SHELF_USE_STUDY, slot)) return true;
+    if (c < 0 || c >= chapters || !shelf_open_is(slot)) return true;
     held: bool = true;
-    borrow shelf_open[SHELF_USE_STUDY] as open {
+    borrow shelf_open[shelf_open_place(slot)] as open {
         match open.reader {
             Document d -> {
                 division: int = folio_chapter_division(d.folio, c);
@@ -1519,9 +1722,9 @@ shelf_commentary_ahead(slot: int, c: int): bool {
     held
 }
 
-// ---- a dictionary's entries, and one entry ----
-// Entries' arg: its slot. Entry's: slot * SHELF_PLACE + its index (its
-// division's).
+// ---- a dictionary's entries ----
+// Its arg: its slot. Each entry's row reads it in a pane (its arg slot *
+// SHELF_PLACE + its chapter there, its division plus one).
 sk_build_shelf_entries(id: int, slot: int) {
     i: int = shelf_find_slot(slot);
     ui_begin(id, SCR_SHELF_ENTRIES, slot, "");
@@ -1535,7 +1738,7 @@ sk_build_shelf_entries(id: int, slot: int) {
         shelf_opening_rows(slot, i);
         return
     }
-    borrow shelf_open[SHELF_USE_ENTRIES] as open {
+    borrow shelf_open[shelf_open_place(slot)] as open {
         match open.reader {
             Document d -> shelf_entries_rows(d.folio, slot);
             _ -> { }
@@ -1583,8 +1786,8 @@ shelf_entries_lazy_from(slot: int, first: int, count: int) {
 }
 
 shelf_entries_lazy(_s: int, r: int) {
-    if (!shelf_open_is(SHELF_USE_ENTRIES, shelf_lazy_module_slot)) return;
-    borrow shelf_open[SHELF_USE_ENTRIES] as open {
+    if (!shelf_open_is(shelf_lazy_module_slot)) return;
+    borrow shelf_open[shelf_open_place(shelf_lazy_module_slot)] as open {
         match open.reader {
             Document d -> shelf_entry_row(d.folio, shelf_lazy_module_slot, shelf_lazy_first + r);
             _ -> { }
@@ -1592,80 +1795,11 @@ shelf_entries_lazy(_s: int, r: int) {
     }
 }
 
-// How many entries the dictionary in slot has (-1: it isn't open).
-shelf_entry_count(slot: int): int {
-    if (!shelf_open_is(SHELF_USE_ENTRIES, slot)) return -1;
-    count: int = -1;
-    borrow shelf_open[SHELF_USE_ENTRIES] as open {
-        match open.reader {
-            Document d -> count = folio::folio_division_count(d.folio);
-            _ -> { }
-        }
-    }
-    count
-}
-
 shelf_entry_row(folio: *folio::Folio, slot: int, index: int) {
-    ui_row(UI_ITEM, ACT_SHELF_ENTRY, slot * SHELF_PLACE + index);
+    ui_row(UI_ITEM, ACT_SHELF_ENTRY, slot * SHELF_PLACE + index + 1);
     fbuf_n = 0;
     fput_folio_entry_key(folio, index);
-    ui_set_title_fbuf();
-    ui_set_acc(ACC_MORE)
-}
-
-sk_build_shelf_entry(id: int, arg: int) {
-    slot: int = arg / SHELF_PLACE;
-    index: int = arg % SHELF_PLACE;
-    i: int = shelf_find_slot(slot);
-    ui_begin(id, SCR_SHELF_ENTRY, arg, "");
-    ui_page = true;
-    sk_shelf_subtitle(i);
-    if (i < 0) return;
-    count: int = shelf_entry_count(slot);
-    ui_tool("", "chevron.up", ACT_SHELF_STEP, -1, if (index > 0) UI_TOOL_PLAIN else UI_TOOL_OFF,
-        0);
-    fbuf_n = 0;
-    fput_str("Previous Entry");
-    ui_set_tool_label_fbuf();
-    ui_tool("", "chevron.down", ACT_SHELF_STEP, 1, if (count < 0 || index + 1 < count) UI_TOOL_PLAIN else UI_TOOL_OFF,
-        2);
-    fbuf_n = 0;
-    fput_str("Next Entry");
-    ui_set_tool_label_fbuf();
-    if (!shelf_ensure_open(slot)) {
-        shelf_opening_rows(slot, i);
-        return
-    }
-    waiting: bool = false;
-    borrow shelf_open[SHELF_USE_ENTRIES] as open {
-        match open.reader {
-            Document d -> {
-                if (index < folio::folio_division_count(d.folio)) {
-                    fbuf_n = 0;
-                    fput_folio_entry_key(d.folio, index);
-                    ui_set_screen_title_fbuf();
-                    region {
-                        match shelf_folio_division(slot, d.folio, index) {
-                            ChapterWaiting -> waiting = true;
-                            ChapterRecords r -> {
-                                ui_section("", "");
-                                records_rows(r.data, 0, len(r.data), ACT_SHELF_LINK)
-                            }
-                            _ -> ui_set_empty("exclamationmark.triangle", "This Entry Is Damaged",
-                                "")
-                        }
-                    }
-                }
-            }
-            _ -> { }
-        }
-    }
-    if (waiting) {
-        shelf_opening_rows(slot, i);
-        return
-    }
-    ui_section("", "");
-    shelf_credit_row(i)
+    ui_set_title_fbuf()
 }
 
 // Whether the folio's metadata says value for key.
@@ -1768,9 +1902,9 @@ folio_entry_today(folio: *folio::Folio): int {
 
 // A devotional's entry for today (-1: it is not open yet, or has none).
 shelf_devotional_today(slot: int): int {
-    if (!shelf_open_is(SHELF_USE_ENTRIES, slot)) return -1;
+    if (!shelf_open_is(slot)) return -1;
     today: int = -1;
-    borrow shelf_open[SHELF_USE_ENTRIES] as open {
+    borrow shelf_open[shelf_open_place(slot)] as open {
         match open.reader {
             Document d -> today = folio_entry_today(d.folio);
             _ -> { }
@@ -1779,11 +1913,26 @@ shelf_devotional_today(slot: int): int {
     today
 }
 
-// ---- a book's parts ----
+// Where a document read in its own divisions opens, as the chapter a pane
+// reads it at: a devotional at today's, once it is open; else where it was
+// read last (its front, the first time).
+shelf_division_opening_chapter(i: int): int {
+    if (shelf_kind_at(i) == SHELF_KIND_DEVOTIONAL) {
+        today: int = shelf_devotional_today(shelf_slot_at(i));
+        if (today >= 0) return today + 1
+    }
+    place: int = shelf_place_at(i);
+    if (place > 0) place else 0
+}
+
+// ---- a book's contents ----
 // Its arg: slot * SHELF_PLACE + the part: 0 the whole book, else its
-// division's index plus one. A part's key is its place in the book's
-// outline (1, 1.2, 1.2.3), so its depth is its key's numbers' count and its
-// parts follow it, deeper; the parts are in reading order.
+// division's index plus one (its chapter as a pane reads it). A part's key
+// is its place in the book's outline (1, 1.2, 1.2.3), so its depth is its
+// key's numbers' count and its parts follow it, deeper; the parts are in
+// reading order. The part first (the book: from its beginning), a tap
+// reading it in a pane; then its parts, each a tap reading it, or, one
+// with parts of its own, listing them.
 sk_build_shelf_book(id: int, arg: int) {
     slot: int = arg / SHELF_PLACE;
     node: int = arg % SHELF_PLACE;
@@ -1795,20 +1944,17 @@ sk_build_shelf_book(id: int, arg: int) {
         ui_set_screen_title_fbuf()
     }
     sk_shelf_subtitle(i);
-    ui_page = true;
     if (i < 0) return;
     if (!shelf_ensure_open(slot)) {
         shelf_opening_rows(slot, i);
         return
     }
-    borrow shelf_open[SHELF_USE_BOOK] as open {
+    borrow shelf_open[shelf_open_place(slot)] as open {
         match open.reader {
             Document d -> shelf_book_rows(d.folio, slot, node, i);
             _ -> { }
         }
     }
-    ui_section("", "");
-    shelf_credit_row(i)
 }
 
 shelf_book_rows(
@@ -1819,45 +1965,18 @@ shelf_book_rows(
 ) {
     count: int = folio::folio_division_count(folio);
     if (node > count) return;
+    ui_section("", "");
+    ui_row(UI_ITEM, ACT_SHELF_ENTRY, slot * SHELF_PLACE + node);
+    fbuf_n = 0;
+    if (node == 0) fput_shelf_title(i) else fput_division_name(folio, node - 1);
+    ui_set_title_fbuf();
+    fbuf_n = 0;
+    fput_str(if (node == 0) "From the beginning" else "From its beginning");
+    ui_set_detail_fbuf();
     if (node > 0) {
         fbuf_n = 0;
-        region {
-            title: []i8 = folio::folio_division_title(folio, node - 1);
-            fput_bytes(title, 0, len(title))
-        }
-        ui_set_screen_title_fbuf();
-        ui_tool("", "chevron.up", ACT_SHELF_STEP, -1, if (node > 1) UI_TOOL_PLAIN else UI_TOOL_OFF,
-            0);
-        fbuf_n = 0;
-        fput_str("Previous Part");
-        ui_set_tool_label_fbuf();
-        ui_tool("", "chevron.down", ACT_SHELF_STEP, 1, if (node < count) UI_TOOL_PLAIN else UI_TOOL_OFF,
-            2);
-        fbuf_n = 0;
-        fput_str("Next Part");
-        ui_set_tool_label_fbuf()
-    } else {
-        ui_section("", "");
-        ui_row(UI_TEXT, 0, 0);
-        ui_rich_begin();
-        fput_shelf_title(i);
-        ui_rich(RUN_STRONG);
-        ui_rich_title()
-    }
-    // (Its text once it is read; the contents meanwhile.)
-    region {
-        match if (node == 0) shelf_folio_own(slot, folio) else shelf_folio_division(slot,
-            folio, node - 1) {
-            ChapterWaiting -> shelf_opening_rows(slot, i);
-            ChapterRecords r -> {
-                if (len(r.data) > 0) {
-                    ui_section("", "");
-                    records_rows(r.data, 0, len(r.data), ACT_SHELF_LINK)
-                }
-            }
-            _ -> ui_set_empty("exclamationmark.triangle", "This Part Is Damaged",
-                "")
-        }
+        fput_division_name(folio, node - 1);
+        ui_set_screen_title_fbuf()
     }
     // (Its parts: those after it a level deeper, until one no deeper.)
     depth: int = if (node == 0) 0 else folio_part_depth(folio, node - 1);
@@ -1865,16 +1984,14 @@ shelf_book_rows(
     d: int = node;
     while (d < count && folio_part_depth(folio, d) > depth) {
         if (folio_part_depth(folio, d) == depth + 1) {
-            if (first) ui_section(if (node == 0) "Contents" else "", "");
+            if (first) ui_section("Contents", "");
             first = false;
-            ui_row(UI_ITEM, ACT_SHELF_ENTRY, slot * SHELF_PLACE + d + 1);
+            has_parts: bool = d + 1 < count && folio_part_depth(folio, d + 1) > depth + 1;
+            ui_row(UI_ITEM, if (has_parts) ACT_SHELF_PARTS else ACT_SHELF_ENTRY, slot * SHELF_PLACE + d + 1);
             fbuf_n = 0;
-            region {
-                title: []i8 = folio::folio_division_title(folio, d);
-                fput_bytes(title, 0, len(title))
-            }
+            fput_division_name(folio, d);
             ui_set_title_fbuf();
-            ui_set_acc(ACC_MORE)
+            if (has_parts) ui_set_acc(ACC_MORE)
         }
         d = d + 1
     }

@@ -190,6 +190,19 @@ SHELF_KIND_OTHER: int = 7;
 shelf_kind_names: []str = ["bible", "commentary", "dictionary", "glossary", "devotional",
     "book", "images", "other"];
 
+// Whether a module of kind (its code) is read in its own divisions, as a
+// pane reads them one after another: a book's parts, a dictionary's or a
+// glossary's entries, a devotional's days.
+shelf_kind_by_divisions(kind: int): bool {
+    kind == SHELF_KIND_DICTIONARY || kind == SHELF_KIND_GLOSSARY || kind == SHELF_KIND_DEVOTIONAL || kind == SHELF_KIND_BOOK
+}
+
+// Whether a module of kind is read in a pane: a commentary, by the
+// Bible's chapters; one read in its own divisions.
+shelf_kind_in_panes(kind: int): bool {
+    kind == SHELF_KIND_COMMENTARY || shelf_kind_by_divisions(kind)
+}
+
 shelf_kind_code(kind: ModuleKind): int {
     match kind {
         Bible -> SHELF_KIND_BIBLE;
@@ -1515,6 +1528,8 @@ shelf_add(entry: *CatalogEntry) {
     fput_tsv(info.description);
     fput(10);
     shelf_keep_fbuf();
+    // (Places kept in it while it was away, in it again.)
+    place_documents_back(shelf_find(info.name));
     shelf_failed_slot = -1;
     shelf_pump();
     shelf_screens_changed()
@@ -1578,6 +1593,9 @@ shelf_remove(i: int) {
         _ -> { }
     }
     if (shelf_rereading == slot) shelf_rereading = -1;
+    // (Places kept in it, in it as a module away: its slot may be given to
+    // another.)
+    place_documents_away(i);
     // (What is kept of it deleted first: its files are named after it.)
     shelf_remove_kept(i);
     shelf_format(i);
@@ -1690,13 +1708,13 @@ shelf_reread_when_ready() {
     i: int = shelf_find_slot(slot);
     if (i >= 0 && !shelf_broken_at(i)) {
         for p in 0..PANES {
-            if (pane_reads_commentary(p, slot) && pane_places[p].c >= 0 && !shelf_comment_place_ready(slot,
+            if (pane_reads_module(p, slot) && pane_places[p].c >= 0 && !shelf_chapter_place_ready(slot,
                 pane_places[p].c, pane_places[p].i)) return
         }
     }
     shelf_rereading = -1;
     for p in 0..PANES
-        if (pane_reads_commentary(p, slot)) pane_reread(p)
+        if (pane_reads_module(p, slot)) pane_reread(p)
 }
 
 // ---- reading what is kept ----
@@ -1858,7 +1876,7 @@ shelf_got(id: int, size: int) {
     match shelf_work {
         MakingBible w -> shelf_bible_got(i, id, size, w.t, w.source);
         MakingDocument w -> shelf_document_got(i, id, size, w.source);
-        OpeningFolio w -> shelf_folio_got(i, id, size, w.use, w.head);
+        OpeningFolio w -> shelf_folio_got(i, id, size, w.head);
         LoadingBible w -> shelf_bible_loaded(i, id, size, w.t, w.kept);
         ReadingText _w -> shelf_text_got(i, id, size);
         _ -> shelf_got_unwanted(id, size)
@@ -1905,7 +1923,7 @@ type ShelfWork =
     | MakingDocument { slot: int, source: MakingSource }
     // Its folio's head read: the first bytes, which say how long it is
     // (head 0), then the head (head its size).
-    | OpeningFolio { slot: int, use: int, head: int }
+    | OpeningFolio { slot: int, head: int }
     // Its folio read back (or its records, kept before folios, then
     // packed and kept as one).
     | LoadingBible { slot: int, t: int, kept: KeptBible }
@@ -2525,8 +2543,9 @@ shelf_bible_records_packed(i: int, ok: bool, t: int) {
 // ---- modules open for reading (commentaries, dictionaries, books) ----
 // Each open module's folio's head, read into an arena of its own (its
 // content read a span of blocks at a time, as it is wanted: shelf_held):
-// one for each use at a time (Study's commentary, a dictionary, a book),
-// let go when another is opened for that use or it is removed.
+// a few at a time (what each pane reads, Study's commentary, a screen's
+// dictionary or book), the one used longest ago let go when another is
+// opened, and each let go when it is removed.
 type OpenReader =
     | Document { folio: *folio::Folio }
 
@@ -2535,24 +2554,38 @@ type OpenModule = {
     reader: OpenReader
 }
 
-SHELF_USES: int = 3;
+SHELF_OPEN_MOST: int = 4;
 
-// The uses: Study's commentary (and a Bible's), a dictionary's entries
-// (a glossary's, a devotional's), a book.
-SHELF_USE_STUDY: int = 0;
+shelf_open: []?owned *OpenModule = new ?owned *OpenModule[SHELF_OPEN_MOST](null);
 
-SHELF_USE_ENTRIES: int = 1;
+// Each place's slot open (-1 none), and when it was used last.
+shelf_open_slots: []int = new int[SHELF_OPEN_MOST](-1);
 
-SHELF_USE_BOOK: int = 2;
+shelf_open_used: []int = new int[SHELF_OPEN_MOST](0);
 
-shelf_open: []?owned *OpenModule = new ?owned *OpenModule[SHELF_USES](null);
+shelf_open_clock: int = 0;
 
-// Each use's slot open (-1 none).
-shelf_open_slots: []int = new int[SHELF_USES](-1);
+// The place slot's module is open in (-1: it isn't), marked as used now.
+shelf_open_place(slot: int): int {
+    for k in 0..SHELF_OPEN_MOST {
+        if (shelf_open_slots[k] == slot && shelf_open[k] != null) {
+            shelf_open_clock = shelf_open_clock + 1;
+            shelf_open_used[k] = shelf_open_clock;
+            return k
+        }
+    }
+    -1
+}
 
-// The use a module's kind (its code) is opened for.
-shelf_use_of(kind: int): int {
-    if (kind <= SHELF_KIND_COMMENTARY) SHELF_USE_STUDY else if (kind <= SHELF_KIND_DEVOTIONAL) SHELF_USE_ENTRIES else SHELF_USE_BOOK
+// The place a module opened goes into: its own, else an empty one, else
+// the one used longest ago.
+shelf_open_place_for(slot: int): int {
+    at: int = 0;
+    for k in 0..SHELF_OPEN_MOST {
+        if (shelf_open_slots[k] == slot) return k;
+        if (shelf_open_slots[at] >= 0 && (shelf_open_slots[k] < 0 || shelf_open_used[k] < shelf_open_used[at])) at = k
+    }
+    at
 }
 
 // Whether slot is open (its module readable now); if not, it is made a
@@ -2560,11 +2593,10 @@ shelf_use_of(kind: int): int {
 shelf_ensure_open(slot: int): bool {
     i: int = shelf_find_slot(slot);
     if (i < 0 || !shelf_ready_at(i)) return false;
-    use: int = shelf_use_of(shelf_kind_at(i));
-    if (shelf_open_slots[use] == slot && shelf_open[use] != null) return true;
+    if (shelf_open_place(slot) >= 0) return true;
     if (shelf_broken_at(i) || shelf_busy()) return false;
     match shelf_form_at(i) {
-        Folio -> shelf_folio_open(i, use);
+        Folio -> shelf_folio_open(i);
         Unpacked -> {
             // (Unpacked by an earlier build, before modules were made
             // folios: its files let go, and it downloaded and made again.)
@@ -2584,10 +2616,10 @@ shelf_open_settled() {
 }
 
 shelf_close_slot(slot: int) {
-    for use in 0..SHELF_USES {
-        if (shelf_open_slots[use] == slot) {
-            drop shelf_open[use];
-            shelf_open_slots[use] = -1
+    for k in 0..SHELF_OPEN_MOST {
+        if (shelf_open_slots[k] == slot) {
+            drop shelf_open[k];
+            shelf_open_slots[k] = -1
         }
     }
     shelf_held_close(slot);
@@ -2601,9 +2633,9 @@ shelf_close_slot(slot: int) {
     }
 }
 
-// The use's open module is slot's.
-shelf_open_is(use: int, slot: int): bool {
-    shelf_open_slots[use] == slot && shelf_open[use] != null
+// Whether slot's module is open.
+shelf_open_is(slot: int): bool {
+    shelf_open_place(slot) >= 0
 }
 
 // ---- a module's text, a span at a time ----

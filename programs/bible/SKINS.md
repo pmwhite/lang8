@@ -254,10 +254,22 @@ then, and the bar's panel button opens Go To aimed at the page.
 
 The page and the panel's reader are two panes: pane 0 the page, pane 1 the
 panel's reader (the screen whose `reader` line says so). Each reads a
-document a part at a time: the page the Bible, or a commentary (Swap Panes,
-in the reader screen's menu, trades what the two read, each going to the
-other's place; the bar's `version` then names the commentary); the panel a
-version or a commentary. The reader screen is one row of chrome, drawn
+document a part at a time: a version of the Bible, a commentary, or a
+document read in its own divisions (a book's parts, a dictionary's or a
+glossary's entries, a devotional's days), each pane any of them (Swap
+Panes, in the reader screen's menu, trades what the two read, each going
+to the other's place; the bar's `version` then names what the page
+reads). A version's and a commentary's chapters are the Bible's; a
+document read in its own divisions has its own (`chapters P N`): its
+front, chapter 0 (its title, centered as a book's name, and what it has
+before its first division, an introduction), then each division in
+order, chapter d + 1, opened by its name (`name` and the part's opener: a
+part's title, an entry's word or date), every chapter one after another
+however long, so that a book reads through and a dictionary scrolls from
+entry to entry. Such a document has no verses: its chapters have no
+anchors (a place in one is `C -1 FRAC`, as far through the whole
+chapter), and the panes can't be linked while either reads one (the
+reader's Link off, `reader 0`, no `link` maps). The reader screen is one row of chrome, drawn
 as the page's bar is on that skin, so that the two panes are named
 alike: its title is always the chapter at its reading line, and its
 `left` the name of what it reads, as the page's `version` names the
@@ -270,7 +282,9 @@ title has one. Its tools are Link (prominent while linked) and a menu
 (`ellipsis`: Swap Panes, Full Screen or Beside the Page, Close Panel;
 Full Screen only where the skin's panel may fill the screen, `panelfill`),
 drawn as the page's bar's glyphs are, Link lit while linked as the
-page's panel button is while the panel shows; where the page's bar puts
+page's panel button is while the panel shows, off (`tool` STYLE 3,
+"Can’t Be Linked") while either pane reads a document in its own
+divisions; where the page's bar puts
 glyphs at both sides (the iPhone's), Link takes the outer left place and
 the menu the outer right.
 The reader is the panel's first screen: it has no Back. A commentary on the page has no verses to select:
@@ -327,7 +341,9 @@ and core answers each:
 - `part P C K N` TEXT: part K of chapter C, the chapter in N parts (0: not
   known yet, a commentary still opening); then `layout ORIG RTL VERSELINES
   OPENER LABEL`, `coming` (it holds its place until it has been read: sent
-  again when it has), `name` TITLE, `span A B STYLE PARA`, `verse V A B`,
+  again when it has; a module still opening, the ESV's chapter loading: a
+  skin draws it as tall as what of the pane is in sight, and knows a part
+  that holds a place by this line alone, not by its having no verses), `name` TITLE, `span A B STYLE PARA`, `verse V A B`,
   `link A B KIND ARG`, `gloss A B`, `mark V HEX BOOKMARK NOTE`, `gap C0 C1`
   (a commentary's run of chapters it says nothing on: this one part stands
   for them all, sent as C0's to a `want` of any of them), then `anchor V K
@@ -609,11 +625,19 @@ name, or `tap shelf` with nothing read there yet). In a wide window a
 skin may anchor it, as a popover, to what opened it (the page's title or
 the panel's name, by the argument); nothing else differs. Its rows, and
 those of the screens pushed over it (a book's chapters, a document's
-page), act for where a pick lands; core works that out, and the skin
-hands the actions back as for any screen.
+page, a book's contents, a dictionary's entries), act for where a pick
+lands; core works that out, and the skin hands the actions back as for
+any screen.
 
-- Nothing typed: Ribbons and Reading Plan, Recent, a Books of the Bible
-  row (the books' screen, `SCR_BOOKS` 69, pushed: Old and New Testament
+- Nothing typed: Ribbons and Reading Plan, Recent (passages of the
+  Bible: a place in a book or a dictionary is History's alone), a row for
+  the contents of each document a pane reads in its own divisions
+  (`Contents` for a book, `Entries` for a dictionary, its short title
+  under it: a book's contents, `SCR_SHELF_BOOK` 66, its parts a row each,
+  one with parts of its own listing them, the part itself its first row;
+  a dictionary's entries, `SCR_SHELF_ENTRIES` 64, a row each from what is
+  typed in its field on; a tap reads it in the pane that reads it), a
+  Books of the Bible row (the books' screen, `SCR_BOOKS` 69, pushed: Old and New Testament
   sections, a row a book; typing finds a book too, so Go To doesn't list
   them), Documents (what is read: the page's document, the panel's, then
   the others read, the latest first, up to six with the Bibles that come
@@ -660,7 +684,8 @@ hands the actions back as for any screen.
   `Psalm 23:1 · Matthew Henry’s Concise Commentary` over the words found;
   a tap goes to the verse and opens the commentary in the panel there.
   Dictionaries and Books: an entry or part titled with the first word
-  first; a tap opens it. Three a section, then `Show All N`. While
+  first; a tap reads it in a pane (the one that reads it, else where a
+  pick of it lands), as far through it as the words are. Three a section, then `Show All N`. While
   documents' indexes or other versions are still being read, a faint busy
   row `Searching more documents…` ends the list; each one read makes the
   screen again with what it adds. A search's results are kept for its
@@ -693,9 +718,19 @@ hands the actions back as for any screen.
   `Removed.`).
 - A document not on the device opens all the same: the pane it lands in
   keeps showing what it shows until the new one can be read, then changes
-  to it at the same place (Panes: Arriving). A dictionary or a book not
-  here opens its screen in the sheet, which says "Opening…" until it has
-  come.
+  to it at the same place (Panes: Arriving); a book or a dictionary at
+  its own place (where it was read last, its front the first time; a
+  devotional at today's).
+- A pick of a version lands as above; any other document (a commentary,
+  a book, a dictionary, a devotional) is read in the panel, aimed there or
+  where the panel fits, else on the page (a book or a dictionary on the
+  page is a jump: the way back leads to where the page was).
+- Look Up (`lookup` WORDS, the text menu's): the words looked up in a
+  dictionary or a glossary (the one a pane reads, the panel's first, else
+  the one read latest), read at its entry for them (the first whose key
+  isn't before them) where it is, else where a pick of it lands; its file
+  not open yet, once it is. With no dictionary here, Go To opens with the
+  words typed.
 - `tap shelf` opens or closes the panel; with nothing to read there it
   presents Go To aimed at the panel (no `beside` line), and the panel
   opens (`beside 1 0`) only when a document is picked. Without a panel
@@ -823,7 +858,7 @@ Other lines from core:
 | `present ID`, `push ID`, `update ID`, `pop`, `pop_to ID`, `dismiss` | what to do with screens |
 | `refill ID FADE` | screen ID made again as its field is typed in (FADE 1: a cross-fade) |
 | `retext ID`, `blur ID` | the fields to show the screen's words again (its search field's, and a `field` row's detail, though it is being typed in); the keyboard put away |
-| `reader N` | the Bible has N chapters (each pane's) |
+| `chapters P N` | pane P's document has N chapters (the Bible's 1,189 for a version or a commentary; a book's or a dictionary's own: see Panes above), said at `start` and as it changes |
 | `part P C K N` TEXT | part K of chapter C of pane P's document, the chapter in N parts (0: not known yet, a commentary still opening), and the panes' other lines: see Panes above |
 | `go P C I FRAC MODE`, `halt P`, `forget P C`, `line P THOUSANDTHS`, `link C MODE` | a pane to a place, its glide stopped, its parts to be asked for again, its reading line; a chapter's link map: see Panes above |
 | `arriving P THOUSANDTHS`, `arrived P` | a document on its way to pane P, so much come (a hairline along the foot of that pane's bar, ink at 30%); nothing on its way any more (the hairline fades out): see Panes, Arriving |
@@ -864,7 +899,9 @@ Show Panel or Hide Panel), `commands MASK` (those that act now, bit K, written a
 changes), `credit K` WORDS LINK ADDRESS LABEL (at `start`: a section's
 credit K, its words then a link to ADDRESS, and what a screen reader
 says of it), `editcommand K` TITLE (at `start`: the text's own menu's
-commands, done as `editmenu K`), `accessory NAME` WORDS (at `start`: what
+commands, done as `editmenu K` on the verses the words selected touch;
+but Look Up, K 5, which sends the words themselves, `lookup` WORDS, and
+is offered in either pane), `accessory NAME` WORDS (at `start`: what
 a screen reader says of a row's accessory, `done`'s), `trayfit` TITLES (at
 `start`: the tray's buttons' titles, split by `|`, that a skin sizing one
 size of title for all of them fits to the widest), `studyable 1|0` (the answer to `studyable`), `copy`,
@@ -895,6 +932,7 @@ From the skin:
 | `model ID [SECTION ROW]` | return the screen's current description without a presentation effect; with windowed rows, include the requested lazy row |
 | `windowrows 0/1` | choose full lazy sections (the default) or their counts with rows fetched on demand, a page at a time (`model ID SECTION ROW`); available to every skin |
 | `editmenu COMMAND` | perform one of core's text-selection menu commands on the current selection |
+| `lookup WORDS` | the text menu's Look Up (`editcommand 5`, said only where the Bookshelf is): the words selected, in either pane (WORDS to the line's end), looked up in a dictionary (see Go To) |
 | `place C V FRAC` | the page's place as an address names it: where it opens, before `start`; Go To it, after |
 | `want P C K`, `at P C I FRAC [NAMED]`, `rest P ENDS_HI MS`, `moving P MS` | a pane's part wanted, its reading line's place, at rest, a finger on it: see Panes above |
 | `dark 0/1` | the system's appearance changed |

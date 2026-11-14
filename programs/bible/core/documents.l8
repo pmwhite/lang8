@@ -1328,12 +1328,19 @@ goto_field_from_fbuf(at: int) {
 // Go To opened (where a pick lands: aim) with words in its field
 // (Study's More Commentaries: "Commentaries").
 goto_open_with(aim: int, words: str) {
-    sk_open(SCR_GOTO, aim, false);
-    at: int = sk_top();
-    if (at < 0 || sk_kinds[at] != SCR_GOTO) return;
+    at: int = goto_opened(aim);
+    if (at < 0) return;
     fbuf_n = 0;
     fput_str(words);
     goto_field_from_fbuf(at)
+}
+
+// Go To opened where a pick lands (aim): its screen (-1: none opened). Its
+// words are put in fbuf after it opens: making its rows uses fbuf.
+goto_opened(aim: int): int {
+    sk_open(SCR_GOTO, aim, false);
+    at: int = sk_top();
+    if (at < 0 || sk_kinds[at] != SCR_GOTO) -1 else at
 }
 
 // Return in Go To's field with no reference or book: the first document
@@ -1398,24 +1405,185 @@ doc_open_module(at: int, i: int) {
     // (Tapped again after it failed: fetched again.)
     if (shelf_failed_slot == shelf_slot_at(item)) shelf_failed_slot = -1;
     pane: int = doc_landing(at, item);
-    if (pane < 0) {
-        shelf_pump();
-        shelf_open_reading(item, false);
-        return
-    }
+    if (pane < 0) return;
     doc_leave_sheet(at);
     doc_arrive(pane, item)
 }
 
 // The pane module i read from screen at lands in: a Bible as a version
-// (the panel's, aimed there, else the page's); a commentary in the panel,
-// aimed there or where the panel fits, else on the page; -1 none (a
-// dictionary's or a book's screens, over the sheet).
+// (the panel's, aimed there, else the page's); another a pane reads (a
+// commentary, a book, a dictionary) in the panel, aimed there or where the
+// panel fits, else on the page; -1 none (what can't be read).
 doc_landing(at: int, i: int): int {
     k: int = shelf_kind_at(i);
     if (k == SHELF_KIND_BIBLE) return if (sk_aims_panel(at)) PANE_PANEL else PANE_PAGE;
-    if (k == SHELF_KIND_COMMENTARY) return if (sk_aims_panel(at) || sk_panel_fits) PANE_PANEL else PANE_PAGE;
+    if (shelf_kind_in_panes(k)) return if (sk_aims_panel(at) || sk_panel_fits) PANE_PANEL else PANE_PAGE;
     -1
+}
+
+// Chapter c of the module in slot (a book's part, a dictionary's entry, as
+// a pane reads them), frac thousandths through it, picked from screen at
+// (its contents, what Go To's words found): read in the pane that reads it
+// already, else where a pick of it lands (doc_landing); the sheet put
+// away. On the page, a jump (the way back leads to where it was).
+doc_read_division(
+    at: int,
+    slot: int,
+    c: int,
+    frac: int
+) {
+    i: int = shelf_find_slot(slot);
+    if (i < 0 || !shelf_here_at(i)) return;
+    pane: int = if (pane_reads_module(PANE_PANEL, slot)) PANE_PANEL else if (pane_reads_module(PANE_PAGE,
+        slot)) PANE_PAGE else doc_landing(at, i);
+    if (pane < 0) return;
+    shelf_note_read(i, c);
+    doc_leave_sheet(at);
+    doc_arrival_end(pane);
+    if (pane == PANE_PAGE) {
+        sk_goto_document(PlaceDocument.Module { slot: slot }, c, 0, frac);
+        return
+    }
+    if (pane_reads_module(PANE_PANEL, slot)) {
+        pane_go_verse(PANE_PANEL, c, 0, frac, PANE_GO_AT_ONCE);
+        bb_reader_placed(c, 0, -1);
+        return
+    }
+    sk_beside_read(slot)
+}
+
+// ---- Look Up ----
+// Words selected looked up (the text's menu's Look Up: `lookup` WORDS) in
+// a dictionary (or a glossary): the one a pane reads, the panel's first,
+// else the one read latest; at its entry for them (the first whose key is
+// not before them: folio_entry_seek), read where it is, else where a
+// pick of it lands. Its file not open yet: looked up once it is. With no
+// dictionary here, Go To opens with the words typed (what they find
+// there: entries, verses, documents).
+look_up_words: []i8 = new i8[64](0i8);
+
+look_up_n: int = 0;
+
+// The dictionary the words wait for (-1: none).
+look_up_slot: int = -1;
+
+sk_look_up(buf: []i8, b: int, e: int) {
+    // (The words without the spaces and punctuation about them; at most
+    // what the field keeps, cut at a character's start.)
+    from: int = b;
+    to: int = e;
+    while (from < to && !look_up_letter(buf[from] as int & 255)) from = from + 1;
+    while (to > from && !look_up_letter(buf[to - 1] as int & 255)) to = to - 1;
+    if (to - from > len(look_up_words)) {
+        to = from + len(look_up_words);
+        while (to > from && (buf[to] as int & 192) == 128) to = to - 1
+    }
+    if (to <= from) return;
+    look_up_n = to - from;
+    memcpy(look_up_words, 0, buf, from, look_up_n);
+    slot: int = look_up_dictionary();
+    if (slot < 0) {
+        at: int = goto_opened(if (sk_panel_fits) GOTO_PANEL else GOTO_PAGE);
+        if (at < 0) return;
+        fbuf_n = 0;
+        fput_bytes(look_up_words, 0, look_up_n);
+        goto_field_from_fbuf(at);
+        return
+    }
+    look_up_slot = slot;
+    look_up_check()
+}
+
+// Whether a byte may be part of a word looked up: a letter or a digit, or
+// part of a character past ASCII (curly quotes are punctuation, not let
+// through: they begin E2 80).
+look_up_letter(k: int): bool {
+    is_alnum(k) || k >= 128 && k != 226 && k != 128 && k != 152 && k != 153 && k != 156 && k != 157
+}
+
+// The dictionary words are looked up in (-1: none here).
+look_up_dictionary(): int {
+    for p in [PANE_PANEL, PANE_PAGE] {
+        slot: int = pane_module_slot(p);
+        if (slot >= 0 && look_up_kind(shelf_kind_at(shelf_find_slot(slot)))) return slot
+    }
+    best: int = -1;
+    for i in 0..shelf_count() {
+        if (shelf_here_at(i) && look_up_kind(shelf_kind_at(i)) && (best < 0 || shelf_used_at(i) > shelf_used_at(best))) best = i
+    }
+    if (best < 0) -1 else shelf_slot_at(best)
+}
+
+look_up_kind(kind: int): bool {
+    kind == SHELF_KIND_DICTIONARY || kind == SHELF_KIND_GLOSSARY
+}
+
+// The words waiting looked up, if their dictionary is open (else it is
+// opened, and this is done again as the Bookshelf moves).
+look_up_check() {
+    slot: int = look_up_slot;
+    if (slot < 0) return;
+    if (!shelf_ensure_open(slot)) {
+        i: int = shelf_find_slot(slot);
+        // (Gone, or broken: not waited for.)
+        if (i < 0 || shelf_broken_at(i)) look_up_slot = -1;
+        return
+    }
+    look_up_slot = -1;
+    entry: int = 0;
+    borrow shelf_open[shelf_open_place(slot)] as open {
+        match open.reader {
+            Document d -> {
+                count: int = folio::folio_division_count(d.folio);
+                entry = folio_entry_seek(d.folio, look_up_words, look_up_n);
+                if (entry >= count) entry = count - 1
+            }
+            _ -> { }
+        }
+    }
+    if (entry >= 0) doc_read_division(-1, slot, entry + 1, 0)
+}
+
+// ---- a document's contents in Go To ----
+// A row in Go To for the contents of each document a pane reads in its own
+// divisions (the page's first): a book's parts, a dictionary's entries.
+goto_contents_rows() {
+    for p in [PANE_PAGE, PANE_PANEL] {
+        slot: int = pane_module_slot(p);
+        if (slot >= 0 && pane_by_divisions(p) && !(p == PANE_PANEL && pane_reads_module(PANE_PAGE,
+            slot))) {
+            i: int = shelf_find_slot(slot);
+            ui_row(UI_ITEM, ACT_SHELF_PARTS, slot * SHELF_PLACE);
+            ui_set_title(if (shelf_kind_at(i) == SHELF_KIND_BOOK) "Contents" else "Entries");
+            fbuf_n = 0;
+            fput_shelf_short_title(i);
+            ui_set_detail_fbuf();
+            ui_set_icon("list.bullet");
+            ui_set_acc(ACC_MORE)
+        }
+    }
+}
+
+// Module i (here, a pane reads it, not a Bible) read in pane p: in the
+// panel at the panel's place (one read in its own divisions, at its own);
+// on the page at the page's place (a commentary), or a jump to its own (one
+// read in its own divisions: the way back leads to where the page was).
+doc_read_module(p: int, i: int) {
+    slot: int = shelf_slot_at(i);
+    if (p == PANE_PANEL) {
+        sk_beside_read_in_place(PanelDocument.Module { slot: slot });
+        return
+    }
+    shelf_note_read(i, -1);
+    if (shelf_kind_by_divisions(shelf_kind_at(i))) {
+        sk_goto_document(PlaceDocument.Module { slot: slot }, shelf_division_opening_chapter(i),
+            0, 0);
+        return
+    }
+    page_read(PlaceDocument.Module { slot: slot });
+    pane_go_verse(PANE_PAGE, sk_c, sk_v, 0, PANE_GO_AT_ONCE);
+    sk_write_title();
+    sk_save()
 }
 
 // ---- a document on its way to a pane ----
@@ -1430,9 +1598,11 @@ doc_landing(at: int, i: int): int {
 // pane meanwhile, the newer pick wins; the earlier goes on coming, unsaid.
 // The panel sent one while it showed none (closed, or nothing read there)
 // keeps it now and opens, "Openingâ€¦" in its place (doc_pane_opening).
+// (Coming at chapter: a place in it opened, a module away's; -1, where a
+// pick of it opens.)
 type PaneArrival =
     | Idle
-    | Coming { slot: int, told: int }
+    | Coming { slot: int, told: int, chapter: int }
 
 doc_arrivals: []PaneArrival = [PaneArrival.Idle, PaneArrival.Idle];
 
@@ -1455,7 +1625,12 @@ doc_arriving_any(slot: int): bool {
 // Module i (not here yet) sent to pane p: fetched first of what is wanted,
 // the pane named for it, and the skin told how much has come.
 doc_arrive(p: int, i: int) {
-    doc_arrivals[p] = PaneArrival.Coming { slot: shelf_slot_at(i), told: -1 };
+    doc_arrive_at(p, i, -1)
+}
+
+// The same, to arrive at chapter c (-1: where a pick of it opens).
+doc_arrive_at(p: int, i: int, c: int) {
+    doc_arrivals[p] = PaneArrival.Coming { slot: shelf_slot_at(i), told: -1, chapter: c };
     shelf_pump();
     if (p == PANE_PAGE) sk_write_title() else doc_panel_names_arriving(i);
     doc_arrivals_check()
@@ -1482,7 +1657,7 @@ doc_panel_names_arriving(i: int) {
 doc_panel_wants_again(i: int) {
     slot: int = shelf_slot_at(i);
     if (!doc_panel_keeps(slot) || doc_arriving_slot(PANE_PANEL) == slot) return;
-    doc_arrivals[PANE_PANEL] = PaneArrival.Coming { slot: slot, told: -1 };
+    doc_arrivals[PANE_PANEL] = PaneArrival.Coming { slot: slot, told: -1, chapter: -1 };
     if (sk_beside_open() && bb_reader_at() >= 0) {
         pane_forget(PANE_PANEL, -1);
         bb_reader_remade()
@@ -1522,26 +1697,31 @@ fput_doc_arriving_name(p: int) {
 doc_arrivals_check() {
     for p in 0..PANES {
         match doc_arrivals[p] {
-            Coming c -> doc_arrival_look(p, c.slot, c.told);
+            Coming c -> doc_arrival_look(p, c.slot, c.told, c.chapter);
             Idle -> { }
         }
     }
 }
 
-doc_arrival_look(p: int, slot: int, told: int) {
+doc_arrival_look(
+    p: int,
+    slot: int,
+    told: int,
+    chapter: int
+) {
     i: int = shelf_find_slot(slot);
     if (i < 0 || slot == shelf_failed_slot || shelf_broken_at(i)) {
         doc_arrival_failed(p, i);
         return
     }
-    if (doc_arrival_ready(p, i)) {
-        doc_arrival_done(p, i);
+    if (doc_arrival_ready(p, i, chapter)) {
+        doc_arrival_done(p, i, chapter);
         return
     }
     progress: int = shelf_progress(slot);
     if (progress < 0) progress = (if (shelf_here_at(i)) 1000 else 0);
     if (told >= 0 && progress < told + ARRIVAL_TOLD_STEP && !(progress == 1000 && told < 1000)) return;
-    doc_arrivals[p] = PaneArrival.Coming { slot: slot, told: progress };
+    doc_arrivals[p] = PaneArrival.Coming { slot: slot, told: progress, chapter: chapter };
     ui_str("arriving ");
     ui_int(p);
     ui_byte(32);
@@ -1549,10 +1729,11 @@ doc_arrival_look(p: int, slot: int, told: int) {
     ui_byte(10)
 }
 
-// Whether module i can be shown in pane p at once: here, and a Bible's text
+// Whether module i can be shown in pane p at once (at chapter, one read in
+// its own divisions; -1 where a pick of it opens): here, and a Bible's text
 // read, or a commentary open with its parts at the pane's place read (what
 // is missing asked for, as the Bookshelf rests).
-doc_arrival_ready(p: int, i: int): bool {
+doc_arrival_ready(p: int, i: int, chapter: int): bool {
     if (!shelf_here_at(i)) return false;
     if (shelf_kind_at(i) == SHELF_KIND_BIBLE) {
         t: int = shelf_text_of(i);
@@ -1560,6 +1741,8 @@ doc_arrival_ready(p: int, i: int): bool {
         shelf_ask_text(t);
         return false
     }
+    if (shelf_kind_by_divisions(shelf_kind_at(i))) return shelf_chapter_place_ready(shelf_slot_at(i),
+        if (chapter >= 0) chapter else shelf_division_opening_chapter(i), -1);
     cv: int = doc_landing_verse(p);
     shelf_comment_verse_ready(shelf_slot_at(i), cv / 1000, cv % 1000)
 }
@@ -1569,24 +1752,83 @@ doc_arrival_ready(p: int, i: int): bool {
 // page's.
 doc_landing_verse(p: int): int {
     if (p == PANE_PANEL && bb_reader_at() >= 0 && !sk_beside_linked() && !doc_pane_opening(PANE_PANEL)) return bb_reader_c * 1000 + bb_reader_v;
-    sk_c * 1000 + sk_v
+    page_bible_c() * 1000 + page_bible_v()
 }
 
 // Module i arrived for pane p: the pane changes to it at its place, as a
-// pick of it here would; then the hairline goes.
-doc_arrival_done(p: int, i: int) {
+// pick of it here would (at chapter, if one was opened on the page); then
+// the hairline goes.
+doc_arrival_done(p: int, i: int, chapter: int) {
     doc_arrivals[p] = PaneArrival.Idle;
-    slot: int = shelf_slot_at(i);
     shelf_note_read(i, -1);
     if (shelf_kind_at(i) == SHELF_KIND_BIBLE) {
         t: int = shelf_text_of(i);
         if (p == PANE_PAGE) sk_use_version(t) else sk_beside_read_in_place(PanelDocument.Version { text: t })
-    } else if (p == PANE_PAGE) {
-        page_read(PlaceDocument.Module { slot: slot });
-        pane_go_verse(PANE_PAGE, sk_c, sk_v, 0, PANE_GO_AT_ONCE);
-        sk_save()
-    } else sk_beside_read_in_place(PanelDocument.Module { slot: slot });
+    } else if (chapter >= 0 && p == PANE_PAGE && shelf_kind_by_divisions(shelf_kind_at(i))) {
+        shelf_note_read(i, chapter);
+        sk_goto_document(PlaceDocument.Module { slot: shelf_slot_at(i) }, chapter,
+            0, 0)
+    } else doc_read_module(p, i);
     doc_write_arrived(p)
+}
+
+// ---- a place in a module away ----
+// A place in a module no longer on the Bookshelf (History's, a ribbon's,
+// the way back's) opened: the module put on it again from the catalog and
+// fetched, as a pick of it in Go To is (its places in it again: shelf_add),
+// and on its way to the page; a commentary arrives at the place, the page
+// going there at once (in the Bible, or the commentary it reads); one read
+// in its own divisions, at the place's chapter. The catalog not read yet:
+// opened once it is (doc_away_check).
+type AwayOpening =
+    | NotWaiting
+    | Waiting { module: int, chapter: int, verse: int }
+
+doc_away_opening: AwayOpening = AwayOpening.NotWaiting;
+
+doc_open_away(module: int, c: int, v: int) {
+    doc_away_opening = AwayOpening.NotWaiting;
+    if (!sk_has_shelf) return;
+    sk_close_group(0);
+    ui_str("goto\n");
+    entry: int = place_away_catalog_entry(module);
+    if (entry < 0 && shelf_catalog == null) {
+        shelf_want_catalog();
+        if (shelf_catalog_awaited()) {
+            doc_away_opening = AwayOpening.Waiting { module: module, chapter: c, verse: v };
+            return
+        }
+    }
+    i: int = -1;
+    if (entry >= 0) {
+        borrow shelf_catalog as catalog {
+            shelf_add(&catalog.entries[entry]);
+            i = shelf_find(catalog.entries[entry].info.name)
+        }
+    }
+    if (i < 0) {
+        fbuf_n = 0;
+        fput_str("Couldn\â\€\™t open ");
+        fput_place_away_title(module);
+        fput(46);
+        ui_toast(TOAST_WARNING);
+        return
+    }
+    if (shelf_kind_by_divisions(shelf_kind_at(i))) {
+        doc_arrive_at(PANE_PAGE, i, c);
+        return
+    }
+    sk_goto(c, v);
+    doc_arrive(PANE_PAGE, i)
+}
+
+// The catalog come (or not to come): the place waiting for it opened.
+doc_away_check() {
+    match doc_away_opening {
+        Waiting w -> if (!shelf_catalog_awaited()) doc_open_away(w.module, w.chapter,
+            w.verse);
+        NotWaiting -> { }
+    }
 }
 
 // Module i couldn't come for pane p (item -1: gone): the pane named for

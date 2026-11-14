@@ -349,10 +349,10 @@ final class Reader extends ListView {
   }
 
   // ---- core's lines ----
-  // `reader N`: the Bible's chapters; what it had let go.
+  // `chapters P N`: its document's chapters (core's `forget` lets go of
+  // what it shows, as its document changes).
   void setChapters(int n) {
     chapters = n;
-    forget(-1);
   }
 
   // `line P THOUSANDTHS`.
@@ -820,10 +820,10 @@ final class Reader extends ListView {
     return getWidth() - getPaddingLeft() - getPaddingRight();
   }
 
-  // Whether part p only holds a place (coming, a run, the ESV's waiting
-  // line): as tall as what of the pane is in sight.
+  // Whether part p only holds a place (coming: a module still opening, the
+  // ESV's chapter loading; a run): as tall as what of the pane is in sight.
   private boolean holding(Part p) {
-    return p.coming || p.runTo >= 0 || (pane == PAGE && p.verses.length == 0);
+    return p.coming || p.runTo >= 0;
   }
 
   // A view set up to show part p: the list's, or the one that measures. A

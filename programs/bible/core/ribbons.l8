@@ -113,8 +113,15 @@ ev_name(i: int) {
     for k in 0..rb_name_n[i] ev(rb_name[i * RB_NAME_BYTES + k] as int)
 }
 
-// A place as the log has it: ROM 3, ROM 3:9.
-ev_place(c: int, v: int) {
+// A place in document d as the log has it: ROM 3, ROM 3:9; a document's
+// own chapter, - 412.
+ev_place(d: PlaceDocument, c: int, v: int) {
+    if (place_document_by_divisions(d)) {
+        ev_str(PLACE_OWN_CHAPTER);
+        ev(32);
+        ev_int(c);
+        return
+    }
     for i in 0..3 ev(book_codes[ch_book[c]][i] as int);
     ev(32);
     ev_int(ch_num[c]);
@@ -182,13 +189,18 @@ name_taken(b: []i8, n: int): bool {
     false
 }
 
-// The default name for chapter c, into nm_buf: its book's ("Romans",
-// "Psalms"), or "Romans (2)", "(3)" if a ribbon has it.
-name_default(c: int) {
-    b: int = ch_book[c];
-    base: int = len(book_name(b));
-    for k in 0..base nm_buf[k] = book_name(b)[k];
-    nm_n = base;
+// The default name for chapter c of document d, into nm_buf: its book's
+// ("Romans", "Psalms"; in a document read in its own divisions, the
+// document's short title, "Easton's"), or "Romans (2)", "(3)" if a ribbon
+// has it.
+name_default(d: PlaceDocument, c: int) {
+    fbuf_n = 0;
+    match d {
+        Module m -> if (place_document_by_divisions(d)) fput_shelf_short_title(shelf_find_slot(m.slot)) else fput_str(book_name(ch_book[c]));
+        _ -> fput_str(book_name(ch_book[c]))
+    }
+    name_clean(fbuf, fbuf_n);
+    base: int = nm_n;
     m: int = 2;
     while (name_taken(nm_buf, nm_n) && m < 100) {
         nm_n = base;
@@ -304,28 +316,30 @@ ribbon_set_color(id: int, k: int): bool {
 }
 
 // ---- making a ribbon (§11.1.2) ----
-// A ribbon named nb (n bytes; empty: the default) at (c, v, frac), made
-// at now, last in the list: its id, or 0 (12 already, or no such place).
-// It is not picked up here (the platform does that, after its jump).
+// A ribbon named nb (n bytes; empty: the default) at (c, v, frac) of
+// document, made at now, last in the list: its id, or 0 (12 already, or no
+// such place). It is not picked up here (the platform does that, after its
+// jump).
 ribbon_make(
     nb: []i8,
     n: int,
+    document: PlaceDocument,
     c: int,
     v: int,
     frac: int,
     now: int
 ): int {
-    if (rb_n >= RB_MOST || c < 0 || c >= chapters) return 0;
+    if (rb_n >= RB_MOST || !place_chapter_may_be(document, c)) return 0;
     name_clean(nb, n);
-    if (nm_n == 0) name_default(c);
+    if (nm_n == 0) name_default(document, c);
     id: int = rb_next;
     color: int = color_default();
-    i: int = rb_add(id, page_document(), c, if (v < 0) 0 else v, frac, now, now);
+    i: int = rb_add(id, document, c, if (v < 0) 0 else v, frac, now, now);
     name_set(i, nm_buf, nm_n);
     rb_color[i] = color;
     ev_begin("made", i);
     ev_str(" at ");
-    ev_place(c, rb_v[i]);
+    ev_place(document, c, rb_v[i]);
     ev_end();
     id
 }
@@ -354,7 +368,7 @@ ribbon_put_down(): bool {
     if (i < 0) return false;
     ev_begin("put down", i);
     ev_str(" at ");
-    ev_place(rb_c[i], rb_v[i]);
+    ev_place(rb_document[i], rb_c[i], rb_v[i]);
     ev_end();
     true
 }
@@ -400,7 +414,7 @@ rb_move_to(
     if (moved) {
         ev_begin("moved", i);
         ev_str(" to ");
-        ev_place(c, v);
+        ev_place(rb_document[i], c, v);
         ev_end()
     }
 }
@@ -459,7 +473,7 @@ ribbon_move_here(
     now: int
 ) {
     i: int = rb_index(id);
-    if (i < 0 || c < 0 || c >= chapters) return;
+    if (i < 0 || !place_chapter_may_be(page_document(), c)) return;
     if (rb_carried != 0 && rb_carried != id) _p: bool = ribbon_put_down();
     // (Here: in the page's document.)
     rb_document[i] = page_document();
@@ -469,7 +483,7 @@ ribbon_move_here(
     rb_last[i] = now;
     ev_begin("moved here", i);
     ev_str(" to ");
-    ev_place(c, rb_v[i]);
+    ev_place(rb_document[i], c, rb_v[i]);
     ev_end();
     if (rb_carried != id) ribbon_pick_up(id, false) else {
         if (rb_back == id) rb_back = 0;
@@ -504,9 +518,10 @@ ribbon_delete(id: int) {
 }
 
 // ---- the file (§11.1.6) ----
-// ribbons.tsv: RIBBON ID NAME BOOK C V FRAC MADE LAST COLOR in the order
-// made (COLOR the palette's name, lower case; a line without one, an older
-// file's, given a default on reading);
+// ribbons.tsv: RIBBON ID NAME BOOK C V FRAC MADE LAST COLOR [DOCUMENT] in
+// the order made (COLOR the palette's name, lower case; a line without one,
+// an older file's, given a default on reading; DOCUMENT and BOOK `-` as
+// history.tsv's: core/store.l8);
 // CARRIED ID while one is; NEXT ID (the next id to give, so none is given
 // twice).
 format_ribbons() {
@@ -517,11 +532,7 @@ format_ribbons() {
         fput(9);
         for k in 0..rb_name_n[i] fput(rb_name[i * RB_NAME_BYTES + k] as int);
         fput(9);
-        fput_book(ch_book[rb_c[i]]);
-        fput_int(ch_num[rb_c[i]]);
-        fput(9);
-        fput_int(rb_v[i]);
-        fput(9);
+        fput_document_place(rb_document[i], rb_c[i], rb_v[i]);
         fput_int(rb_frac[i]);
         fput(9);
         fput_int(rb_made[i]);
@@ -530,11 +541,11 @@ format_ribbons() {
         k: int = rb_color[i];
         // (Its color, and what its place is in: a module's name; none,
         // the Bible, and no field when it is the last.)
-        if (k >= 0 && k < RB_COLORS || !place_documents_same(rb_document[i], PlaceDocument.Bible)) fput(9);
+        if (k >= 0 && k < RB_COLORS || !place_document_is_bible(rb_document[i])) fput(9);
         if (k >= 0 && k < RB_COLORS) {
             for ch in rb_color_names[k] fput(if (ch as int >= 65 && ch as int <= 90) ch as int + 32 else ch as int)
         }
-        if (!place_documents_same(rb_document[i], PlaceDocument.Bible)) {
+        if (!place_document_is_bible(rb_document[i])) {
             fput(9);
             fput_place_document(rb_document[i])
         }
@@ -571,8 +582,9 @@ parse_ribbons() {
                 f8: int = field_after(f7);
                 f9: int = field_after(f8);
                 id: int = field_num(f2, false);
-                c: int = field_chapter(f4);
-                v: int = if (c >= 0) field_verse(f6, c, true) else -1;
+                own: bool = field_is(f4, PLACE_OWN_CHAPTER);
+                c: int = field_document_chapter(f4);
+                v: int = if (c >= 0) field_document_verse(f4, f6, c) else -1;
                 frac: int = field_num(f7, true);
                 made: int = field_num(f8, false);
                 last: int = field_num(f9, false);
@@ -592,10 +604,13 @@ parse_ribbons() {
                         f10: int = field_after(f9);
                         f11: int = field_after(f10);
                         document: PlaceDocument = if (f11 <= line_e) place_document_of_field(f11,
-                            field_end(f11)) else PlaceDocument.Bible;
-                        i: int = rb_add(id, document, c, v, frac, made, last);
-                        name_set(i, nm_buf, nm_n);
-                        rb_color[i] = field_color(f10)
+                            field_end(f11), own) else PlaceDocument.Bible;
+                        // (Its chapter numbered as its document's places are.)
+                        if (own == place_document_by_divisions(document)) {
+                            i: int = rb_add(id, document, c, v, frac, made, last);
+                            name_set(i, nm_buf, nm_n);
+                            rb_color[i] = field_color(f10)
+                        } else skip_line()
                     }
                 } else skip_line()
             } else if (field_is(fpos, "CARRIED")) {
@@ -700,7 +715,7 @@ migrate_readings(now: int): int {
         }
         if (best < 0) return made;
         mg_used[best] = true;
-        name_default(mg_c[best]);
+        name_default(PlaceDocument.Bible, mg_c[best]);
         color: int = color_default();
         i: int = rb_add(rb_next, PlaceDocument.Bible, mg_c[best], mg_v[best], mg_frac[best],
             mg_started[best], mg_last[best]);
@@ -721,11 +736,17 @@ fput_ribbon_name(i: int) {
 // 41"; "Jude".
 fput_ribbon_place(i: int) {
     c: int = rb_c[i];
-    if (rb_v[i] >= 2) fput_ref(c, rb_v[i], 0) else fput_title(c)
+    if (place_document_by_divisions(rb_document[i])) fput_place_ref(rb_document[i],
+        c, 0, 0) else if (rb_v[i] >= 2) fput_ref(c, rb_v[i], 0) else fput_title(c)
 }
 
-// The same, said: "Romans, chapter 8, verse 12".
+// The same, said: "Romans, chapter 8, verse 12" (a book's part, an entry,
+// by its name).
 fput_ribbon_spoken(i: int) {
+    if (place_document_by_divisions(rb_document[i])) {
+        fput_place_ref(rb_document[i], rb_c[i], 0, 0);
+        return
+    }
     fput_spoken_title(rb_c[i]);
     if (rb_v[i] >= 2) {
         fput_str(", verse ");

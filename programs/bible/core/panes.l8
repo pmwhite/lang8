@@ -36,31 +36,103 @@ PANE_GO_BROUGHT: int = 1;
 
 PANE_GO_RULED: int = 2;
 
-// What a pane reads: the page, the version read; the panel's reader, a
-// version or a commentary (nothing while the panel shows no reader).
+// What a pane reads: a version; a commentary, by the Bible's chapters; or
+// a document read in its own divisions (a book's parts, a dictionary's
+// entries, a devotional's days: its chapters are its front, 0, and then
+// each division, d + 1). The panel's reader reads nothing while the panel
+// shows none.
 type PaneDocument =
     | Nothing
     | Version { text: int }
     | Commentary { slot: int }
+    | Divisions { slot: int }
 
 pane_document(p: int): PaneDocument {
     if (p == PANE_PAGE) {
         match page_document() {
-            Module m -> return PaneDocument.Commentary { slot: m.slot };
-            Bible -> return PaneDocument.Version { text: text_cur }
+            Module m -> return pane_module_document(m.slot);
+            _ -> return PaneDocument.Version { text: text_cur }
         }
     }
     at: int = bb_reader_at();
     if (at < 0) return PaneDocument.Nothing;
-    if (sk_kinds[at] == SCR_SHELF_COMMENTARY) PaneDocument.Commentary { slot: sk_args[at] / SHELF_PLACE } else PaneDocument.Version { text: sk_args[at] / SHELF_PLACE }
+    if (sk_kinds[at] == SCR_SHELF_READER) pane_module_document(sk_args[at] / SHELF_PLACE) else PaneDocument.Version { text: sk_args[at] / SHELF_PLACE }
 }
 
-// Whether pane p reads the commentary in slot.
-pane_reads_commentary(p: int, slot: int): bool {
+// The Bookshelf module in slot as a pane reads it.
+pane_module_document(slot: int): PaneDocument {
+    if (shelf_kind_by_divisions(shelf_kind_at(shelf_find_slot(slot)))) PaneDocument.Divisions { slot: slot } else PaneDocument.Commentary { slot: slot }
+}
+
+// How many chapters pane p's document has (one read in its own divisions:
+// 0 until it is open).
+pane_chapter_count(p: int): int {
     match pane_document(p) {
-        Commentary c -> c.slot == slot;
+        Divisions d -> shelf_division_chapters(d.slot);
+        _ -> chapters
+    }
+}
+
+// Whether c may be a chapter of pane p's document: one it has, or, its
+// count not known yet (a document still opening), any.
+pane_chapter_may_be(p: int, c: int): bool {
+    n: int = pane_chapter_count(p);
+    c >= 0 && (n == 0 || c < n)
+}
+
+// Whether pane p reads a document in its own divisions.
+pane_by_divisions(p: int): bool {
+    match pane_document(p) {
+        Divisions _d -> true;
         _ -> false
     }
+}
+
+// Whether pane p reads a Bookshelf module (a commentary, or a document in
+// its own divisions), and which (-1: none).
+pane_module_slot(p: int): int {
+    match pane_document(p) {
+        Commentary c -> c.slot;
+        Divisions d -> d.slot;
+        _ -> -1
+    }
+}
+
+// Whether the panes' documents can be linked, place for place: neither
+// read in its own divisions (no verses to go by).
+pane_linkable(): bool {
+    !pane_by_divisions(PANE_PAGE) && !pane_by_divisions(PANE_PANEL)
+}
+
+// Chapter c of pane p's document named onto fbuf, as its title names it
+// (a Bible's chapter, Psalm 23; a book's part, a dictionary's entry).
+fput_pane_chapter(p: int, c: int) {
+    match pane_document(p) {
+        Divisions d -> fput_division_chapter_name(d.slot, c);
+        _ -> fput_title(c)
+    }
+}
+
+// What each pane was last told its document's chapters are (`chapters P
+// N`; -1: not yet).
+pane_chapters_said: []int = new int[PANES](-1);
+
+// `chapters P N`: pane p's document has N chapters, said as it changes
+// (not while its count isn't known: a document still opening).
+pane_write_chapters(p: int) {
+    n: int = pane_chapter_count(p);
+    if (n <= 0 || n == pane_chapters_said[p]) return;
+    pane_chapters_said[p] = n;
+    ui_str("chapters ");
+    ui_int(p);
+    ui_byte(32);
+    ui_int(n);
+    ui_byte(10)
+}
+
+// Whether pane p reads the module in slot.
+pane_reads_module(p: int, slot: int): bool {
+    slot >= 0 && pane_module_slot(p) == slot
 }
 
 pane_by_comment(p: int): bool {
@@ -74,80 +146,385 @@ pane_by_comment(p: int): bool {
 // What a place is in (the page's, the history's, a ribbon's, the way
 // back's): the Bible, in whichever version is read (a place in it is a
 // reference, the same in every version), or a Bookshelf module, by its
-// slot (in kept files, by its name: core/store.l8's).
+// slot (in kept files, by its name: core/store.l8's); or a module no longer
+// on the Bookshelf (removed, a copy of what is online), by its entry in
+// place_away (opening a place in it fetches it again: doc_open_away). The
+// page reads the Bible or a module on the Bookshelf, never one away.
 type PlaceDocument =
     | Bible
     | Module { slot: int }
+    | Away { module: int }
 
-// The page's document: the Bible, or a commentary on the Bookshelf, ready
-// to read (pageSlot, its slot plus one; any other, the Bible).
+// The page's document: the Bible, or a module on the Bookshelf a pane
+// reads, ready to read (pageSlot, its slot plus one; any other, the
+// Bible).
 page_document(): PlaceDocument {
     slot: int = pref_get("pageSlot") - 1;
     if (slot < 0) return PlaceDocument.Bible;
     i: int = shelf_find_slot(slot);
-    if (i < 0 || !shelf_ready_at(i) || shelf_kind_at(i) != SHELF_KIND_COMMENTARY) return PlaceDocument.Bible;
+    if (i < 0 || !shelf_ready_at(i) || !shelf_kind_in_panes(shelf_kind_at(i))) return PlaceDocument.Bible;
     PlaceDocument.Module { slot: slot }
 }
 
 // Whether the page reads the module in slot.
 page_reads_module(slot: int): bool {
     match page_document() {
-        Bible -> false;
-        Module m -> m.slot == slot
+        Module m -> m.slot == slot;
+        _ -> false
     }
 }
 
 page_reads_bible(): bool {
     match page_document() {
         Bible -> true;
-        Module _m -> false
+        _ -> false
     }
 }
 
 place_documents_same(a: PlaceDocument, b: PlaceDocument): bool {
-    place_document_slot(a) == place_document_slot(b)
+    match a {
+        Bible -> place_document_is_bible(b);
+        Module m -> place_document_module_slot(b) == m.slot;
+        Away x -> match b {
+            Away y -> x.module == y.module;
+            _ -> false
+        }
+    }
 }
 
-// A document's Bookshelf slot (-1: the Bible).
-place_document_slot(d: PlaceDocument): int {
+place_document_is_bible(d: PlaceDocument): bool {
     match d {
-        Bible -> -1;
-        Module m -> m.slot
+        Bible -> true;
+        _ -> false
+    }
+}
+
+// The Bookshelf slot of the module document d is (-1: the Bible, or one
+// away).
+place_document_module_slot(d: PlaceDocument): int {
+    match d {
+        Module m -> m.slot;
+        _ -> -1
     }
 }
 
 // The page to read document d (not saved: the caller saves): its parts
-// asked for again and its title said; the caller says where it goes.
+// asked for again; the caller says where it goes, and then its title
+// (sk_write_title: so that it never names a chapter of one document in
+// another for a moment). The
+// page's place (sk_c, sk_v, sk_frac) is its place in what it reads: one
+// read in its own divisions has chapters of its own, so the Bible's place
+// is kept aside while the page reads one (bibleChapter, plus one), and is
+// the page's again when it reads the Bible or a commentary.
 page_read(d: PlaceDocument) {
-    if (place_documents_same(d, page_document())) return;
+    if (place_documents_same(d, page_document()) || place_document_away(d)) return;
+    was_divisions: bool = pane_by_divisions(PANE_PAGE);
+    if (!was_divisions && place_document_by_divisions(d)) {
+        set_pref("bibleChapter", sk_c + 1);
+        set_pref("bibleVerse", sk_v);
+        set_pref("bibleOffset", sk_frac)
+    }
     match d {
-        Bible -> set_pref("pageSlot", 0);
         Module m -> {
             // (Its folio opened, for its parts: Study's use, as beside.)
             set_pref("pageSlot", m.slot + 1);
             i: int = shelf_find_slot(m.slot);
             if (i >= 0) _open: bool = shelf_ensure_open(m.slot)
         }
+        _ -> set_pref("pageSlot", 0)
     }
+    _restored: bool = page_bible_place_restored();
     pane_forget(PANE_PAGE, -1);
-    sk_write_title()
+    pane_write_chapters(PANE_PAGE)
+}
+
+// A place in document d named onto fbuf: in the Bible or a commentary,
+// its reference (chapter c, verses v to v2: fput_ref's); in a document read
+// in its own divisions, its chapter's name (a book's part, an entry); in
+// one of those away, which can't be read for its chapters' names, the
+// document's title.
+fput_place_ref(
+    d: PlaceDocument,
+    c: int,
+    v: int,
+    v2: int
+) {
+    if (place_document_by_divisions(d)) {
+        match d {
+            Module m -> fput_division_chapter_name(m.slot, c);
+            Away a -> fput_place_away_title(a.module);
+            Bible -> { }
+        }
+        return
+    }
+    fput_ref(c, v, v2)
+}
+
+// Document d's title onto fbuf (the Bible: nothing).
+fput_place_document_title(d: PlaceDocument) {
+    match d {
+        Module m -> fput_shelf_title(shelf_find_slot(m.slot));
+        Away a -> fput_place_away_title(a.module);
+        Bible -> { }
+    }
+}
+
+// The Bible's place kept aside made the page's again, if the page reads the
+// Bible or a commentary while one is kept (the document it read in its own
+// divisions gone from the Bookshelf); whether it was.
+page_bible_place_restored(): bool {
+    kept: int = pref_get("bibleChapter") - 1;
+    if (kept < 0 || pane_by_divisions(PANE_PAGE)) return false;
+    sk_c = (if (kept < chapters) kept else 0);
+    sk_v = pref_get("bibleVerse");
+    sk_frac = pref_get("bibleOffset");
+    set_pref("bibleChapter", 0);
+    true
+}
+
+// The Bible's place as the page keeps it (its chapter and verse): the
+// page's own, while it reads the Bible or a commentary; kept aside while it
+// reads a document in its own divisions (page_read). What goes by the
+// Bible's place (Listen, the panel's reader opening, a search's ranking)
+// goes by this.
+page_bible_c(): int {
+    if (!pane_by_divisions(PANE_PAGE)) return sk_c;
+    kept: int = pref_get("bibleChapter") - 1;
+    if (kept >= 0 && kept < chapters) kept else 0
+}
+
+page_bible_v(): int {
+    if (pane_by_divisions(PANE_PAGE)) pref_get("bibleVerse") else sk_v
+}
+
+// Whether document d is read in its own divisions (its places' chapters
+// its own, not the Bible's).
+place_document_by_divisions(d: PlaceDocument): bool {
+    match d {
+        Bible -> false;
+        Module m -> shelf_kind_by_divisions(shelf_kind_at(shelf_find_slot(m.slot)));
+        Away a -> place_away_by_divisions(a.module)
+    }
+}
+
+place_document_away(d: PlaceDocument): bool {
+    match d {
+        Away _a -> true;
+        _ -> false
+    }
+}
+
+// Whether chapter c may be one of document d's: the Bible's chapters (a
+// commentary's too); in one read in its own divisions, any from its front
+// (0) up to its count, where its file is open to say it.
+place_chapter_may_be(d: PlaceDocument, c: int): bool {
+    if (c < 0) return false;
+    if (!place_document_by_divisions(d)) return c < chapters;
+    match d {
+        Module m -> {
+            count: int = shelf_division_chapters(m.slot);
+            count == 0 || c < count
+        }
+        _ -> true
+    }
 }
 
 // A place's document in a kept file's field: the module's name (none: the
-// Bible), onto fbuf; read back from fbuf's from to to (a name no longer on
-// the Bookshelf: the Bible).
+// Bible), onto fbuf; read back from fbuf's from to to, its places numbered
+// by the module's own divisions or not (by_divisions, as the line says): a
+// name no longer on the Bookshelf, a module away.
 fput_place_document(d: PlaceDocument) {
     match d {
         Bible -> { }
-        Module m -> fput_shelf_name(shelf_find_slot(m.slot))
+        Module m -> fput_shelf_name(shelf_find_slot(m.slot));
+        Away a -> fput_place_away_name(a.module)
     }
 }
 
-place_document_of_field(from: int, to: int): PlaceDocument {
+place_document_of_field(from: int, to: int, by_divisions: bool): PlaceDocument {
     if (to <= from) return PlaceDocument.Bible;
     i: int = shelf_find_bytes(fbuf, from, to);
-    if (i < 0) return PlaceDocument.Bible;
-    PlaceDocument.Module { slot: shelf_slot_at(i) }
+    if (i >= 0) return PlaceDocument.Module { slot: shelf_slot_at(i) };
+    PlaceDocument.Away { module: place_away_entry(fbuf, from, to, by_divisions) }
+}
+
+// ---- modules away ----
+// Each module no longer on the Bookshelf that a kept place has been in
+// this run (the history's, a ribbon's, the way back's): its name, and
+// whether its places are numbered by its own divisions. An entry is made
+// once for a name and kept for the run (a name away again reuses it), so
+// there are at most as many as the catalog has modules; its index is the
+// Away document's.
+type AwayModule = {
+    name: str;
+    by_divisions: bool
+}
+
+type AwayModules = {
+    modules: []AwayModule;
+    count: int
+}
+
+place_away: ?owned *AwayModules = null;
+
+// The entry of the module named by data's from to to, made if there is
+// none (the table made again with it: entries are few, made when a module
+// is removed or a kept file names one away).
+place_away_entry(
+    data: []i8,
+    from: int,
+    to: int,
+    by_divisions: bool
+): int {
+    found: int = place_away_find(data, from, to);
+    if (found >= 0) return found;
+    next: owned *AwayModules = own {
+        place_away_made(data, from, to, by_divisions)
+    };
+    drop place_away;
+    place_away = move next;
+    place_away_count() - 1
+}
+
+place_away_count(): int {
+    if (place_away == null) return 0;
+    count: int = 0;
+    borrow place_away as away {
+        count = away.count
+    }
+    count
+}
+
+// The entry of the module named by data's from to to (-1: none).
+place_away_find(data: []i8, from: int, to: int): int {
+    if (place_away == null) return -1;
+    found: int = -1;
+    borrow place_away as away {
+        for k in 0..away.count
+            if (sk_word_is(data, from, to, away.modules[k].name)) found = k
+    }
+    found
+}
+
+// The table's entries copied, and one more after them.
+place_away_made(
+    data: []i8,
+    from: int,
+    to: int,
+    by_divisions: bool
+): *AwayModules@new {
+    count: int = place_away_count();
+    modules: []AwayModule = new AwayModule[count + 1](AwayModule { name: "", by_divisions: false });
+    if (place_away != null) {
+        borrow place_away as away {
+            for k in 0..count {
+                name: str = away.modules[k].name;
+                bytes: []i8 = new i8[len(name)](0i8);
+                for x in 0..len(name) bytes[x] = name[x];
+                modules[k] = AwayModule { name: cstr(bytes), by_divisions: away.modules[k].by_divisions }
+            }
+        }
+    }
+    modules[count] = AwayModule { name: shelf_bytes_text(data, from, to), by_divisions: by_divisions };
+    new AwayModules { modules: modules, count: count + 1 }
+}
+
+place_away_by_divisions(module: int): bool {
+    if (place_away == null) return false;
+    by_divisions: bool = false;
+    borrow place_away as away {
+        if (module >= 0 && module < away.count) by_divisions = away.modules[module].by_divisions
+    }
+    by_divisions
+}
+
+fput_place_away_name(module: int) {
+    if (place_away == null) return;
+    borrow place_away as away {
+        if (module >= 0 && module < away.count) fput_str(away.modules[module].name)
+    }
+}
+
+// Its title, as the catalog has it; else (the catalog not read yet:
+// place_away_titles_want) its name.
+fput_place_away_title(module: int) {
+    entry: int = place_away_catalog_entry(module);
+    if (entry < 0) {
+        fput_place_away_name(module);
+        return
+    }
+    borrow shelf_catalog as catalog {
+        fput_str(catalog.entries[entry].info.description)
+    }
+}
+
+// Its short name, as the catalog has it (its abbreviation, else its
+// name); else its name.
+fput_place_away_abbreviation(module: int) {
+    entry: int = place_away_catalog_entry(module);
+    if (entry < 0) {
+        fput_place_away_name(module);
+        return
+    }
+    borrow shelf_catalog as catalog {
+        fput_str(shelf_short_name(&catalog.entries[entry].info))
+    }
+}
+
+// The catalog asked for, if a module is away (a screen listing places is
+// made: their titles are the catalog's, and it is made again once it has
+// come).
+place_away_titles_want() {
+    if (sk_has_shelf && place_away_count() > 0) shelf_want_catalog()
+}
+
+// Its entry in the catalog (-1: the catalog isn't read, or hasn't it).
+place_away_catalog_entry(module: int): int {
+    if (place_away == null) return -1;
+    entry: int = -1;
+    borrow place_away as away {
+        if (module >= 0 && module < away.count) entry = shelf_catalog_find(away.modules[module].name)
+    }
+    entry
+}
+
+// Item i, about to be removed from the Bookshelf: each kept place in it
+// (the history's, the ribbons', the way back's, the jump's to come) now in
+// it as a module away, so that none is taken for a place in another module
+// given its slot later.
+place_documents_away(i: int) {
+    slot: int = shelf_slot_at(i);
+    away: PlaceDocument = PlaceDocument.Away { module: place_away_entry_of_item(i) };
+    module: PlaceDocument = PlaceDocument.Module { slot: slot };
+    place_documents_replace(module, away)
+}
+
+place_away_entry_of_item(i: int): int {
+    fbuf_n = 0;
+    fput_shelf_name(i);
+    place_away_entry(fbuf, 0, fbuf_n, shelf_kind_by_divisions(shelf_kind_at(i)))
+}
+
+// Item i, put on the Bookshelf: each kept place in it while it was away in
+// it again.
+place_documents_back(i: int) {
+    if (i < 0) return;
+    fbuf_n = 0;
+    fput_shelf_name(i);
+    module: int = place_away_find(fbuf, 0, fbuf_n);
+    if (module < 0) return;
+    place_documents_replace(PlaceDocument.Away { module: module }, PlaceDocument.Module { slot: shelf_slot_at(i) })
+}
+
+// Every kept place in document from, in document to.
+place_documents_replace(from: PlaceDocument, to: PlaceDocument) {
+    for i in 0..hs_n
+        if (place_documents_same(visits[i].document, from)) visits[i].document = to;
+    for i in 0..rb_n
+        if (place_documents_same(rb_document[i], from)) rb_document[i] = to;
+    for i in 0..bk_n
+        if (place_documents_same(bk_document[i], from)) bk_document[i] = to;
+    if (place_documents_same(jp_to_document, from)) jp_to_document = to
 }
 
 // ---- where each is read ----
@@ -211,7 +588,7 @@ pane_anchors_forget(p: int) {
 // The slot holding chapter c's anchors for pane p, made if they are not
 // kept (-1: they can't be known yet).
 pane_anchored(p: int, c: int): int {
-    if (c < 0 || c >= chapters) return -1;
+    if (!pane_chapter_may_be(p, c)) return -1;
     base: int = p * PANE_ANCHORED_MOST;
     oldest: int = base;
     for s in base..base + PANE_ANCHORED_MOST {
@@ -237,7 +614,8 @@ pane_anchors_knowable(p: int): bool {
     match pane_document(p) {
         Nothing -> false;
         Version v -> v.text == text_cur || text_ready(v.text);
-        Commentary m -> shelf_open_is(SHELF_USE_STUDY, m.slot)
+        Commentary m -> shelf_open_is(m.slot);
+        Divisions d -> shelf_open_is(d.slot)
     }
 }
 
@@ -260,15 +638,17 @@ pane_anchors_made(p: int, c: int): owned *ChapterAnchors {
                     made.verse_parts = parts.verse_parts
                 }
             }
-            Commentary m -> {
-                parts: CommentParts = shelf_comment_parts(m.slot, c);
+            Nothing -> { }
+            _ -> {
+                // (A module's: a commentary's comments; a document read in
+                // its own divisions has none.)
+                parts: ChapterParts = shelf_chapter_parts(pane_module_slot(p), c);
                 made.parts = (if (parts.division == -2) 0 else len(parts.starts));
                 made.verses = parts.verses;
                 made.verse_parts = parts.verse_parts;
                 made.gap_from = parts.gap_from;
                 made.gap_to = parts.gap_to
             }
-            Nothing -> { }
         }
         made.reach = pane_reaches(made.verses);
         made
@@ -481,7 +861,7 @@ pane_version_parts(source: *TextData, t: int, c: int): VersionParts@new {
 // ---- parts, as lines ----
 // `want P C K`: part k of chapter c of pane p's document, as its lines.
 pane_want(p: int, c: int, k: int) {
-    if (c < 0 || c >= chapters) return;
+    if (!pane_chapter_may_be(p, c)) return;
     if (doc_pane_opening(p)) {
         pane_write_opening_part(p);
         return
@@ -501,7 +881,8 @@ pane_want(p: int, c: int, k: int) {
             if (v.text != text_cur && !text_ready(v.text)) return;
             pane_write_version_part(p, v.text, c, k)
         }
-        Commentary m -> pane_write_comment_part(p, m.slot, c, k)
+        Commentary m -> pane_write_module_part(p, m.slot, c, k);
+        Divisions d -> pane_write_module_part(p, d.slot, c, k)
     }
 }
 
@@ -579,23 +960,23 @@ pane_coming_c: []int = new int[PANE_PARTS_COMING_MOST](-1);
 
 pane_coming_k: []int = new int[PANE_PARTS_COMING_MOST](-1);
 
-// Part k of chapter c of the commentary in slot as pane p's lines (N 0
-// while the commentary is opening): its comments, or a line saying they are
-// coming, with every verse the chapter's comments begin and the part each
-// is in. A chapter in a run without comments: the run's one part, as its
-// first chapter's. Laid out, the parts beside it read ahead; coming,
-// noted.
-pane_write_comment_part(
+// Part k of chapter c of the module in slot as pane p's lines (N 0 while
+// the module is opening): a commentary's comments, or a document's part of
+// a division, or a line saying they are coming, with every verse the
+// chapter's comments begin and the part each is in. A chapter in a run
+// without comments: the run's one part, as its first chapter's. Laid out,
+// the parts beside it read ahead; coming, noted.
+pane_write_module_part(
     p: int,
     slot: int,
     c: int,
     k: int
 ) {
     region {
-        parts: CommentParts = shelf_comment_parts(slot, c);
+        parts: ChapterParts = shelf_chapter_parts(slot, c);
         at_c: int = if (parts.gap_from >= 0) parts.gap_from else c;
         part: int = if (k < 0) 0 else if (k >= len(parts.starts)) len(parts.starts) - 1 else k;
-        laid: bool = shelf_lay_comment_part(slot, c, part, &sk_layout);
+        laid: bool = shelf_lay_chapter_part(slot, c, part, &sk_layout);
         if (!laid) {
             layout_begin(&sk_layout);
             lay_begin(&sk_layout, STYLE_REF, PARA_PROSE, 0);
@@ -610,14 +991,14 @@ pane_write_comment_part(
             parts: if (parts.division == -2) 0 else len(parts.starts),
             verses: parts.verses,
             verse_parts: parts.verse_parts,
-            part_bytes: comment_part_bytes(&parts),
+            part_bytes: chapter_part_bytes(&parts),
             verse_offsets: parts.verse_offsets,
             gap_from: parts.gap_from,
             gap_to: parts.gap_to
         });
         if (laid) {
             pane_part_coming_done(p, at_c, part);
-            _held: bool = shelf_comment_part_ahead(slot, at_c, part)
+            _held: bool = shelf_chapter_part_ahead(slot, at_c, part)
         } else pane_part_coming(p, at_c, part)
     }
 }
@@ -644,7 +1025,7 @@ pane_write_opening_part(p: int) {
             part_bytes: new int[1](0),
             verse_offsets: new int[0](0),
             gap_from: 0,
-            gap_to: chapters - 1
+            gap_to: (if (pane_chapters_said[p] > 0) pane_chapters_said[p] else chapters) - 1
         })
     }
 }
@@ -668,18 +1049,19 @@ pane_part_coming_done(p: int, c: int, k: int) {
     }
 }
 
-// The page waiting for its commentary's file (a launch's place kept, no
-// `go` sent: pane_go_verse, pane_page_jump_anchor), as the Bookshelf
-// moves (shelf_screens_changed) or the app starts: sent there once the
-// file is open (pane_comments_came); given up if it can't be (the module
-// gone, not ready, or broken): a toast says so, and the page reads the
-// Bible at the place kept.
+// The page waiting for its module's file (a launch's place kept, no `go`
+// sent: pane_go_verse, pane_page_jump_anchor), as the Bookshelf moves
+// (shelf_screens_changed) or the app starts: sent there once the file is
+// open (pane_modules_came); given up if it can't be (the module gone, not
+// ready, or broken): a toast says so, and the page reads the Bible at the
+// place kept (the Bible's own, if the module was read in its own
+// divisions).
 pane_page_wait_check() {
     c: int = pane_verse_kept_c[PANE_PAGE];
     if (c < 0) return;
     slot: int = pref_get("pageSlot") - 1;
     i: int = shelf_find_slot(slot);
-    if (pane_by_comment(PANE_PAGE) && (pane_anchors_knowable(PANE_PAGE) || i >= 0 && shelf_ready_at(i) && !shelf_broken_at(i))) {
+    if (pane_module_slot(PANE_PAGE) >= 0 && (pane_anchors_knowable(PANE_PAGE) || i >= 0 && shelf_ready_at(i) && !shelf_broken_at(i))) {
         // (Its file opened if it isn't, as at a launch that reads it there:
         // until it is, its anchors can't be known, and the page waits;
         // opened, pane_comments_came sends it to its place. Tried again
@@ -691,41 +1073,47 @@ pane_page_wait_check() {
     frac: int = pane_verse_kept_f[PANE_PAGE];
     pane_verse_kept_c[PANE_PAGE] = -1;
     page_read(PlaceDocument.Bible);
+    // (A document read in its own divisions: the Bible at its own place.)
+    if (page_bible_place_restored()) {
+        c = sk_c;
+        v = sk_v;
+        frac = sk_frac
+    }
     // (A module gone from the Bookshelf is read as the Bible already: the
     // page's pick forgotten too.)
     set_pref("pageSlot", 0);
     pane_go_verse(PANE_PAGE, c, v, frac, PANE_GO_AT_ONCE);
+    sk_write_title();
     sk_save();
     fbuf_n = 0;
     fput_str("Couldn\â\€\™t open ");
-    if (i >= 0) fput_shelf_short_title(i) else fput_str("the commentary");
+    if (i >= 0) fput_shelf_short_title(i) else fput_str("the document");
     fput(46);
     ui_toast(TOAST_WARNING)
 }
 
-// A commentary's text come (shelf_screens_changed): its chapters' parts
-// known now, and each part told as coming told again, in whichever pane
-// reads it.
-pane_comments_came() {
+// A module's text come (shelf_screens_changed): its chapters (and their
+// parts) known now, and each part told as coming told again, in whichever
+// pane reads it.
+pane_modules_came() {
     for p in 0..PANES {
-        match pane_document(p) {
-            Commentary m -> {
-                pane_anchors_forget(p);
-                pane_links_forget();
-                for s in 0..PANE_PARTS_COMING_MOST {
-                    c: int = pane_coming_c[s];
-                    if (c >= 0 && pane_coming_p[s] == p) {
-                        pane_coming_c[s] = -1;
-                        pane_write_comment_part(p, m.slot, c, pane_coming_k[s])
-                    }
+        slot: int = pane_module_slot(p);
+        if (slot >= 0) {
+            pane_anchors_forget(p);
+            pane_links_forget();
+            pane_write_chapters(p);
+            for s in 0..PANE_PARTS_COMING_MOST {
+                c: int = pane_coming_c[s];
+                if (c >= 0 && pane_coming_p[s] == p) {
+                    pane_coming_c[s] = -1;
+                    pane_write_module_part(p, slot, c, pane_coming_k[s])
                 }
-                // (Its maps, now its anchors are known.)
-                for q in 0..PANES
-                    if (pane_places[q].c >= 0) pane_links_near(pane_places[q].c);
-                // (A verse it was sent to before: there now.)
-                pane_verse_kept_go(p)
             }
-            _ -> { }
+            // (Its maps, now its anchors are known.)
+            for q in 0..PANES
+                if (pane_places[q].c >= 0) pane_links_near(pane_places[q].c);
+            // (A place it was sent to before: there now.)
+            pane_verse_kept_go(p)
         }
     }
 }
@@ -744,7 +1132,7 @@ pane_at(
     i: int,
     frac: int
 ) {
-    if (p < 0 || p >= PANES || c < 0 || c >= chapters) return;
+    if (p < 0 || p >= PANES || !pane_chapter_may_be(p, c)) return;
     // (Showing "Openingâ€¦": no place in a document yet.)
     if (doc_pane_opening(p)) return;
     // (The panel's reader begun anew and not sent to its place yet: a place
@@ -779,9 +1167,13 @@ pane_place_chapter(p: int, c: int): int {
 }
 
 // `rest P ENDS_HI MS`: pane p at rest: the page's counted as read
-// (core/reading.l8).
+// (core/reading.l8); a document read in its own divisions keeps the
+// chapter it is at as its place (it opens there again).
 pane_rest(p: int, ends_hi: int, ms: int) {
+    if (p < 0 || p >= PANES) return;
     if (p == pane_leader && pane_hand_moving) pane_hand_moving = false;
+    if (pane_by_divisions(p) && pane_places[p].c >= 0) shelf_note_read(shelf_find_slot(pane_module_slot(p)),
+        pane_places[p].c);
     // (Reading counted in the Bible alone: a commentary on the page isn't
     // its chapter read.)
     if (p != PANE_PAGE || pane_places[p].c < 0 || !page_reads_bible()) return;
@@ -827,7 +1219,7 @@ pane_go(
     frac: int,
     mode: int
 ) {
-    if (p < 0 || p >= PANES || c < 0 || c >= chapters) return;
+    if (p < 0 || p >= PANES || !pane_chapter_may_be(p, c)) return;
     pane_links_near(c);
     ui_str("go ");
     ui_int(p);
@@ -848,7 +1240,9 @@ pane_go(
 }
 
 // Pane p to verse v of chapter c (0: its top), frac through it: its first
-// anchor of the verse (a commentary's: the first comment on it).
+// anchor of the verse (a commentary's: the first comment on it). A
+// document read in its own divisions has no verses: frac through chapter
+// c, once its file is open (until then kept, as a verse is).
 pane_go_verse(
     p: int,
     c: int,
@@ -856,7 +1250,15 @@ pane_go_verse(
     frac: int,
     mode: int
 ) {
-    if (c < 0 || c >= chapters) return;
+    if (!pane_chapter_may_be(p, c)) return;
+    if (pane_by_divisions(p)) {
+        if (pane_anchors_knowable(p)) pane_go(p, c, -1, frac, mode) else {
+            pane_verse_kept_c[p] = c;
+            pane_verse_kept_i[p] = -1;
+            pane_verse_kept_f[p] = frac
+        }
+        return
+    }
     gap: int = pane_gap_from(p, c);
     if (gap >= 0) {
         pane_go(p, gap, -1, 0, mode);
@@ -936,9 +1338,10 @@ pane_link_sent(c: int): bool {
     false
 }
 
-// Whether the panel's reader is linked with the page.
+// Whether the panel's reader is linked with the page (neither reading a
+// document in its own divisions: those have no places in common).
 pane_linked(): bool {
-    bb_reader_at() >= 0 && sk_beside_linked()
+    bb_reader_at() >= 0 && sk_beside_linked() && pane_linkable()
 }
 
 // The link maps of chapter c and the two either side of it, each once,
@@ -947,7 +1350,7 @@ pane_linked(): bool {
 PANE_LINKS_NEAR: int = 2;
 
 pane_links_near(c: int) {
-    if (bb_reader_at() < 0) return;
+    if (bb_reader_at() < 0 || !pane_linkable()) return;
     for x in c - PANE_LINKS_NEAR..c + PANE_LINKS_NEAR + 1 {
         if (x >= 0 && x < chapters && !pane_link_sent(x)) pane_write_link(x)
     }
@@ -1077,7 +1480,13 @@ pane_panel_shown() {
         return
     }
     if (pane_places[PANE_PANEL].c >= 0) return;
-    pane_go_verse(PANE_PANEL, sk_c, sk_v, sk_frac, if (pane_linked()) PANE_GO_RULED else PANE_GO_AT_ONCE)
+    // (A document read in its own divisions: at its own place.)
+    if (pane_by_divisions(PANE_PANEL)) {
+        pane_go_verse(PANE_PANEL, bb_reader_c, 0, 0, PANE_GO_AT_ONCE);
+        return
+    }
+    pane_go_verse(PANE_PANEL, page_bible_c(), page_bible_v(), if (pane_by_divisions(PANE_PAGE)) 0 else sk_frac,
+        if (pane_linked()) PANE_GO_RULED else PANE_GO_AT_ONCE)
 }
 
 // Every chapter laid out again (the look, the settings, the version): both

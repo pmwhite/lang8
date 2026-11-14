@@ -64,7 +64,13 @@ verse 0, an introduction, is a mark without a verse) or a verse a `V` in it
 begins. One of verse 0 is where a paragraph (`P`), a heading (`S`, `s`) or
 a comment begins `FOLIO_MARK_SPAN` (1536) bytes or more after the mark
 before, so that marks are no further apart than that, but where one
-paragraph is longer. `folio_division_marks` reads them; a folio of the
+paragraph is longer. A book's and a dictionary's divisions say marks too,
+if they are long, where their records were added by
+`folio_append_marked`: each of verse 0, where a paragraph or a heading
+begins `FOLIO_MARK_SPAN` bytes or more after the mark before (or the
+division's start), so that a reader shows a long part or entry a part at
+a time as it does a commentary's chapter. `folio_division_marks` reads
+them; a folio of the
 format's first version, which the library still reads, has none
 (`folio_marked` says). A folio of the second version has no word index
 and no offsets 40 and 44: its block sizes begin at 40.

@@ -1198,10 +1198,11 @@ public final class Bible extends Activity {
           // (Not a time: no tick.)
         }
         break;
-      case "reader":
-        reader.setChapters(w.num(1));
-        besideReader.setChapters(w.num(1));
+      case "chapters": {
+        Reader r = pane(w.num(1));
+        if (r != null) r.setChapters(w.num(2));
         break;
+      }
       case "line": {
         Reader r = pane(w.num(1));
         if (r != null) r.setReadingLine(w.num(2));

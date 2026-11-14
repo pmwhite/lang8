@@ -111,8 +111,10 @@ bundle (../README.md), as CI does for TestFlight.
 - **Reminders** (UserNotifications), a reminder opened telling core.
 - **Share as Image:** core's composer, the card drawn at its pixels by
   core's measures, shared whole.
-- **The words' own menu:** Study (where core says the words have a word
-  to study), Highlight and Note before the system's own.
+- **The words' own menu:** on the page, Study (where core says the words
+  have a word to study), Highlight and Note; in either pane, Look Up (the
+  words to core, `lookup`, a dictionary read at their entry); then the
+  system's own.
 - **Keys:** core's commands as key commands of the root's (the ⌘ overlay),
   and on an iPad the menu bar's Go menu and View's own commands.
 - **The iPad:** the panel a column at the page's right where the window

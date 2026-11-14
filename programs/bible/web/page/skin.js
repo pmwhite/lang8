@@ -730,9 +730,11 @@ function line(w) {
     case "look":
       readLook(w);
       break;
-    case "reader":
-      for (const r of panes) r.setCount(w.num(1));
+    case "chapters": {
+      const r = panes[w.num(1)];
+      if (r) r.setCount(w.num(2));
       break;
+    }
     case "goto":
       send("jumped 0");
       panel.dismiss();
