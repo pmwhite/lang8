@@ -61,6 +61,11 @@ type QuickGoTo = {
     rows_content: int;
     rows_height: f64;
     rows_top: f64;
+    // The keys' height as last seen (0: not yet), what the rows are made
+    // to fit above; the width of the column of its lines' names (as wide
+    // as the widest of them).
+    keys_h: f64;
+    name_w: f64;
     rows_at_foot: bool;
     // The passage chooser: the chips (a scroll view), the grid's glass, the
     // chapters' scroll view in it and the verses' view (a chapter held).
@@ -116,6 +121,8 @@ quick: QuickGoTo = QuickGoTo {
     rows_content: 0,
     rows_height: 0.0f64,
     rows_top: 0.0f64,
+    keys_h: 0.0f64,
+    name_w: 0.0f64,
     rows_at_foot: true,
     chips: 0,
     chips_content: 0,
@@ -381,7 +388,7 @@ quick_views_make(view: int) {
     // (The rows, nearest the field at their foot.)
     rows: int = autoreleased(msg_rect(msg(cls("UIScrollView"), sel("alloc")), sel("initWithFrame:"),
         0.0f64, 0.0f64, 0.0f64, 0.0f64));
-    msg1(rows, sel("setAlwaysBounceVertical:"), 1);
+    msg1(rows, sel("setAlwaysBounceVertical:"), 0);
     msg1(rows, sel("setShowsVerticalScrollIndicator:"), 0);
     msg1(rows, sel("setContentInsetAdjustmentBehavior:"), 2);
     msg1(rows, sel("setKeyboardDismissMode:"), 0);
@@ -729,118 +736,530 @@ quick_chapter_label(button: int, n: int) {
     msg1(button, sel("setAccessibilityHint:"), nsstring("Touch and hold for its verses."))
 }
 
-// Go To's rows, laid out top down from the farthest: each section from
-// the last, its header (and its button) over its shape, its rows from
-// the last, its footer under it; the first row, nearest the field, at the
-// foot.
+// Go To's places and finds on one shape of glass above the field (the
+// field, its close, the book chips and the grid are its other glass),
+// made to fit the room there: nothing scrolls, since nothing would say
+// there is more. Its sections, nearest the field first, each a block of
+// lines with hairlines between: a section of chips with no notes (Recent,
+// the documents, Browse) one line, its name in a column at its left, its
+// places plain words after it (the one a pane shows in the accent), as
+// many as fit whole, its button or Show All at its right; a section of
+// chips with notes (the ribbons, the plans' days) and a section of rows
+// (what words find) its header (its button or link at its right) over a
+// line a row. Those that fit are shown, a section of rows that half fits
+// its first rows; the rest, where their more is a tap away, a last line
+// of links. Laid out top down from the farthest; the first, nearest the
+// field, at the foot.
+QUICK_SECTIONS_MOST: int = 128;
+
+quick_block_views: []int = new int[128](0);
+
+quick_block_heights: []f64 = new f64[128](0.0f64);
+
+quick_block_rows: []int = new int[128](0);
+
+// A section's block shown: its rows all (-1), some (n), or none (0).
+QUICK_ALL_ROWS: int = -1;
+
+// Its sizes: a line, a header, the column of a line's name, the inset of
+// words from the shape's edge, the shape's corners.
+QUICK_LINE_H: f64 = 46.0f64;
+
+QUICK_HEAD_H: f64 = 30.0f64;
+
+QUICK_NAME_W_LEAST: f64 = 64.0f64;
+
+QUICK_INSET: f64 = 18.0f64;
+
+QUICK_PANEL_CORNER: f64 = 26.0f64;
+
+// The height of the block last made.
+quick_block_made_h: f64 = 0.0f64;
+
 quick_rows_make(w: f64) {
     subviews_cleared(quick.rows_content);
     x: f64 = quick_left(w);
     cw: f64 = quick_width(w);
-    y: f64 = 0.0f64;
     typed: bool = ui.search_text.n > 0;
     // (Return's: the first row, where the chooser isn't Return's.)
     outlined: int = if (typed && ui.rows_n > 0 && !(quick.has_passage && quick.goes)) 0 else -1;
-    quick.rows_top = -1.0f64;
+    n: int = if (ui.sections_n < QUICK_SECTIONS_MOST) ui.sections_n else QUICK_SECTIONS_MOST;
+    quick.name_w = quick_names_width(n);
+    for k in 0..n {
+        quick_block_views[k] = (if (quick_section_shows(k)) quick_block_make(k, cw,
+            QUICK_ALL_ROWS, outlined) else 0);
+        quick_block_heights[k] = quick_block_made_h
+    }
+    // (Those that fit; with some left out, room kept for the line of what
+    // is left out.)
+    room: f64 = quick_rows_room() - 12.0f64;
+    fits_all: bool = quick_blocks_choose(n, room, cw, outlined);
+    more: int = 0;
+    if (!fits_all) {
+        _f: bool = quick_blocks_choose(n, room - QUICK_LINE_H, cw, outlined);
+        more = quick_more_line_make(n, cw)
+    }
+    quick.rows_top = 0.0f64;
     if (ui.rows_n == 0 && typed && !quick.has_passage) {
-        empty: int = label_new(font_system(17.0f64, 0.23f64), colors.faint, 0);
+        empty: int = label_new(font_system(17.0f64, 0.0f64), colors.faint, 1);
         msg1(empty, sel("setText:"), ui_text(ui.empty_title));
         msg1(empty, sel("setTextAlignment:"), 1);
-        set_frame4(empty, x, y, cw, 30.0f64);
+        set_frame4(empty, x, 0.0f64, cw, 30.0f64);
         add_sub(quick.rows_content, empty);
-        quick.rows_top = y;
-        y = y + 30.0f64 + 12.0f64
+        quick.rows_height = 42.0f64;
+        set_frame4(quick.rows_content, 0.0f64, 0.0f64, w, quick.rows_height);
+        msg_ff(quick.rows, sel("setContentSize:"), w, quick.rows_height);
+        return
     }
-    k: int = ui.sections_n - 1;
+    // (The shape: the line of what is left out, then the blocks chosen,
+    // the last section's first, a hairline between each.)
+    panel: int = glass_view(false);
+    set_corners(panel, QUICK_PANEL_CORNER);
+    inside: int = glass_content(panel);
+    y: f64 = 4.0f64;
+    first: bool = true;
+    if (more != 0) {
+        y = quick_panel_put(inside, more, QUICK_LINE_H, cw, y, first);
+        first = false
+    }
+    k: int = n - 1;
     while (k >= 0) {
-        section: UiSection = ui.sections[k];
-        if (section.n > 0 || section.header.n > 0 || section.footer.n > 0) {
-            if (quick.rows_top < 0.0f64) quick.rows_top = y;
-            if (section.header.n > 0 || section.button.n > 0) y = y + quick_header_make(k,
-                x, y, cw);
-            if (section.n > 0) {
-                card: int = glass_view(false);
-                set_corners(card, QUICK_CARD_CORNER);
-                inner: f64 = 0.0f64;
-                r: int = section.first + section.n - 1;
-                while (r >= section.first) {
-                    if (inner > 0.0f64) {
-                        rule: int = autoreleased(view_new());
-                        set_background(rule, colors.rule);
-                        set_frame4(rule, 18.0f64, inner, cw - 36.0f64, 0.5f64);
-                        add_sub(glass_content(card), rule)
-                    }
-                    inner = inner + quick_row_make(glass_content(card), r, inner,
-                        cw, r == outlined);
-                    r = r - 1
-                }
-                set_frame4(card, x, y, cw, inner);
-                add_sub(quick.rows_content, card);
-                y = y + inner
-            }
-            if (section.footer.n > 0) {
-                footer: int = label_new(font_system(13.0f64, 0.0f64), colors.faint,
-                    0);
-                msg1(footer, sel("setText:"), ui_text(section.footer));
-                msg_set_f(footer, sel("setPreferredMaxLayoutWidth:"), cw - 36.0f64);
-                h: f64 = intrinsic_size(footer).h;
-                set_frame4(footer, x + 18.0f64, y + 6.0f64, cw - 36.0f64, h);
-                add_sub(quick.rows_content, footer);
-                y = y + 6.0f64 + h
-            }
-            y = y + 14.0f64
+        v: int = quick_block_views[k];
+        if (v != 0 && quick_block_rows[k] != 0) {
+            y = quick_panel_put(inside, v, quick_block_heights[k], cw, y, first);
+            first = false
         }
         k = k - 1
     }
-    if (quick.rows_top < 0.0f64) quick.rows_top = y;
-    quick.rows_height = y;
-    set_frame4(quick.rows_content, 0.0f64, 0.0f64, w, y);
-    msg_ff(quick.rows, sel("setContentSize:"), w, y)
+    y = y + 4.0f64;
+    h: f64 = if (first) 0.0f64 else y;
+    if (!first) {
+        set_frame4(panel, x, 0.0f64, cw, h);
+        add_sub(quick.rows_content, panel)
+    }
+    quick.rows_height = h;
+    set_frame4(quick.rows_content, 0.0f64, 0.0f64, w, h);
+    msg_ff(quick.rows, sel("setContentSize:"), w, h)
 }
 
-// Section k's header at y (x, cw the content's): its words, small and
-// faint, and its button at its right (Recent's History, Ribbons' New);
-// its height.
-quick_header_make(
-    k: int,
-    x: f64,
+// A block put into the shape at y (a hairline over it but the first):
+// where the next goes.
+quick_panel_put(
+    inside: int,
+    block: int,
+    h: f64,
+    cw: f64,
     y: f64,
-    cw: f64
+    first: bool
 ): f64 {
+    if (!first) {
+        rule: int = autoreleased(view_new());
+        set_background(rule, colors.rule);
+        set_frame4(rule, QUICK_INSET, y, cw - QUICK_INSET, 0.5f64);
+        add_sub(inside, rule)
+    }
+    set_frame4(block, 0.0f64, y, cw, h);
+    add_sub(inside, block);
+    y + h
+}
+
+// Whether section k has anything to show.
+quick_section_shows(k: int): bool {
+    section: UiSection = ui.sections[k];
+    section.n > 0 || section.button.n > 0
+}
+
+// Whether section k is one line: chips with no notes.
+quick_section_is_line(k: int): bool {
+    section: UiSection = ui.sections[k];
+    if (!section.chips) return false;
+    for r in section.first..section.first + section.n
+        if (ui.rows[r].note.n > 0) return false;
+    true
+}
+
+// The blocks that fit room, nearest first (quick_block_rows: all, some or
+// none of each section's rows; a section of rows half fitting made again
+// with the rows that fit); whether every one fit whole.
+quick_blocks_choose(
+    n: int,
+    room: f64,
+    cw: f64,
+    outlined: int
+): bool {
+    left: f64 = room;
+    all: bool = true;
+    for k in 0..n {
+        quick_block_rows[k] = 0;
+        if (quick_block_views[k] != 0) {
+            if (quick_block_heights[k] <= left) {
+                quick_block_rows[k] = QUICK_ALL_ROWS;
+                left = left - quick_block_heights[k]
+            } else {
+                all = false;
+                if (!quick_section_is_line(k)) {
+                    fit: int = quick_rows_fitting(k, cw, left);
+                    if (fit > 0) {
+                        quick_block_views[k] = quick_block_make(k, cw, fit, outlined);
+                        quick_block_heights[k] = quick_block_made_h;
+                        quick_block_rows[k] = fit;
+                        left = left - quick_block_made_h
+                    }
+                }
+            }
+        }
+    }
+    all
+}
+
+// How many of section k's rows fit room under its header (0: none).
+quick_rows_fitting(k: int, cw: f64, room: f64): int {
+    section: UiSection = ui.sections[k];
+    h: f64 = if (quick_section_has_head(k)) QUICK_HEAD_H else 0.0f64;
+    fit: int = 0;
+    for r in section.first..section.first + section.n {
+        if (r != quick_link_row(k)) {
+            h = h + quick_row_height(k, r, cw);
+            if (h > room) return fit;
+            fit = fit + 1
+        }
+    }
+    fit
+}
+
+// A section's link (its last row, a tinted Show All or All N Verses, where
+// it has rows before it): at its header's or line's right, not a row; -1:
+// none.
+quick_link_row(k: int): int {
+    section: UiSection = ui.sections[k];
+    if (section.n < 2) return -1;
+    last: int = section.first + section.n - 1;
+    if (ui.rows[last].tinted && ui.rows[last].action != 0) last else -1
+}
+
+// Whether section k's block has a header line (a section of lines has its
+// name at its left instead).
+quick_section_has_head(k: int): bool {
+    section: UiSection = ui.sections[k];
+    !quick_section_is_line(k) && (section.header.n > 0 || section.button.n > 0 || quick_link_row(k) >= 0)
+}
+
+// Section k's block (autoreleased) cw wide, with its first rows rows
+// (QUICK_ALL_ROWS: all); its height, quick_block_made_h.
+quick_block_make(
+    k: int,
+    cw: f64,
+    rows: int,
+    outlined: int
+): int {
+    if (quick_section_is_line(k)) return quick_line_make(k, cw, outlined);
+    section: UiSection = ui.sections[k];
+    block: int = autoreleased(view_new());
+    link: int = quick_link_row(k);
+    y: f64 = 0.0f64;
+    if (quick_section_has_head(k)) {
+        quick_head_make(block, k, link, cw);
+        y = QUICK_HEAD_H
+    }
+    // (Its rows from the last shown, the first at the foot.)
+    last: int = section.first - 1;
+    counted: int = 0;
+    for r in section.first..section.first + section.n {
+        if (r != link && (rows == QUICK_ALL_ROWS || counted < rows)) {
+            last = r;
+            counted = counted + 1
+        }
+    }
+    r: int = last;
+    while (r >= section.first) {
+        if (r != link) {
+            if (r != last) {
+                rule: int = autoreleased(view_new());
+                set_background(rule, colors.rule);
+                set_frame4(rule, QUICK_INSET, y, cw - QUICK_INSET, 0.5f64);
+                add_sub(block, rule)
+            }
+            y = y + quick_row_make(block, k, r, y, cw, r == outlined)
+        }
+        r = r - 1
+    }
+    set_frame4(block, 0.0f64, 0.0f64, cw, y);
+    quick_block_made_h = y;
+    block
+}
+
+// Section k's header line in block: its words, small and faint, and at
+// its right its button (New, Plans) or its link (All 77 Verses).
+quick_head_make(
+    block: int,
+    k: int,
+    link: int,
+    cw: f64
+) {
     section: UiSection = ui.sections[k];
     if (section.header.n > 0) {
-        header: int = label_new(font_system(13.0f64, 0.23f64), colors.faint, 1);
-        msg1(header, sel("setText:"), msg(ui_text(section.header), sel("uppercaseString")));
-        set_frame4(header, x + 18.0f64, y + 4.0f64, cw - 120.0f64, 18.0f64);
-        add_sub(quick.rows_content, header)
+        header: int = label_new(font_system(13.0f64, 0.0f64), colors.faint, 1);
+        msg1(header, sel("setText:"), ui_text(section.header));
+        set_frame4(header, QUICK_INSET, 10.0f64, cw - 160.0f64, 18.0f64);
+        add_sub(block, header)
     }
-    if (section.button.n > 0) {
-        button: int = msg1(cls("UIButton"), sel("buttonWithType:"), 1);
-        msg2(button, sel("setTitle:forState:"), ui_text(section.button), 0);
-        msg1(msg(button, sel("titleLabel")), sel("setFont:"), font_system(15.0f64,
-            0.23f64));
-        msg1(button, sel("setTintColor:"), colors.accent);
-        msg1(button, sel("setContentHorizontalAlignment:"), 2);
-        msg1(button, sel("setTag:"), k);
-        msg3(button, sel("addTarget:action:forControlEvents:"), quick.root, sel("vellumGoToHeader:"),
-            64);
-        set_frame4(button, x + cw - 138.0f64, y - 4.0f64, 120.0f64, 30.0f64);
-        add_sub(quick.rows_content, button)
+    end: int = quick_end_button(k, link, 15.0f64);
+    if (end != 0) {
+        bw: f64 = intrinsic_size(end).w;
+        set_frame4(end, cw - QUICK_INSET - bw, 4.0f64, bw, QUICK_HEAD_H - 4.0f64);
+        add_sub(block, end)
     }
-    26.0f64
 }
 
-// Row r made in a shape's content at top, cw wide (washed where Return
-// goes to it): its title and words, its icon, at its end its value, its
-// check, its info button or that it opens more; its actions a menu on a
-// long press. Its height.
+// A section's button (History, New) or its link (Show All), in the
+// accent, plain: 0 with neither.
+quick_end_button(k: int, link: int, size: f64): int {
+    section: UiSection = ui.sections[k];
+    words: int = if (link >= 0) quick_link_words(link) else if (section.button.n > 0) ui_text(section.button) else 0;
+    if (words == 0) return 0;
+    button: int = msg1(cls("UIButton"), sel("buttonWithType:"), 1);
+    msg2(button, sel("setTitle:forState:"), words, 0);
+    msg1(msg(button, sel("titleLabel")), sel("setFont:"), font_system(size, 0.0f64));
+    msg1(button, sel("setTintColor:"), colors.accent);
+    if (link >= 0) {
+        msg1(button, sel("setTag:"), link);
+        msg3(button, sel("addTarget:action:forControlEvents:"), quick.root, sel("vellumGoToRow:"),
+            64)
+    } else {
+        msg1(button, sel("setTag:"), k);
+        msg3(button, sel("addTarget:action:forControlEvents:"), quick.root, sel("vellumGoToHeader:"),
+            64)
+    }
+    button
+}
+
+// A link's words, short: "Show All 988" and "All 77 Verses" as "All 988",
+// "All 77".
+quick_link_words(r: int): int {
+    words: int = ui_text(ui.rows[r].title);
+    digits: int = msg(cls("NSCharacterSet"), sel("decimalDigitCharacterSet"));
+    found: int = msg1(words, sel("rangeOfCharacterFromSet:"), digits);
+    if (found < 0 || found >= ns_length(words)) return words;
+    end: int = found;
+    while (end < ns_length(words) && truth(msg1(digits, sel("characterIsMember:"),
+        msg1(words, sel("characterAtIndex:"), end)))) end = end + 1;
+    msg1(nsstring("All "), sel("stringByAppendingString:"), msg2(words, sel("substringWithRange:"),
+        found, end - found))
+}
+
+// Section k as one line: its name in the column at its left, its places
+// plain words after it (the one a pane shows in the accent, Return's on a
+// wash), as many as fit whole, its button or link at its right.
+quick_line_make(k: int, cw: f64, outlined: int): int {
+    section: UiSection = ui.sections[k];
+    line: int = autoreleased(view_new());
+    if (section.header.n > 0) {
+        name: int = label_new(font_system(13.0f64, 0.0f64), colors.faint, 1);
+        msg1(name, sel("setText:"), ui_text(section.header));
+        set_frame4(name, QUICK_INSET, 0.0f64, quick.name_w - QUICK_INSET - 8.0f64,
+            QUICK_LINE_H);
+        add_sub(line, name)
+    }
+    link: int = quick_link_row(k);
+    end: int = quick_end_button(k, link, 16.0f64);
+    right: f64 = cw - QUICK_INSET;
+    if (end != 0) {
+        bw: f64 = intrinsic_size(end).w;
+        set_frame4(end, right - bw, 0.0f64, bw, QUICK_LINE_H);
+        add_sub(line, end);
+        right = right - bw - 18.0f64
+    }
+    lx: f64 = if (section.header.n > 0) quick.name_w else QUICK_INSET;
+    // (Each that fits whole; the first, cut short if it must be.)
+    placed: bool = false;
+    for r in section.first..section.first + section.n {
+        if (r != link) {
+            item: int = quick_word_button(r, r == outlined);
+            iw: f64 = intrinsic_size(item).w;
+            if (!placed && lx + iw > right) iw = right - lx;
+            if (lx + iw <= right && iw > 0.0f64) {
+                msg1(msg(item, sel("titleLabel")), sel("setLineBreakMode:"), 4);
+                set_frame4(item, lx - 6.0f64, 7.0f64, iw + 12.0f64, QUICK_LINE_H - 14.0f64);
+                add_sub(line, item);
+                lx = lx + iw + 18.0f64;
+                placed = true
+            }
+        }
+    }
+    set_frame4(line, 0.0f64, 0.0f64, cw, QUICK_LINE_H);
+    quick_block_made_h = QUICK_LINE_H;
+    line
+}
+
+// The width of the column of the lines' names: the widest of the names of
+// the n sections that are lines, and More's.
+quick_names_width(n: int): f64 {
+    font: int = font_system(13.0f64, 0.0f64);
+    widest: f64 = text_width(nsstring("More"), font);
+    for k in 0..n {
+        if (quick_section_is_line(k) && ui.sections[k].header.n > 0) {
+            w: f64 = text_width(ui_text(ui.sections[k].header), font);
+            if (w > widest) widest = w
+        }
+    }
+    QUICK_INSET + clamp_f(widest, QUICK_NAME_W_LEAST - QUICK_INSET - 14.0f64, 110.0f64) + 14.0f64
+}
+
+// Row r as plain words in a line: its short words (or title) and, faint
+// after them, its count; in the accent where a pane shows it; on a wash
+// where Return goes; its tap and its menu a row's.
+quick_word_button(r: int, outlined: bool): int {
+    row: UiRow = ui.rows[r];
+    button: int = quick_row_button(r);
+    on: bool = row.acc == ACC_CHECK;
+    words: int = ui_text(if (row.short.n > 0) row.short else row.title);
+    a: int = autoreleased(msg1(msg(cls("NSMutableAttributedString"), sel("alloc")),
+        sel("initWithString:"), words));
+    n: int = ns_length(words);
+    msg4(a, sel("addAttribute:value:range:"), objc_const("NSFontAttributeName"), font_system(16.0f64,
+        if (on) 0.3f64 else 0.0f64), 0, n);
+    msg4(a, sel("addAttribute:value:range:"), objc_const("NSForegroundColorAttributeName"),
+        if (on || row.tinted) colors.accent else colors.ink, 0, n);
+    if (row.value_detail && row.detail.n > 0) {
+        count: int = msg1(nsstring(" "), sel("stringByAppendingString:"), ui_text(row.detail));
+        tail: int = autoreleased(msg1(msg(cls("NSMutableAttributedString"), sel("alloc")),
+            sel("initWithString:"), count));
+        msg4(tail, sel("addAttribute:value:range:"), objc_const("NSFontAttributeName"),
+            font_system(16.0f64, 0.0f64), 0, ns_length(count));
+        msg4(tail, sel("addAttribute:value:range:"), objc_const("NSForegroundColorAttributeName"),
+            colors.faint, 0, ns_length(count));
+        msg1(a, sel("appendAttributedString:"), tail)
+    }
+    msg2(button, sel("setAttributedTitle:forState:"), a, 0);
+    if (outlined) {
+        set_background(button, colors.selection);
+        set_corners(button, 10.0f64)
+    }
+    button
+}
+
+// Row r of section k made in block at top, cw wide (washed where Return
+// goes to it): its height. A chip with a note (a ribbon, a plan's day) one
+// line: its mark, its short words, its note at its right; a row found its
+// title over its words, a line of each, its info button or check at its
+// right.
 quick_row_make(
-    parent: int,
+    block: int,
+    k: int,
     r: int,
     top: f64,
     cw: f64,
     outlined: bool
 ): f64 {
+    row: UiRow = ui.rows[r];
+    button: int = quick_row_button(r);
+    chip: bool = ui.sections[k].chips;
+    ink: int = if (row.tinted) colors.accent else if (row.faint || row.disabled) colors.faint else colors.ink;
+    lx: f64 = QUICK_INSET;
+    mark: int = quick_row_mark(row);
+    if (mark != 0) lx = 50.0f64;
+    end: int = 0;
+    end_w: f64 = 0.0f64;
+    if (chip && row.note.n > 0) {
+        end = label_new(font_system(15.0f64, 0.0f64), colors.faint, 1);
+        msg1(end, sel("setText:"), ui_text(row.note));
+        end_w = clamp_f(intrinsic_size(end).w, 0.0f64, cw * 0.45f64)
+    } else if (row.info_action != 0) {
+        end = quick_info_button(r);
+        end_w = 30.0f64
+    } else if (row.acc == ACC_CHECK) {
+        end = quick_symbol_view("checkmark", colors.accent);
+        end_w = 20.0f64
+    }
+    text_w: f64 = cw - lx - QUICK_INSET - (if (end != 0) end_w + 12.0f64 else 0.0f64);
+    title: int = label_new(font_system(16.0f64, if (!chip && row.detail.n > 0) 0.3f64 else 0.0f64),
+        ink, 1);
+    msg1(title, sel("setText:"), ui_text(if (chip && row.short.n > 0) row.short else row.title));
+    if (row.suffix.n > 0 && !chip) {
+        words: int = msg1(ui_text(row.title), sel("stringByAppendingString:"), ui_text(row.suffix));
+        a: int = autoreleased(msg1(msg(cls("NSMutableAttributedString"), sel("alloc")),
+            sel("initWithString:"), words));
+        msg4(a, sel("addAttribute:value:range:"), objc_const("NSForegroundColorAttributeName"),
+            colors.faint, ns_length(ui_text(row.title)), ns_length(ui_text(row.suffix)));
+        msg1(title, sel("setAttributedText:"), a)
+    }
+    h: f64 = QUICK_LINE_H;
+    detail: int = 0;
+    if (!chip && row.detail.n > 0 && !row.value_detail) {
+        detail = label_new(if (row.scripture) new_york(15.0f64) else font_system(14.0f64,
+            0.0f64), colors.faint, 1);
+        a: int = autoreleased(msg1(msg(cls("NSMutableAttributedString"), sel("alloc")),
+            sel("initWithString:"), ui_text(row.detail)));
+        marks_stress(a, row);
+        if (row.query_marks) query_stress(quick.slot, a);
+        msg1(detail, sel("setAttributedText:"), a);
+        h = 60.0f64
+    }
+    if (detail != 0) {
+        set_frame4(title, lx, 9.0f64, text_w, 21.0f64);
+        set_frame4(detail, lx, 31.0f64, text_w, 19.0f64);
+        msg1(detail, sel("setUserInteractionEnabled:"), 0);
+        add_sub(button, detail)
+    } else set_frame4(title, lx, 0.0f64, text_w, h);
+    msg1(title, sel("setUserInteractionEnabled:"), 0);
+    add_sub(button, title);
+    if (mark != 0) {
+        f: Rect = frame_of(mark);
+        set_frame4(mark, 18.0f64 + (24.0f64 - f.w) / 2.0f64, (h - f.h) / 2.0f64, f.w,
+            f.h);
+        add_sub(button, mark)
+    }
+    if (end != 0) {
+        msg1(end, sel("setTextAlignment:"), 2);
+        set_frame4(end, cw - QUICK_INSET - end_w, 0.0f64, end_w, h);
+        add_sub(button, end)
+    }
+    if (outlined) {
+        wash: int = autoreleased(view_new());
+        set_background(wash, colors.selection);
+        set_corners(wash, 14.0f64);
+        msg1(wash, sel("setUserInteractionEnabled:"), 0);
+        set_frame4(wash, 6.0f64, 3.0f64, cw - 12.0f64, h - 6.0f64);
+        msg2(button, sel("insertSubview:atIndex:"), wash, 0)
+    }
+    if (row.detail.n > 0 && row.label.n == 0) msg1(button, sel("setAccessibilityValue:"),
+        ui_text(row.detail));
+    set_frame4(button, 0.0f64, top, cw, h);
+    add_sub(block, button);
+    h
+}
+
+// A row's mark at its start (sized; 0: none): a ribbon's strip in its
+// color, else its symbol.
+quick_row_mark(row: UiRow): int {
+    if (row.icon.n == 0) return 0;
+    tint: int = if (row.icon_color.n > 0) screen_color(&ui, row.icon_color) else 0;
+    if (ns_equal(ui_text(row.icon), nsstring("ribbon"))) {
+        strip: int = autoreleased(view_new());
+        set_background(strip, if (tint != 0) tint else colors.accent);
+        set_corners(strip, 2.0f64);
+        msg1(strip, sel("setUserInteractionEnabled:"), 0);
+        set_frame4(strip, 0.0f64, 0.0f64, 4.0f64, 20.0f64);
+        return strip
+    }
+    icon: int = autoreleased(msg1(msg(cls("UIImageView"), sel("alloc")), sel("initWithImage:"),
+        symbol_image(ui_text(row.icon), 16.0f64, 4)));
+    msg1(icon, sel("setTintColor:"), if (tint != 0) tint else if (row.icon_faint) colors.faint else colors.accent);
+    msg1(icon, sel("setContentMode:"), 4);
+    msg1(icon, sel("setUserInteractionEnabled:"), 0);
+    set_frame4(icon, 0.0f64, 0.0f64, 22.0f64, 22.0f64);
+    icon
+}
+
+// Row r's height as quick_row_make makes it in section k.
+quick_row_height(k: int, r: int, cw: f64): f64 {
+    holder: int = autoreleased(view_new());
+    quick_row_make(holder, k, r, 0.0f64, cw, false)
+}
+
+// A row's button (its tag the row): its tap, its press washed, its
+// actions a menu on a long press.
+quick_row_button(r: int): int {
     row: UiRow = ui.rows[r];
     button: int = msg1(cls("UIButton"), sel("buttonWithType:"), 0);
     msg1(button, sel("setTag:"), r);
@@ -857,101 +1276,58 @@ quick_row_make(
             sel("alloc")), sel("initWithDelegate:"), quick.root));
         msg1(button, sel("addInteraction:"), interaction)
     }
-    has_icon: bool = row.icon.n > 0;
-    text_x: f64 = if (has_icon) 52.0f64 else 18.0f64;
-    // (At its end: its value's words, then a check, its info button or a
-    // chevron.)
-    value: int = 0;
-    value_w: f64 = 0.0f64;
-    if (row.value_detail && row.detail.n > 0) {
-        value = label_new(font_system(16.0f64, 0.0f64), colors.faint, 1);
-        msg1(value, sel("setText:"), ui_text(row.detail));
-        value_w = intrinsic_size(value).w + 10.0f64
-    }
-    mark: int = 0;
-    if (row.info_action != 0) mark = quick_info_button(r) else if (row.acc == ACC_CHECK) mark = quick_symbol_view("checkmark",
-        colors.accent) else if (row.acc == ACC_MORE) mark = quick_symbol_view("chevron.right",
-        colors.faint);
-    mark_w: f64 = if (mark != 0) 36.0f64 else 0.0f64;
-    text_w: f64 = cw - text_x - 14.0f64 - value_w - mark_w;
-    title: int = label_new(font_system(16.5f64, if (row.strong) 0.3f64 else 0.23f64),
-        if (row.tinted) colors.accent else if (row.faint || row.disabled) colors.faint else colors.ink,
-        if (row.title_lines > 0) row.title_lines else 2);
-    msg1(title, sel("setText:"), ui_text(row.title));
-    if (row.suffix.n > 0) {
-        words: int = msg1(ui_text(row.title), sel("stringByAppendingString:"), ui_text(row.suffix));
-        a: int = autoreleased(msg1(msg(cls("NSMutableAttributedString"), sel("alloc")),
-            sel("initWithString:"), words));
-        msg4(a, sel("addAttribute:value:range:"), objc_const("NSForegroundColorAttributeName"),
-            colors.faint, ns_length(ui_text(row.title)), ns_length(ui_text(row.suffix)));
-        msg1(title, sel("setAttributedText:"), a)
-    }
-    msg_set_f(title, sel("setPreferredMaxLayoutWidth:"), text_w);
-    title_h: f64 = intrinsic_size(title).h;
-    h: f64 = 12.0f64;
-    set_frame4(title, text_x, h, text_w, title_h);
-    h = h + title_h;
-    detail: int = 0;
-    if (row.detail.n > 0 && !row.value_detail) {
-        detail = label_new(if (row.scripture) new_york(15.0f64) else font_system(14.0f64,
-            0.0f64), colors.faint, if (row.lines > 0) row.lines else 2);
-        a: int = autoreleased(msg1(msg(cls("NSMutableAttributedString"), sel("alloc")),
-            sel("initWithString:"), ui_text(row.detail)));
-        marks_stress(a, row);
-        if (row.query_marks) query_stress(quick.slot, a);
-        msg1(detail, sel("setAttributedText:"), a);
-        msg_set_f(detail, sel("setPreferredMaxLayoutWidth:"), text_w);
-        detail_h: f64 = intrinsic_size(detail).h;
-        set_frame4(detail, text_x, h + 3.0f64, text_w, detail_h);
-        h = h + 3.0f64 + detail_h
-    }
-    h = h + 12.0f64;
-    if (outlined) {
-        wash: int = autoreleased(view_new());
-        set_background(wash, colors.selection);
-        set_corners(wash, QUICK_CARD_CORNER - 5.0f64);
-        msg1(wash, sel("setUserInteractionEnabled:"), 0);
-        set_frame4(wash, 5.0f64, 5.0f64, cw - 10.0f64, h - 10.0f64);
-        add_sub(button, wash)
-    }
-    if (has_icon) {
-        icon: int = autoreleased(msg1(msg(cls("UIImageView"), sel("alloc")), sel("initWithImage:"),
-            symbol_image(ui_text(row.icon), 17.0f64, 5)));
-        tint: int = if (row.icon_color.n > 0) screen_color(&ui, row.icon_color) else 0;
-        msg1(icon, sel("setTintColor:"), if (tint != 0) tint else if (row.icon_faint) colors.faint else colors.accent);
-        msg1(icon, sel("setContentMode:"), 4);
-        set_frame4(icon, 16.0f64, 12.0f64, 24.0f64, title_h);
-        add_sub(button, icon)
-    }
-    msg1(title, sel("setUserInteractionEnabled:"), 0);
-    add_sub(button, title);
-    if (detail != 0) {
-        msg1(detail, sel("setUserInteractionEnabled:"), 0);
-        add_sub(button, detail)
-    }
-    if (mark != 0) {
-        set_frame4(mark, cw - 8.0f64 - mark_w, 0.0f64, mark_w, h);
-        add_sub(button, mark)
-    }
-    if (value != 0) {
-        msg1(value, sel("setTextAlignment:"), 2);
-        msg1(value, sel("setUserInteractionEnabled:"), 0);
-        set_frame4(value, cw - 14.0f64 - mark_w - value_w, 0.0f64, value_w, h);
-        add_sub(button, value)
-    }
     msg1(button, sel("setAccessibilityLabel:"), if (row.label.n > 0) ui_text(row.label) else ui_text(row.title));
-    if (row.detail.n > 0 && row.label.n == 0) msg1(button, sel("setAccessibilityValue:"),
-        ui_text(row.detail));
     if (row.hint.n > 0) msg1(button, sel("setAccessibilityHint:"), ui_text(row.hint));
-    set_frame4(button, 0.0f64, top, cw, h);
-    add_sub(parent, button);
-    h
+    button
+}
+
+// The line of what was left out (n sections), its name More: each
+// section whose more is a tap away, its name in the accent (its link's
+// tap, else its button's); 0 when there is none.
+quick_more_line_make(n: int, cw: f64): int {
+    line: int = autoreleased(view_new());
+    name: int = label_new(font_system(13.0f64, 0.0f64), colors.faint, 1);
+    msg1(name, sel("setText:"), nsstring("More"));
+    set_frame4(name, QUICK_INSET, 0.0f64, quick.name_w - QUICK_INSET - 8.0f64, QUICK_LINE_H);
+    add_sub(line, name);
+    lx: f64 = quick.name_w;
+    made: bool = false;
+    for k in 0..n {
+        section: UiSection = ui.sections[k];
+        link: int = quick_link_row(k);
+        if (quick_block_views[k] != 0 && quick_block_rows[k] == 0 && section.header.n > 0 && (link >= 0 || section.button.n > 0)) {
+            button: int = msg1(cls("UIButton"), sel("buttonWithType:"), 1);
+            msg2(button, sel("setTitle:forState:"), ui_text(section.header), 0);
+            msg1(msg(button, sel("titleLabel")), sel("setFont:"), font_system(16.0f64,
+                0.0f64));
+            msg1(button, sel("setTintColor:"), colors.accent);
+            if (link >= 0) {
+                msg1(button, sel("setTag:"), link);
+                msg3(button, sel("addTarget:action:forControlEvents:"), quick.root,
+                    sel("vellumGoToRow:"), 64)
+            } else {
+                msg1(button, sel("setTag:"), k);
+                msg3(button, sel("addTarget:action:forControlEvents:"), quick.root,
+                    sel("vellumGoToHeader:"), 64)
+            }
+            bw: f64 = intrinsic_size(button).w;
+            if (lx + bw <= cw - QUICK_INSET) {
+                set_frame4(button, lx, 0.0f64, bw, QUICK_LINE_H);
+                add_sub(line, button);
+                lx = lx + bw + 20.0f64;
+                made = true
+            }
+        }
+    }
+    if (!made) return 0;
+    set_frame4(line, 0.0f64, 0.0f64, cw, QUICK_LINE_H);
+    line
 }
 
 // A row's info button: its info action (tag: the row).
 quick_info_button(r: int): int {
     info: int = msg1(cls("UIButton"), sel("buttonWithType:"), 1);
-    msg2(info, sel("setImage:forState:"), symbol("info.circle", 19.0f64, 5), 0);
+    msg2(info, sel("setImage:forState:"), symbol("info.circle", 19.0f64, 4), 0);
     msg1(info, sel("setTintColor:"), colors.accent);
     msg1(info, sel("setTag:"), r);
     msg1(info, sel("setAccessibilityLabel:"), nsstring("More Info"));
@@ -967,6 +1343,18 @@ quick_symbol_view(name: str, tint: int): int {
     msg1(view, sel("setContentMode:"), 4);
     msg1(view, sel("setUserInteractionEnabled:"), 0);
     view
+}
+
+// The room the rows have: above the field where the keys put it (their
+// height as last seen, else as most phones have them), less the chooser
+// and the status bar's.
+quick_rows_room(): f64 {
+    b: Rect = bounds_of(window);
+    safe: Insets = safe_insets(root_view);
+    keys: f64 = if (quick.keys_h > 0.0f64) quick.keys_h else b.h * 0.4f64;
+    field_y: f64 = b.h - keys - QUICK_GAP - QUICK_FIELD_H;
+    room: f64 = field_y - QUICK_GAP - quick_chooser_height() - safe.top - 8.0f64;
+    if (room < 0.0f64) 0.0f64 else room
 }
 
 // ---- laid out ----
@@ -985,8 +1373,14 @@ quick_layout() {
         a: Rect = frame_of(quick.keys_anchor);
         if (a.y + a.h > 0.0f64) keys_top = a.y + a.h
     }
-    // (No keys, a hardware keyboard: the field where the dock's capsule
-    // stands.)
+    // (The keys up, at another height than the rows were made for: made
+    // again to fit. No keys, a hardware keyboard: the field where the
+    // dock's capsule stands.)
+    keys_h: f64 = b.h - keys_top;
+    if (quick.shown && keys_h > b.h * 0.2f64 && abs_f(keys_h - quick.keys_h) > 4.0f64) {
+        quick.keys_h = keys_h;
+        if (quick.slot >= 0) quick_fill()
+    }
     if (keys_top > b.h - safe.bottom - 8.0f64) keys_top = b.h - safe.bottom - 8.0f64;
     x: f64 = quick_left(b.w);
     cw: f64 = quick_width(b.w);
@@ -1060,6 +1454,24 @@ quick_field_place(x: f64, cw: f64, field_y: f64) {
         15.0f64)
 }
 
+// The chooser's height (its chips and its grid, and the gap over them),
+// as quick_layout places it: none without one.
+quick_chooser_height(): f64 {
+    if (!quick.has_passage) return 0.0f64;
+    chips: f64 = if (quick_books_shown()) 0.0f64 else QUICK_CHIP_H + 8.0f64;
+    rows: int = quick_grid_rows_shown();
+    chips + rows as f64 * QUICK_CELL_H + 2.0f64 * QUICK_GRID_PAD + QUICK_GAP
+}
+
+// How many of the grid's rows show (more scroll inside it).
+quick_grid_rows_shown(): int {
+    columns: int = quick_cell_columns();
+    cells: int = if (quick_books_shown()) quick_cell_place(66) + 1 else quick.chapters;
+    rows: int = (cells + columns - 1) / columns;
+    most_shown: int = if (quick_books_shown()) QUICK_GRID_ROWS + 1 else QUICK_GRID_ROWS;
+    if (rows < most_shown) rows else most_shown
+}
+
 // The grid's glass placed with its foot at foot (x, cw as the content's;
 // up to ceiling while a chapter's verses show): its height.
 quick_grid_place(
@@ -1082,8 +1494,7 @@ quick_grid_place(
     columns: int = quick_cell_columns();
     cells: int = if (quick_books_shown()) quick_cell_place(66) + 1 else quick.chapters;
     rows: int = (cells + columns - 1) / columns;
-    most_shown: int = if (quick_books_shown()) QUICK_GRID_ROWS + 1 else QUICK_GRID_ROWS;
-    shown: int = if (rows < most_shown) rows else most_shown;
+    shown: int = quick_grid_rows_shown();
     h: f64 = shown as f64 * QUICK_CELL_H + 2.0f64 * pad;
     set_frame4(quick.grid_glass, x, foot - h, cw, h);
     set_frame4(quick.grid, pad, pad, inner_w, h - 2.0f64 * pad);

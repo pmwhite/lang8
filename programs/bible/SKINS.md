@@ -732,6 +732,16 @@ any screen.
   -1 the grid again); New Ribbon (with a ribbon), Reading Plans (with a
   plan followed) and History (`ACT_GT_HISTORY`, 417) are their sections'
   headers' buttons, not rows. A screen Go To opens is a sheet over it.
+  Its places are chips (CHIPS sections, each row's SHORT words, its NOTE
+  where it is): the ribbons (a ribbon's name, its place), the plans' days
+  (the passages, "Day 26"), Recent, the documents read (the one a pane
+  reads checked) and found (a book's or a dictionary's short title less
+  its kind's words: "Easton's", "The Pilgrim's Progress"), and Browse
+  (the contents of what a pane reads in its own divisions, Books of the
+  Bible, then each kind with its count); what is found in words is rows.
+  A skin fits it to the room above the keys, nothing scrolling: a
+  section's last row that is tinted (a Show All, All N Verses) can be its
+  header's link.
 - Return (`submit`) goes to the first row's place: the reference, else the
   first book's chapters, else the first document found, else the first
   verse found.
@@ -828,14 +838,15 @@ A screen, from core:
 | `reader LINKED` | the screen is the panel's reader (pane 1, below: the version or commentary read beside the page) in place of rows; LINKED 1 while it is linked with the page |
 | `empty` SYMBOL TITLE LINE | what it shows with no rows |
 | `button` TITLE, then `command` ACTION ARG TITLE FLAGS | its button at the top and its menu (`x`: destructive) |
-| `section` HEADER FOOTER BUTTON ACTION SUFFIX CREDIT COLUMNS | a section: a button in its header doing ACTION; faint words after its header; CREDIT the credit under it (0 none; each said at `start` by a `credit` line); COLUMNS a grid's columns' names |
+| `section` HEADER FOOTER BUTTON ACTION SUFFIX CREDIT COLUMNS CHIPS | a section: a button in its header doing ACTION; faint words after its header; CREDIT the credit under it (0 none; each said at `start` by a `credit` line); COLUMNS a grid's columns' names; CHIPS 1, its rows chips: places named by their short words (Go To's quick form, below) |
 | `row` ... | a row (below) |
 | `cell` ACTION ARG SCRIPT TEXT SUB COUNT LABEL TR FLAGS ACTIONS | after its row, a grid's cell or a tile: its words in a script (0 none: a faint "—"), what it does, its count, what a screen reader says, and its tap (ACTION 0: none); a tile's transliteration and its flags (`UI_TILE_`: what it hides; the one being chosen for, ringed; an answer wrong, in red over what was chosen, struck through; a choice offered, its words alone as a button), and the actions a screen reader offers |
 
 A row's fields, in order: `row` KIND ACTION ARG TITLE DETAIL ICON ACC FLAGS
 VALUE OPTIONS LO HI LABEL TRAILING DELETE CUSTOM HINT MARKS LINES CIRCLE
 CIRCLE_ACTION SUFFIX ICON_COLOR NOTE INFO ACTIONS RUNS TRUNS TITLE_LINES
-FIELD_KIND LEAD LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS LINKS CAPS.
+FIELD_KIND LEAD LEAD_STYLE SIDE SRUNS SIDE_NOTE ACTION_ICONS LINKS CAPS
+SHORT (its words as a chip: "KJV", "Henry's Concise"; empty, its title).
 
 - KIND is `item`, `toggle`, `choice`, `slider`, `field`, `button`, `custom`,
   `time`, `text` or `tiles`; ACC is empty, `more`, `check`, `info`, `done` (a faint check) or

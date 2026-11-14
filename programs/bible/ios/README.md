@@ -34,9 +34,18 @@ the compiled asset catalog (`assets/`), the frameworks it links
   dissolving and the page blurred behind; Go To is asked of core on the
   next turn, so the keys wait on nothing, and its rows form as they come.
   Closed, the field sinks back into the capsule. Above the field, nearest first,
-  every row of Go To (ribbons, the plan's day, Recent, Documents,
-  Browse; what the words find), each section a shape of glass under its
-  header (History, New and Plans its buttons), and while the words name
+  all of Go To on one shape of glass, made to fit the room above the keys
+  so that nothing scrolls: Recent, the documents and Browse a line each,
+  its name in a column at its left and its places plain words after it
+  (the one read in the accent), as many as fit whole, its button or All
+  at its right; the ribbons and the plan's day rows under their headers
+  (New, Plans), a ribbon's strip in its color, its place at its right;
+  what the words find rows under theirs (All 77 at a header's right);
+  hairlines between. What doesn't fit is a last line, More, of links to
+  the whole lists (it is made for the keys' height as last seen, and made
+  again when the keys rise to another). The field, its close, the book
+  chips and the grid are the other glass.
+  While the words name
   books, the books as chips and the chosen one's chapters as a grid (the
   one read last ringed); Books of the Bible makes the grid every book's.
   A chapter's tap goes there; held, the grid grows into the chapter's
