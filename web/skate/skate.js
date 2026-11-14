@@ -15,6 +15,7 @@ import { saveLocalJson as store } from "../local-storage.js";
 // (Who plays: see the leaderboards, below. A person's link is taken out of
 // the address as this comes in, before anything else sees it there.)
 import * as people from "../people/people.js";
+import { boardOf, placeOfBoard, onMoon } from "./boards.js";
 
 const canvas = document.getElementById("screen");
 // (The game has stopped: what is left to show is the page's.)
@@ -135,7 +136,7 @@ const stepWhenReady = () => {
 // lesson's end, the next lesson, or the list of them.)
 let onwardWord = "";
 const onward = () => {
-  if (!isLesson(placeNow)) return goTo(today(), true);
+  if (!isLesson(placeNow)) return goTo(boardOf(today(), onMoon(placeNow)), true);
   const n = placeNow - TUTORIAL;
   if (n < LESSONS.length) goInstead("lesson", n + 1);
   else goBack();
@@ -202,6 +203,9 @@ const present = () => {
     visit((placeOf = of));
     fetchLines(of);
   }
+  // (A board come to, to see or ride, is on the earth or the moon: and so
+  // what he picks from then on. Not the tutorial, nor riding together.)
+  if ((id === "place" || id === "ride") && !inTutorial(placeOfBoard(of)) && !isRound(placeOfBoard(of))) pickMoon(onMoon(of));
   if (id === "person") personOf = of;
   const motion = trail.length > shownLength ? "push" : trail.length < shownLength ? "pop" : "swap";
   shownLength = trail.length;
@@ -293,21 +297,23 @@ const addressNow = () => {
 const showAddress = () => {
   if (location.pathname + location.search + location.hash !== addressNow()) history.replaceState(history.state, "", addressNow());
 };
-// The way from home to a place's page: through the places of its kind
+// The way from home to a board's page: through the places of its kind
 // (and the days gone by, to a day that is over); big air, straight from
 // home.
 const placeTrail = (id) => {
-  const kind = id < 0 ? "parks" : "courses";
-  if (isBigAir(id)) return [["menu"], ["place", id]];
-  if (isDaily(id) && Math.abs(id) !== today()) return [["menu"], ["places", kind], ["days", kind], ["place", id]];
+  const place = placeOfBoard(id);
+  const kind = place < 0 ? "parks" : "courses";
+  if (isBigAir(place)) return [["menu"], ["place", id]];
+  if (isDaily(place) && Math.abs(place) !== today()) return [["menu"], ["places", kind], ["days", kind], ["place", id]];
   return [["menu"], ["places", kind], ["place", id]];
 };
-// A place's number from an address, if it is one the page could have come
-// to (a course, a park, a day's or big air; not the tutorial, nor a
-// round); or null.
+// A board's number from an address, if it is one the page could have
+// come to (a course, a park, a day's or big air, on the earth or the moon;
+// not the tutorial, nor a round); or null.
 const placeIn = (text) => {
   const id = /^-?[0-9]{1,10}$/.test(text ?? "") ? Number(text) : 0;
-  return id !== 0 && !inTutorial(id) && !isRound(id) ? id : null;
+  const place = placeOfBoard(id);
+  return place !== 0 && !inTutorial(place) && !isRound(place) ? id : null;
 };
 // A run to be watched as the page opens (see openAddress): its place, if
 // known yet, and it, once it has come ({run, name, what}).
@@ -541,20 +547,34 @@ const placeName = (id) => {
   if (isDaily(id)) return Math.abs(id) === today() ? (id < 0 ? "Daily park" : "Daily slopestyle") : `${id < 0 ? "Park" : "Slopestyle"} ${dayName(id)}`;
   return `${id < 0 ? "Park" : "Slopestyle"} ${Math.abs(id)}`;
 };
+// A board's name, in words: its place's, and on the moon, so ("Haystack
+// on the Moon"). (In a list, the moon is a mark: see moonCell.)
+const boardName = (id) => `${placeName(placeOfBoard(id))}${onMoon(id) ? " on the Moon" : ""}`;
+// Whether he rides on the moon or the earth, wherever he goes next (but
+// the tutorial and riding together, which are on the earth): picked on a
+// place's sheet or a kind's (see showPlace and showPlaces), and kept on
+// the device. Going to a board on the moon (from a run on it, say) picks
+// the moon; to one on the earth, the earth.
+let moonOn = stored("skate.moon", false) === true;
+const pickMoon = (on) => {
+  if (on !== moonOn) store("skate.moon", (moonOn = on));
+};
 // (Picked before the game is up: it starts there instead. See main.)
 let wanted = null;
 // Where the game has been asked to go, until it says it is there.
 let headed = null;
-// (Asked for outright, as one key the game knows a page by: 2000000000 and
-// the place's number. Typed as a number and Enter, as on a keyboard, it
-// could be lost: Enter means other things to the game at times. The game
-// keeps the picture of the place it is leaving while it builds the next,
-// and fades from one to the other.)
+// (Asked for outright, as one key the game knows a page by: PLACE_KEY and
+// the board's number (see place_key, in programs/skate/main.l8). Typed as
+// a number and Enter, as on a keyboard, it could be lost: Enter means
+// other things to the game at times. The game keeps the picture of the
+// place it is leaving while it builds the next, and fades from one to the
+// other.)
+const PLACE_KEY = 10000000000;
 const typePlace = (id) => {
   headed = id;
   pendingStep = "";
   syncSteps();
-  typeKeys([2000000000 + id]);
+  typeKeys([PLACE_KEY + id]);
 };
 // Have the game go there, the page's sheets left as they are (see
 // showPlace).
@@ -573,7 +593,7 @@ const goTo = (id, instead = false) => {
   else if (id === (headed ?? placeNow)) typeKeys([id === TUTORIAL ? 116 : 114]);
   else typePlace(id);
 };
-const randomPlace = (kind) => (kind === "parks" ? -1 : 1) * (PLACES + 1 + Math.floor(Math.random() * 99000));
+const randomPlace = (kind) => boardOf((kind === "parks" ? -1 : 1) * (PLACES + 1 + Math.floor(Math.random() * 99000)), moonOn);
 
 // His best run on the place he is at, for the game's corner (which knows
 // only this visit's): as the leaderboards have it, if he is someone, or
@@ -819,11 +839,12 @@ const playAs = (secret, tell = true) => {
 const current = (run) => gameVersion === 0 || run.version >= gameVersion;
 const bestsOn = (id) => (account?.courses?.[id] ?? []).filter(current);
 const recentOn = (id) => account?.recent?.[id] ?? [];
-// A place the leaderboards keep scores of (so there is a board to see);
-// and one a run may be posted to now: a day's place only on its day, as
-// everyone has the same day to ride it in.
-const boarded = (id) => (Math.abs(id) >= 1 && Math.abs(id) <= PLACES) || (isDaily(id) && Math.abs(id) <= today() && Math.abs(id) >= FIRST_DAY) || (isBigAir(id) && id - BIG_AIR <= PLACES);
-const postable = (id) => boarded(id) && (!isDaily(id) || Math.abs(id) === today());
+// A board the leaderboards keep scores of (so there is a board to see),
+// on the earth or the moon; and one a run may be posted to now: a day's
+// place only on its day, as everyone has the same day to ride it in.
+const placeBoarded = (id) => (Math.abs(id) >= 1 && Math.abs(id) <= PLACES) || (isDaily(id) && Math.abs(id) <= today() && Math.abs(id) >= FIRST_DAY) || (isBigAir(id) && id - BIG_AIR <= PLACES);
+const boarded = (id) => placeBoarded(placeOfBoard(id));
+const postable = (id) => boarded(id) && (!isDaily(placeOfBoard(id)) || Math.abs(placeOfBoard(id)) === today());
 // A run just finished, as the game wrote it: posted, to be logged, and
 // kept if it is his best there.
 const postRun = async (version, id, score, replay) => {
@@ -839,7 +860,7 @@ const postRun = async (version, id, score, replay) => {
     await loadMe();
     // (Where a new best puts him, among those he sees.)
     const place = r.ok && body.best && account ? bestsOn(id).findIndex((e) => e.id === account.id) + 1 : 0;
-    if (place > 0 && bestsOn(id).length > 1) toast(`You're #${place} on ${placeName(id)}`);
+    if (place > 0 && bestsOn(id).length > 1) toast(`You're #${place} on ${boardName(id)}`);
   } catch {
     toast("Couldn't post score");
   }
@@ -939,7 +960,7 @@ const shareNow = async () => {
       .catch(() => toast("Couldn't share that run"));
   }
   const url = new URL(location.pathname + address, location.origin).href;
-  const title = `${what.name} on ${placeName(what.course)}: ${what.run.score}`;
+  const title = `${what.name} on ${boardName(what.course)}: ${what.run.score}`;
   // (A phone's own way to pass a link on; else it is copied.)
   try {
     if (navigator.share) await navigator.share({ title, url });
@@ -1282,6 +1303,9 @@ const gameSays = (line) => {
     // (Where he was last, to start at next time: not a round, long gone by
     // then.)
     if (!inTutorial(placeNow) && !isRound(placeNow)) {
+      // (On the moon or the earth: so he rides from then on. The game
+      // goes there itself on a key, M.)
+      pickMoon(onMoon(placeNow));
       store("skate.course", placeNow);
       store("skate.tutorial", true);
     }
@@ -1336,6 +1360,18 @@ const onTap = (name) => {
       goBack();
     } else if (account) go("person", account.name);
   } else if (what === "play") goTo(placeOf);
+  else if (what === "moon") {
+    // The earth or the moon: a place's sheet becomes the same place's
+    // there (its scores, and the game showing it, behind); a sheet of
+    // places has its places there, and the game shows where it is there.
+    pickMoon(arg === "moon");
+    if (pageNow() === "place") goInstead("place", boardOf(placeOfBoard(placeOf), moonOn));
+    else {
+      const here = placeOfBoard(headed ?? placeNow);
+      if (here !== 0 && !inTutorial(here) && !isRound(here)) visit(boardOf(here, moonOn));
+      showPage();
+    }
+  }
   else if (what === "who") {
     store("skate.who", (tabWho = arg));
     showPage();
@@ -1368,6 +1404,9 @@ const row = (tap, mine, ...cells) => ["row", tap, mine ? 1 : 0, ...cells.flat()]
 // (A best run can be watched, if this game can still play it.)
 const watchCell = (run, id) => (run.version === gameVersion ? [["watch", `watch:${run.id}:${id}`, ""]] : []);
 const nameCell = (run) => ["who", `go:person:${run.name}`, run.name];
+// A board, in a row: its place's name, and on the moon, a crescent after
+// it (no words, so that a row still fits a phone's width on one line).
+const boardCells = (id) => [[onMoon(id) ? "moonwhat" : "what", "", placeName(placeOfBoard(id))]];
 const BELOW = touch ? 66 : 58;
 // A list of runs has room for a few, however few it has, so that the sheet
 // keeps its shape (and its tabs their place) from one list to the next.
@@ -1379,14 +1418,17 @@ const feed = () =>
   Object.entries(account?.recent ?? {})
     .flatMap(([course, list]) => list.map((run) => ({ ...run, course: Number(course) })))
     .sort((a, b) => b.at - a.at);
-// Someone's best on each place they have ridden: the day's first, then the
-// courses, the parks, and days gone by.
-const placeRank = (id) => {
+// Someone's best on each board they have ridden: the day's first, then the
+// courses, the parks, and days gone by; each place's on the moon after its
+// own.
+const placeRank = (board) => {
+  const id = placeOfBoard(board);
   const n = Math.abs(id);
   const park = id < 0 ? 0.5 : 0;
-  if (isDaily(id)) return n === today() ? park : 1e8 - n + park;
-  if (isBigAir(id)) return 2000 + id - BIG_AIR;
-  return (id < 0 ? 1000 : 10) + n;
+  const moon = onMoon(board) ? 0.25 : 0;
+  if (isDaily(id)) return (n === today() ? park : 1e8 - n + park) + moon;
+  if (isBigAir(id)) return 2000 + id - BIG_AIR + moon;
+  return (id < 0 ? 1000 : 10) + n + moon;
 };
 const bestsOf = (name) =>
   Object.entries(account?.courses ?? {})
@@ -1405,8 +1447,8 @@ const showMenu = () => {
   blocks.push(["item", "go:lessons", "Tutorial", fresh ? "Start here" : "", fresh ? "first" : "plain"]);
   blocks.push(["item", "go:places:courses", "Slopestyle", "", "plain"]);
   blocks.push(["item", "go:places:parks", "Park", "", "plain"]);
-  // (One big air is enough.)
-  blocks.push(["item", `go:place:${BIG_AIR + 1}`, "Big air", "", "plain"]);
+  // (One big air is enough: on the earth or the moon, as picked.)
+  blocks.push(["item", `go:place:${boardOf(BIG_AIR + 1, moonOn)}`, "Big air", "", "plain"]);
   // (Riding together is with those he sees, so for someone.)
   if (mySecret) {
     const riding = live.lobby.find(({ place }) => place === ROUND_BASE)?.names.length ?? 0;
@@ -1416,7 +1458,7 @@ const showMenu = () => {
     blocks.push(["head", "Activity"], ["feed", 4]);
     const runs = feed().slice(0, FEED);
     if (account && runs.length === 0) blocks.push(["empty", "No runs yet"]);
-    for (const run of runs) blocks.push(row(`go:place:${run.course}`, run.name === account?.name, nameCell(run), ["what", "", placeName(run.course)], ["score", "", run.score], ["when", "", ago(run.at)]));
+    for (const run of runs) blocks.push(row(`go:place:${run.course}`, run.name === account?.name, nameCell(run), ...boardCells(run.course), ["score", "", run.score], ["when", "", ago(run.at)]));
     blocks.push(["/feed"]);
   }
   return { wide: 520, blocks };
@@ -1447,16 +1489,20 @@ const showLesson = () => {
   };
 };
 
+// The earth or the moon, to pick (see moonOn): under the title of a sheet
+// of places, and of a place.
+const moonTabs = () => ["tabs", moonOn ? 1 : 0, "moon:earth", "Earth", "moon:moon", "Moon"];
 // The places to pick from: the slopestyles or the parks, the day's first
-// (with how long it is open for), the days gone by, and one at random.
+// (with how long it is open for), the days gone by, and one at random; on
+// the earth or the moon.
 let picking = "courses";
 const showPlaces = () => {
   const kind = picking;
   const sign = kind === "parks" ? -1 : 1;
-  const blocks = [["title", "", { courses: "Slopestyle", parks: "Park" }[kind]]];
-  blocks.push(["card", `go:place:${sign * today()}`, `Daily ${kind === "parks" ? "park" : "slopestyle"}`, `${leftText(dayLeft())} left`, 1, "daily"]);
+  const blocks = [["title", "", { courses: "Slopestyle", parks: "Park" }[kind]], moonTabs(), ["gap", 2]];
+  blocks.push(["card", `go:place:${boardOf(sign * today(), moonOn)}`, `Daily ${kind === "parks" ? "park" : "slopestyle"}`, `${leftText(dayLeft())} left`, 1, "daily"]);
   blocks.push(["card", `go:days:${kind}`, "Past days", "", 1, "past"]);
-  for (let n = 1; n <= PLACES; n++) blocks.push(["card", `go:place:${sign * n}`, placeName(sign * n), "", 0, "plain"]);
+  for (let n = 1; n <= PLACES; n++) blocks.push(["card", `go:place:${boardOf(sign * n, moonOn)}`, placeName(sign * n), "", 0, "plain"]);
   blocks.push(["card", `random:${kind}`, "Random", "", 0, "plain"]);
   return { wide: 440, blocks };
 };
@@ -1482,7 +1528,7 @@ const showDays = () => {
   for (let d = 1; d <= days; d++) {
     const n = calendarMonth * 100 + d;
     const on = n >= first && n <= last;
-    blocks.push(["day", on ? `go:place:${sign * n}` : "", d, n === now ? "today" : on ? "on" : "off"]);
+    blocks.push(["day", on ? `go:place:${boardOf(sign * n, moonOn)}` : "", d, n === now ? "today" : on ? "on" : "off"]);
   }
   return { wide: 380, blocks };
 };
@@ -1499,9 +1545,12 @@ let tabWho = stored("skate.who", null);
 let tabWhat = "best";
 const showPlace = () => {
   const id = placeOf;
-  const blocks = [["title", "", placeName(id), "play", "Play"]];
+  const place = placeOfBoard(id);
+  // (Its name, and under it, the earth or the moon: how he will ride it,
+  // set a little apart from the tabs that pick which of its runs show.)
+  const blocks = [["title", "", placeName(place), "play", "Play"], moonTabs(), ["gap", 6]];
   // A day's place: how long it is open for, or that it is over.
-  if (isDaily(id)) blocks.push(["note", Math.abs(id) === today() ? `Open for ${leftText(dayLeft())} more` : "This day is over: runs here are not posted", "gold"]);
+  if (isDaily(place)) blocks.push(["note", Math.abs(place) === today() ? `Open for ${leftText(dayLeft())} more` : "This day is over: runs here are not posted", "gold"]);
   // Whose: everyone's (until he picks), or his own.
   const shared = !!account && boarded(id);
   const who = shared && tabWho !== "me" ? "all" : "me";
@@ -1548,7 +1597,7 @@ const showPerson = () => {
   const name = personOf;
   const blocks = [["title", "", name], ["tabs", personWhat === "best" ? 0 : 1, "pwhat:best", "Best", "pwhat:recent", "Recent"], ["scroll"], ["gap", 4]];
   const runs = personWhat === "best" ? bestsOf(name) : feed().filter((run) => run.name === name);
-  const rows = runs.map((run) => row(`go:place:${run.course}`, false, ["what", "", placeName(run.course)], ...(personWhat === "best" ? [["score", "", run.score], ...watchCell(run, run.course)] : [["when", "", ago(run.at)], ["score", "", run.score]])));
+  const rows = runs.map((run) => row(`go:place:${run.course}`, false, ...boardCells(run.course), ...(personWhat === "best" ? [["score", "", run.score], ...watchCell(run, run.course)] : [["when", "", ago(run.at)], ["score", "", run.score]])));
   blocks.push(...(rows.length ? rows : [["empty", "No runs yet"]]), listRoom(rows));
   return { wide: 440, blocks };
 };
@@ -1586,7 +1635,7 @@ const showPage = (motion = "swap") => {
 };
 // (A day's place says how long it is open for: told again each minute.)
 setInterval(() => {
-  if (sheetNow() === "places" || (sheetNow() === "place" && isDaily(placeOf))) showPage();
+  if (sheetNow() === "places" || (sheetNow() === "place" && isDaily(placeOfBoard(placeOf)))) showPage();
 }, 15000);
 
 // What is over the game, as it is now (see programs/skate/ui_chrome.l8):
@@ -1605,7 +1654,8 @@ const syncChrome = () => {
   const replaying = body.contains("replaying");
   const lesson = lessonNow() !== 0;
   chrome("back", trail.length > 1);
-  chrome("look", true);
+  // (The moon has no night or day: see look_moon, in programs/skate.)
+  chrome("look", !onMoon(headed ?? placeNow));
   chrome("night", body.contains("night"));
   chrome("stats", true, statsOn, statsWords, statsRoom);
   chrome("steps", lesson, ["read", "watch", "try"].indexOf(stepAt()), body.contains("nudge"));
@@ -1636,7 +1686,8 @@ const syncChrome = () => {
 const startPlace = () => {
   const last = stored("skate.course", 0) || 0;
   const start = last === 0 && !stored("skate.tutorial", false) ? TUTORIAL + 1 : last || 1;
-  return isDaily(start) ? Math.sign(start) * today() : start;
+  const place = placeOfBoard(start);
+  return isDaily(place) ? boardOf(Math.sign(place) * today(), onMoon(start)) : start;
 };
 // A sheet's contents, as they now are (its scores have come).
 const showOpen = () => showPage();

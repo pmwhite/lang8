@@ -39,6 +39,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { bearer, personOf, personWith, seenBy } from "../people-api/people.js";
+import { placeOfBoard } from "../skate/boards.js";
 
 // The courses scores are kept for, and as many parks (and each day's course
 // and park: see dayOf); how long a replay may be; and how many of a
@@ -97,8 +98,10 @@ const DAILY_ZONE = "America/New_York";
 const dayNow = (at) => Number(new Intl.DateTimeFormat("en-CA", { timeZone: DAILY_ZONE }).format(new Date(at)).replace(/-/g, ""));
 const GRACE = 5 * 60 * 1000;
 const openPlace = (n) => whole(n, 1, COURSES) || whole(n, BIG_AIR + 1, BIG_AIR + COURSES) || (dayOf(n) !== null && (dayNow(Date.now()) === n || dayNow(Date.now() - GRACE) === n));
-const validCourse = (course) => Number.isInteger(course) && validPlace(Math.abs(course));
-const openCourse = (course) => Number.isInteger(course) && openPlace(Math.abs(course));
+// (A course's number here is a board's: its place's, on the earth or the
+// moon. See ../skate/boards.js.)
+const validCourse = (course) => Number.isInteger(course) && validPlace(Math.abs(placeOfBoard(course)));
+const openCourse = (course) => Number.isInteger(course) && openPlace(Math.abs(placeOfBoard(course)));
 const validId = (id) => typeof id === "string" && /^[a-z0-9]{8}$/.test(id);
 
 // Who he is, and the scores of those he sees (himself, and everyone he
