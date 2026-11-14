@@ -57,6 +57,13 @@ the compiled asset catalog (`assets/`), the frameworks it links
   (‹) is the screen before, from the first Go To again; a tap on the
   field is Go To again too, the keys up; the close closes Go To from
   anywhere, and a place picked anywhere goes there.
+- **Go To's colors are the theme's.** Its glass (the field, its close,
+  the chips, the grid, its shapes) is tinted with the page's color, as
+  the dock's is, and the page under it blurs washed in its own color, so
+  that Paper and Sepia are warm, Dark and Black dark, never grey. Rows on
+  its glass are a faint wash of the ink, a page's or a plain list's none;
+  words are the theme's ink and faint, the one read and Return's in its
+  accent.
 - **The tray is the dock.** Verses selected, the capsule grows up into a
   glass panel of core's tray (the reference, the highlights' colors, Copy,
   Share, Bookmark, Note, Study, Compare, Memorize), and goes back into the
@@ -123,7 +130,7 @@ place and chrome, the panel's sheet, the dock, and the screens), `!scroll
 P DY`, `!flick P DY` (a finger's fling, frame by frame), `!dock
 open|close`, `!tap WORDS` (the top sheet's first row so titled, or the quick form's row),
 `!close`, `!back`, `!swipe` (the panel put away as a hand's swipe puts
-it), `!capsule` (a tap on the dock's capsule), `!home` (Back from the first screen Go To opened), in Go To's quick form `!type WORDS`, `!return`
+it), `!capsule` (a tap on the dock's capsule), `!home` (Back from the first screen Go To opened), `!theme N` (theme N chosen, the one it was logged), in Go To's quick form `!type WORDS`, `!return`
 and `!hold N V` (chapter N held, the finger on verse V; `!hold 0` lets
 go), `!probe N` (for N frames, where the dock and the panel's sheet are
 drawn), `!part` (the panel's first part as core sent it: its words and
