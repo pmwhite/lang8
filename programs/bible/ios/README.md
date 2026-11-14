@@ -53,8 +53,12 @@ the compiled asset catalog (`assets/`), the frameworks it links
   a grid of their names, then a book's chapters; History; Plans; Browse;
   a document's page; every verse found) fills the room above the field
   on Go To's glass, the keys down and the field's words kept: the lists
-  of the app's own navigation, a child of the overlay's controller. Back
-  (‹) is the screen before, from the first Go To again; a tap on the
+  of the app's own navigation, a child of the overlay's controller. Its
+  glass grows with a spring out of Go To's panel's place and shape (the
+  panel's words fading over it, the lists fading in) as the keys fall,
+  and goes back into it as they rise, the panel's own glass taking its
+  place where it ends. Back (‹) is the screen before, from the first Go
+  To again; a tap on the
   field is Go To again too, the keys up; the close closes Go To from
   anywhere, and a place picked anywhere goes there.
 - **Go To's colors are the theme's.** Its glass (the field, its close,
