@@ -26,6 +26,24 @@ the compiled asset catalog (`assets/`), the frameworks it links
   beside it reaches what is under it; under a sheet of a task (Go To, the
   Library, Reading, Share) its glass dissolves along the sheet's
   transition and forms again as it goes.
+- **Go To rises from the dock.** A tap on the capsule brings the keys up
+  at once: the capsule's own glass (handed from the dock to Go To's
+  overlay, a view in the app's window, not a presented controller) rises
+  with them into the field, the close parting from it as liquid, the
+  chapter's name dissolving into the field's words, the rest of the dock
+  dissolving and the page blurred behind; Go To is asked of core on the
+  next turn, so the keys wait on nothing, and its rows form as they come.
+  Closed, the field sinks back into the capsule. Above the field, nearest first,
+  every row of Go To (ribbons, the plan's day, Recent, Documents,
+  Browse; what the words find), each section a shape of glass under its
+  header (History, New and Plans its buttons), and while the words name
+  books, the books as chips and the chosen one's chapters as a grid (the
+  one read last ringed); Books of the Bible makes the grid every book's.
+  A chapter's tap goes there; held, the grid grows into the chapter's
+  verses, and a finger slid to one and lifted goes there. Return goes to
+  the ringed chapter or the washed row. There is no sheet of Go To: a
+  screen it opens (a document's page, History, every verse found) is a
+  sheet over it, the keys down, and swiped away, Go To again.
 - **The tray is the dock.** Verses selected, the capsule grows up into a
   glass panel of core's tray (the reference, the highlights' colors, Copy,
   Share, Bookmark, Note, Study, Compare, Memorize), and goes back into the
@@ -59,6 +77,7 @@ the compiled asset catalog (`assets/`), the frameworks it links
 | `linking.l8` | Link maps, chapter shapes (laid out or guessed by bytes), following |
 | `dock.l8` | The dock and its window, the tray, the way back, toasts, the title's menu |
 | `screens.l8` | Core's screens as sheets of lists; effects; rows, menus and swipes |
+| `goto.l8` | Go To's quick form over the keys: its field, its rows and its passage chooser |
 | `panel.l8` | The panel's sheet and its reader |
 | `services.l8` | Core's time, the screen kept on, the pasteboard, sharing, pages outside |
 | `devwire.l8` | The development server's data files and lines |
@@ -89,9 +108,11 @@ The development wire takes core's lines (`node web/devctl.mjs wire tap
 goto`, lines split by `|`) and the skin's own: `!state` (each pane's window,
 place and chrome, the panel's sheet, the dock, and the screens), `!scroll
 P DY`, `!flick P DY` (a finger's fling, frame by frame), `!dock
-open|close`, `!tap WORDS` (the top sheet's first row so titled),
+open|close`, `!tap WORDS` (the top sheet's first row so titled, or the quick form's row),
 `!close`, `!back`, `!swipe` (the panel put away as a hand's swipe puts
-it), `!probe N` (for N frames, where the dock and the panel's sheet are
+it), `!capsule` (a tap on the dock's capsule), in Go To's quick form `!type WORDS`, `!return`
+and `!hold N V` (chapter N held, the finger on verse V; `!hold 0` lets
+go), `!probe N` (for N frames, where the dock and the panel's sheet are
 drawn), `!part` (the panel's first part as core sent it: its words and
 styles), `!sheetviews` (the sheet's views, from the panel's up), and `!record
 on|off` (ReplayKit; the movie is posted to the server's `/video`, for

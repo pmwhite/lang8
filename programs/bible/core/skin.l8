@@ -362,6 +362,13 @@ fput_reader(s: int) {
     } else if (s >= 0 && s < len(src_readers)) fput_str(src_readers[s])
 }
 
+// Whether the skin shows Go To as its quick form (the iPhone's: every row
+// of Go To over the keys, no sheet of it): the passage chooser shows the
+// books (no rows of them), the books of the Bible too (Books of the Bible
+// lists them there), and New Ribbon, Reading Plans and History are their
+// sections' headers' buttons.
+sk_has_quick_goto: bool = false;
+
 // Whether the host keeps ribbons and plans (Go To's first sections); and
 // the chapters the ribbons show, which Recent leaves out.
 sk_has_ribbons: bool = false;
@@ -582,6 +589,13 @@ ACT_GT_DOC_ALL: int = 414;
 
 // Go To's Books of the Bible: the books' screen pushed over it.
 ACT_GT_BOOKS: int = 415;
+
+// A book chosen among Go To's passage chooser's chips (arg the book): its
+// chapters are the chooser's grid.
+ACT_GT_PASSAGE_BOOK: int = 416;
+
+// Go To's Recent's History (the quick form's header button).
+ACT_GT_HISTORY: int = 417;
 
 // The books of the Bible, by testament, the one read strong and tinted: a
 // pick as Go To's (pushed over it, so landing where it is aimed).
@@ -1506,6 +1520,8 @@ sk_open(kind: int, arg: int, push: bool) {
     group: int = if (push && sk_n > 0) sk_groups[sk_top()] else 0;
     if (kind == SCR_GOTO) {
         sk_q_n = 0;
+        sk_goto_book = -1;
+        sk_goto_books_all = false;
         sk_goto_recent();
         // (Checked online at most once a day, quietly: its updates, and
         // what can be read wherever it is kept.)
@@ -1649,6 +1665,8 @@ sk_build_goto(id: int) {
     ui_begin(id, SCR_GOTO, if (at >= 0) sk_args[at] else GOTO_PAGE, "Go To");
     ui_set_search("Book, chapter, verse or words");
     ui_set_search_text(sk_q, sk_q_n);
+    // (Opened to be typed in: most places are a few letters away.)
+    ui_search_focus = true;
     // (Its words searched for as they are typed: a moment's pause first;
     // the documents' indexes read as it opens, to be ready.)
     ui_search_wait = GOTO_SEARCH_WAIT;
@@ -1658,6 +1676,7 @@ sk_build_goto(id: int) {
         sk_build_goto_query();
         return
     }
+    if (sk_goto_books_all) goto_books_passage();
     if (sk_has_ribbons) {
         sk_goto_ribbons();
         sk_goto_plans()
@@ -1665,6 +1684,8 @@ sk_build_goto(id: int) {
     n: int = sk_recent_n;
     if (n > 0) {
         ui_section("Recent", "");
+        // (The quick form's History: its header's button.)
+        if (sk_has_quick_goto) ui_set_section_button("History", ACT_GT_HISTORY);
         for j in 0..n {
             c: int = sk_recent_c[j];
             v: int = sk_recent_v[j];
@@ -1680,7 +1701,7 @@ sk_build_goto(id: int) {
             ui_set_icon_faint();
             sk_menu_recent()
         }
-        if (sk_recent_more) {
+        if (sk_recent_more && !sk_has_quick_goto) {
             ui_row(UI_ITEM, ACT_OPEN, OPEN_HISTORY);
             ui_set_title("Show All");
             ui_set_tinted();
@@ -1761,6 +1782,9 @@ sk_build_docs(id: int, s: int) {
 // (what a ribbon is), or with twelve.
 sk_goto_ribbons() {
     ui_section(if (rb_n > 0) "Ribbons" else "", if (rb_n == 0) "A ribbon keeps your place, and moves on as you read from it." else if (rb_n >= RB_MOST) "12 ribbons is the most." else "");
+    // (The quick form's New Ribbon, with a ribbon: its header's button.)
+    quick_new: bool = sk_has_quick_goto && rb_n > 0;
+    if (quick_new && rb_n < RB_MOST) ui_set_section_button("New", ACT_GT_NEW_RIBBON);
     th: int = theme_now(clamp_index(pref_get("theme"), len(t_bg)), sk_dark);
     now: int = time(0);
     for i in 0..rb_n {
@@ -1780,6 +1804,7 @@ sk_goto_ribbons() {
         ui_set_hint("Opens here. Moves on as you read.");
         sk_menu_ribbon(i)
     }
+    if (quick_new) return;
     ui_row(UI_ITEM, ACT_GT_NEW_RIBBON, 0);
     ui_set_title("New Ribbon\â\€\¦");
     ui_set_icon("plus");
@@ -1795,6 +1820,10 @@ sk_goto_ribbons() {
 sk_goto_plans() {
     ui_section(if (fw_n > 1) "Reading Plans" else if (fw_n == 1) "Reading Plan" else "",
         "");
+    // (The quick form's Reading Plans, with a plan followed: its header's
+    // button.)
+    quick_plans: bool = sk_has_quick_goto && fw_n > 0;
+    if (quick_plans) ui_set_section_button("Plans", ACT_GT_PLANS);
     d: int = sk_today_now();
     for i in 0..fw_n {
         p: int = fw_plan[i];
@@ -1838,6 +1867,7 @@ sk_goto_plans() {
         ui_row_action_icon("Plan Details", "info.circle", ACT_GT_PLAN_DETAILS);
         ui_set_delete(ACT_GT_PLAN_REMOVE)
     }
+    if (quick_plans) return;
     ui_row(UI_ITEM, ACT_GT_PLANS, 0);
     ui_set_title("Reading Plans");
     ui_set_icon("calendar");
@@ -2006,16 +2036,8 @@ sk_query_books() {
     sk_found_n = 0;
     // (The name typed, before its numbers; with words after them, "the 3
     // wise men", no book.)
-    name_n: int = sk_q_n;
-    seen_letter: bool = false;
-    words_after: bool = false;
-    for i in 0..sk_q_n {
-        k: int = sk_q[i] as int;
-        if (is_letter(k)) seen_letter = true;
-        if (seen_letter && is_digit(k) && name_n == sk_q_n) name_n = i;
-        if (name_n < sk_q_n && is_letter(k)) words_after = true
-    }
-    for pass in 0..if (words_after) 0 else 2 {
+    name_n: int = goto_name_end();
+    for pass in 0..if (name_n < 0) 0 else 2 {
         for b in 0..books {
             if (sk_found_n < len(sk_found) && book_begins(b, sk_q, name_n)) {
                 if (book_alias_exact(b) == (pass == 0)) {
@@ -2034,11 +2056,181 @@ sk_query_books() {
     sk_ref = goto_ref(sk_q, sk_q_n)
 }
 
+// Where the name typed in Go To ends (before its numbers: "john" of "john
+// 3:16"), or -1 with words after the numbers ("the 3 wise men": no book).
+goto_name_end(): int {
+    name_n: int = sk_q_n;
+    seen_letter: bool = false;
+    for i in 0..sk_q_n {
+        k: int = sk_q[i] as int;
+        if (is_letter(k)) seen_letter = true;
+        if (seen_letter && is_digit(k) && name_n == sk_q_n) name_n = i;
+        if (name_n < sk_q_n && is_letter(k)) return -1
+    }
+    name_n
+}
+
+// The book chosen among Go To's chips (-1: the first), until what is typed
+// changes; and whether, nothing typed, the chooser shows every book (Books
+// of the Bible in the quick form).
+sk_goto_book: int = -1;
+
+sk_goto_books_all: bool = false;
+
+// The chooser's every book (nothing typed): the chips, by names short
+// enough for a grid of them ("Ruth", "Gen", "1 Cor") and no book chosen;
+// with one
+// chosen, by their names, its chapters under them, at the chapter read
+// last there.
+goto_books_passage() {
+    chosen: int = sk_goto_book;
+    fbuf_n = 0;
+    for b in 0..books {
+        if (b > 0) fput(124);
+        fput_int(b);
+        fput(58);
+        if (chosen >= 0 || len(book_name(b)) <= 6) fput_str(book_name(b)) else {
+            book_short(b);
+            fput_bytes(short_name, 0, short_n)
+        }
+    }
+    names: UiText = ui_put_fbuf();
+    goto_passage_of(chosen, if (chosen >= 0) goto_last_chapter_in(chosen) else 0,
+        chosen >= 0, names)
+}
+
+// The chooser for book chosen (-1: none, its books a grid), its chapter
+// mark marked, whether Return goes there, and its chips' words.
+goto_passage_of(
+    chosen: int,
+    mark: int,
+    goes: bool,
+    names: UiText
+) {
+    fbuf_n = 0;
+    if (chosen >= 0) {
+        for c in 0..book_count[chosen] {
+            if (c > 0) fput(32);
+            fput_int(ch_verses[book_first[chosen] + c])
+        }
+    }
+    ui_passage = UiPassage.Passage {
+        book: chosen,
+        first_chapter: if (chosen >= 0) book_first[chosen] else 0,
+        mark: mark,
+        goes: goes,
+        books: names,
+        verses: ui_put_fbuf()
+    }
+}
+
+// Go To's passage chooser (ui.l8's UiPassage) for what is typed, after
+// sk_query_books: as chips, every book the name could mean (a reference's
+// own first, else one whose short name is typed exactly, else the one read
+// latest, then the others in the Bible's order, so that they stay put as
+// letters are typed); the chosen one's chapters, the one typed marked,
+// else where the reader was last in that book, else its first.
+goto_passage() {
+    name_n: int = goto_name_end();
+    if (name_n < 0) return;
+    chips: []int = goto_chips;
+    n: int = 0;
+    // (A reference's book first where a chapter typed chose it.)
+    chosen_by_chapter: bool = sk_ref && ref_chapter >= 1;
+    if (chosen_by_chapter) {
+        chips[0] = ref_book;
+        n = 1
+    }
+    has_letter: bool = false;
+    for i in 0..name_n
+        if (is_letter(sk_q[i] as int)) has_letter = true;
+    // (The exact short names, then the rest.)
+    for pass in 0..if (has_letter) 2 else 0 {
+        for b in 0..books {
+            if (book_begins(b, sk_q, name_n) && book_alias_exact(b) == (pass == 0) && !goto_chips_hold(chips,
+                n, b)) {
+                chips[n] = b;
+                n = n + 1
+            }
+        }
+    }
+    if (sk_ref && !goto_chips_hold(chips, n, ref_book)) {
+        chips[n] = ref_book;
+        n = n + 1
+    }
+    if (n == 0) return;
+    // (None typed exactly: the one read latest first. book_alias_exact
+    // looks at the name book_begins last folded: the query's.)
+    if (!chosen_by_chapter && !book_alias_exact(chips[0])) {
+        latest: int = goto_latest_book_of(chips, n);
+        if (latest > 0) {
+            b: int = chips[latest];
+            for k in 0..latest chips[latest - k] = chips[latest - k - 1];
+            chips[0] = b
+        }
+    }
+    chosen: int = if (sk_goto_book >= 0 && goto_chips_hold(chips, n, sk_goto_book)) sk_goto_book else chips[0];
+    typed: bool = chosen_by_chapter && chosen == ref_book;
+    mark: int = if (typed) ref_chapter else goto_last_chapter_in(chosen);
+    fbuf_n = 0;
+    for k in 0..n {
+        if (k > 0) fput(124);
+        fput_int(chips[k]);
+        fput(58);
+        fput_str(book_name(chips[k]))
+    }
+    goto_passage_of(chosen, mark, !typed, ui_put_fbuf())
+}
+
+// (Room for every book.)
+goto_chips: []int = new int[66](0);
+
+goto_chips_hold(chips: []int, n: int, b: int): bool {
+    for k in 0..n
+        if (chips[k] == b) return true;
+    false
+}
+
+// Which of chips (n of them) holds the book of the Bible read latest (the
+// page's, else History's newest): its index, or -1.
+goto_latest_book_of(chips: []int, n: int): int {
+    page_book: int = ch_book[page_bible_c()];
+    for k in 0..n
+        if (chips[k] == page_book) return k;
+    i: int = hs_n - 1;
+    while (i >= 0) {
+        if (!place_document_by_divisions(visits[i].document)) {
+            b: int = ch_book[visits[i].chapter];
+            for k in 0..n
+                if (chips[k] == b) return k
+        }
+        i = i - 1
+    }
+    -1
+}
+
+// The chapter of book b the reader was in last (the page's, else History's
+// newest there), else its first: a chapter's number in the book.
+goto_last_chapter_in(b: int): int {
+    page_c: int = page_bible_c();
+    if (ch_book[page_c] == b) return page_c - book_first[b] + 1;
+    i: int = hs_n - 1;
+    while (i >= 0) {
+        c: int = visits[i].chapter;
+        if (!place_document_by_divisions(visits[i].document) && ch_book[c] == b) return c - book_first[b] + 1;
+        i = i - 1
+    }
+    1
+}
+
 sk_build_goto_query() {
     sk_query_books();
     goto_found_reset();
     here: int = ch_book[page_bible_c()];
-    if (sk_ref) {
+    goto_passage();
+    // (The quick form's chooser shows the books: their rows, and a book's
+    // own, "rom", left out.)
+    if (sk_ref && !(sk_has_quick_goto && ref_chapter < 0)) {
         // (No heading: the screen's title says it.)
         ui_section("", "");
         ui_row(UI_ITEM, ACT_GOTO_REF, 0);
@@ -2077,7 +2269,7 @@ sk_build_goto_query() {
             }
         }
     }
-    if (sk_found_n > 0) {
+    if (sk_found_n > 0 && !sk_has_quick_goto) {
         // (Not "Books": that is a kind of document, after them.)
         ui_section("Books of the Bible", "");
         for j in 0..sk_found_n sk_book_row(sk_found[j], here)
@@ -2240,6 +2432,8 @@ sk_query(
         return
     }
     sk_q_n = 0;
+    sk_goto_book = -1;
+    sk_goto_books_all = false;
     for x in b..e {
         if (sk_q_n < len(sk_q)) {
             sk_q[sk_q_n] = buf[x];
@@ -2268,7 +2462,16 @@ sk_submit(id: int) {
     }
     if (i < 0 || sk_q_n == 0) return;
     sk_query_books();
-    if (sk_ref) sk_go_ref(i) else if (sk_found_n > 0) sk_pick_book(i, sk_found[0]) else if (sk_kinds[i] == SCR_GOTO) _opened: bool = goto_open_first_document(i)
+    if (sk_ref) sk_go_ref(i) else if (sk_found_n > 0) sk_pick_book(i, sk_found[0]) else if (sk_kinds[i] == SCR_GOTO && !goto_open_first_document(i)) goto_first_verse(i)
+}
+
+// Go To's first verse its words found (as its build left them), gone to
+// from screen at: Return's, with no document found before it.
+goto_first_verse(at: int) {
+    if (sk_q_n < GOTO_WORDS_LEAST || hit_count == 0) return;
+    first: int = find_order[0];
+    sk_remember_search();
+    sk_goto_from(at, hit_chapter[first], hit_verse[first])
 }
 
 // What Go To's field holds, folded (its capitals as small letters).
@@ -4714,8 +4917,23 @@ sk_act(
             sk_open(SCR_SEARCH, 0, true);
             return
         }
-        if (action == ACT_GT_BOOKS) {
+        if (action == ACT_GT_BOOKS && !sk_has_quick_goto) {
             sk_open(SCR_BOOKS, 0, true);
+            return
+        }
+        if (action == ACT_GT_HISTORY) {
+            sk_open(SCR_HISTORY, 0, true);
+            return
+        }
+        if (action == ACT_GT_PASSAGE_BOOK || action == ACT_GT_BOOKS) {
+            // (Books of the Bible: the chooser's books; a chip, its book's
+            // chapters; -1, the books again.)
+            if (action == ACT_GT_BOOKS) {
+                sk_goto_books_all = true;
+                sk_goto_book = -1
+            } else if (arg >= -1 && arg < books) sk_goto_book = arg;
+            sk_build(at);
+            ui_effect("refill", sk_ids[at], -1);
             return
         }
         if (action == ACT_GT_DOC_HIT) {

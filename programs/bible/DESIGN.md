@@ -83,8 +83,15 @@ every Bible's place is taken, opening another lets go of the one read
 longest ago that no pane shows.
 Go To lists what can be read (`core/documents.l8`) and is one screen
 wherever it opens: the same title, sections, rows and marks, always
-presented and opened at its top; its argument says only where a pick
-lands, the page (the bar's title) or the panel (the panel's name). Nothing
+presented and opened at its top, its field taking the keys; its argument
+says only where a pick lands, the page (the bar's title) or the panel
+(the panel's name). The iPhone shows it first as a quick form over the
+keys, nearest the field first: every row (the ribbons, the plans' days,
+Recent, Documents, Browse; what is found) and, while the words name books
+or Books of the Bible is tapped,
+a passage chooser (the books as chips, the chosen one's chapters as a
+grid, a chapter held for its verses), the screens Go To opens sheets
+over it; it is all of Go To there, never a sheet. Nothing
 typed, it shows the ribbons and plan, Recent, Documents (the page's
 document, the panel's, then the others read, the latest first, up to six
 with the Bibles that come with the app), Browse (each kind and the

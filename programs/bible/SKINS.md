@@ -619,7 +619,8 @@ page of the verses in the reader's styles and Open in Reader.
 Go To (`SCR_GOTO`) is one screen wherever it opens: the same title (Go
 To, no subtitle), sections, rows and marks, always presented (a sheet,
 group 0; never pushed, so it has no Back) and opened at its top (no
-`focus`). Its screen's argument says only where a pick lands: `GOTO_PAGE`
+`focus`), its field taking the keys (`f`): most places are a few letters
+away. Its screen's argument says only where a pick lands: `GOTO_PAGE`
 (0: the bar's title, `tap goto`) or `GOTO_PANEL` (1: the panel reader's
 name, or `tap shelf` with nothing read there yet). In a wide window a
 skin may anchor it, as a popover, to what opened it (the page's title or
@@ -708,6 +709,32 @@ any screen.
   Nothing on a row says whether it is on the device, how large it is or
   how its download goes, and Go To lists only what can be opened now
   (offline, what is here).
+- The passage chooser (a `passage` line) comes while the words name
+  books: every book the name typed could mean, as chips (a reference's
+  book first where a chapter typed chose it, else one whose short name is
+  typed exactly, else the one read latest, then the others in the Bible's
+  order, so that they stay put as letters are typed); the chosen one's
+  chapters, the one typed marked, else where the reader was last in that
+  book (the page, else History), else its first. A chip's tap is
+  `ACT_GT_PASSAGE_BOOK` (416) with the book (its chapters then, until the
+  words change; -1, the first again); a chapter's `ACT_CHAPTER` with its
+  chapter of the Bible's, a verse's `ACT_PLACE` (chapter * 1000 +
+  verse), each landing as Go To's picks do. Return, where the chooser
+  shows: GOES 1, the marked chapter; else (a reference with its chapter
+  typed) `submit`, which goes there. A skin without one ignores it.
+- A skin that shows Go To as its quick form says so
+  (`sk_has_quick_goto`; the iPhone's, its README): Go To over the keys,
+  every row of it, never a sheet. Its chooser lists the books, so no rows
+  of them come (nor a book's own reference row, `rom`); Books of the
+  Bible (`ACT_GT_BOOKS`) is the chooser's every book, nothing typed (BOOK
+  -1, their names short enough for a grid: "Ruth", "Gen", "1 Cor"), a
+  book's tap its chapters (every book's name a chip, the chosen in sight;
+  -1 the grid again); New Ribbon (with a ribbon), Reading Plans (with a
+  plan followed) and History (`ACT_GT_HISTORY`, 417) are their sections'
+  headers' buttons, not rows. A screen Go To opens is a sheet over it.
+- Return (`submit`) goes to the first row's place: the reference, else the
+  first book's chapters, else the first document found, else the first
+  verse found.
 - A document's page (kind 62, a bundled version's 68) is pushed over Go
   To: the title and what it is (`Commentary · English · Version 2.1`, its
   own line), Read (as a pick in that Go To), why it can't be read if it
@@ -797,6 +824,7 @@ A screen, from core:
 | `scopes` VALUE TITLES LABELS | the field's scopes, the one chosen |
 | `plain` | a plain list, not grouped |
 | `page`, `grid` | its rows a page's paragraphs; its rows square buttons, their VALUE their words |
+| `passage` BOOK FIRST MARK GOES BOOKS VERSES | Go To's passage chooser (see Go To): BOOK the book whose chapters it shows (-1: none, BOOKS every book for a grid of them), FIRST its first chapter of the Bible's (its chapter n is FIRST + n - 1), MARK the chapter marked, GOES 1 where Return goes there; BOOKS the chips (`BOOK:NAME` split by `\|`), VERSES each chapter's verses (split by spaces) |
 | `reader LINKED` | the screen is the panel's reader (pane 1, below: the version or commentary read beside the page) in place of rows; LINKED 1 while it is linked with the page |
 | `empty` SYMBOL TITLE LINE | what it shows with no rows |
 | `button` TITLE, then `command` ACTION ARG TITLE FLAGS | its button at the top and its menu (`x`: destructive) |
