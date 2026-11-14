@@ -14,16 +14,18 @@ the compiled asset catalog (`assets/`), the frameworks it links
   bar, which softens them (the scroll view's top edge effect). There is no
   bar at the top.
 - **The dock.** Liquid Glass at the foot, near the thumb, over everything
-  of the app's, the panel too: two matching pairs, the panel's button and
-  Library, Listen and Reading, about a capsule naming the chapter (and,
-  small under it, what the page reads), which never moves sideways. A tap
-  on the capsule is Go To, a long press core's title menu (ribbons). Its
-  shapes are in one glass container (`UIGlassContainerEffect`), so they
-  merge and part as liquid does: reading on, the pairs melt into the
+  of the app's, the panel too: two matching circles, the panel's button
+  and ⋯ (the Library, Listen, Reading), about a capsule naming the
+  chapter (and, small under it, what the page reads). A tap on the
+  capsule is Go To, a long press core's title menu (ribbons). Its shapes
+  are in one glass container (`UIGlassContainerEffect`), so they merge
+  and part as liquid does: reading on, the circles melt into the
   capsule, which narrows to the chapter's name, and the status bar goes;
   moving back, a tap, a jump or a sheet brings them out again. It is in a
   window of its own above the app's, as large as the dock, so a touch
-  beside it reaches what is under it; under a sheet of a task (Go To, the
+  beside it reaches what is under it (the screen's size while one of its
+  menus shows, as a window draws nothing past itself; what its menus
+  choose goes to the window's root, up the responder chain); under a sheet of a task (Go To, the
   Library, Reading, Share) its glass dissolves along the sheet's
   transition and forms again as it goes.
 - **Go To rises from the dock.** A tap on the capsule brings the keys up
@@ -82,20 +84,26 @@ the compiled asset catalog (`assets/`), the frameworks it links
   so a change is seen as it is made.
 - **The panel** is a sheet over the page at a third, a half or the whole
   height, never dimming the page, UIKit's own in every way it moves. Its
+  first line stands clear of the grabber (room in its safe area). Its
   reader is the second pane, with no bar of its own: while it shows, the
-  dock is the header of both readers. The capsule is the page's (its
-  chapter, the version) and beside it is the panel's (what it reads, where
-  it is), the two joined by the link (⛓), one shape of glass while they
-  are linked, parting as liquid does when they aren't (a tap links or
-  unlinks). The panel's capsule's tap is Go To aimed at the panel, its
-  field rising out of that capsule (unlinked, a passage picked moves the
-  panel alone, and the field says so); its long press, the panel's menu
-  (Swap Panes, Close Panel; filling the screen is a drag up, closing it
-  a swipe down too). The left pair goes, the panel's capsule being the
-  panel, and the right draws in to ⋯ (the Library, Listen, Reading). A
-  document read in its own divisions (a book, a dictionary) can't be
-  linked: no link, the capsules apart. Drawn in, the dock shows both: the
-  chapter, the link, the panel's short name. Study pushed over the reader has the system's bar and its Back;
+  dock is the header of both readers, as symmetrical as the page's
+  alone: the page's capsule (its chapter, the version) at the left, ⋯ in
+  the middle and the panel's capsule (what it reads, where it is) at the
+  right, one shape of glass while the two are linked (⋯ a waist between
+  them), three apart as liquid parts while they aren't. As the panel
+  comes the dock moves over by a place, the page's capsule over the
+  panel's button, ⋯ to the middle, the panel's capsule growing out of
+  where ⋯ was; as it goes, back. The words that change go as the shapes
+  begin to move and the new come as they settle. The panel's capsule's
+  tap is Go To aimed at the panel, its field rising out of that capsule
+  (unlinked, a passage picked moves the panel alone, and the field says
+  so); its long press, the panel's menu: Linked (checked while they are;
+  a tap links or unlinks), Swap Panes, Close Panel (filling the screen is
+  a drag up, closing it a swipe down too). A document read in its own
+  divisions (a book, a dictionary) can't be linked: no Linked, the three
+  apart. Drawn in, the dock shows both capsules, the chapter and the
+  panel's short name, one shape linked. Study pushed over the reader has
+  the system's bar and its Back;
   in an iPad's column the reader keeps its own bar. The dock floats over
   the panel's foot (its safe area made larger there), and the page's
   reading area ends at its top.
@@ -147,7 +155,7 @@ place and chrome, the panel's sheet, the dock, and the screens), `!scroll
 P DY`, `!flick P DY` (a finger's fling, frame by frame), `!dock
 open|close`, `!tap WORDS` (the top sheet's first row so titled, or the quick form's row),
 `!close`, `!back`, `!swipe` (the panel put away as a hand's swipe puts
-it), `!capsule` (a tap on the dock's capsule), `!panelcapsule` (on the panel's), `!link` (on the link), `!shot` (every window of the app's, the dock's too, drawn to the server's /shot: its glass left out), `!home` (Back from the first screen Go To opened), `!theme N` (theme N chosen, the one it was logged), in Go To's quick form `!type WORDS`, `!return`
+it), `!capsule` (a tap on the dock's capsule), `!panelcapsule` (on the panel's), `!link` (Linked, in the panel's menu), `!shot` (every window of the app's, the dock's too, drawn to the server's /shot: its glass left out), `!slow F` (every window's animations F times slower), `!dockinapp 1` (the dock moved into the app's window, so that ReplayKit records it; a sheet presented after goes over it; `!dockinapp 0` back), `!home` (Back from the first screen Go To opened), `!theme N` (theme N chosen, the one it was logged), in Go To's quick form `!type WORDS`, `!return`
 and `!hold N V` (chapter N held, the finger on verse V; `!hold 0` lets
 go), `!probe N` (for N frames, where the dock and the panel's sheet are
 drawn), `!part` (the panel's first part as core sent it: its words and
