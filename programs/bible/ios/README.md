@@ -123,6 +123,23 @@ the compiled asset catalog (`assets/`), the frameworks it links
   panel is a column at the page's right with its own bar. The dock floats
   over the panel's foot (its safe area made larger there), and the page's
   reading area ends at the divider.
+- **Side by side** in a window wider than tall (a phone on its side): the
+  page at the left, the panel at the right, each a column from the safe
+  area at its side to the divider standing between them. Alone, the dock
+  is ⋯, the capsule, then the panel's button at the right end, where the
+  panel comes from: opening, the button slides along the dock's row to
+  the divider's foot (it stays the dock's, in the row), the panel comes
+  in from the right, the page's capsule goes to the middle of its half,
+  the panel's grows out of the button to the middle of its own, and ⋯
+  rises onto the divider over the button (the divider's own at rest);
+  Swap Panes (⇄) is at the divider's head, Link in its middle. The page
+  is laid out again at its width once, under a picture of it fading.
+  Dragged sideways the halves' edges and the capsules follow; it settles
+  at a third, a half or two thirds of the width (the share kept is the
+  one stacked uses), thrown to the left the panel fills the screen,
+  thrown to the right the split closes; each half is laid out again at
+  its width once it is still. Turned with the split open, it goes
+  between stacked and side by side.
 
 ## How it is built
 
@@ -171,7 +188,9 @@ place and chrome, the panel, the dock, and the screens), `!scroll
 P DY`, `!flick P DY` (a finger's fling, frame by frame), `!dock
 open|close`, `!tap WORDS` (the top sheet's first row so titled, or the quick form's row),
 `!close`, `!back`, `!split P` (the split's divider let go as a hand
-would at P% of the window's height: 0 closes it, 100 fills the screen), `!capsule` (a tap on the dock's capsule), `!panelcapsule` (on the panel's), `!link` (Linked, in the panel's menu), `!shot` (every window of the app's, the dock's too, drawn to the server's /shot: its glass left out), `!slow F` (every window's animations F times slower), `!dockinapp 1` (the dock moved into the app's window, so that ReplayKit records it; a sheet presented after goes over it; `!dockinapp 0` back), `!home` (Back from the first screen Go To opened), `!theme N` (theme N chosen, the one it was logged), in Go To's quick form `!type WORDS`, `!return`
+would at P% of the window's height, or width side by side: 0 closes it,
+100 fills the screen), `!panel` (a tap on the dock's panel button),
+`!tapat X Y` (a finger's tap on the words at window point X, Y), `!capsule` (a tap on the dock's capsule), `!panelcapsule` (on the panel's), `!link` (Linked, in the panel's menu), `!shot` (every window of the app's, the dock's too, drawn to the server's /shot: its glass left out), `!slow F` (every window's animations F times slower), `!dockinapp 1` (the dock moved into the app's window, so that ReplayKit records it; a sheet presented after goes over it; `!dockinapp 0` back), `!home` (Back from the first screen Go To opened), `!theme N` (theme N chosen, the one it was logged), in Go To's quick form `!type WORDS`, `!return`
 and `!hold N V` (chapter N held, the finger on verse V; `!hold 0` lets
 go), `!probe N` (for N frames, where the dock and the panel are
 drawn), `!part` (the panel's first part as core sent it: its words and
