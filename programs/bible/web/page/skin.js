@@ -1841,7 +1841,7 @@ function makeReader(p, main, view, opts) {
       const l = s.links[+t.dataset.l];
       if (l) {
         if (!this.opts.tap && l[2] !== 1 && l[2] !== 2) return;
-        send(l[2] === 0 ? `footnote ${c} ${l[3]}` : l[2] === 2 ? `word ${l[3]}` : l[2] === 3 ? `esvact ${l[3]} ${c}` : `preview ${l[3]}`);
+        send(l[2] === 0 ? `footnote ${c} ${l[3]}` : l[2] === 2 ? `word ${l[3]}` : l[2] === 3 ? `esvact ${l[3]} ${c}` : `preview ${l[3]} ${this.p}`);
         return;
       }
     }

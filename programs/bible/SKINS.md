@@ -899,7 +899,10 @@ SHORT (its words as a chip: "KJV", "Henry's Concise"; empty, its title).
   their own, `RUN_DIVINE`. A commentary's paragraph that opens with bold
   words ("Verse 12.") has them as a run of `STYLE_LABEL`: a small sans
   label run into the paragraph, faint, with room above the paragraph, so
-  that each comment's start is found without reading.
+  that each comment's start is found without reading. A reference in a
+  document's own words (a commentary's, a devotional's, a book's) is a
+  run of `STYLE_LINK`, the body's type in the accent, and a `link` of
+  KIND 1 as a heading's reference is.
 
 Other lines from core:
 
@@ -999,7 +1002,7 @@ From the skin:
 | `tick MS`, `jumped KIND` | the time core asked for (`wake MS`), a jump (0 with a way back, 1 the capsule's, 2 neither): `core/reading.l8` counts chapters read (20 s at the page's `rest`, end seen), moves the carried ribbon, and puts a chapter dwelt in 20 s onto the history |
 | `back` | the capsule tapped: core goes back (`go 0`), or opens the plan's day it came from |
 | `key NAME MODS` | a hardware keyboard's key (NAME its character, or `left`, `up`, `down`, `space`, `return`; MODS 1 ⌘ or Ctrl, 2 Shift, 4 Alt): `core/keys.l8` makes it a command and does it where it acts — Go To, Search, Library, Settings, chapters, Back, Listen, a page (`page 1` down, `page 0` up: the skin scrolls a screen less three lines), a plan's day's Mark Read and Next, Practice's Check and grades, the panel beside the reader and Study's verses in it. A skin with menus or a command overlay makes them from core's `command` lines and offers each where `commands` says |
-| `footnote C P`, `preview REF` | a footnote's mark tapped (its place P in chapter C), a reference tapped: core's footnote (`core/footnote.l8`) or preview |
+| `footnote C P`, `preview REF [P]` | a footnote's mark tapped (its place P in chapter C), a reference tapped in pane P (the page's, none said): core's footnote (`core/footnote.l8`) or preview; a reference in a document read in its own divisions (a devotional's, a book's) shows its passage in the other pane instead, where that pane reads the Bible or a commentary (the page jumping there, the panel going there alone, or opening at it if it is closed) |
 | `studyable C K A B`, `studyat C K A B` | whether the words at UTF-16 A to B of part K of chapter C's text on the page have a word to study (core says `studyable 1` or `0`: a skin's menu offers Study), and that word's Study opened |
 | `link ADDRESS` | a link into the app opened (`bsb://JHN/3/16`): the reader there |
 | `refresh` | what core's screens show has changed (the host's own state): each made again |

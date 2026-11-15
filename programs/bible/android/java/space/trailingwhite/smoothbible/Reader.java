@@ -1766,11 +1766,11 @@ final class Reader extends ListView {
       if (off < p.links[i] - 1 || off > p.links[i + 1]) continue;
       long kind = p.links[i + 2], arg = p.links[i + 3];
       if (pane == PANEL) {
-        if (kind == 1) say("preview " + arg);
+        if (kind == 1) say("preview " + arg + " " + PANEL);
         return;
       }
       say(kind == 0 ? "footnote " + p.c + " " + arg : kind == 2 ? "word " + arg
-          : kind == 3 ? "esvact " + arg + " " + p.c : "preview " + arg);
+          : kind == 3 ? "esvact " + arg + " " + p.c : "preview " + arg + " " + PAGE);
       return;
     }
     if (pane != PAGE) return;
