@@ -106,8 +106,10 @@ the compiled asset catalog (`assets/`), the frameworks it links
   the divider as the dock's other shapes close in or part. Its reader is the second pane, with no bar of its
   own: while it shows, the dock is the header of both readers, as
   symmetrical as the page's alone: the page's capsule (its chapter, the
-  version) at the left, ⋯ in the middle and the panel's capsule (what it
-  reads, where it is) at the right. As the panel comes the dock moves
+  version) at the left, ⋯ in the middle and the panel's capsule (where it
+  is over what it reads, as the page's: the place large, the document
+  small) at the right; a scroll of either pane by a hand draws the dock
+  in or out. As the panel comes the dock moves
   over by a place, the page's capsule over where the panel's button was,
   ⋯ to the middle, the panel's capsule growing out of where ⋯ was; as it
   goes, back. The words that change go as the shapes begin to move and
@@ -118,7 +120,7 @@ the compiled asset catalog (`assets/`), the frameworks it links
   page's (`titlemenu 1`; Swap Panes and Close Panel are the divider's),
   each a context menu, the capsule lifted beside it so that letting go
   chooses nothing. Drawn in, the dock shows both
-  capsules, the chapter and the panel's short name. Study pushed over the
+  capsules, each its place alone. Study pushed over the
   reader has the system's bar and its Back. In an iPad's wide window the
   panel is a column at the page's right with its own bar. The dock floats
   over the panel's foot (its safe area made larger there), and the page's
