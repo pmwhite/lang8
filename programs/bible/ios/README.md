@@ -21,7 +21,12 @@ the compiled asset catalog (`assets/`), the frameworks it links
   are in one glass container (`UIGlassContainerEffect`), so they merge
   and part as liquid does: reading on, the circles melt into the
   capsule, which narrows to the chapter's name, and the status bar goes;
-  moving back, a tap, a jump or a sheet brings them out again. It is in a
+  moving back, a tap, a jump or a sheet brings them out again. Under a
+  finger, as Safari's bar does, the change follows the finger (a paused
+  `UIViewPropertyAnimator`, as far through as the finger has read of 60
+  points, either pane's), and as the finger lifts it finishes from where
+  it is if most of the way or thrown that way, else goes back; thrown, it
+  changes in a spring once read far enough. It is in a
   window of its own above the app's, as large as the dock, so a touch
   beside it reaches what is under it (the screen's size while one of its
   menus shows, as a window draws nothing past itself; what its menus
@@ -194,7 +199,8 @@ goto`, lines split by `|`) and the skin's own: `!state` (each pane's window,
 place and chrome, the panel, the dock, and the screens), `!scroll
 P DY`, `!flick P DY` (a finger's fling, frame by frame), `!dock
 open|close`, `!tap WORDS` (the top sheet's first row so titled, or the quick form's row),
-`!close`, `!back`, `!split P` (the split's divider let go as a hand
+`!close`, `!back`, `!pull P DY` (pane P dragged by DY with a finger held
+on it, and let go), `!split P` (the split's divider let go as a hand
 would at P% of the window's height, or width side by side: 0 closes it,
 100 fills the screen), `!drag P` (the divider dragged as a hand would,
 frame by frame for half a second, to P%, and let go: each frame's layout
