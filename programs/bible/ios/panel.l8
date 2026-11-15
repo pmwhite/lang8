@@ -3,17 +3,25 @@ tag vellum;
 use_tag std, ios, bible, bible_wire;
 
 // The panel beside the page (SKINS.md: core/beside.l8's screens, group 1):
-// an ordinary sheet the root presents, at a third, half or the whole
-// height, the page bright and usable behind it at every height, the
-// system's grabber, drag and swipe. Its first screen is the panel's
-// reader (pane 1), a VellumList whose view is the pane's scroll view
-// under the system's navigation bar: the chapter there as its title, what
-// it reads under it (a tap: Go To aimed at the panel), Link at its left
-// and the menu at its right. Study goes on its navigation over it.
+// its navigation a child of the root's, under the page in a split (an
+// iPhone's, or a window too narrow for a column) or a column at its right
+// (an iPad's wide window). Its first screen is the panel's reader (pane
+// 1), a VellumList whose view is the pane's scroll view: in a split it has
+// no bar (the dock is the header of both readers, dock.l8), in a column
+// the system's (the chapter as its title, what it reads under it, Link and
+// the menu). Study goes on its navigation over it.
 //
-// As the sheet's top moves, the dock rides above it, and once it is
-// still the page's foot becomes what it covers (its offset untouched: no
-// word on it moves).
+// The split: the page above, the panel below, parted by the divider, a
+// hairline with two glass buttons on it: the split's (the dock's panel
+// button, moved up into the divider as the panel comes and back down
+// into the dock as it goes; a tap closes the split) and the link (in the
+// accent linked, faint unlinked, none where the panel's document can't be
+// linked). A drag of the divider sizes the two, settling at a third, a half
+// or two thirds of the window; dragged to the top, the panel fills the
+// screen (core's Full Screen), dragged down past the foot, the split
+// closes. The dock floats over the panel's foot (its safe area made larger
+// there), and once the divider is still the page's foot is where it is
+// (the page's offset untouched: no word on it moves).
 import "../../ios/objc.l8";
 
 import "../../ios/block.l8";
@@ -23,19 +31,18 @@ import "kit.l8";
 import "pane.l8";
 
 type Panel = {
-    // Its navigation controller (held; 0: none), whether it is presented,
-    // and whether core wants it open and filling the screen.
+    // Its navigation controller (held; 0: none), whether it shows, and
+    // whether core wants it open and filling the screen.
     nav: int;
     shown: bool;
     wanted: bool;
     full: bool;
-    // Where its sheet's top is in the window (the window's height: none).
+    // Where its top (the divider's line) is in the window (the window's
+    // height: none, or a column).
     top: f64;
     // The reader screen's slot (-1: none).
     reader_slot: int;
-    // Being put away by the app (not a swipe).
-    leaving: bool;
-    // A column at the page's right (an iPad's wide window), not a sheet.
+    // A column at the page's right (an iPad's wide window), not a split.
     column: bool
 }
 
@@ -46,7 +53,6 @@ panel: Panel = Panel {
     full: false,
     top: 0.0f64,
     reader_slot: -1,
-    leaving: false,
     column: false
 };
 
@@ -70,54 +76,76 @@ page_width(w: f64): f64 {
     if (panel.shown && panel.column) w - PANEL_COLUMN_W - 1.0f64 else w
 }
 
-// The panel as a column: its navigation the root's child at the right.
-panel_column_attach(nav: int) {
+// ---- its navigation, the root's child ----
+// The navigation in the root's view, over the page and under the chrome
+// (the way back, toasts); kept there while a split closes (panel.nav let
+// go at once), let go once it has.
+panel_attached: int = 0;
+
+panel_attach(nav: int) {
+    if (panel_attached != 0 && panel_attached != nav) panel_detach_now();
+    panel_attached = held(panel_attached, nav);
+    panel_inset_top = -1.0f64;
+    panel_inset_bottom = -1.0f64;
     msg1(root_vc, sel("addChildViewController:"), nav);
-    add_sub(root_view, msg(nav, sel("view")));
+    msg2(root_view, sel("insertSubview:aboveSubview:"), msg(nav, sel("view")), page_pane.scroll);
     msg1(nav, sel("didMoveToParentViewController:"), root_vc);
-    panel.column = true;
-    send1("panelfill", 0);
-    chrome_relayout()
+    panel.column = panel_column_fits();
+    send1("panelfill", if (panel.column) 0 else 1);
+    panel_insets_fit();
+    if (panel.column) {
+        chrome_relayout();
+        return
+    }
+    panel_split_open()
 }
 
-panel_column_detach() {
-    if (panel.nav == 0 || !panel.column) return;
-    msg1(panel.nav, sel("willMoveToParentViewController:"), 0);
-    msg(msg(panel.nav, sel("view")), sel("removeFromSuperview"));
-    msg(panel.nav, sel("removeFromParentViewController"));
-    panel.column = false
+panel_detach_now() {
+    nav: int = panel_attached;
+    if (nav == 0) return;
+    msg1(nav, sel("willMoveToParentViewController:"), 0);
+    msg(msg(nav, sel("view")), sel("removeFromSuperview"));
+    msg(nav, sel("removeFromParentViewController"));
+    panel_attached = held(panel_attached, 0);
+    if (!panel.shown) panel_divider_remove()
 }
 
-// The column laid out at the root's right, a hairline before it.
-panel_column_layout(w: f64, h: f64) {
-    if (!panel.shown || !panel.column || panel.nav == 0) return;
-    set_frame4(msg(panel.nav, sel("view")), w - PANEL_COLUMN_W, 0.0f64, PANEL_COLUMN_W,
-        h);
-    layer: int = msg(msg(panel.nav, sel("view")), sel("layer"));
-    msg_set_f(layer, sel("setBorderWidth:"), 0.0f64);
-    panel.top = h
+// The panel laid out for the root's bounds (w by h): a column at the
+// right, a hairline before it; a split where its divider is, unless a
+// hand or an animation is moving it.
+panel_layout(w: f64, h: f64) {
+    if (panel_attached == 0) return;
+    if (panel.column) {
+        if (!panel.shown) return;
+        set_frame4(msg(panel_attached, sel("view")), w - PANEL_COLUMN_W, 0.0f64, PANEL_COLUMN_W,
+            h);
+        msg_set_f(msg(msg(panel_attached, sel("view")), sel("layer")), sel("setBorderWidth:"),
+            0.0f64);
+        panel.top = h;
+        return
+    }
+    if (panel_dragging || panel_split_moving > 0) return;
+    panel_split_place(if (panel.shown) panel_split_top() else h)
 }
 
-// The window changed size: the panel moved between sheet and column.
+// The window changed size: the panel moved between split and column.
 panel_mode_check() {
-    if (!panel.shown || panel.nav == 0) return;
+    if (!panel.shown || panel_attached == 0) return;
     fits: bool = panel_column_fits();
     if (fits == panel.column) return;
-    nav: int = retain(panel.nav);
-    if (panel.column) {
-        panel_column_detach();
-        panel_sheet_dress(nav);
-        send1("panelfill", 1);
-        panel_present()
+    panel.column = fits;
+    send1("panelfill", if (fits) 0 else 1);
+    panel_insets_fit();
+    if (fits) {
+        panel_divider_remove();
+        dock_panel_button_back()
     } else {
-        panel.leaving = true;
-        presenter: int = msg(nav, sel("presentingViewController"));
-        if (presenter != 0) msg2(presenter, sel("dismissViewControllerAnimated:completion:"),
-            0, 0);
-        panel.leaving = false;
-        panel_column_attach(nav)
+        panel_divider_attach();
+        dock_panel_button_away_now()
     }
-    release(nav)
+    if (panel.reader_slot >= 0 && screen_load(panel.reader_slot)) panel_reader_dress(panel.reader_slot);
+    panel_bar_fit();
+    chrome_relayout()
 }
 
 panel_nav(): int {
@@ -128,15 +156,17 @@ panel_shown(): bool {
     panel.shown
 }
 
-// (By what it presented: once a sheet has gone, its controller's
-// presentationController is a new one.)
-panel_presentation_is(presentation: int): bool {
-    panel.nav != 0 && presentation != 0 && msg(presentation, sel("presentedViewController")) == panel.nav
+// What of the page's foot the panel covers: the split's, to a little above
+// its divider (the buttons' room); none in a column.
+panel_page_cover(): f64 {
+    if (!panel.shown || panel.column || panel.top >= chrome_bounds.h) return 0.0f64;
+    chrome_bounds.h - panel.top + PANEL_DIVIDER_ROOM
 }
 
 // `beside OPEN FULL`: the panel wanted open (its screens asked for:
 // `panelmake`) or not, and filling the screen or not.
 beside_line(open: bool, full: bool) {
+    full_was: bool = panel.full;
     panel.full = full;
     if (open && !panel.wanted) {
         panel.wanted = true;
@@ -144,11 +174,11 @@ beside_line(open: bool, full: bool) {
     } else if (!open && panel.wanted) {
         panel.wanted = false;
         panel_put_away()
-    } else if (open && panel.shown) panel_detent_to_full(full)
+    } else if (open && panel.shown && full != full_was) panel_split_animate()
 }
 
 // A screen of the panel's shown: its first (the reader, or Study) as the
-// navigation's root, presented if it isn't.
+// navigation's root, attached if it isn't.
 panel_screen_show(s: int) {
     if (s < 0) return;
     controller: int = slot_controller(s);
@@ -164,209 +194,52 @@ panel_screen_show(s: int) {
     }
     nav: int = nav_new(controller);
     panel.nav = held(panel.nav, nav);
-    // (Its sheet rises from the foot.)
-    panel.top = chrome_bounds.h;
     panel.shown = true;
-    panel.leaving = false;
     send1("panelvisible", 1);
     panel_button_light(true);
-    if (panel_column_fits()) {
-        panel_column_attach(nav);
-        return
-    }
-    panel_sheet_dress(nav);
-    send1("panelfill", 1);
-    panel_present()
-}
-
-// The panel's sheet presented over the page, but not over a sheet of
-// core's: presented over one, it would go when that one is put away (a
-// document picked in Go To for the panel). It waits for them to go.
-panel_present() {
-    if (panel.nav == 0 || panel.column) return;
-    if (msg(panel.nav, sel("presentingViewController")) != 0) return;
-    if (msg(root_vc, sel("presentedViewController")) != 0) {
-        // (The panel's last sheet going: presented as soon as it has gone.)
-        if (!panel_dismissing) panel_check_soon();
-        return
-    }
-    panel_transition_blocks();
-    panel_presenting = held(panel_presenting, panel.nav);
-    msg3(root_vc, sel("presentViewController:animated:completion:"), panel.nav, 1,
-        panel_presented_block);
-    panel_check_soon()
-}
-
-// ---- the sheet's transitions, one after another ----
-// A sheet's coming or going can't be undone halfway, nor another begun
-// meanwhile: a tap of the panel's button as one is under way is done as
-// soon as it ends (its completion), so that taps as quick as a hand's
-// follow one another, the last one's wish where they end.
-panel_presenting: int = 0;
-
-panel_dismissing: bool = false;
-
-panel_presented_block: int = 0;
-
-panel_dismissed_block: int = 0;
-
-panel_transition_blocks() {
-    if (panel_presented_block != 0) return;
-    panel_presented_block = block0(&panel_presented, 0, "v8@?0");
-    panel_dismissed_block = block0(&panel_dismissed, 0, "v8@?0")
-}
-
-// Come: if it was put away as it came, it goes now.
-panel_presented(_context: int): int {
-    nav: int = panel_presenting;
-    if (nav == 0) return 0;
-    _kept: int = retain(nav);
-    panel_presenting = held(panel_presenting, 0);
-    if ((nav != panel.nav || !panel.shown) && msg(nav, sel("presentingViewController")) != 0) panel_dismiss_sheet(nav);
-    release(nav);
-    0
-}
-
-panel_dismiss_sheet(nav: int) {
-    presenter: int = msg(nav, sel("presentingViewController"));
-    if (presenter == 0) return;
-    panel_transition_blocks();
-    panel_dismissing = true;
-    msg2(presenter, sel("dismissViewControllerAnimated:completion:"), 1, panel_dismissed_block)
-}
-
-// Gone: if the panel was asked for again meanwhile, it comes now.
-panel_dismissed(_context: int): int {
-    panel_dismissing = false;
-    if (panel.shown && panel.nav != 0 && msg(panel.nav, sel("presentingViewController")) == 0) panel_present();
-    0
-}
-
-// Whether the sheet shows as the panel says it does: a presentation that
-// couldn't be made (another under way), or one put away with what it was
-// over, is made again while core wants the panel; else it is gone.
-panel_check_due: bool = false;
-
-panel_check_soon() {
-    if (panel_check_due || app_obj == 0) return;
-    panel_check_due = true;
-    _t: int = timer_after(app_obj, 0.4f64, "vellumPanelCheck:")
-}
-
-panel_check_fired(_self: int, _cmd: int, _timer: int): int {
-    panel_check_due = false;
-    if (!panel.shown || panel.column || panel.nav == 0 || panel.leaving) return 0;
-    if (msg(panel.nav, sel("presentingViewController")) != 0) return 0;
-    if (panel.wanted) panel_present() else {
-        panel_gone();
-        send0("tap shelf")
-    }
-    0
-}
-
-// The sheet: a third, a half and the whole height, never dimming the page.
-panel_small_block: int = 0;
-
-panel_third_height(_context: int, resolution: int): int {
-    block_double(msg_f(resolution, sel("maximumDetentValue")) * 0.36f64)
-}
-
-// The whole height's identifier.
-panel_full_id(): int {
-    msg(msg(cls("UISheetPresentationControllerDetent"), sel("largeDetent")), sel("identifier"))
-}
-
-panel_sheet_dress(nav: int) {
-    msg1(nav, sel("setModalPresentationStyle:"), 2);
-    sheet: int = msg(nav, sel("sheetPresentationController"));
-    if (sheet == 0) return;
-    if (panel_small_block == 0) panel_small_block = block1_double(&panel_third_height,
-        0, "d16@?0@8");
-    small: int = if (panel_small_block != 0) msg2(cls("UISheetPresentationControllerDetent"),
-        sel("customDetentWithIdentifier:resolver:"), nsstring("third"), panel_small_block) else 0;
-    medium: int = msg(cls("UISheetPresentationControllerDetent"), sel("mediumDetent"));
-    large: int = msg(cls("UISheetPresentationControllerDetent"), sel("largeDetent"));
-    detents: int = fresh("NSMutableArray");
-    if (small != 0) msg1(detents, sel("addObject:"), small);
-    msg1(detents, sel("addObject:"), medium);
-    msg1(detents, sel("addObject:"), large);
-    msg1(sheet, sel("setDetents:"), detents);
-    msg1(sheet, sel("setLargestUndimmedDetentIdentifier:"), msg(large, sel("identifier")));
-    msg1(sheet, sel("setPrefersGrabberVisible:"), 1);
-    msg1(sheet, sel("setPrefersScrollingExpandsWhenScrolledToEdge:"), 0);
-    msg1(sheet, sel("setPrefersEdgeAttachedInCompactHeight:"), 1);
-    msg1(sheet, sel("setWidthFollowsPreferredContentSizeWhenEdgeAttached:"), 1);
-    msg1(sheet, sel("setSelectedDetentIdentifier:"), msg(if (panel.full) large else medium,
-        sel("identifier")));
-    msg1(sheet, sel("setDelegate:"), screens_delegate);
-    // (Pulled down, it goes: the swipe is Close Panel.)
-    msg1(nav, sel("setModalInPresentation:"), 0)
-}
-
-// (The height chosen in the sheet's own animation: animateChanges:'s
-// block.)
-panel_detent_block: int = 0;
-
-panel_detent_full: bool = false;
-
-panel_detent_to_full(full: bool) {
-    if (panel.nav == 0) return;
-    sheet: int = msg(panel.nav, sel("sheetPresentationController"));
-    if (sheet == 0) return;
-    panel_detent_full = full;
-    if (panel_detent_block == 0) panel_detent_block = block0(&panel_detent_chosen,
-        0, "v8@?0");
-    msg1(sheet, sel("animateChanges:"), panel_detent_block)
-}
-
-panel_detent_chosen(_context: int): int {
-    if (panel.nav == 0) return 0;
-    sheet: int = msg(panel.nav, sel("sheetPresentationController"));
-    id: int = if (panel_detent_full) panel_full_id() else msg(msg(cls("UISheetPresentationControllerDetent"),
-        sel("mediumDetent")), sel("identifier"));
-    if (sheet != 0) msg1(sheet, sel("setSelectedDetentIdentifier:"), id);
-    0
-}
-
-// A height chosen by a hand: core's Full Screen made to agree.
-panel_height_chosen(sheet: int) {
-    if (panel.nav == 0 || msg(panel.nav, sel("sheetPresentationController")) != sheet) return;
-    chosen: int = msg(sheet, sel("selectedDetentIdentifier"));
-    full: bool = ns_equal(chosen, panel_full_id());
-    if (full != panel.full) send0("tap full");
-    panel_settle_soon()
+    panel_attach(nav)
 }
 
 // Put away by the app: its screens let go (`closegroup 1`).
 panel_put_away() {
     if (panel.nav == 0) return;
-    panel.leaving = true;
     sheet_mark_closing(msg(panel.nav, sel("viewControllers")));
-    // (Still coming, it goes once it has come: panel_presented.)
-    if (panel.column) panel_column_detach() else if (panel_presenting != panel.nav) panel_dismiss_sheet(panel.nav);
     panel_gone();
     send1("closegroup", 1)
 }
 
-// Swiped away by a hand: Close Panel, core's.
-panel_swiped_away() {
+// Dragged down past the foot by a hand: Close Panel, core's.
+panel_dragged_away() {
     panel_gone();
     send0("tap shelf")
 }
 
 panel_gone() {
-    panel_column_detach();
+    // (A split: the button handed to the dock first, so that the dock
+    // follows it back rather than changing on its own; drawn in, it comes
+    // out as it does.)
+    if (!panel.column && panel_divider != 0) {
+        panel_move_begin(panel.top);
+        dock_expand()
+    }
     panel.shown = false;
     panel.wanted = false;
     panel.reader_slot = -1;
-    // (Its words shown as its sheet goes, let go once it has.)
+    // (Its words shown as it goes, let go once it has.)
     _t: int = timer_after(app_obj, 0.7f64, "vellumPanelDetach:");
     panel.nav = held(panel.nav, 0);
-    panel.top = chrome_bounds.h;
     send1("panelvisible", 0);
     panel_button_light(false);
     dock_panel_gone();
     panel_forget_gone();
+    if (panel.column) {
+        panel_detach_now();
+        panel.top = chrome_bounds.h
+    } else {
+        // (The split closes, the panel going down off the screen and the
+        // split's button down into the dock.)
+        panel_split_animate()
+    }
     chrome_relayout();
     panel_settle_soon()
 }
@@ -398,7 +271,7 @@ panel_nav_showed() {
     panel_bar_fit()
 }
 
-// The panel's bar: none over its reader on a sheet (the dock is its
+// The panel's bar: none over its reader in a split (the dock is its
 // header), the system's over Study (its Back) and in a column.
 panel_bar_fit() {
     if (panel.nav == 0) return;
@@ -409,12 +282,13 @@ panel_bar_fit() {
         sel("setNavigationBarHidden:animated:"), if (hide) 1 else 0, 1)
 }
 
-// The panel's ground in the look's color: its navigation's and its
-// reader's.
+// The panel's ground in the look's color (its navigation's and its
+// reader's), and its divider's.
 panel_ground_dress() {
-    if (panel.nav != 0) set_background(msg(panel.nav, sel("view")), colors.panel);
+    if (panel.nav != 0) set_background(msg(panel.nav, sel("view")), colors.page);
     if (panel.reader_slot >= 0 && slots[panel.reader_slot].controller != 0) set_background(msg(slots[panel.reader_slot].controller,
-        sel("view")), colors.panel)
+        sel("view")), colors.page);
+    panel_divider_dress()
 }
 
 // ---- its reader ----
@@ -423,9 +297,8 @@ panel_reader_install(s: int, view: int) {
     scroll: int = fresh("UIScrollView");
     msg1(scroll, sel("setAutoresizingMask:"), 18);
     set_frame(scroll, bounds_of(view));
-    set_background(view, colors.panel);
+    set_background(view, colors.page);
     add_sub(view, scroll);
-    panel_reader_room = -1.0f64;
     panel.reader_slot = s;
     pane_attach(PANE_PANEL, scroll);
     panel_reader_dress(s)
@@ -437,7 +310,7 @@ panel_reader_dress(s: int) {
     controller: int = slots[s].controller;
     if (controller == 0 || ui_slot != s) return;
     linked = ui.reader_linked;
-    // (A sheet: the dock is its header, dock.l8; its own bar hidden.)
+    // (A split: the dock is its header, dock.l8; its own bar hidden.)
     if (!panel.column) {
         dock_panel_said(s);
         panel_bar_fit();
@@ -460,7 +333,7 @@ panel_reader_dress(s: int) {
     // left, the others right, as the page's dock has its glyphs.)
     for k in 0..ui.tools_n {
         tool: UiTool = ui.tools[k];
-        b: int = if (tool.menu.n > 0) panel_menu_item(tool, k, controller) else bar_item_symbol_ns(ui_text(tool.icon),
+        b: int = if (tool.menu.n > 0) tool_menu_item(tool) else bar_item_symbol_ns(ui_text(tool.icon),
             "vellumTool:", controller);
         if (b == 0)
             continue;
@@ -481,51 +354,6 @@ panel_reader_dress(s: int) {
 
 // A tool with a menu: its items (ARG:TITLE split by |), each its action
 // with its argument.
-// The panel's menu (core's: Swap Panes, Full Screen, Close Panel) on its
-// sheet: what the sheet does itself left out (filling the screen, a drag
-// up; closing, a swipe down or the dock's button); one item left, a
-// button that does it (Swap Panes, its arrows); none, no button. In a
-// column, all of it.
-panel_menu_one_arg: int = 0;
-
-panel_menu_item(tool: UiTool, k: int, controller: int): int {
-    if (tool.action != ACT_BESIDE_MENU || panel.column) return tool_menu_item(tool);
-    kept: int = 0;
-    one_arg: int = 0;
-    one_words: int = 0;
-    n: int = split_count(&ui, tool.menu);
-    for i in 0..n {
-        part: int = split_word(&ui, tool.menu, i);
-        colon: int = msg1(part, sel("rangeOfString:"), nsstring(":"));
-        if (colon >= 0 && colon < ns_length(part)) {
-            arg: int = msg(msg1(part, sel("substringToIndex:"), colon), sel("integerValue"));
-            if (arg != BESIDE_MENU_FULL && arg != BESIDE_MENU_CLOSE) {
-                kept = kept + 1;
-                one_arg = arg;
-                one_words = msg1(part, sel("substringFromIndex:"), colon + 1)
-            }
-        }
-    }
-    if (kept == 0) return 0;
-    if (kept > 1) return tool_menu_item(tool);
-    panel_menu_one_arg = one_arg;
-    b: int = bar_item_symbol(if (one_arg == BESIDE_MENU_SWAP) "arrow.up.arrow.down" else "ellipsis",
-        "vellumPanelMenuOne:", controller);
-    msg1(b, sel("setTag:"), k);
-    msg1(b, sel("setAccessibilityLabel:"), one_words);
-    b
-}
-
-// The panel's one menu item, done.
-panel_menu_one_tapped(self: int, _cmd: int, item: int): int {
-    s: int = slot_of_controller(self);
-    k: int = msg(item, sel("tag"));
-    if (s < 0 || !screen_load(s) || k < 0 || k >= ui.tools_n) return 0;
-    haptic_impact(0);
-    act(s, ui.tools[k].action, panel_menu_one_arg, 0);
-    0
-}
-
 tool_menu_item(tool: UiTool): int {
     kids: int = fresh("NSMutableArray");
     n: int = split_count(&ui, tool.menu);
@@ -546,78 +374,377 @@ tool_menu_item(tool: UiTool): int {
         symbol_image(ui_text(tool.icon), 17.0f64, 5), menu))
 }
 
-// The reader's view laid out: the pane's chrome its bar's and the sheet's
-// foot; the sheet's top told to the chrome.
+// The reader's view laid out: the pane's chrome its safe area's (the
+// divider's room over it, the dock's at its foot, panel_insets_fit).
 panel_reader_layout(controller: int) {
-    view: int = msg(controller, sel("view"));
-    // (No bar on a sheet: the grabber's room over the first line, as the
-    // reader's safe area.)
-    room: f64 = if (panel.column) 0.0f64 else PANEL_GRABBER_ROOM;
-    if (room != panel_reader_room) {
-        panel_reader_room = room;
-        msg_insets(controller, sel("setAdditionalSafeAreaInsets:"), room, 0.0f64,
-            0.0f64, 0.0f64)
-    }
-    safe: Insets = safe_insets(view);
+    safe: Insets = safe_insets(msg(controller, sel("view")));
     pane_chrome(PANE_PANEL, safe.top, safe.bottom);
-    panel_top_measure();
     if (panel_pane.go_c >= 0) pane_settle_soon()
 }
 
-// The room over the bare reader's first line (the grabber's), and what
-// of it the reader's safe area has now (-1: not yet).
-PANEL_GRABBER_ROOM: f64 = 18.0f64;
+// The navigation's safe area made larger in a split: at its top for the
+// divider's buttons, at its foot for the dock over it (what of that the
+// window's safe area hasn't already). Each as last set (-1: not yet).
+panel_inset_top: f64 = -1.0f64;
 
-panel_reader_room: f64 = -1.0f64;
+panel_inset_bottom: f64 = -1.0f64;
 
-// ---- the panel under the dock ----
-// The dock floats over the panel's sheet (dock.l8: a window of its own):
-// the sheet's top is where UIKit lays it out (the page's reading area
-// ends there), and what the panel shows ends above the dock (more of the
-// safe area at its foot).
-panel_top_measure() {
-    if (panel.column || panel.nav == 0 || !panel.shown) return;
-    panel_dock_room();
-    top: f64 = panel_sheet_top();
-    if (top == panel.top) return;
+panel_insets_fit() {
+    nav: int = panel_attached;
+    if (nav == 0) return;
+    top: f64 = if (panel.column) 0.0f64 else PANEL_DIVIDER_ROOM;
+    bottom: f64 = if (panel.column) 0.0f64 else clamp_f(chrome_bottom_cover() - chrome_safe.bottom,
+        0.0f64, chrome_bounds.h);
+    if (top == panel_inset_top && bottom == panel_inset_bottom) return;
+    panel_inset_top = top;
+    panel_inset_bottom = bottom;
+    msg_insets(nav, sel("setAdditionalSafeAreaInsets:"), top, 0.0f64, bottom, 0.0f64)
+}
+
+// ---- the split ----
+// Half the divider's height (its touch's, and the room either side of
+// its line for its buttons), its buttons' size, and the heights the
+// panel settles at (of the window's).
+PANEL_DIVIDER_ROOM: f64 = 22.0f64;
+
+PANEL_DIVIDER_BUTTON: f64 = 40.0f64;
+
+PANEL_SNAPS: []f64 = [0.36f64, 0.5f64, 0.64f64];
+
+// The divider and what is on it (made once, held).
+panel_divider: int = 0;
+
+panel_divider_line: int = 0;
+
+panel_split_glass: int = 0;
+
+panel_split_button: int = 0;
+
+panel_link_glass: int = 0;
+
+panel_link_button: int = 0;
+
+panel_swap_glass: int = 0;
+
+panel_swap_button: int = 0;
+
+// Whether a hand is moving the divider (from where it was), and how many
+// of the split's animations are under way (panel_split_animate: one
+// taking over from another ends it, and says so, at once).
+panel_dragging: bool = false;
+
+panel_drag_from: f64 = 0.0f64;
+
+panel_split_moving: int = 0;
+
+// Whether the split's height is changing (by a hand or in its spring):
+// the linked panes not followed meanwhile, but once it is still
+// (panel_settle_fired).
+panel_resizing(): bool {
+    panel_dragging || panel_split_moving > 0
+}
+
+panel_divider_make() {
+    if (panel_divider != 0) return;
+    panel_divider = retain(view_new());
+    pan: int = autoreleased(msg2(msg(cls("UIPanGestureRecognizer"), sel("alloc")),
+        sel("initWithTarget:action:"), app_obj, sel("vellumDividerPan:")));
+    msg1(panel_divider, sel("addGestureRecognizer:"), pan);
+    panel_divider_line = retain(view_new());
+    msg1(panel_divider_line, sel("setUserInteractionEnabled:"), 0);
+    add_sub(panel_divider, panel_divider_line);
+    panel_split_glass = retain(glass_view(true));
+    add_sub(panel_divider, panel_split_glass);
+    panel_split_button = retain(msg1(cls("UIButton"), sel("buttonWithType:"), 1));
+    msg3(panel_split_button, sel("addTarget:action:forControlEvents:"), app_obj, sel("vellumSplitTapped:"),
+        64);
+    button_symbol(panel_split_button, "rectangle.bottomhalf.inset.filled", 18.0f64);
+    msg1(panel_split_button, sel("setAccessibilityLabel:"), nsstring("Close Panel"));
+    add_sub(glass_content(panel_split_glass), panel_split_button);
+    panel_link_glass = retain(glass_view(true));
+    add_sub(panel_divider, panel_link_glass);
+    panel_link_button = retain(msg1(cls("UIButton"), sel("buttonWithType:"), 1));
+    msg3(panel_link_button, sel("addTarget:action:forControlEvents:"), app_obj, sel("vellumDividerLink:"),
+        64);
+    button_symbol(panel_link_button, "link", 16.0f64);
+    add_sub(glass_content(panel_link_glass), panel_link_button);
+    panel_swap_glass = retain(glass_view(true));
+    add_sub(panel_divider, panel_swap_glass);
+    panel_swap_button = retain(msg1(cls("UIButton"), sel("buttonWithType:"), 1));
+    msg3(panel_swap_button, sel("addTarget:action:forControlEvents:"), app_obj, sel("vellumDividerSwap:"),
+        64);
+    button_symbol(panel_swap_button, "arrow.up.arrow.down", 16.0f64);
+    msg1(panel_swap_button, sel("setAccessibilityLabel:"), nsstring("Swap Panes"));
+    add_sub(glass_content(panel_swap_glass), panel_swap_button);
+    panel_divider_dress()
+}
+
+// The divider over the panel and the page (under the chrome).
+panel_divider_attach() {
+    panel_divider_make();
+    under: int = if (panel_attached != 0) msg(panel_attached, sel("view")) else page_pane.scroll;
+    msg2(root_view, sel("insertSubview:aboveSubview:"), panel_divider, under)
+}
+
+panel_divider_remove() {
+    if (panel_divider != 0) msg(panel_divider, sel("removeFromSuperview"))
+}
+
+// Its colors (the look's), and the link as the panel's reader says it.
+panel_divider_dress() {
+    if (panel_divider == 0) return;
+    set_background(panel_divider_line, colors.rule);
+    for g in [panel_split_glass, panel_link_glass, panel_swap_glass] glass_tint(g,
+        dock_tint());
+    msg1(panel_split_button, sel("setTintColor:"), colors.accent);
+    msg1(panel_swap_button, sel("setTintColor:"), colors.accent);
+    set_hidden(panel_swap_glass, !dock_panel_can_swap());
+    msg1(panel_link_button, sel("setTintColor:"), if (dock_panel.linked) colors.accent else colors.faint);
+    msg1(panel_link_button, sel("setAccessibilityLabel:"), nsstring(if (dock_panel.linked) "Linked" else "Not Linked"));
+    set_hidden(panel_link_glass, dock_panel.link_off || dock_panel.link_action == 0)
+}
+
+// Where the divider's line is to be: at the top filling the screen, else
+// the panel the height chosen (kept), within reach of both.
+panel_split_top(): f64 {
+    h: f64 = chrome_bounds.h;
+    least: f64 = chrome_safe.top + PANEL_DIVIDER_ROOM;
+    if (panel.full) return least;
+    clamp_f(h - panel_fraction() * h, least + 120.0f64, h - 160.0f64)
+}
+
+// The split laid out with the divider's line at top: the panel under it
+// (never shorter than it is open, so that coming and going it moves
+// rather than being laid out again), the divider about it, its buttons on
+// it (the split's hidden while the dock's own is moving: panel_moving).
+panel_split_place(top: f64) {
+    w: f64 = chrome_bounds.w;
+    h: f64 = chrome_bounds.h;
     panel.top = top;
+    if (panel_attached != 0) set_frame4(msg(panel_attached, sel("view")), 0.0f64,
+        top, w, h - (if (top < panel_split_top()) top else panel_split_top()));
+    if (panel_divider == 0) return;
+    set_frame4(panel_divider, 0.0f64, top - PANEL_DIVIDER_ROOM, w, 2.0f64 * PANEL_DIVIDER_ROOM);
+    line: f64 = 1.0f64 / msg_f(msg(cls("UIScreen"), sel("mainScreen")), sel("scale"));
+    set_frame4(panel_divider_line, 0.0f64, PANEL_DIVIDER_ROOM - line / 2.0f64, w,
+        line);
+    b: f64 = PANEL_DIVIDER_BUTTON;
+    y: f64 = PANEL_DIVIDER_ROOM - b / 2.0f64;
+    set_frame4(panel_link_glass, (w - b) / 2.0f64, y, b, b);
+    set_corners(panel_link_glass, b / 2.0f64);
+    set_frame4(panel_link_button, 0.0f64, 0.0f64, b, b);
+    // (Under the dock's panel button's place, so that it goes straight up
+    // and down.)
+    set_frame4(panel_split_glass, chrome_safe.left + DOCK_SIDE + DOCK_H / 2.0f64 - b / 2.0f64,
+        y, b, b);
+    set_corners(panel_split_glass, b / 2.0f64);
+    set_frame4(panel_split_button, 0.0f64, 0.0f64, b, b);
+    // (Swap Panes as far in from the right: the divider symmetrical.)
+    set_frame4(panel_swap_glass, w - chrome_safe.right - DOCK_SIDE - DOCK_H / 2.0f64 - b / 2.0f64,
+        y, b, b);
+    set_corners(panel_swap_glass, b / 2.0f64);
+    set_frame4(panel_swap_button, 0.0f64, 0.0f64, b, b);
+    set_hidden(panel_split_glass, panel_moving);
+    // (Coming up with the button, going down with it.)
+    panel_divider_out(!panel_moving || panel.shown)
+}
+
+// The divider's line and link shown or not (in the split's animation,
+// with it).
+panel_divider_out(out: bool) {
+    set_alpha(panel_divider_line, if (out) 1.0f64 else 0.0f64);
+    glass_shown(panel_link_glass, out, true, dock_tint());
+    glass_shown(panel_swap_glass, out, true, dock_tint())
+}
+
+// ---- the split opening and closing ----
+// Each in one spring, from a tap or as a hand lets the divider go: the
+// split's button is the dock's own glass meanwhile (dock_morph), going
+// between its place in the dock and the divider as the dock goes between
+// the page's alone and both readers', and the divider and the panel come
+// up from the foot with it or go down off the screen.
+panel_moving: bool = false;
+
+// The button's middle in its place in the dock.
+panel_slot_y(): f64 {
+    r: Rect = dock_panel_button_home();
+    r.y + r.h / 2.0f64
+}
+
+// Begun with the button at y: the divider's handed to the dock's, the
+// dock as it is (both readers' or the page's).
+panel_move_begin(y: f64) {
+    if (panel_moving) return;
+    panel_moving = true;
+    if (panel_divider != 0) set_hidden(panel_split_glass, true);
+    dock_morph_begin(dock_both(), y)
+}
+
+// The button, the divider and the panel at y (in the spring).
+panel_move_to(y: f64) {
+    panel_split_place(y);
+    if (panel_moving) dock_morph(panel.shown, y)
+}
+
+// The split opening: the button rising out of the dock, the divider with
+// it and the panel coming up from the foot under it.
+panel_split_open() {
+    panel_divider_attach();
+    nav_view: int = msg(panel_attached, sel("view"));
+    view_class: int = cls("UIView");
+    was: bool = truth(msg(view_class, sel("areAnimationsEnabled")));
+    msg1(view_class, sel("setAnimationsEnabled:"), 0);
+    panel_move_begin(panel_slot_y());
+    panel_split_place(panel_slot_y());
+    panel_divider_out(false);
+    set_frame4(nav_view, 0.0f64, chrome_bounds.h, chrome_bounds.w, frame_of(nav_view).h);
+    msg1(view_class, sel("setAnimationsEnabled:"), if (was) 1 else 0);
+    panel_split_animate()
+}
+
+// The split moved to where it is to be (open, at its height; closed, the
+// button home), in a spring carrying on a hand's throw (panel_thrown,
+// points a second downwards, spent here): closing, faster and without a
+// bounce. The panel's capsule's words go at once closing, come as it has
+// grown opening (dock.l8).
+panel_thrown: f64 = 0.0f64;
+
+panel_split_animate() {
+    if (panel.column || panel_divider == 0) return;
+    if (!panel.shown) panel_move_begin(panel.top);
+    panel_split_moving = panel_split_moving + 1;
+    to: f64 = if (panel.shown) panel_split_top() else panel_slot_y();
+    distance: f64 = to - panel.top;
+    velocity: f64 = if (abs_f(distance) > 1.0f64) clamp_f(panel_thrown / distance,
+        0.0f64, 12.0f64) else 0.0f64;
+    panel_thrown = 0.0f64;
+    if (panel_moving && !panel.shown) ease(ANIM_DOCK_WORDS_OUT, 0.1f64);
+    spring_moving(ANIM_SPLIT, if (panel.shown) 0.5f64 else 0.42f64, if (panel.shown) 0.1f64 else 0.0f64,
+        velocity);
+    if (panel_moving && panel.shown) ease_after(ANIM_DOCK_WORDS, 0.2f64, 0.22f64)
+}
+
+panel_split_animated() {
+    if (panel.shown) panel_move_to(panel_split_top()) else {
+        panel_split_place(chrome_bounds.h + PANEL_DIVIDER_ROOM);
+        dock_morph(false, panel_slot_y())
+    }
+}
+
+// Settled (the last of them; a hand may have taken over): the button the
+// divider's again, open, or the dock's in its place, closed, the panel
+// let go; the page's foot told.
+panel_split_settled() {
+    panel_split_moving = panel_split_moving - 1;
+    if (panel_split_moving > 0) return;
+    panel_split_moving = 0;
+    if (panel_dragging) return;
+    if (panel_moving) {
+        panel_moving = false;
+        dock_morph_end(panel.shown);
+        if (panel_divider != 0) set_hidden(panel_split_glass, !panel.shown)
+    }
+    if (!panel.shown) {
+        if (panel_attached != 0) panel_detach_now() else panel_divider_remove()
+    }
     panel_settle_soon()
 }
 
-// Where the sheet is laid out to be, its transform aside.
-panel_sheet_top(): f64 {
-    if (panel.nav == 0) return chrome_bounds.h;
-    presented: int = msg(msg(panel.nav, sel("presentationController")), sel("presentedView"));
-    if (presented == 0) return chrome_bounds.h;
-    geo_of(presented, "center");
-    middle: f64 = geo[1];
-    geo_of(presented, "bounds");
-    middle - geo[3] / 2.0f64
+// A hand on the divider: it follows, the dock as it is; let go, the
+// split settles at the height nearest where it was going (thrown up to
+// the top, the panel fills the screen; down to the dock, the split
+// closes).
+panel_divider_panned(_self: int, _cmd: int, gesture: int): int {
+    state: int = msg(gesture, sel("state"));
+    // (Ended however it ends: no longer a hand's.)
+    if (state >= 3) panel_dragging = false;
+    if (panel_attached == 0 || !panel.shown || panel.column) {
+        if (state >= 3 && panel_moving) panel_split_animate();
+        return 0
+    }
+    h: f64 = chrome_bounds.h;
+    if (state == 1) {
+        panel_dragging = true;
+        panel_drag_from = panel.top;
+        return 0
+    }
+    geo_of1(gesture, "translationInView:", root_view);
+    if (state == 2) {
+        panel_split_place(clamp_f(panel_drag_from + geo[1], chrome_safe.top + PANEL_DIVIDER_ROOM,
+            h - 40.0f64));
+        return 0
+    }
+    panel_dragging = false;
+    geo_of1(gesture, "velocityInView:", root_view);
+    panel_thrown = (if (state == 3) geo[1] else 0.0f64);
+    panel_divider_let_go(panel.top + geo[1] * 0.15f64, state == 3);
+    0
 }
 
-// The safe area added at the panel's foot for the dock over it.
-panel_extra_bottom: f64 = 0.0f64;
-
-panel_dock_room() {
-    presented: int = msg(msg(panel.nav, sel("presentationController")), sel("presentedView"));
-    if (presented == 0) return;
-    geo_of(presented, "center");
-    middle: f64 = geo[1];
-    geo_of(presented, "bounds");
-    sheet_bottom: f64 = middle + geo[3] / 2.0f64;
-    // (From the sheet's foot to a little above the dock, less what of the
-    // safe area the sheet has of its own.)
-    wanted: f64 = sheet_bottom - (chrome_bounds.h - chrome_bottom_cover());
-    own: f64 = safe_insets(msg(panel.nav, sel("view"))).bottom - panel_extra_bottom;
-    extra: f64 = wanted - own;
-    if (extra < 0.0f64) extra = 0.0f64;
-    if (abs_f(extra - panel_extra_bottom) < 0.5f64) return;
-    panel_extra_bottom = extra;
-    msg_insets(panel.nav, sel("setAdditionalSafeAreaInsets:"), 0.0f64, 0.0f64, extra,
-        0.0f64)
+// The divider let go, its line going to going (where it would come to,
+// thrown; given up, not thrown).
+panel_divider_let_go(going: f64, thrown: bool) {
+    panel_dragging = false;
+    h: f64 = chrome_bounds.h;
+    if (going > h * 0.84f64) {
+        panel_dragged_away();
+        return
+    }
+    full: bool = thrown && going < chrome_safe.top + PANEL_DIVIDER_ROOM + h * 0.1f64;
+    if (!full) panel_fraction_keep(panel_snap_nearest((h - going) / h));
+    if (full != panel.full) {
+        panel.full = full;
+        send0("tap full")
+    }
+    panel_split_animate()
 }
 
-// Once the sheet has been still a moment: the page's foot what it covers.
+// The settling height nearest fraction (of the window's).
+panel_snap_nearest(fraction: f64): f64 {
+    best: f64 = PANEL_SNAPS[0];
+    for snap in PANEL_SNAPS {
+        if (abs_f(snap - fraction) < abs_f(best - fraction)) best = snap
+    }
+    best
+}
+
+// The height chosen, kept on the device (half the window's at first).
+PANEL_FRACTION_KEY: str = "VellumPanelFraction";
+
+panel_fraction(): f64 {
+    kept: int = msg1(msg(cls("NSUserDefaults"), sel("standardUserDefaults")), sel("objectForKey:"),
+        nsstring(PANEL_FRACTION_KEY));
+    if (kept != 0 && responds(kept, "doubleValue")) msg_f(kept, sel("doubleValue")) else 0.5f64
+}
+
+panel_fraction_keep(fraction: f64) {
+    msg1_f(msg(cls("NSUserDefaults"), sel("standardUserDefaults")), sel("setDouble:forKey:"),
+        nsstring(PANEL_FRACTION_KEY), fraction)
+}
+
+// The split's button tapped: Close Panel, core's.
+panel_split_tapped(_self: int, _cmd: int, _sender: int): int {
+    haptic_impact(0);
+    send0("tap shelf");
+    0
+}
+
+// Swap Panes on the divider: core's, as the panel's menu has it (what
+// each pane reads pictured over it until laid out in the other, pane.l8).
+panel_swap_tapped(_self: int, _cmd: int, _sender: int): int {
+    if (!panel.shown || dock_panel.slot < 0 || !dock_panel_can_swap()) return 0;
+    haptic_impact(0);
+    act(dock_panel.slot, dock_panel.menu_action, BESIDE_MENU_SWAP, 0);
+    0
+}
+
+// The link tapped: linked or not, as the panel's Link does it.
+panel_divider_link_tapped(_self: int, _cmd: int, _sender: int): int {
+    _l: int = dock_link_tapped(0, 0, 0);
+    0
+}
+
+// Once the divider has been still a moment: the page's foot what it covers.
 panel_settle_due: bool = false;
 
 panel_settle_soon() {
@@ -631,6 +758,7 @@ panel_settle_fired(_self: int, _cmd: int, _timer: int): int {
     page_chrome_set();
     if (panel.shown) {
         pane_tell(PANE_PAGE, true);
+        pane_tell(PANE_PANEL, true);
         follow_rested(PANE_PAGE)
     }
     0
@@ -647,11 +775,12 @@ panel_detach_fired(_self: int, _cmd: int, _timer: int): int {
 }
 
 add_panel_methods(app: int) {
-    add_method1(cls("VellumList"), sel("vellumPanelMenuOne:"), &panel_menu_one_tapped,
-        "v@:@");
     add_method1(app, sel("vellumPanelDetach:"), &panel_detach_fired, "v@:@");
-    add_method1(app, sel("vellumPanelCheck:"), &panel_check_fired, "v@:@");
     add_method1(app, sel("vellumPanelSettle:"), &panel_settle_fired, "v@:@");
+    add_method1(app, sel("vellumDividerPan:"), &panel_divider_panned, "v@:@");
+    add_method1(app, sel("vellumSplitTapped:"), &panel_split_tapped, "v@:@");
+    add_method1(app, sel("vellumDividerLink:"), &panel_divider_link_tapped, "v@:@");
+    add_method1(app, sel("vellumDividerSwap:"), &panel_swap_tapped, "v@:@");
     // (The dock's look at the sheets now and then: dock.l8.)
     add_method1(app, sel("vellumDockSheets:"), &dock_sheets_fired, "v@:@")
 }

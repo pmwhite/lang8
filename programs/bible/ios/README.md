@@ -82,31 +82,43 @@ the compiled asset catalog (`assets/`), the frameworks it links
   system's search, content-unavailable view, context menus on a long press
   and swipe-to-delete. Reading's sheet leaves the page bright behind it,
   so a change is seen as it is made.
-- **The panel** is a sheet over the page at a third, a half or the whole
-  height, never dimming the page, UIKit's own in every way it moves. Its
-  first line stands clear of the grabber (room in its safe area). Its
-  reader is the second pane, with no bar of its own: while it shows, the
-  dock is the header of both readers, as symmetrical as the page's
-  alone: the page's capsule (its chapter, the version) at the left, ⋯ in
-  the middle and the panel's capsule (what it reads, where it is) at the
-  right, one shape of glass while the two are linked (⋯ a waist between
-  them), three apart as liquid parts while they aren't. As the panel
-  comes the dock moves over by a place, the page's capsule over the
-  panel's button, ⋯ to the middle, the panel's capsule growing out of
-  where ⋯ was; as it goes, back. The words that change go as the shapes
-  begin to move and the new come as they settle. The panel's capsule's
-  tap is Go To aimed at the panel, its field rising out of that capsule
-  (unlinked, a passage picked moves the panel alone, and the field says
-  so); its long press, the panel's menu: Linked (checked while they are;
-  a tap links or unlinks), Swap Panes, Close Panel (filling the screen is
-  a drag up, closing it a swipe down too). A document read in its own
-  divisions (a book, a dictionary) can't be linked: no Linked, the three
-  apart. Drawn in, the dock shows both capsules, the chapter and the
-  panel's short name, one shape linked. Study pushed over the reader has
-  the system's bar and its Back;
-  in an iPad's column the reader keeps its own bar. The dock floats over
-  the panel's foot (its safe area made larger there), and the page's
-  reading area ends at its top.
+- **The panel** is under the page in a split: the page above, the panel
+  below, parted by the divider, a hairline with glass buttons on it,
+  the split's (the dock's panel button: as the panel comes it goes up out
+  of the dock into the divider, and back down into it as the panel goes;
+  a tap closes the split) and the link (🔗, in the accent linked, faint
+  unlinked, none for a document read in its own divisions, a book or a
+  dictionary, which can't be linked; a tap links or unlinks) and, as far
+  in from the right as the split's from the left, Swap Panes (⇅, where
+  core's menu has it, each pane's picture over it until it is laid out
+  with what the other read). While the divider moves, by a hand or
+  settling, the linked panes aren't followed; once it is still, they
+  are.
+  The halves of a split are alike, the panel's type and ground the
+  page's, one above the other or (an iPad's) side by side.
+  A drag of the divider sizes the two, settling at a third, a half or
+  two thirds of the window (the height kept on the device); thrown to
+  the top, the
+  panel fills the screen (core's Full Screen), let go down by the dock,
+  the split closes. Opening and closing are each one spring (from a tap,
+  or as the divider is let go): the button flies between the dock and
+  the divider as the dock's other shapes close in or part. Its reader is the second pane, with no bar of its
+  own: while it shows, the dock is the header of both readers, as
+  symmetrical as the page's alone: the page's capsule (its chapter, the
+  version) at the left, ⋯ in the middle and the panel's capsule (what it
+  reads, where it is) at the right. As the panel comes the dock moves
+  over by a place, the page's capsule over where the panel's button was,
+  ⋯ to the middle, the panel's capsule growing out of where ⋯ was; as it
+  goes, back. The words that change go as the shapes begin to move and
+  the new come as they settle. The panel's capsule's tap is Go To aimed
+  at the panel, its field rising out of that capsule (unlinked, a passage
+  picked moves the panel alone, and the field says so); its long press,
+  the panel's menu: Swap Panes, Close Panel. Drawn in, the dock shows both
+  capsules, the chapter and the panel's short name. Study pushed over the
+  reader has the system's bar and its Back. In an iPad's wide window the
+  panel is a column at the page's right with its own bar. The dock floats
+  over the panel's foot (its safe area made larger there), and the page's
+  reading area ends at the divider.
 
 ## How it is built
 
@@ -123,7 +135,7 @@ the compiled asset catalog (`assets/`), the frameworks it links
 | `dock.l8` | The dock and its window, the tray, the way back, toasts, the title's menu |
 | `screens.l8` | Core's screens as sheets of lists; effects; rows, menus and swipes |
 | `goto.l8` | Go To's quick form over the keys: its field, its rows and its passage chooser |
-| `panel.l8` | The panel's sheet and its reader |
+| `panel.l8` | The panel: the split (its divider) or the column, and its reader |
 | `services.l8` | Core's time, the screen kept on, the pasteboard, sharing, pages outside |
 | `devwire.l8` | The development server's data files and lines |
 
@@ -151,13 +163,13 @@ node web/dev.mjs --port 8777 --data .build/bible-folio -- programs/bible/ios/app
 
 The development wire takes core's lines (`node web/devctl.mjs wire tap
 goto`, lines split by `|`) and the skin's own: `!state` (each pane's window,
-place and chrome, the panel's sheet, the dock, and the screens), `!scroll
+place and chrome, the panel, the dock, and the screens), `!scroll
 P DY`, `!flick P DY` (a finger's fling, frame by frame), `!dock
 open|close`, `!tap WORDS` (the top sheet's first row so titled, or the quick form's row),
-`!close`, `!back`, `!swipe` (the panel put away as a hand's swipe puts
-it), `!capsule` (a tap on the dock's capsule), `!panelcapsule` (on the panel's), `!link` (Linked, in the panel's menu), `!shot` (every window of the app's, the dock's too, drawn to the server's /shot: its glass left out), `!slow F` (every window's animations F times slower), `!dockinapp 1` (the dock moved into the app's window, so that ReplayKit records it; a sheet presented after goes over it; `!dockinapp 0` back), `!home` (Back from the first screen Go To opened), `!theme N` (theme N chosen, the one it was logged), in Go To's quick form `!type WORDS`, `!return`
+`!close`, `!back`, `!split P` (the split's divider let go as a hand
+would at P% of the window's height: 0 closes it, 100 fills the screen), `!capsule` (a tap on the dock's capsule), `!panelcapsule` (on the panel's), `!link` (Linked, in the panel's menu), `!shot` (every window of the app's, the dock's too, drawn to the server's /shot: its glass left out), `!slow F` (every window's animations F times slower), `!dockinapp 1` (the dock moved into the app's window, so that ReplayKit records it; a sheet presented after goes over it; `!dockinapp 0` back), `!home` (Back from the first screen Go To opened), `!theme N` (theme N chosen, the one it was logged), in Go To's quick form `!type WORDS`, `!return`
 and `!hold N V` (chapter N held, the finger on verse V; `!hold 0` lets
-go), `!probe N` (for N frames, where the dock and the panel's sheet are
+go), `!probe N` (for N frames, where the dock and the panel are
 drawn), `!part` (the panel's first part as core sent it: its words and
 styles), `!sheetviews` (the sheet's views, from the panel's up), and `!record
 on|off` (ReplayKit; the movie is posted to the server's `/video`, for
@@ -184,7 +196,7 @@ bundle (../README.md), as CI does for TestFlight.
 - **Keys:** core's commands as key commands of the root's (the ⌘ overlay),
   and on an iPad the menu bar's Go menu and View's own commands.
 - **The iPad:** the panel a column at the page's right where the window
-  has room for both (the page keeping 28 em and its margins), a sheet
+  has room for both (the page keeping 28 em and its margins), a split
   otherwise, moving between them as the window changes size.
 - **Core's own rows:** the text's size, the themes' swatches, the ribbons'
   colors, a download's ring, verses found, marks, passages, verses, the
@@ -196,4 +208,5 @@ bundle (../README.md), as CI does for TestFlight.
 - **Practice** takes typed letters (the list is a key input: no capitals,
   no corrections), a wrong one felt.
 - **Arrivals:** a hairline along the foot of the pane's bar (the page's
-  capsule, the panel's bar) as a document comes.
+  capsule; the panel's capsule, or its bar in a column) as a document
+  comes.
