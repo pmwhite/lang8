@@ -70,10 +70,10 @@ the compiled asset catalog (`assets/`), the frameworks it links
   its glass are a faint wash of the ink, a page's or a plain list's none;
   words are the theme's ink and faint, the one read and Return's in its
   accent.
-- **The tray is the dock.** Verses selected, the capsule grows up into a
-  glass panel of core's tray (the reference, the highlights' colors, Copy,
-  Share, Bookmark, Note, Study, Compare, Memorize), and goes back into the
-  capsule as they are let go.
+- **The tray is the dock.** Verses selected, in either half of a split,
+  the capsule grows up into a glass panel of core's tray (the reference,
+  the highlights' colors, Copy, Share, Bookmark, Note, Study, Compare,
+  Memorize), and goes back into the capsule as they are let go.
 - **At the top:** the way back after a jump, a glass capsule
   (`↩ Psalm 135`), and core's toasts dropping in where it is.
 - **Core's screens are the system's.** Sheets of `UICollectionView` lists in
@@ -83,7 +83,8 @@ the compiled asset catalog (`assets/`), the frameworks it links
   and swipe-to-delete. Reading's sheet leaves the page bright behind it,
   so a change is seen as it is made.
 - **The panel** is under the page in a split: the page above, the panel
-  below, parted by the divider, a hairline with glass buttons on it,
+  below, parted by the divider, a band with glass buttons on it (the
+  halves' corners at it rounded, as two cards side by side),
   the split's (the dock's panel button: as the panel comes it goes up out
   of the dock into the divider, and back down into it as the panel goes;
   a tap closes the split) and the link (🔗, in the accent linked, faint
@@ -113,7 +114,10 @@ the compiled asset catalog (`assets/`), the frameworks it links
   the new come as they settle. The panel's capsule's tap is Go To aimed
   at the panel, its field rising out of that capsule (unlinked, a passage
   picked moves the panel alone, and the field says so); its long press,
-  the panel's menu: Swap Panes, Close Panel. Drawn in, the dock shows both
+  the panel's ribbons at its place, as the page's capsule's are the
+  page's (`titlemenu 1`; Swap Panes and Close Panel are the divider's),
+  each a context menu, the capsule lifted beside it so that letting go
+  chooses nothing. Drawn in, the dock shows both
   capsules, the chapter and the panel's short name. Study pushed over the
   reader has the system's bar and its Back. In an iPad's wide window the
   panel is a column at the page's right with its own bar. The dock floats

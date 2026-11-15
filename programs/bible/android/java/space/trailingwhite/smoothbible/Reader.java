@@ -1781,19 +1781,20 @@ final class Reader extends ListView {
   }
 
   // ---- the selection and the verse heard (the page's) ----
-  // Core's selection (its chapter, -1 none, then its verses), painted.
+  // Core's selection (its pane, its chapter, -1 none, then its verses),
+  // painted: the page's alone.
   void selection(String words) {
     String[] w = words.trim().split(" ");
     int c = -1;
     try {
-      c = Integer.parseInt(w[0]);
+      if (w.length > 1 && Integer.parseInt(w[0]) == 0) c = Integer.parseInt(w[1]);
     } catch (NumberFormatException e) {
       // (None.)
     }
     int was = selC;
     sel.clear();
     selC = c;
-    for (int i = 1; i < w.length && c >= 0; i++) {
+    for (int i = 2; i < w.length && c >= 0; i++) {
       try {
         sel.add(Integer.parseInt(w[i]));
       } catch (NumberFormatException e) {

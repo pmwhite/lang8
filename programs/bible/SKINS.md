@@ -123,7 +123,8 @@ a concrete implementation: `web/main.l8` (the platform) and
   `page`; `selection`,
   `carried`, `hearing`, `back`, `wake`, `tick`, `jumped`.
 - The tray (`tray`, `tray_away`: screen 0), the title's menu
-  (`titlemenu`, `menuact`), toasts (`toast`), the small player (`player`).
+  (`titlemenu P`, `menuact ACTION ARG P`: either pane's, P left out the
+  page's), toasts (`toast`), the small player (`player`).
 - Icons by their SF Symbols names (its own drawing of each), runs by their
   styles (`STYLE_*`, `RUN_*`), `keys ACTION` (a screen that takes typed
   letters: Practice's).
@@ -287,8 +288,10 @@ page's panel button is while the panel shows, off (`tool` STYLE 3,
 divisions; where the page's bar puts
 glyphs at both sides (the iPhone's), Link takes the outer left place and
 the menu the outer right.
-The reader is the panel's first screen: it has no Back. A commentary on the page has no verses to select:
-core lets a `tapverse` on it go. Core and the skin divide the work by what each
+The reader is the panel's first screen: it has no Back. A commentary in
+either pane has no verses to select: core lets a `tapverse` on it go;
+the panel's selection is let go as it reads something else, closes or
+the panes swap. Core and the skin divide the work by what each
 knows best, and speak across the line in the document's terms, never in
 pixels:
 
@@ -987,9 +990,9 @@ From the skin:
 | `version ABBR` | the version an address names (`KJV`): before `start`, the one the reader opens in; after, read now |
 | `away` | the app put away: the settings kept now |
 | `word W` | a word of the original tapped (a `link` of KIND 2, its ARG the word): core's word screen (`SCR_WORD`: its form, where, transliteration, gloss, meaning, parsing; Word Study) |
-| `tapverse C V`, `tapnone` | a verse tapped (core toggles it: another chapter's starts again), or the reader elsewhere (the selection let go); core says `selection` C V... (C -1: none) for the skin to paint, and writes the tray's model as screen 0 (`tray`, `tray_away`). A skin hit-tests in this order: a footnote's mark, a word of the original, a reference, a note's mark, the ESV's line, a chapter's note, then a verse (within a few points), else elsewhere |
+| `tapverse C V [P]`, `tapnone` | a verse tapped in pane P (the page's, none said; core toggles it: another chapter's, or the other pane's, starts again), or a reader elsewhere (the selection let go); core says `selection` P C V... (C -1: none) for the skin to paint in that pane, and the tray copies, shares and memorizes the verses in the version that pane reads, and writes the tray's model as screen 0 (`tray`, `tray_away`). A skin hit-tests in this order: a footnote's mark, a word of the original, a reference, a note's mark, the ESV's line, a chapter's note, then a verse (within a few points), else elsewhere |
 | `select C V...` | the verses selected, whole (none: the tray away), for a skin that keeps its own selection |
-| `trayact ACTION V`, `titlemenu`, `menuact ACTION ARG` | a tray's button; the title's menu's model, as screen 0; one of its items |
+| `trayact ACTION V`, `titlemenu [P]`, `menuact ACTION ARG [P]` | a tray's button; pane P's title's menu's model (the page's, P left out), as screen 0: its ribbons at its place (the panel's without the ribbon the page carries; a ribbon moved there is put down there); one of its items |
 | `versestudy C V` | verse C:V's Study, as core's screen (a skin's answer to `study_verse`) |
 | `spoke C V MS`, `spoken C V`, `listenstop` | the skin's voice began (MS its clock: following waits 8 s after a finger moves the reader) and finished saying verse C:V (0 the chapter's title), or was stopped: a skin speaks what core's session gives it (`say C V` WORDS, `player` TITLE STATE PLAYING READER VERSION (also for the platform's own player: a lock screen's, a headset's; its buttons `listenplay`, `listenpause`, `listenprev`, `listennext`, `listenstop`), `follow C V`, `listen_stop`) |
 | `next` | the turn core asked for with `next`: a step of its work |
@@ -1106,7 +1109,8 @@ page's taps are core's (`footnote`, `word`, `esvact`, `preview`,
 `tapverse`, `tapnone`, each with its part's chapter), a tap that lets the
 text's own selection go doing only that; the selection, the verse heard
 and highlights are washed on its parts; the panel's reader previews a
-reference tapped.
+reference tapped and, where a skin lets it, selects verses
+(`tapverse C V 1`), washed on its own parts.
 
 The panel beside the page is a second stack of core's screens (group 1),
 said to fit always (`panelfits 1`): at the page's right, 390 dp wide after

@@ -775,7 +775,7 @@ function line(w) {
       tray.hide();
       break;
     case "clear_selection":
-      reader.selection("-1");
+      reader.selection("0 -1");
       tray.hide();
       break;
     case "study_verse":
@@ -1805,11 +1805,12 @@ function makeReader(p, main, view, opts) {
     for (const s of this.sections()) if (+s.dataset.c === h.c) for (const t of s.querySelectorAll(`[data-v="${h.v}"]`)) t.classList.add("heard");
   },
 
-  // Core's selection (its chapter, -1 none, then its verses), painted.
+  // Core's selection (its pane, its chapter, -1 none, then its verses),
+  // painted: the page's alone.
   selection(words) {
-    const w = words.trim().split(" ").map(Number);
+    const [pane, ...w] = words.trim().split(" ").map(Number);
     const was = this.selC;
-    this.selC = w[0] ?? -1;
+    this.selC = pane === 0 ? w[0] ?? -1 : -1;
     this.sel = new Set(this.selC >= 0 ? w.slice(1) : []);
     if (was >= 0 && was !== this.selC) this.paint(was, new Set());
     this.paintSelection();
