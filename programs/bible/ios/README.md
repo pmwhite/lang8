@@ -132,14 +132,19 @@ the compiled asset catalog (`assets/`), the frameworks it links
   in from the right, the page's capsule goes to the middle of its half,
   the panel's grows out of the button to the middle of its own, and ⋯
   rises onto the divider over the button (the divider's own at rest);
-  Swap Panes (⇄) is at the divider's head, Link in its middle. The page
-  is laid out again at its width once, under a picture of it fading.
-  Dragged sideways the halves' edges and the capsules follow; it settles
-  at a third, a half or two thirds of the width (the share kept is the
-  one stacked uses), thrown to the left the panel fills the screen,
-  thrown to the right the split closes; each half is laid out again at
-  its width once it is still. Turned with the split open, it goes
-  between stacked and side by side.
+  Swap Panes (⇄) is at the divider's head, Link in its middle. Dragged
+  sideways (by the divider or the panel's button) the halves' edges and
+  the capsules follow; it settles at a third, a half or two thirds of the
+  width (the share kept is the one stacked uses), thrown to the left the
+  panel fills the screen, thrown to the right the split closes. The
+  halves' words are laid out only at the widths the split settles at: a
+  spring's at once at those it goes to (a margin that moves gliding in
+  it), a hand's at those it would settle at from where it is, so that
+  letting go lays out nothing more. Laid out
+  again at a new width, a pane keeps its rows' words and measures anew the
+  one at its reading line and those in sight, those out of sight as they
+  come near; a row's verses' places are found as they are asked for.
+  Turned with the split open, it goes between stacked and side by side.
 
 ## How it is built
 
@@ -189,7 +194,9 @@ P DY`, `!flick P DY` (a finger's fling, frame by frame), `!dock
 open|close`, `!tap WORDS` (the top sheet's first row so titled, or the quick form's row),
 `!close`, `!back`, `!split P` (the split's divider let go as a hand
 would at P% of the window's height, or width side by side: 0 closes it,
-100 fills the screen), `!panel` (a tap on the dock's panel button),
+100 fills the screen), `!drag P` (the divider dragged as a hand would,
+frame by frame for half a second, to P%, and let go: each frame's layout
+time written to the log), `!panel` (a tap on the dock's panel button),
 `!tapat X Y` (a finger's tap on the words at window point X, Y), `!capsule` (a tap on the dock's capsule), `!panelcapsule` (on the panel's), `!link` (Linked, in the panel's menu), `!shot` (every window of the app's, the dock's too, drawn to the server's /shot: its glass left out), `!slow F` (every window's animations F times slower), `!dockinapp 1` (the dock moved into the app's window, so that ReplayKit records it; a sheet presented after goes over it; `!dockinapp 0` back), `!home` (Back from the first screen Go To opened), `!theme N` (theme N chosen, the one it was logged), in Go To's quick form `!type WORDS`, `!return`
 and `!hold N V` (chapter N held, the finger on verse V; `!hold 0` lets
 go), `!probe N` (for N frames, where the dock and the panel are

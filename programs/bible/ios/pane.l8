@@ -280,6 +280,14 @@ type Pane = {
     anchors: []int;
     anchor_first: []int;
     anchor_y: []f64;
+    // The width each row was last laid out and measured at (one at another
+    // width than the pane's measured again as it comes near what is in
+    // sight: pane_measure_near), and that its anchors' places were found
+    // at (as they are asked for: row_anchors_find).
+    measured_w: []f64;
+    anchors_w: []f64;
+    // How far in from its left its words begin (its rows' margin there).
+    text_left: f64;
     // Text views let go, kept to be used again.
     spare: []int;
     spare_n: int;
@@ -328,6 +336,9 @@ pane_new(p: int): Pane@new {
         anchors: new int[48](0),
         anchor_first: new int[48](0),
         anchor_y: new f64[48 * 320](0.0f64),
+        measured_w: new f64[48](0.0f64),
+        anchors_w: new f64[48](0.0f64),
+        text_left: 0.0f64,
         spare: new int[8](0),
         spare_n: 0,
         self_moving: 0,
@@ -563,7 +574,7 @@ part_top_room(p: int, c: int, k: int): f64 {
 }
 
 // Row i given part k of chapter c's words, laid out at the pane's width
-// and measured: its height and its anchors' places.
+// and measured (pane_measure).
 pane_dress(
     p: int,
     i: int,
@@ -572,18 +583,53 @@ pane_dress(
 ) {
     pane: *Pane = pane_of(p);
     tv: int = pane.view[i];
-    t: *TypeSet = type_of(p);
     s: int = part_need(p, c, k);
-    m: f64 = text_margin(t, pane.width);
-    top: f64 = part_top_room(p, c, k);
-    last_part: bool = row_last(p, c) + 1 >= pane_chapters(p) && k + 1 >= part_count(p,
-        c);
-    foot: f64 = if (last_part) 120.0f64 else 0.0f64;
-    msg_insets(tv, sel("setTextContainerInset:"), top, m, foot, m);
+    pane.chapter[i] = c;
+    pane.last[i] = row_last(p, c);
+    pane.part[i] = k;
+    pane.anchor_first[i] = first_anchor(p, c, k);
     msg1(tv, sel("setTintColor:"), colors.accent);
     a: int = if (s >= 0) part_attributed(s) else fresh("NSMutableAttributedString");
     if (s >= 0) part_wash(s, a);
     msg1(tv, sel("setAttributedText:"), a);
+    msg1(tv, sel("setTag:"), key_of(p, c, k) + 1);
+    held_place: bool = pane_measure(p, i);
+    // (How tall a byte of source is, for guessing.)
+    bytes: int = part_bytes(p, c, k);
+    if (bytes > 0 && !held_place) {
+        f: *Facts = facts_of(p);
+        f.measured_height = f.measured_height + pane.h[i];
+        f.measured_bytes = f.measured_bytes + bytes
+    }
+    follow_links_stale()
+}
+
+// Row i's words (as they are in its text view) laid out at the pane's
+// width and measured, at its place down the canvas: its height and its
+// anchors' places. Whether it only holds a place (a run's, or a part still
+// coming: as tall as the pane, wherever the other pane is in its chapters).
+pane_measure(p: int, i: int): bool {
+    pane: *Pane = pane_of(p);
+    tv: int = pane.view[i];
+    c: int = pane.chapter[i];
+    k: int = pane.part[i];
+    s: int = part_slot(p, c, k);
+    m: f64 = text_margin(type_of(p), pane.width);
+    top: f64 = part_top_room(p, c, k);
+    last_part: bool = row_last(p, c) + 1 >= pane_chapters(p) && k + 1 >= part_count(p,
+        c);
+    foot: f64 = if (last_part) 120.0f64 else 0.0f64;
+    // (The page reaches the window's left edge, and its right but beside
+    // a side-by-side split: its words clear of the safe area there, the
+    // Dynamic Island's or a corner's, by a margin.)
+    left: f64 = m;
+    right: f64 = m;
+    if (p == PANE_PAGE) {
+        if (chrome_safe.left > 0.0f64 && left < chrome_safe.left + look.margin) left = chrome_safe.left + look.margin;
+        if ((panel_page_edge <= 0.0f64 || panel_page_edge >= chrome_bounds.w) && chrome_safe.right > 0.0f64 && right < chrome_safe.right + look.margin) right = chrome_safe.right + look.margin
+    }
+    msg_insets(tv, sel("setTextContainerInset:"), top, left, foot, right);
+    pane.text_left = left;
     // (Laid out whole, in a frame taller than any part: a text view lays
     // out only near what it shows otherwise.)
     set_frame4(tv, 0.0f64, 0.0f64, pane.width, 1000000.0f64);
@@ -591,34 +637,41 @@ pane_dress(
     if (h < 1.0f64) h = 1.0f64;
     coming: bool = false;
     run: bool = c >= 0 && c < CHAPTERS_MOST && facts_of(p).gap_first[c] >= 0;
+    pane.anchors[i] = 0;
     if (s >= 0) {
         borrow parts[s] as part {
             coming = part.coming;
             n: int = len(part.verses);
-            if (n > PART_ANCHORS_MOST) n = PART_ANCHORS_MOST;
-            pane.anchors[i] = n;
-            for j in 0..n pane.anchor_y[i * PART_ANCHORS_MOST + j] = char_top(tv,
-                part.verses[j].shown_b)
+            pane.anchors[i] = (if (n > PART_ANCHORS_MOST) PART_ANCHORS_MOST else n)
         }
-    } else pane.anchors[i] = 0;
-    // (A part that only holds a place, a run's or one still coming, as tall
-    // as the pane: it shows wherever the other pane is in its chapters.)
-    if ((run || coming) && h < pane_seen(pane)) h = pane_seen(pane);
-    set_frame4(tv, 0.0f64, pane.y[i], pane.width, h);
-    pane.h[i] = h;
-    pane.chapter[i] = c;
-    pane.last[i] = row_last(p, c);
-    pane.part[i] = k;
-    pane.anchor_first[i] = first_anchor(p, c, k);
-    msg1(tv, sel("setTag:"), key_of(p, c, k) + 1);
-    // (How tall a byte of source is, for guessing.)
-    bytes: int = part_bytes(p, c, k);
-    if (bytes > 0 && !run && !coming) {
-        f: *Facts = facts_of(p);
-        f.measured_height = f.measured_height + h;
-        f.measured_bytes = f.measured_bytes + bytes
     }
-    follow_links_stale()
+    if ((run || coming) && h < pane_seen(pane)) h = pane_seen(pane);
+    pane.h[i] = h;
+    pane.measured_w[i] = pane.width;
+    pane.anchors_w[i] = 0.0f64;
+    row_frame_set(pane, i);
+    run || coming
+}
+
+// Row i's text view where the row is, as wide as it was laid out at.
+row_frame_set(pane: *Pane, i: int) {
+    set_frame4(pane.view[i], 0.0f64, pane.y[i], pane.measured_w[i], pane.h[i])
+}
+
+// Row r's anchors' places found (down from its top), if they weren't at
+// the width it is laid out at.
+row_anchors_find(pane: *Pane, r: int) {
+    if (pane.anchors_w[r] == pane.measured_w[r]) return;
+    pane.anchors_w[r] = pane.measured_w[r];
+    s: int = part_slot(pane.index, pane.chapter[r], pane.part[r]);
+    if (s < 0) return;
+    tv: int = pane.view[r];
+    base: int = r * PART_ANCHORS_MOST;
+    borrow parts[s] as part {
+        n: int = pane.anchors[r];
+        if (n > len(part.verses)) n = len(part.verses);
+        for j in 0..n pane.anchor_y[base + j] = char_top(tv, part.verses[j].shown_b)
+    }
 }
 
 // The height of a text view's words, TextKit 2's, laid out whole.
@@ -675,7 +728,7 @@ pane_add_above(p: int, c: int, k: int) {
     pane.y[0] = pane.y[1];
     pane_dress(p, 0, c, k);
     pane.y[0] = pane.y[1] - pane.h[0];
-    set_frame4(pane.view[0], 0.0f64, pane.y[0], pane.width, pane.h[0]);
+    row_frame_set(pane, 0);
     add_sub(pane.scroll, pane.view[0])
 }
 
@@ -688,6 +741,8 @@ pane_move_row(pane: *Pane, from: int, to: int) {
     pane.h[to] = pane.h[from];
     pane.anchors[to] = pane.anchors[from];
     pane.anchor_first[to] = pane.anchor_first[from];
+    pane.measured_w[to] = pane.measured_w[from];
+    pane.anchors_w[to] = pane.anchors_w[from];
     for j in 0..pane.anchors[from] pane.anchor_y[to * PART_ANCHORS_MOST + j] = pane.anchor_y[from * PART_ANCHORS_MOST + j]
 }
 
@@ -722,7 +777,7 @@ pane_redress(p: int, i: int) {
     if (d == 0.0f64) return;
     if (pane.y[i] + was <= pane_top(pane)) {
         pane.y[i] = pane.y[i] - d;
-        set_frame4(pane.view[i], 0.0f64, pane.y[i], pane.width, pane.h[i]);
+        row_frame_set(pane, i);
         for j in 0..i pane_shift_row(pane, j, -d)
     } else
         for j in i + 1..pane.n pane_shift_row(pane, j, d);
@@ -732,7 +787,7 @@ pane_redress(p: int, i: int) {
 
 pane_shift_row(pane: *Pane, i: int, d: f64) {
     pane.y[i] = pane.y[i] + d;
-    set_frame4(pane.view[i], 0.0f64, pane.y[i], pane.width, pane.h[i])
+    row_frame_set(pane, i)
 }
 
 // Only the washes of row i painted again (the selection, a flash): its
@@ -792,9 +847,10 @@ pane_fill(p: int, margin: f64, budget: int): bool {
     pane: *Pane = pane_of(p);
     if (pane.scroll == 0 || pane.n == 0) return true;
     if (pane_width_changed(p)) {
-        pane_rebuild(p);
+        pane_reflow(p);
         return false
     }
+    if (!pane_measure_near(p, margin, 2)) return false;
     left: int = budget;
     going: bool = true;
     while (going && left > 0) {
@@ -835,7 +891,7 @@ pane_screen(pane: *Pane): f64 {
 pane_window_at(p: int, c: int, k: int) {
     pane: *Pane = pane_of(p);
     pane_clear(p);
-    pane.width = bounds_of(pane.scroll).w;
+    pane.width = pane_layout_width(p);
     pane_add_below(p, c, k, PANE_MIDDLE);
     steps: int = 0;
     while (steps < 6 && PANE_MIDDLE - pane.y[0] < pane_screen(pane)) {
@@ -846,12 +902,98 @@ pane_window_at(p: int, c: int, k: int) {
     pane_bounds_set(p)
 }
 
-// Whether pane p's width is not what its parts were laid out at, to be
-// laid out again (not while a side-by-side split's divider moves: once it
-// is still, panel_width_held).
+// Whether pane p's parts are laid out at another width than they are to
+// be (pane_layout_width).
 pane_width_changed(p: int): bool {
     pane: *Pane = pane_of(p);
-    bounds_of(pane.scroll).w != pane.width && !panel_width_held()
+    pane.scroll != 0 && pane_layout_width(p) != pane.width
+}
+
+// The window laid out again at the pane's width now, in place (the width
+// changed: a side-by-side split's divider moving, the window turned): the
+// row at the reading line measured anew where it is, the pane put back at
+// the place it was at, and the rows in sight below and above it measured
+// and stacked about it (those above upward, so that nothing in sight
+// moves); those out of sight keep their height until they come near it
+// (pane_measure_near). At once, not in an animation under way (its rows
+// would slide).
+pane_reflow(p: int) {
+    pane: *Pane = pane_of(p);
+    if (pane.scroll == 0) return;
+    at: Place = pane_place_told(p);
+    pane.width = pane_layout_width(p);
+    if (pane.n == 0) return;
+    view_class: int = cls("UIView");
+    was: bool = truth(msg(view_class, sel("areAnimationsEnabled")));
+    msg1(view_class, sel("setAnimationsEnabled:"), 0);
+    r: int = row_at(pane, pane_offset(pane) + pane_line_below(pane));
+    if (r < 0) r = 0;
+    _held: bool = pane_measure(p, r);
+    if (at.ok) pane_set_offset(p, aim_offset(p, at.c, at.i, (at.frac * 1000.0f64 + 0.5f64) as int));
+    margin: f64 = pane_seen(pane) * 0.25f64;
+    for i in r + 1..pane.n {
+        pane.y[i] = pane.y[i - 1] + pane.h[i - 1];
+        if (pane.y[i] < pane_bottom(pane) + margin) _below: bool = pane_measure(p,
+            i) else row_frame_set(pane, i)
+    }
+    j: int = r - 1;
+    while (j >= 0) {
+        if (pane.y[j + 1] > pane_top(pane) - margin) _above: bool = pane_measure(p,
+            j);
+        pane.y[j] = pane.y[j + 1] - pane.h[j];
+        row_frame_set(pane, j);
+        j = j - 1
+    }
+    follow_links_stale();
+    pane_bounds_set(p);
+    msg1(view_class, sel("setAnimationsEnabled:"), if (was) 1 else 0)
+}
+
+// Pane p's words laid out anew with their left margin moved by d: shown
+// where they were, and brought to their place in the animation under way
+// (a side-by-side split's spring), so that the margin glides rather than
+// jumps; out of one, at once.
+pane_glide_margin(p: int, d: f64) {
+    pane: *Pane = pane_of(p);
+    if (d == 0.0f64 || pane.scroll == 0 || reduce_motion()) return;
+    view_class: int = cls("UIView");
+    was: bool = truth(msg(view_class, sel("areAnimationsEnabled")));
+    msg1(view_class, sel("setAnimationsEnabled:"), 0);
+    msg_ff(pane.scroll, sel("setContentOffset:"), d, pane_offset(pane));
+    msg1(view_class, sel("setAnimationsEnabled:"), if (was) 1 else 0);
+    msg_ff(pane.scroll, sel("setContentOffset:"), 0.0f64, pane_offset(pane))
+}
+
+// Rows laid out at another width than the pane's, within margin of what
+// is in sight, measured now (at most budget of them), as pane_redress
+// moves rows: nothing in sight moves. Whether none is left near.
+pane_measure_near(p: int, margin: f64, budget: int): bool {
+    pane: *Pane = pane_of(p);
+    left: int = budget;
+    for i in 0..pane.n {
+        near: bool = pane.y[i] + pane.h[i] > pane_top(pane) - margin && pane.y[i] < pane_bottom(pane) + margin;
+        if (pane.measured_w[i] != pane.width && near) {
+            if (left == 0) return false;
+            left = left - 1;
+            was: f64 = pane.h[i];
+            _held: bool = pane_measure(p, i);
+            d: f64 = pane.h[i] - was;
+            if (d != 0.0f64) {
+                if (pane.y[i] + was <= pane_top(pane)) {
+                    pane.y[i] = pane.y[i] - d;
+                    row_frame_set(pane, i);
+                    for k in 0..i pane_shift_row(pane, k, -d)
+                } else
+                    for k in i + 1..pane.n pane_shift_row(pane, k, d)
+            }
+        }
+    }
+    if (left < budget) {
+        follow_links_stale();
+        pane_bounds_set(p);
+        pane_reaim(p)
+    }
+    true
 }
 
 // The window laid out again (a new width, a new look): its place kept.
@@ -877,6 +1019,7 @@ anchor_pos(
     if (r < 0) return 0.0f64;
     j: int = if (i < 0) -1 else i - pane.anchor_first[r];
     base: int = r * PART_ANCHORS_MOST;
+    row_anchors_find(pane, r);
     a: f64 = pane.y[r] + (if (j >= 0 && j < pane.anchors[r]) pane.anchor_y[base + j] else 0.0f64);
     b: f64 = if (j + 1 < pane.anchors[r] && j + 1 >= 0) pane.y[r] + pane.anchor_y[base + j + 1] else pane.y[r] + pane.h[r];
     a + (b - a) * frac as f64 / 1000.0f64
@@ -1166,6 +1309,7 @@ pane_place(p: int): Place {
     i: int = -1;
     a: f64 = pane.y[r];
     b: f64 = pane.y[r] + pane.h[r];
+    row_anchors_find(pane, r);
     for j in 0..pane.anchors[r] {
         y: f64 = pane.y[r] + pane.anchor_y[base + j];
         if (y <= line + FOLLOW_PLACE_SLACK) {
