@@ -15,7 +15,7 @@ the compiled asset catalog (`assets/`), the frameworks it links
   bar at the top.
 - **The dock.** Liquid Glass at the foot, near the thumb, over everything
   of the app's, the panel too: two matching circles, the panel's button
-  and ⋯ (the Library, Listen, Reading), about a capsule naming the
+  and ⋯ (its panel, below), about a capsule naming the
   chapter (and, small under it, what the page reads). A tap on the
   capsule is Go To, a long press core's title menu (ribbons). Its shapes
   are in one glass container (`UIGlassContainerEffect`), so they merge
@@ -70,6 +70,17 @@ the compiled asset catalog (`assets/`), the frameworks it links
   its glass are a faint wash of the ink, a page's or a plain list's none;
   words are the theme's ink and faint, the one read and Return's in its
   accent.
+- **⋯ is one panel.** A card of the dock's glass grows out of ⋯ over
+  the page (under it, if ⋯ is high in a split), all of it at once and
+  nothing to scroll: how the text looks (the size's slider, the themes'
+  circles, Aa in each font, and the rest of Reading as one menu beside
+  the slider), Listen with its speed (1×: a menu of the speeds and the
+  voice), and the Library's collections as four tiles (Learn's symbol
+  in the accent while passages wait). It is core's Reading screen
+  (`sk_has_quick_more`), drawn as a panel: a collection opens the
+  Library in place of it, a screen it opens (Voice, the Manual) is a
+  sheet over it, and a tap beside it or ⋯ again puts it back into ⋯. A
+  phone on its side has it in two columns.
 - **The tray is the dock.** Verses selected, in either half of a split,
   the capsule grows up into a glass panel of core's tray (the reference,
   the highlights' colors, Copy, Share, Bookmark, Note, Study, Compare,
@@ -163,6 +174,7 @@ the compiled asset catalog (`assets/`), the frameworks it links
 | `dock.l8` | The dock and its window, the tray, the way back, toasts, the title's menu |
 | `screens.l8` | Core's screens as sheets of lists; effects; rows, menus and swipes |
 | `goto.l8` | Go To's quick form over the keys: its field, its rows and its passage chooser |
+| `more.l8` | ⋯'s panel: Reading, Listen and the Library's collections on one card |
 | `panel.l8` | The panel: the split (its divider) or the column, and its reader |
 | `services.l8` | Core's time, the screen kept on, the pasteboard, sharing, pages outside |
 | `devwire.l8` | The development server's data files and lines |
@@ -198,7 +210,7 @@ open|close`, `!tap WORDS` (the top sheet's first row so titled, or the quick for
 would at P% of the window's height, or width side by side: 0 closes it,
 100 fills the screen), `!drag P` (the divider dragged as a hand would,
 frame by frame for half a second, to P%, and let go: each frame's layout
-time written to the log), `!panel` (a tap on the dock's panel button),
+time written to the log), `!panel` (a tap on the dock's panel button), `!more` (on ⋯),
 `!tapat X Y` (a finger's tap on the words at window point X, Y), `!capsule` (a tap on the dock's capsule), `!panelcapsule` (on the panel's), `!link` (Linked, in the panel's menu), `!shot` (every window of the app's, the dock's too, drawn to the server's /shot: its glass left out), `!slow F` (every window's animations F times slower), `!dockinapp 1` (the dock moved into the app's window, so that ReplayKit records it; a sheet presented after goes over it; `!dockinapp 0` back), `!home` (Back from the first screen Go To opened), `!theme N` (theme N chosen, the one it was logged), in Go To's quick form `!type WORDS`, `!return`
 and `!hold N V` (chapter N held, the finger on verse V; `!hold 0` lets
 go), `!probe N` (for N frames, where the dock and the panel are

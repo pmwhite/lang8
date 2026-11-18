@@ -750,6 +750,13 @@ any screen.
   A skin fits it to the room above the keys, nothing scrolling: a
   section's last row that is tinted (a Show All, All N Verses) can be its
   header's link.
+- A skin that shows Reading as one panel says so (`sk_has_quick_more`;
+  the iPhone's ⋯, its README): Reading's screen begins with a Library
+  section, a row for each collection (Highlights, Notes, Bookmarks,
+  Learn), its detail how many it keeps (Learn's, the passages to
+  practise today), its tap `ACT_LIB_OPEN` (419) with the segment: the
+  Library opened at it, in place of Reading. Listen's row is on while
+  it plays, and the speed's row has the speed as its detail (`1×`).
 - Return (`submit`) goes to the first row's place: the reference, else the
   first book's chapters, else the first document found, else the first
   verse found.
