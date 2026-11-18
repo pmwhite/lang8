@@ -57,6 +57,15 @@ or in a Bookshelf module (kept by its name), and going back to one reads
 its document on the page again. Each pane is read at one line:
 the page's a third of the way down (where Go To leaves a verse), the
 panel's at its top.
+`core/commentary.l8` makes the reader's notes a commentary of their own,
+My Commentary, which the panel reads linked to the page as it reads any
+commentary, and sets notes into a version's text after the verses they
+are on where the reader asks (In the Text: their own, or a commentary's
+comments, each its beginning), through a hook of the layout's
+(`lay_aside`). Notes are written where they are read: the layout marks a
+note's words as a hand's to write in, a skin that can makes them editable
+there, and core keeps each change as it is typed; with the reader's notes
+in the text, a tap on a verse begins its note.
 `core/shelf.l8` keeps the Bookshelf: SWORD modules fetched when they are
 first opened rather than bundled. It has no screen of its own (it isn't
 the reader's Library of highlights, notes, bookmarks and Memory), and

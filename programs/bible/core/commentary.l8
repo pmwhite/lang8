@@ -1,0 +1,735 @@
+tag bible;
+
+use_tag std;
+
+// The reader's own commentary: their notes (store.l8's, each on a verse or
+// verses of a chapter, or on a chapter as a whole) read as a commentary is,
+// each under its verses' label, in a pane linked to the Bible beside it
+// (PaneDocument.Notes); and, as the reader asks (In the Text, a setting),
+// set into a version's text after the verses they are on, as blocks of
+// their own (STYLE_ASIDE).
+//
+// The reader writes them where they are read: a note's words are a hand's
+// to write in (its `edit` line), in their commentary or set into the text,
+// the skin's text view taking what is typed within them only and saying it
+// as it is typed (`notetext KEY WORDS`) and when the writing ends
+// (`noteend KEY`). Set into the text, a tap on a verse writes there (core
+// takes `tapverse` as that, not a selection): in the note on it, or in a
+// new one after it, begun as a draft (an empty note, laid out as one and
+// kept once it has words), the skin told where to write (`noteedit P
+// KEY`). SKINS.md, Panes: Writing.
+import "skin.l8";
+
+// ---- what is set into the text ----
+// What a version's text has set into it after its verses: nothing, the
+// reader's own notes (written there too), or a commentary's comments (a
+// Bookshelf module's, by its slot).
+type InText =
+    | Nothing
+    | Mine
+    | Comments { slot: int }
+
+// The setting's value for each (inText): 0 nothing, 1 the reader's own,
+// a commentary's slot plus IN_TEXT_COMMENTS_FIRST.
+IN_TEXT_COMMENTS_FIRST: int = 2;
+
+// What is set into the text: a commentary only while it is on the
+// Bookshelf, ready to read.
+in_text(): InText {
+    n: int = pref_get("inText");
+    if (n == 1) return InText.Mine;
+    if (n >= IN_TEXT_COMMENTS_FIRST) {
+        slot: int = n - IN_TEXT_COMMENTS_FIRST;
+        i: int = shelf_find_slot(slot);
+        if (i >= 0 && shelf_kind_at(i) == SHELF_KIND_COMMENTARY && shelf_ready_at(i)) return InText.Comments { slot: slot }
+    }
+    InText.Nothing
+}
+
+in_text_keep(choice: InText) {
+    set_pref("inText", match choice {
+        Nothing -> 0;
+        Mine -> 1;
+        Comments m -> m.slot + IN_TEXT_COMMENTS_FIRST
+    })
+}
+
+// Whether pane p's text has the reader's own notes set into it (a version
+// read there, Mine chosen).
+in_text_mine(p: int): bool {
+    if (pane_version(p) < 0) return false;
+    match in_text() {
+        Mine -> true;
+        _ -> false
+    }
+}
+
+// Whether a hand writes in pane p: in its notes set into the text, or in
+// the reader's own commentary (a skin that writes notes where they are
+// read: sk_has_inline_notes).
+commentary_writes_in(p: int): bool {
+    sk_has_inline_notes && (in_text_mine(p) || pane_reads_notes(p))
+}
+
+// Whether pane p's version marks a verse's note with a mark of its own (a
+// note set into the text is shown whole instead).
+commentary_marks_notes(p: int): bool {
+    !in_text_mine(p)
+}
+
+// The setting's row (Reading's): its choices nothing, the reader's own and
+// each commentary on the Bookshelf, in the Bookshelf's order.
+ACT_IN_TEXT: int = 420;
+
+in_text_row() {
+    ui_row(UI_CHOICE, ACT_IN_TEXT, 0);
+    ui_set_title("In the Text");
+    fbuf_n = 0;
+    fput_str("None|My Commentary");
+    chosen: int = match in_text() {
+        Nothing -> 0;
+        Mine -> 1;
+        Comments _m -> 0
+    };
+    k: int = IN_TEXT_COMMENTS_FIRST;
+    for i in 0..shelf_count() {
+        if (in_text_offered(i)) {
+            fput(124);
+            fput_shelf_short_title(i);
+            match in_text() {
+                Comments m -> if (shelf_slot_at(i) == m.slot) chosen = k;
+                _ -> { }
+            }
+            k = k + 1
+        }
+    }
+    ui_set_options_fbuf(chosen)
+}
+
+// Whether the Bookshelf's item i is offered to set into the text: a
+// commentary ready to read.
+in_text_offered(i: int): bool {
+    shelf_kind_at(i) == SHELF_KIND_COMMENTARY && shelf_ready_at(i)
+}
+
+// The row's choice k made (in_text_row's order): kept, and the panes'
+// versions laid out again.
+in_text_chosen(k: int) {
+    choice: InText = InText.Nothing;
+    if (k == 1) choice = InText.Mine;
+    n: int = IN_TEXT_COMMENTS_FIRST;
+    for i in 0..shelf_count() {
+        if (in_text_offered(i)) {
+            if (n == k) choice = InText.Comments { slot: shelf_slot_at(i) };
+            n = n + 1
+        }
+    }
+    commentary_writing_end();
+    aside_comments_forget();
+    in_text_keep(choice);
+    sk_save();
+    pane_relayout()
+}
+
+// ---- the notes of a chapter ----
+// The notes on chapter c: kept_notes' from first to before past (sorted by
+// key: the chapter's own first, then by first verse).
+type ChapterNotes = {
+    first: int;
+    past: int
+}
+
+chapter_notes(c: int): ChapterNotes {
+    ChapterNotes { first: note_find(verse_key(c, 0)), past: note_find(verse_key(c + 1,
+        0)) }
+}
+
+// A note being begun: on verses v to last of chapter c, laid out as an
+// empty note until its first words are kept (then it is one), and let go
+// if it is left empty. One at a time.
+type NoteDraft =
+    | NoDraft
+    | Draft { c: int, v: int, last: int }
+
+note_draft: NoteDraft = NoteDraft.NoDraft;
+
+// The draft's place in chapter c (its first verse; -1: none there).
+note_draft_verse(c: int): int {
+    match note_draft {
+        Draft d -> if (d.c == c && note_of(d.c, d.v) < 0) d.v else -1;
+        NoDraft -> -1
+    }
+}
+
+note_draft_last(): int {
+    match note_draft {
+        Draft d -> d.last;
+        NoDraft -> -1
+    }
+}
+
+// The note on verse v of chapter c: one whose verses hold it (the first,
+// the chapter's own only for verse 0), or -1.
+note_on_verse(c: int, v: int): int {
+    notes: ChapterNotes = chapter_notes(c);
+    for i in notes.first..notes.past {
+        first: int = key_verse(kept_notes[i].key);
+        last: int = if (kept_notes[i].end > first) kept_notes[i].end else first;
+        if (first == v || first > 0 && first <= v && v <= last) return i
+    }
+    -1
+}
+
+// A note's words, copied (to read with note_refs, which takes a buffer of
+// its own).
+note_words(i: int): []i8@new {
+    words: []i8 = new i8[kept_notes[i].text_n](0i8);
+    for x in 0..kept_notes[i].text_n words[x] = nt_pool[kept_notes[i].text_at + x];
+    words
+}
+
+// Words laid out into ctx in style, its references (note_refs') links in
+// link_style, as a hand may write in them (lay_edit, the note's key), each
+// line of them a paragraph, the last ended.
+lay_note_words(
+    ctx: *ChapterLayout,
+    words: []i8,
+    key: int,
+    style: int,
+    link_style: int
+) {
+    n: int = len(words);
+    note_refs(words, n);
+    lay_begin(ctx, style, PARA_PROSE, 0);
+    b: int = ctx.out_n;
+    at: int = 0;
+    for r in 0..nr_n {
+        if (nr_b[r] >= at) {
+            for x in at..nr_b[r] lay_byte(ctx, words[x] as int);
+            xr_book = nr_book[r];
+            xr_c = nr_c[r];
+            xr_v = (if (nr_v[r] > 0) nr_v[r] else 0);
+            xr_ce = (if (nr_ve[r] > 0) nr_c[r] else 0);
+            xr_ve = (if (nr_ve[r] > 0) nr_ve[r] else 0);
+            lay_begin(ctx, link_style, PARA_PROSE, xref_start());
+            ctx.run_arg2[ctx.runs - 1] = xref_end();
+            for x in nr_b[r]..nr_e[r] lay_byte(ctx, words[x] as int);
+            lay_begin(ctx, style, PARA_PROSE, 0);
+            at = nr_e[r]
+        }
+    }
+    for x in at..n lay_byte(ctx, words[x] as int);
+    lay_edit(ctx, b, key);
+    lay_byte(ctx, 10)
+}
+
+// Note i's words, or the draft's (none: i < 0), laid out (lay_note_words).
+lay_note(
+    ctx: *ChapterLayout,
+    i: int,
+    key: int,
+    style: int,
+    link_style: int
+) {
+    region {
+        words: []i8 = if (i >= 0) note_words(i) else new i8[0](0i8);
+        lay_note_words(ctx, words, key, style, link_style)
+    }
+}
+
+// ---- set into the text ----
+// What follows verse v of chapter c in a version's text with the reader's
+// own notes in it (layout.l8's lay_aside): each note whose verses end
+// there (the chapter's own, verse 0, before its first verse), and the
+// draft if it is there; whether there was any.
+lay_mine_after(ctx: *ChapterLayout, c: int, v: int): bool {
+    laid: bool = false;
+    notes: ChapterNotes = chapter_notes(c);
+    for i in notes.first..notes.past {
+        first: int = key_verse(kept_notes[i].key);
+        last: int = if (kept_notes[i].end > first) kept_notes[i].end else first;
+        if (last == v) {
+            lay_note(ctx, i, kept_notes[i].key, STYLE_ASIDE, STYLE_ASIDE_LINK);
+            laid = true
+        }
+    }
+    draft: int = note_draft_verse(c);
+    if (draft >= 0 && (if (note_draft_last() > draft) note_draft_last() else draft) == v) {
+        lay_note(ctx, -1, verse_key(c, draft), STYLE_ASIDE, STYLE_ASIDE_LINK);
+        laid = true
+    }
+    laid
+}
+
+// What pane p's version sets after its verses (layout.l8's lay_aside;
+// none: nothing).
+commentary_aside(p: int): ?fn(ctx: *ChapterLayout, c: int, v: int): bool {
+    if (pane_version(p) < 0) return null;
+    match in_text() {
+        Mine -> &lay_mine_after;
+        Comments _m -> &lay_comments_after;
+        Nothing -> null
+    }
+}
+
+// ---- a commentary's comments set into the text ----
+// A comment of the commentary set into the text (In the Text) is shown in
+// part, its first paragraph's opening words, at most
+// ASIDE_COMMENT_BYTES, ended at a word with an ellipsis, then a link that
+// reads the rest in the other pane: a whole comment (Spurgeon's run to
+// pages) would bury the verses it is on.
+ASIDE_COMMENT_BYTES: int = 220;
+
+// What follows verse v of chapter c in a version's text with a
+// commentary's comments in it: each comment whose verses end there, in
+// part (ASIDE_COMMENT_BYTES), under its label (the commentary's name and
+// the verses); whether there was any. A chapter whose comments haven't
+// been read yet has none set in until they have (commentary_comments_came).
+lay_comments_after(ctx: *ChapterLayout, c: int, v: int): bool {
+    slot: int = match in_text() {
+        Comments m -> m.slot;
+        _ -> -1
+    };
+    if (slot < 0 || v <= 0 || !aside_comments_read(slot, c)) return false;
+    laid: bool = false;
+    borrow aside_comments as comments {
+        for k in 0..len(comments.from) {
+            through: int = comments.through[k];
+            if ((if (through > comments.from[k]) through else comments.from[k]) == v) {
+                lay_comment_aside(ctx, c, comments, k);
+                laid = true
+            }
+        }
+    }
+    laid
+}
+
+// The comments of the chapter last set into the text, kept while its
+// verses are laid out one after another (a part asks for each verse's):
+// its commentary's slot and its chapter (-1: none).
+aside_comments: ?owned *ChapterComments = null;
+
+aside_comments_slot: int = -1;
+
+aside_comments_c: int = -1;
+
+// Whether chapter c's comments in the commentary in slot are kept now
+// (aside_comments), read if they weren't; not while they are on their way
+// (then commentary_comments_waiting).
+aside_comments_read(slot: int, c: int): bool {
+    if (aside_comments != null && aside_comments_slot == slot && aside_comments_c == c) return true;
+    drop aside_comments;
+    aside_comments_c = -1;
+    waiting: bool = commentary_comments_waiting;
+    commentary_comments_waiting = false;
+    aside_comments = own {
+        read: ChapterComments = shelf_chapter_comments(slot, c);
+        new ChapterComments {
+            from: read.from,
+            through: read.through,
+            words: read.words,
+            words_at: read.words_at
+        }
+    };
+    came: bool = !commentary_comments_waiting;
+    commentary_comments_waiting = waiting || commentary_comments_waiting;
+    if (came) {
+        aside_comments_slot = slot;
+        aside_comments_c = c
+    }
+    came
+}
+
+// The comments kept let go (what is set into the text changed, or more
+// of a commentary has come).
+aside_comments_forget() {
+    drop aside_comments;
+    aside_comments_c = -1
+}
+
+// Whether a chapter's comments to set into the text were on their way
+// when it was laid out (shelf_chapter_comments).
+commentary_comments_waiting: bool = false;
+
+// A module's text come (pane_modules_came): the comments set into the text
+// that were waited for, set in now (the versions' parts made again).
+commentary_comments_came() {
+    if (!commentary_comments_waiting) return;
+    commentary_comments_waiting = false;
+    aside_comments_forget();
+    match in_text() {
+        Comments _m -> ui_effect("marked", -1, -1);
+        _ -> { }
+    }
+}
+
+// Comment k of a chapter's comments set into the text, in part: under its
+// verses' label (the commentary is the one the reader chose: not named
+// again), its words cut at a word, then "Read on", a link that reads it
+// whole in the other pane (ASIDE_READS_ON); a comment shown whole, "Open".
+lay_comment_aside(
+    ctx: *ChapterLayout,
+    c: int,
+    comments: *ChapterComments,
+    k: int
+) {
+    lay_begin(ctx, STYLE_ASIDE_LABEL, PARA_PROSE, 0);
+    fbuf_n = 0;
+    fput_comment_verses(CommentSpan {
+        start: 0,
+        end: 0,
+        from: comments.from[k],
+        through: comments.through[k]
+    });
+    for x in 0..fbuf_n lay_byte(ctx, fbuf[x] as int);
+    lay_byte(ctx, 10);
+    lay_begin(ctx, STYLE_ASIDE, PARA_PROSE, 0);
+    words: []i8 = comments.words;
+    from: int = comments.words_at[k];
+    to: int = comments.words_at[k + 1];
+    cut: bool = to - from > ASIDE_COMMENT_BYTES;
+    end: int = if (cut) from + ASIDE_COMMENT_BYTES else to;
+    // (Ended at a word, or at least not within a UTF-8 character.)
+    if (cut) {
+        while (end > from + ASIDE_COMMENT_BYTES / 2 && words[end] as int != 32) end = end - 1;
+        while (end > from && (words[end] as int & 192) == 128) end = end - 1
+    }
+    for x in from..end lay_byte(ctx, words[x] as int);
+    if (cut) lay_str(ctx, "\â\€\¦");
+    lay_byte(ctx, 32);
+    lay_begin(ctx, STYLE_ASIDE_LINK, PARA_PROSE, ASIDE_READS_ON);
+    ctx.run_arg2[ctx.runs - 1] = verse_key(c, comments.from[k]);
+    lay_str(ctx, if (cut) "Read on" else "Open");
+    lay_byte(ctx, 10)
+}
+
+// A comment's "Read on": its STYLE_ASIDE_LINK run's arg (a reference's is
+// its start, never negative), run_arg2 the comment's first verse's key.
+// Sent as a link of its own kind (`link A B 4 KEY`); its tap,
+// `asideopen C V P`, reads the commentary at that verse in the other pane
+// than P (commentary_aside_open).
+ASIDE_READS_ON: int = -1;
+
+// `asideopen C V P`: the commentary set into pane p's text read at verse v
+// of chapter c in the other pane: the panel opened at it from the page;
+// from the panel, the page goes there.
+commentary_aside_open(p: int, c: int, v: int) {
+    slot: int = match in_text() {
+        Comments m -> m.slot;
+        _ -> -1
+    };
+    if (slot < 0 || c < 0 || c >= chapters) return;
+    if (p == PANE_PANEL) {
+        sk_goto_document(PlaceDocument.Module { slot: slot }, c, v, 0);
+        return
+    }
+    if (sk_beside_open() && sk_beside_reads_module(slot) && bb_reader_at() >= 0) {
+        pane_go_verse(PANE_PANEL, c, v, 0, PANE_GO_AT_ONCE);
+        bb_reader_placed(c, v, -1);
+        return
+    }
+    sk_beside_keep(PanelDocument.Module { slot: slot });
+    bb_reader_opening_c = c;
+    bb_reader_opening_v = v;
+    sk_beside_show_kept()
+}
+
+// ---- the reader's own commentary, read in a pane ----
+// Chapter c of it in parts, as a pane reads it: one part, each note an
+// anchor at its first verse (the chapter's own, at none: as a
+// commentary's introduction is); a chapter without notes in the run of
+// such chapters it is in, shown as one part.
+notes_chapter_parts(c: int): ChapterParts@new {
+    notes: ChapterNotes = chapter_notes(c);
+    draft: int = note_draft_verse(c);
+    if (notes.past == notes.first && draft < 0) {
+        // (The run: from the chapter after the last note before it to the
+        // one before the next note's.)
+        from: int = if (notes.first > 0) key_chapter(kept_notes[notes.first - 1].key) + 1 else 0;
+        to: int = if (notes.first < nt_n) key_chapter(kept_notes[notes.first].key) - 1 else chapters - 1;
+        match note_draft {
+            Draft d -> {
+                if (d.c < c && d.c >= from) from = d.c + 1;
+                if (d.c > c && d.c <= to) to = d.c - 1
+            }
+            NoDraft -> { }
+        }
+        made: ChapterParts = chapter_parts_none(-1);
+        made.gap_from = from;
+        made.gap_to = to;
+        return made
+    }
+    count: int = 0;
+    for i in notes.first..notes.past
+        if (key_verse(kept_notes[i].key) > 0) count = count + 1;
+    if (draft > 0) count = count + 1;
+    made: ChapterParts = ChapterParts {
+        division: 0,
+        starts: new int[1](0),
+        end: 0,
+        verses: new int[count](0),
+        verse_parts: new int[count](0),
+        verse_offsets: new int[count](0),
+        gap_from: -1,
+        gap_to: -1
+    };
+    // (Each anchor how many bytes in, as the notes are laid out: a label
+    // and the words, near enough for a skin's guesses.)
+    at: int = 0;
+    n: int = 0;
+    i: int = notes.first;
+    draft_put: bool = draft <= 0;
+    while (i < notes.past || !draft_put) {
+        use_draft: bool = !draft_put && (i >= notes.past || key_verse(kept_notes[i].key) > draft);
+        v: int = if (use_draft) draft else key_verse(kept_notes[i].key);
+        if (v > 0) {
+            made.verses[n] = v;
+            made.verse_offsets[n] = at;
+            n = n + 1
+        }
+        at = at + NOTE_LABEL_BYTES + (if (use_draft) 0 else kept_notes[i].text_n) + 1;
+        if (use_draft) draft_put = true else i = i + 1
+    }
+    made.end = at;
+    made
+}
+
+// About how many bytes a note's label is (laid out: "Verses 12â€“14").
+NOTE_LABEL_BYTES: int = 12;
+
+// Chapter c of the reader's own commentary laid out into ctx: its number,
+// then each note under its verses' label (the chapter's own, "Chapter";
+// the draft among them, empty), its words a hand's to write in; a chapter
+// without notes, a line saying so for its run.
+lay_notes_chapter(ctx: *ChapterLayout, c: int) {
+    region {
+        parts: ChapterParts = notes_chapter_parts(c);
+        if (parts.division < 0) {
+            lay_notes_gap(parts.gap_from, parts.gap_to, ctx);
+            return
+        }
+    }
+    lay_comment_opener(c, ctx);
+    notes: ChapterNotes = chapter_notes(c);
+    draft: int = note_draft_verse(c);
+    i: int = notes.first;
+    draft_put: bool = draft < 0;
+    while (i < notes.past || !draft_put) {
+        use_draft: bool = !draft_put && (i >= notes.past || key_verse(kept_notes[i].key) > draft);
+        v: int = if (use_draft) draft else key_verse(kept_notes[i].key);
+        last: int = if (use_draft) note_draft_last() else kept_notes[i].end;
+        if (v > 0) {
+            verse_open(ctx, v, v);
+            verse_here(ctx)
+        }
+        lay_begin(ctx, STYLE_COMMENT, PARA_PROSE, 0);
+        fbuf_n = 0;
+        if (v == 0) fput_str("Chapter") else fput_comment_verses(CommentSpan {
+            start: 0,
+            end: 0,
+            from: v,
+            through: if (last > v) last else v
+        });
+        for x in 0..fbuf_n lay_byte(ctx, fbuf[x] as int);
+        lay_byte(ctx, 10);
+        lay_note(ctx, if (use_draft) -1 else i, verse_key(c, v), STYLE_BODY, STYLE_LINK);
+        if (v > 0) verse_on(ctx);
+        if (use_draft) draft_put = true else i = i + 1
+    }
+}
+
+// A run's one part: a line that says there are no notes on its chapters
+// (from to to), and how to write one.
+lay_notes_gap(from: int, to: int, ctx: *ChapterLayout) {
+    layout_begin(ctx);
+    lay_begin(ctx, STYLE_REF, PARA_CENTER, 0);
+    fbuf_n = 0;
+    if (nt_n == 0) fput_str("No notes yet. Select a verse and tap Note to write one.") else {
+        fput_str("No notes on ");
+        whole: bool = ch_num[from] == 1 && ch_num[to] == book_count[ch_book[to]];
+        if (whole) {
+            fput_str(book_name(ch_book[from]));
+            if (ch_book[to] != ch_book[from]) {
+                fput_str(" to ");
+                fput_str(book_name(ch_book[to]))
+            }
+        } else {
+            fput_title(from);
+            if (to != from) {
+                fput_str(" to ");
+                fput_title(to)
+            }
+        }
+        fput(46)
+    }
+    for k in 0..fbuf_n lay_byte(ctx, fbuf[k] as int);
+    lay_byte(ctx, 10)
+}
+
+// Part k of chapter c of the reader's own commentary as pane p's lines (a
+// chapter in a run without notes: the run's one part, as its first's).
+pane_write_notes_part(p: int, c: int, k: int) {
+    region {
+        parts: ChapterParts = notes_chapter_parts(c);
+        at_c: int = if (parts.gap_from >= 0) parts.gap_from else c;
+        if (parts.gap_from >= 0) {
+            layout_begin(&sk_layout);
+            lay_notes_gap(parts.gap_from, parts.gap_to, &sk_layout)
+        } else {
+            layout_begin(&sk_layout);
+            lay_notes_chapter(&sk_layout, c)
+        }
+        measure_chapter(&sk_layout, &sk_ranges, at_c);
+        sk_write_laid(at_c, p, LaidPart {
+            coming: false,
+            marked: false,
+            esv: false,
+            part: 0,
+            parts: 1,
+            verses: parts.verses,
+            verse_parts: parts.verse_parts,
+            part_bytes: chapter_part_bytes(&parts),
+            verse_offsets: parts.verse_offsets,
+            gap_from: parts.gap_from,
+            gap_to: parts.gap_to
+        });
+        _k: int = k
+    }
+}
+
+// The reader's own commentary's name, as a pane's title and Go To name it.
+notes_title: str = "My Commentary";
+
+fput_notes_title() {
+    fput_str(notes_title)
+}
+
+// ---- writing ----
+// The note being written in (its key; -1: none).
+commentary_writing_key: int = -1;
+
+// `tapverse C V P` where pane p is written in: the writing point put in
+// the note on the verse, or in a new one begun after it (the draft).
+commentary_write_at(p: int, c: int, v: int) {
+    if (c < 0 || c >= chapters || v <= 0) return;
+    commentary_writing_end();
+    i: int = note_on_verse(c, v);
+    key: int = if (i >= 0) kept_notes[i].key else verse_key(c, v);
+    if (i < 0) note_draft = NoteDraft.Draft { c: c, v: v, last: v };
+    commentary_write_in(p, key)
+}
+
+// The note keyed key (or the draft) written in, in pane p: the panes
+// showing it made again with it in them, and the skin told where to write
+// (`noteedit P KEY`).
+commentary_write_in(p: int, key: int) {
+    commentary_writing_key = key;
+    commentary_panes_changed();
+    ui_str("noteedit ");
+    ui_int(p);
+    ui_byte(32);
+    ui_int(key);
+    ui_byte(10)
+}
+
+// `notetext KEY WORDS`: the words of the note keyed key as they are
+// written now, kept (a draft's first words make it a note; a note's last
+// taken away, it is the draft again, until the writing ends).
+commentary_note_text(
+    key: int,
+    words: []i8,
+    from: int,
+    to: int
+) {
+    c: int = key_chapter(key);
+    v: int = key_verse(key);
+    if (c < 0 || c >= chapters) return;
+    i: int = note_of(c, v);
+    last: int = if (i >= 0) kept_notes[i].end else match note_draft {
+        Draft d -> if (d.c == c && d.v == v) d.last else v;
+        NoDraft -> v
+    };
+    n: int = to - from;
+    if (n == 0) {
+        if (i >= 0) {
+            note_draft = NoteDraft.Draft { c: c, v: v, last: last };
+            set_note(c, v, 0, words, 0)
+        }
+    } else {
+        region {
+            text: []i8 = new i8[n](0i8);
+            for x in 0..n text[x] = words[from + x];
+            set_note(c, v, last, text, n)
+        }
+    }
+    sk_kept_c = c;
+    sk_kept(SK_KEPT_NOTES);
+    sk_kept_c = -1
+}
+
+// `noteend KEY`: the writing in the note keyed key ended: the draft let go
+// (an empty one is no note), and the panes showing it made again, its
+// references linked.
+commentary_note_end(key: int) {
+    // (Another note begun since, by core: its own end lays out what
+    // changed. One begun by the skin alone, a tap in its words, core never
+    // heard of: ended all the same.)
+    if (commentary_writing_key >= 0 && key != commentary_writing_key) return;
+    commentary_writing_key = key;
+    commentary_writing_end()
+}
+
+// The writing (if any) ended, and what it changed shown.
+commentary_writing_end() {
+    if (commentary_writing_key < 0) return;
+    commentary_writing_key = -1;
+    note_draft = NoteDraft.NoDraft;
+    commentary_panes_changed()
+}
+
+// The panes that show the reader's notes made again: a version with them
+// set in, its parts asked for again where they are (`marked`); the
+// reader's own commentary, read again at its place (its runs without
+// notes may have changed).
+commentary_panes_changed() {
+    for p in 0..PANES {
+        if (pane_reads_notes(p)) {
+            pane_anchors_forget(p);
+            pane_reread(p)
+        }
+    }
+    ui_effect("marked", -1, -1)
+}
+
+// A note (on verses v to last of chapter c) opened from elsewhere (the
+// tray's Note, a note's mark, the Library): written where it is read, in
+// the page if its notes are set into its text, else in the reader's own
+// commentary in the panel, opened at it; a skin without the panel, the
+// note's screen.
+commentary_open_note(c: int, v: int, last: int) {
+    if (c < 0 || c >= chapters) return;
+    commentary_writing_end();
+    i: int = note_on_verse(c, v);
+    key: int = if (i >= 0) kept_notes[i].key else verse_key(c, v);
+    if (i < 0) note_draft = NoteDraft.Draft { c: c, v: v, last: if (last > v) last else v };
+    if (in_text_mine(PANE_PAGE)) {
+        sk_goto(c, v);
+        commentary_write_in(PANE_PAGE, key);
+        return
+    }
+    sk_beside_read_notes(c, v);
+    commentary_write_in(PANE_PANEL, key)
+}
+
+// The note on verse v of chapter c shown where it is read, not written in
+// (the Library's row): in the page if its notes are set into its text,
+// else in the reader's own commentary in the panel, opened at it.
+commentary_show_note(c: int, v: int) {
+    if (c < 0 || c >= chapters) return;
+    commentary_writing_end();
+    if (in_text_mine(PANE_PAGE)) {
+        sk_goto(c, v);
+        return
+    }
+    sk_beside_read_notes(c, v)
+}

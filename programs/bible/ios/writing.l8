@@ -1,0 +1,374 @@
+tag vellum;
+
+use_tag std, ios, bible, bible_wire;
+
+// Writing in a note where it is read (core/commentary.l8; SKINS.md, Panes:
+// Writing): the words of a part core says a hand may write in (its `edit`
+// lines) are written in its own text view, made editable while they are,
+// whatever is typed kept within them (the verses about them, and the other
+// notes, are the reader's to read, not to change). What is written is said
+// to core as it is typed (`notetext KEY WORDS`) and when the writing ends
+// (`noteend KEY`: the keyboard put away, a tap outside the note); core then
+// lays the note out again (its references linked). A tap in a note's words
+// writes there; core says where to write when it begins one
+// (`noteedit P KEY`), and it is written in as soon as its words are shown.
+import "../../ios/objc.l8";
+
+import "kit.l8";
+
+import "part.l8";
+
+// The note being written in: its pane, the text view it is in (0: none),
+// its key, and where its words are in the text view now (they grow and
+// shrink as they are written).
+type Writing = {
+    pane: int;
+    view: int;
+    key: int;
+    b: int;
+    e: int
+}
+
+writing: Writing = Writing {
+    pane: -1,
+    view: 0,
+    key: -1,
+    b: 0,
+    e: 0
+};
+
+// A note core said to write in that isn't shown yet (key -1: none): begun
+// as soon as its words are (writing_due_check).
+writing_due: Writing = Writing {
+    pane: -1,
+    view: 0,
+    key: -1,
+    b: 0,
+    e: 0
+};
+
+// How far the keyboard reaches up the window from its foot (0: away).
+keyboard_cover: f64 = 0.0f64;
+
+writing_now(): bool {
+    writing.view != 0
+}
+
+// `noteedit P KEY`: the note written in, where its words are shown; else
+// as soon as they are.
+noteedit_line(p: int, key: int) {
+    if (p < 0 || p >= PANES) return;
+    writing_due = Writing {
+        pane: p,
+        view: 0,
+        key: key,
+        b: 0,
+        e: 0
+    };
+    writing_due_check()
+}
+
+// The note core said to write in, begun if its words are shown now.
+writing_due_check() {
+    if (writing_due.key < 0) return;
+    p: int = writing_due.pane;
+    pane: *Pane = pane_of(p);
+    for i in 0..pane.n {
+        s: int = part_slot(p, pane.chapter[i], pane.part[i]);
+        if (s >= 0) {
+            w: int = -1;
+            borrow parts[s] as part {
+                w = writable_of(part, writing_due.key)
+            }
+            if (w >= 0) {
+                writing_due.key = -1;
+                writing_begin(p, i, w, -1);
+                return
+            }
+        }
+    }
+}
+
+// Row i of pane p written in, in its words w, the writing point at shown
+// place at (-1: their end).
+writing_begin(
+    p: int,
+    i: int,
+    w: int,
+    at: int
+) {
+    pane: *Pane = pane_of(p);
+    tv: int = pane.view[i];
+    s: int = part_slot(p, pane.chapter[i], pane.part[i]);
+    if (s < 0 || tv == 0) return;
+    if (writing.view != 0 && writing.view != tv) writing_finish();
+    b: int = 0;
+    e: int = 0;
+    key: int = -1;
+    attrs: int = 0;
+    borrow parts[s] as part {
+        b = part.writables[w].shown_b;
+        e = part.writables[w].shown_e;
+        key = part.writables[w].key;
+        // (What is typed in the style of the words there: a note's in the
+        // text, or in the reader's own commentary.)
+        style: int = STYLE_BODY;
+        para: int = PARA_PROSE;
+        for span in part.spans {
+            if (span.b <= part.writables[w].b && part.writables[w].b < span.e) {
+                style = span.style;
+                para = span.para
+            }
+        }
+        attrs = run_attrs(type_of(p), part.flags, style, para)
+    }
+    writing = Writing {
+        pane: p,
+        view: tv,
+        key: key,
+        b: b,
+        e: e
+    };
+    msg1(tv, sel("setEditable:"), 1);
+    msg1(tv, sel("setTypingAttributes:"), attrs);
+    point: int = if (at < b || at > e) e else at;
+    msg2(tv, sel("setSelectedRange:"), point, 0);
+    if (!truth(msg(tv, sel("isFirstResponder")))) msg(tv, sel("becomeFirstResponder"));
+    writing_panel_raise(p);
+    writing_reveal()
+}
+
+// The writing ended here (a tap outside the note, its row let go): the
+// keyboard put away, which ends it (writing_ended).
+writing_finish() {
+    tv: int = writing.view;
+    if (tv == 0) return;
+    if (truth(msg(tv, sel("isFirstResponder")))) msg(tv, sel("resignFirstResponder")) else writing_ended(tv)
+}
+
+// The writing in text view tv ended: it is read again, not written, and
+// core told between frames (writing_end_tell), not now: core then lays the
+// note out again, every pane's rows made again, which must not happen
+// within UIKit's callback or a row being let go.
+writing_ended(tv: int) {
+    if (tv == 0 || tv != writing.view) return;
+    writing_end_due = writing.key;
+    writing.view = 0;
+    writing.key = -1;
+    msg1(tv, sel("setEditable:"), 0);
+    writing_panel_lower();
+    pane_settle_soon()
+}
+
+// The note whose writing ended, for core to be told (-1: none).
+writing_end_due: int = -1;
+
+// `noteend KEY`, for a writing that ended (pane_settle_fired's).
+writing_end_tell() {
+    key: int = writing_end_due;
+    if (key < 0) return;
+    writing_end_due = -1;
+    send1("noteend", key)
+}
+
+// Whether a change to the words of text view tv from at (n of them) may be
+// made: within the note's words; kept track of as they grow or shrink.
+writing_may_change(
+    tv: int,
+    at: int,
+    n: int,
+    typed: int
+): bool {
+    if (tv != writing.view || at < writing.b || at + n > writing.e) return false;
+    writing.e = writing.e + ns_length(typed) - n;
+    true
+}
+
+// The note's words changed: said to core, its row as tall as they are now,
+// the writing point in sight.
+writing_changed(tv: int) {
+    if (tv != writing.view) return;
+    words: int = msg2(msg(tv, sel("text")), sel("substringWithRange:"), writing.b,
+        writing.e - writing.b);
+    out_word("notetext");
+    out_arg(writing.key);
+    out_byte(32);
+    out_ns(words);
+    out_end();
+    writing_row_grew();
+    writing_reveal()
+}
+
+// The selection kept within the note's words.
+writing_selection_changed(tv: int) {
+    if (tv != writing.view) return;
+    range: int = msg(tv, sel("selectedTextRange"));
+    if (range == 0) return;
+    at: int = msg2(tv, sel("offsetFromPosition:toPosition:"), msg(tv, sel("beginningOfDocument")),
+        msg(range, sel("start")));
+    n: int = writing_selected_length(tv);
+    from: int = if (at < writing.b) writing.b else if (at > writing.e) writing.e else at;
+    to: int = if (at + n > writing.e) writing.e else at + n;
+    if (from != at || to - from != n) msg2(tv, sel("setSelectedRange:"), from, if (to > from) to - from else 0)
+}
+
+// How many characters text view tv has selected.
+writing_selected_length(tv: int): int {
+    range: int = msg(tv, sel("selectedTextRange"));
+    if (range == 0) return 0;
+    msg2(tv, sel("offsetFromPosition:toPosition:"), msg(range, sel("start")), msg(range,
+        sel("end")))
+}
+
+// The row written in as tall as its words are now: the rows below moved by
+// as much.
+writing_row_grew() {
+    p: int = writing.pane;
+    pane: *Pane = pane_of(p);
+    for i in 0..pane.n {
+        if (pane.view[i] == writing.view) {
+            was: f64 = pane.h[i];
+            geo_of(writing.view, "textContainerInset");
+            h: f64 = geo[0] + geo[2] + text_height(writing.view);
+            d: f64 = h - was;
+            if (d != 0.0f64) {
+                pane.h[i] = h;
+                row_frame_set(pane, i);
+                for j in i + 1..pane.n pane_shift_row(pane, j, d);
+                pane_bounds_set(p);
+                follow_links_stale()
+            }
+            return
+        }
+    }
+}
+
+// The writing point in sight above the keyboard: the pane moved, if it is
+// below it (or above the pane's top), so that it is two fifths down what
+// is in sight.
+writing_reveal() {
+    tv: int = writing.view;
+    if (tv == 0) return;
+    p: int = writing.pane;
+    pane: *Pane = pane_of(p);
+    row: int = -1;
+    for i in 0..pane.n
+        if (pane.view[i] == tv) row = i;
+    if (row < 0 || pane.scroll == 0) return;
+    range: int = msg(tv, sel("selectedTextRange"));
+    if (range == 0) return;
+    geo_of1(tv, "caretRectForPosition:", msg(range, sel("end")));
+    if (geo[3] <= 0.0f64 || geo[1] > 1.0e9f64) return;
+    caret_top: f64 = pane.y[row] + geo[1];
+    caret_bottom: f64 = caret_top + geo[3];
+    top: f64 = pane_top(pane);
+    view: Rect = bounds_of(pane.scroll);
+    // (The keyboard's cover of the pane: it reaches up from the window's
+    // foot, the pane's own foot as far above it as the pane's place in the
+    // window says.)
+    covered: f64 = keyboard_cover - (chrome_bounds.h - view_window_bottom(pane.scroll));
+    if (covered < 0.0f64) covered = 0.0f64;
+    bottom: f64 = view.y + view.h - covered - type_of(p).em;
+    if (caret_bottom <= bottom && caret_top >= top) return;
+    seen: f64 = bottom - top;
+    pane_set_offset(p, caret_top - seen * 0.4f64 - pane.chrome_top)
+}
+
+// Where a view's foot is down its window: each frame's origin, less each
+// superview's bounds' origin, up to the window.
+view_window_bottom(view: int): f64 {
+    top: f64 = 0.0f64;
+    v: int = view;
+    while (v != 0 && msg(v, sel("superview")) != 0) {
+        up: int = msg(v, sel("superview"));
+        top = top + frame_of(v).y - bounds_of(up).y;
+        v = up
+    }
+    top + frame_of(view).h
+}
+
+// The split's share the panel had before writing in it raised it (-1: not
+// raised).
+writing_split_was: f64 = -1.0f64;
+
+// The panel's share of a stacked split while it is written in: most of the
+// window, so that what is written shows above the keys.
+WRITING_PANEL_SHARE: f64 = 0.78f64;
+
+// Writing in the panel's half of a stacked split: the panel raised over
+// the page; let down again as the writing ends.
+writing_panel_raise(p: int) {
+    if (p != PANE_PANEL || !panel.shown || panel.column || panel.full || panel_side()) return;
+    was: f64 = panel_fraction();
+    if (was >= WRITING_PANEL_SHARE || writing_split_was >= 0.0f64) return;
+    writing_split_was = was;
+    panel_fraction_keep(WRITING_PANEL_SHARE);
+    panel_split_animate()
+}
+
+writing_panel_lower() {
+    if (writing_split_was < 0.0f64) return;
+    panel_fraction_keep(writing_split_was);
+    writing_split_was = -1.0f64;
+    if (panel.shown && !panel.column) panel_split_animate()
+}
+
+// The keyboard moved (UIKeyboardWillChangeFrameNotification): how far it
+// covers the window kept, and the writing point kept in sight.
+writing_keyboard_moved(_self: int, _cmd: int, notification: int): int {
+    info: int = msg(notification, sel("userInfo"));
+    if (info == 0) return 0;
+    value: int = msg1(info, sel("objectForKey:"), objc_const("UIKeyboardFrameEndUserInfoKey"));
+    if (value == 0) return 0;
+    geo_of(value, "CGRectValue");
+    keyboard_cover = chrome_bounds.h - geo[1];
+    if (keyboard_cover < 0.0f64) keyboard_cover = 0.0f64;
+    writing_reveal();
+    0
+}
+
+// ---- the text views' delegate (the panes') ----
+writing_should_change(
+    _self: int,
+    _cmd: int,
+    tv: int,
+    at: int,
+    n: int,
+    typed: int
+): int {
+    if (writing_may_change(tv, at, n, typed)) 1 else 0
+}
+
+writing_did_change(_self: int, _cmd: int, tv: int): int {
+    writing_changed(tv);
+    0
+}
+
+writing_did_select(_self: int, _cmd: int, tv: int): int {
+    writing_selection_changed(tv);
+    0
+}
+
+writing_did_end(_self: int, _cmd: int, tv: int): int {
+    writing_ended(tv);
+    0
+}
+
+// The writing's methods on the panes' delegate (the text views' too), and
+// the keyboard watched.
+writing_methods_add(delegate: int) {
+    add_method4(delegate, sel("textView:shouldChangeTextInRange:replacementText:"),
+        &writing_should_change, "B@:@{_NSRange=QQ}@");
+    add_method1(delegate, sel("textViewDidChange:"), &writing_did_change, "v@:@");
+    add_method1(delegate, sel("textViewDidChangeSelection:"), &writing_did_select,
+        "v@:@");
+    add_method1(delegate, sel("textViewDidEndEditing:"), &writing_did_end, "v@:@");
+    add_method1(delegate, sel("vellumKeyboardMoved:"), &writing_keyboard_moved, "v@:@")
+}
+
+writing_keyboard_watch(delegate: int) {
+    center: int = msg(cls("NSNotificationCenter"), sel("defaultCenter"));
+    msg2(center, sel("removeObserver:name:"), delegate, objc_const("UIKeyboardWillChangeFrameNotification"));
+    msg4(center, sel("addObserver:selector:name:object:"), delegate, sel("vellumKeyboardMoved:"),
+        objc_const("UIKeyboardWillChangeFrameNotification"), 0)
+}

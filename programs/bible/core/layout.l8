@@ -82,8 +82,23 @@ type ChapterLayout = {
     xr_v: int;
     xr_ce: int;
     xr_ve: int;
-    xn_end: int
+    xn_end: int;
+    // What the reader asks to be set after a verse (core/commentary.l8's
+    // notes): given the layout, the chapter and a verse (0: the chapter's
+    // own, before its first verse), it lays what follows the verse and says
+    // whether it laid anything. None: nothing is (the original's chapters,
+    // laid out with their apparatus, never have any).
+    lay_aside: ?fn(ctx: *ChapterLayout, c: int, v: int): bool;
+    // The words a hand may write in (a note of the reader's own): each from
+    // edit_b to edit_e in out, and its note's key (store.l8's).
+    edits: int;
+    edit_b: []int;
+    edit_e: []int;
+    edit_key: []int
 }
+
+// The places a layout keeps for words a hand may write in, at most.
+LAY_EDITS_MOST: int = 256;
 
 // The verses a chapter's layout holds, at most: a commentary's chapter may
 // go through its verses more than once (core/shelf_folio.l8's lay_comment),
@@ -141,7 +156,12 @@ chapter_layout(): ChapterLayout@new {
         xr_v: 0,
         xr_ce: 0,
         xr_ve: 0,
-        xn_end: 0
+        xn_end: 0,
+        lay_aside: null,
+        edits: 0,
+        edit_b: new int[LAY_EDITS_MOST](0),
+        edit_e: new int[LAY_EDITS_MOST](0),
+        edit_key: new int[LAY_EDITS_MOST](0)
     }
 }
 
@@ -158,7 +178,8 @@ layout_begin(ctx: *ChapterLayout) {
     ctx.lay_orig = false;
     ctx.lay_rtl = false;
     ctx.ow_n = 0;
-    ctx.ap_n = 0
+    ctx.ap_n = 0;
+    ctx.edits = 0
 }
 
 // Render a complete chapter without selecting its version or touching
@@ -174,6 +195,7 @@ layout_chapter_from(source: *TextData, ctx: *ChapterLayout, c: int) {
     ctx.lay_prev_i = 0;
     ctx.og_acc_line = -1;
     ctx.og_acc_w = 0;
+    ctx.edits = 0;
     layout_append(source, ctx, c)
 }
 
@@ -359,6 +381,37 @@ verse_on(ctx: *ChapterLayout) {
     if (ctx.verse_count > 0) ctx.verse_end[ctx.verse_count - 1] = ctx.out_n
 }
 
+// What the reader asks to follow verse v of chapter c laid out after it
+// (lay_aside), the paragraph open ended first if it has words; whether
+// anything was (else nothing is changed).
+lay_aside_after(
+    ctx: *ChapterLayout,
+    c: int,
+    v: int,
+    paragraph_has_words: bool
+): bool {
+    aside: ?fn(ctx: *ChapterLayout, c: int, v: int): bool = ctx.lay_aside;
+    if (aside == null || ctx.lay_orig) return false;
+    out_n: int = ctx.out_n;
+    runs: int = ctx.runs;
+    if (paragraph_has_words) lay_byte(ctx, 10);
+    if (aside(ctx, c, v)) return true;
+    ctx.out_n = out_n;
+    ctx.runs = runs;
+    if (runs > 0) ctx.run_end[runs - 1] = out_n;
+    false
+}
+
+// The edit's place kept: the words from b to here in out are a note's
+// (key), a hand's to write in (lay_aside's).
+lay_edit(ctx: *ChapterLayout, b: int, key: int) {
+    if (ctx.edits >= len(ctx.edit_b)) return;
+    ctx.edit_b[ctx.edits] = b;
+    ctx.edit_e[ctx.edits] = ctx.out_n;
+    ctx.edit_key[ctx.edits] = key;
+    ctx.edits = ctx.edits + 1
+}
+
 layout_append(source: *TextData, ctx: *ChapterLayout, c: int) {
     ctx.lay_placeholder = source.starts[c] < 0;
     b: int = ch_book[c];
@@ -421,6 +474,11 @@ layout_append(source: *TextData, ctx: *ChapterLayout, c: int) {
     lines: bool = ctx.lay_verse_lines;
     // In a psalm's title (which a footnote's mark may be inside).
     in_title: bool = false;
+    // The verse (its index) the reader's asides were last set after: each
+    // verse's once it has ended, before the paragraph, heading or verse
+    // after it; the chapter's own (-1) before its first verse, if this is
+    // the chapter's beginning.
+    asided: int = if (mid) -1 else -2;
     e_ch: int = source.ends[c];
     if (mid && p < e_ch) {
         q: int = source_verse_block(source, c, ctx.lay_v1);
@@ -437,6 +495,17 @@ layout_append(source: *TextData, ctx: *ChapterLayout, c: int) {
         if (in_title && k != 70 && k != 100) {
             if (ctx.lay_headings) lay_byte(ctx, 10);
             in_title = false
+        }
+        // (A verse ended: before a verse, a stanza's break or a heading
+        // after it, or a paragraph a verse begins.)
+        ends_verse: bool = k == 86 || ctx.verse_count > 0 && (k == 95 || k == 80 && e + 1 < e_ch && source.data[e + 1] as int == 86 || !in_title && is_heading_line(k));
+        if (ends_verse && ctx.lay_aside != null && ctx.verse_count - 1 > asided) {
+            asided = ctx.verse_count - 1;
+            if (lay_aside_after(ctx, c, if (asided < 0) 0 else ctx.verse_num[asided],
+                open && words)) {
+                open = false;
+                words = false
+            }
         }
         if (in_title) {
             // A footnote's mark in the title, or the title going on.
@@ -551,6 +620,8 @@ layout_append(source: *TextData, ctx: *ChapterLayout, c: int) {
         p = e + 1
     }
     if (in_title && ctx.lay_headings) lay_byte(ctx, 10);
+    if (ctx.lay_aside != null && ctx.verse_count > 0 && ctx.verse_count - 1 > asided && lay_aside_after(ctx,
+        c, ctx.verse_num[ctx.verse_count - 1], open && words)) words = false;
     if (open && words) lay_para_end(source, ctx)
 }
 

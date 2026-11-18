@@ -48,6 +48,8 @@ import "row_menus.l8";
 
 import "note.l8";
 
+import "commentary.l8";
+
 import "practice.l8";
 
 import "day.l8";
@@ -374,6 +376,12 @@ sk_has_quick_goto: bool = false;
 // settings begin with the Library's collections, each a row opening the
 // Library at it (ACT_LIB_OPEN), how many it keeps its detail.
 sk_has_quick_more: bool = false;
+
+// Whether the skin writes notes where they are read (core/commentary.l8):
+// a note's `edit` words a hand's to write in, what is written said
+// (`notetext`, `noteend`), `noteedit` done. A note opened is written in the
+// page or the panel then, not on its screen (SCR_NOTE).
+sk_has_inline_notes: bool = false;
 
 // Whether the host keeps ribbons and plans (Go To's first sections); and
 // the chapters the ribbons show, which Recent leaves out.
@@ -1039,17 +1047,19 @@ type ChapterHead =
 // Chapter c of version t laid out as the reader lays it out, headed as
 // head says (into sk_layout and sk_ranges).
 sk_lay_version(t: int, c: int, head: ChapterHead) {
-    sk_lay_version_verses(t, c, head, 0, 0)
+    sk_lay_version_verses(t, c, head, 0, 0, null)
 }
 
 // The same, its verses v1 to v2 alone (0: from its start; to its end; each
-// verse's headings with it).
+// verse's headings with it), what aside lays set after its verses (none:
+// nothing; layout.l8's lay_aside).
 sk_lay_version_verses(
     t: int,
     c: int,
     head: ChapterHead,
     v1: int,
-    v2: int
+    v2: int,
+    aside: ?fn(ctx: *ChapterLayout, c: int, v: int): bool
 ) {
     sk_apply_prefs();
     ctx: *ChapterLayout = &sk_layout;
@@ -1061,6 +1071,7 @@ sk_lay_version_verses(
     });
     ctx.lay_v1 = v1;
     ctx.lay_v2 = v2;
+    ctx.lay_aside = aside;
     ctx.lay_verse_numbers = lay_verse_numbers;
     ctx.lay_headings = lay_headings;
     ctx.lay_notes = lay_notes;
@@ -1131,6 +1142,7 @@ sk_write_chapter(c: int) {
 // end): a part after the first begins with its verses alone (into
 // sk_layout and sk_ranges).
 sk_lay_part(
+    p: int,
     t: int,
     c: int,
     head: ChapterHead,
@@ -1138,7 +1150,8 @@ sk_lay_part(
     v1: int,
     v2: int
 ) {
-    sk_lay_version_verses(t, c, if (k > 0) ChapterHead.NumberOnly else head, v1, v2)
+    sk_lay_version_verses(t, c, if (k > 0) ChapterHead.NumberOnly else head, v1, v2,
+        commentary_aside(p))
 }
 
 // What sk_layout holds: part `part` of a chapter in `parts` (0: not known
@@ -1170,6 +1183,7 @@ type LaidPart = {
 sk_write_laid(c: int, p: int, laid: LaidPart) {
     ctx: *ChapterLayout = &sk_layout;
     u: []int = sk_ranges.u16_at;
+    pane: int = p;
     pane_part_word(p);
     ui_int(c);
     ui_byte(32);
@@ -1237,14 +1251,27 @@ sk_write_laid(c: int, p: int, laid: LaidPart) {
         }
     }
     // (Its links: a footnote's mark, KIND 0, its F line's place; a
-    // reference (a heading's, a plan's passage, a document's own), 1, the
+    // reference (a heading's, a plan's passage, a document's own, a note's
+    // set into the text), 1, the
     // reference; a word of the original's apparatus, 2,
     // the word. A commentary's mark of a note in its text is none.)
     for r in 0..ctx.runs {
         st: int = ctx.run_style[r];
         b: int = if (r == 0) 0 else ctx.run_end[r - 1];
         e: int = ctx.run_end[r];
-        reference: bool = st == STYLE_XREF || st == STYLE_PASSAGE || st == STYLE_LINK;
+        reads_on: bool = st == STYLE_ASIDE_LINK && ctx.run_arg[r] == ASIDE_READS_ON;
+        reference: bool = st == STYLE_XREF || st == STYLE_PASSAGE || st == STYLE_LINK || st == STYLE_ASIDE_LINK && !reads_on;
+        if (e > b && reads_on) {
+            // (A comment set into the text, read on in the other pane: KIND
+            // 4, its first verse's key.)
+            ui_str("link ");
+            ui_int(u[b]);
+            ui_byte(32);
+            ui_int(u[e]);
+            ui_str(" 4 ");
+            ui_int(ctx.run_arg2[r]);
+            ui_byte(10)
+        }
         if (e > b && (st == STYLE_NOTE && ctx.run_arg[r] != NOTE_IN_TEXT || reference || st == STYLE_APP_ENTRY)) {
             ui_str("link ");
             ui_int(u[b]);
@@ -1271,7 +1298,7 @@ sk_write_laid(c: int, p: int, laid: LaidPart) {
         }
     }
     // (The chapter's own note, marked after its label: verse 0.)
-    if (marked && ctx.label_end > 0 && note_of(c, 0) >= 0) ui_str("mark 0 - 0 1\n");
+    if (marked && ctx.label_end > 0 && note_of(c, 0) >= 0 && commentary_marks_notes(pane)) ui_str("mark 0 - 0 1\n");
     // (What is marked on its verses: a highlight's color, a bookmark, a
     // note.)
     for i in 0..ctx.verse_count {
@@ -1279,7 +1306,7 @@ sk_write_laid(c: int, p: int, laid: LaidPart) {
         if (marked && ctx.verse_begin[i] >= 0 && v > 0 && (i == 0 || ctx.verse_num[i - 1] != v)) {
             h: int = highlight_of(c, v);
             b: bool = is_bookmarked(c, v);
-            n: bool = note_of(c, v) >= 0;
+            n: bool = note_of(c, v) >= 0 && commentary_marks_notes(pane);
             if (h >= 0 || b || n) {
                 ui_str("mark ");
                 ui_int(v);
@@ -1294,6 +1321,16 @@ sk_write_laid(c: int, p: int, laid: LaidPart) {
         }
     }
     if (esv_tail) ew_tail_runs(u[ctx.out_n]);
+    // (edit B E KEY: words a hand may write in, the note keyed KEY's.)
+    for i in 0..ctx.edits {
+        ui_str("edit ");
+        ui_int(u[ctx.edit_b[i]]);
+        ui_byte(32);
+        ui_int(u[ctx.edit_e[i]]);
+        ui_byte(32);
+        ui_int(ctx.edit_key[i]);
+        ui_byte(10)
+    }
     // (anchor V K AT, each anchor the chapter has, in order, the part it
     // is in and how many bytes into it; sizes B..., how many bytes each of
     // the chapter's parts is; gap C0 C1, the chapters without comments it
@@ -1449,7 +1486,7 @@ sk_build(i: int) {
         a: int = sk_args[i];
         if (k >= SCR_SHELF_ITEM && k <= SCR_SHELF_BOOK) sk_build_shelf_screen(sk_ids[i],
             k, a) else if (k == SCR_VERSION_DETAILS) sk_build_version_details(sk_ids[i],
-            a) else if (k == SCR_BESIDE_BIBLE) sk_build_beside_bible(sk_ids[i], a) else if (k == SCR_GOTO) sk_build_goto(sk_ids[i]) else if (k == SCR_BOOKS) sk_build_books(sk_ids[i]) else if (k == SCR_BROWSE) sk_build_browse(sk_ids[i]) else if (k == SCR_FOUND) sk_build_found(sk_ids[i],
+            a) else if (k == SCR_BESIDE_BIBLE) sk_build_beside_bible(sk_ids[i], a) else if (k == SCR_NOTES_READER) bb_build_notes_reader(sk_ids[i]) else if (k == SCR_GOTO) sk_build_goto(sk_ids[i]) else if (k == SCR_BOOKS) sk_build_books(sk_ids[i]) else if (k == SCR_BROWSE) sk_build_browse(sk_ids[i]) else if (k == SCR_FOUND) sk_build_found(sk_ids[i],
             a) else if (k == SCR_DOCS) sk_build_docs(sk_ids[i], a) else if (k == SCR_CHAPTERS) sk_build_chapters(sk_ids[i],
             a) else if (k == SCR_SETTINGS) sk_build_settings(sk_ids[i]) else if (k == SCR_HISTORY) sk_build_history(sk_ids[i]) else if (k == SCR_SEARCH) sk_build_search(sk_ids[i]) else if (k == SCR_PLANS) sk_build_plans(sk_ids[i]) else if (k == SCR_PLAN) sk_build_plan(sk_ids[i],
             a) else if (k == SCR_DAY1) sk_build_day1(sk_ids[i]) else if (k == SCR_BEGIN_BOOKS) sk_build_begin_books(sk_ids[i]) else if (k == SCR_BEGIN_CHAPTERS) sk_build_begin_chapters(sk_ids[i],
@@ -4793,6 +4830,11 @@ sk_build_settings(id: int) {
         fput_str(" doesn\â\€\™t mark the words of Jesus.")
     }
     ui_set_footer_fbuf();
+    // (Notes set into the text: the reader's own, or a commentary's.)
+    if (!orig) {
+        ui_section("", "");
+        in_text_row()
+    }
     // (The version is chosen in Go To; the Hebrew and Greek's own settings
     // here.)
     if (orig) {
@@ -5337,7 +5379,7 @@ sk_act(
             v: int = v_num(language_data, ws_vi);
             i: int = note_of(c, v);
             last: int = if (i >= 0) kept_notes[i].end else v;
-            sk_note_open(c, v, last, true);
+            sk_note_take(c, v, last, true);
             if (sk_nt_n > 0 && sk_nt_n < len(sk_nt_text)) {
                 sk_nt_text[sk_nt_n] = 10i8;
                 sk_nt_n = sk_nt_n + 1
@@ -5365,8 +5407,13 @@ sk_act(
                 }
             }
             sk_note_save();
-            sk_build(sk_top());
-            ui_effect("update", sk_ids[sk_top()], -1);
+            // (Written in where it is read, the word's line in it; else its
+            // screen.)
+            if (sk_writes_notes_inline()) {
+                commentary_open_note(c, v, last);
+                return
+            }
+            sk_note_screen_open();
             return
         }
         if (action == ACT_CONC_SENSE) {
@@ -5486,6 +5533,10 @@ sk_act(
             sk_update_all();
             return
         }
+        if (action == ACT_DOC_NOTES) {
+            doc_open(at, Document.Notes);
+            return
+        }
         if (action == ACT_VERSION) {
             doc_read_version(at, arg);
             return
@@ -5516,6 +5567,11 @@ sk_act(
         }
         if (action == ACT_LISTEN) {
             sk_listen_toggle();
+            return
+        }
+        if (action == ACT_IN_TEXT) {
+            in_text_chosen(value);
+            sk_update_all();
             return
         }
         if (action == ACT_LISTEN_RATE || action == ACT_KEEP_ON) {
@@ -6028,6 +6084,27 @@ sk_take(line: []i8, b: int, e: int) {
         arg: int = sk_num(line, sk_num_end, e);
         at: int = if (sk_num_end < e) sk_num_end + 1 else e;
         sk_text(id, action, arg, line, at, sk_unescape(line, at, e))
+    } else if (sk_word_is(line, b, e, "notetext")) {
+        // (notetext KEY WORDS: a note's words as they are written now;
+        // noteend KEY: its writing ended. core/commentary.l8.)
+        key: int = sk_num(line, b + 8, e);
+        at: int = if (sk_num_end < e) sk_num_end + 1 else e;
+        commentary_note_text(key, line, at, sk_unescape(line, at, e))
+    } else if (sk_word_is(line, b, e, "noteend")) commentary_note_end(sk_num(line,
+        b + 7, e)) else if (sk_word_is(line, b, e, "asideopen")) {
+        // (asideopen C V P: a comment set into pane P's text read on.)
+        ac: int = sk_num(line, b + 9, e);
+        av: int = sk_num(line, sk_num_end, e);
+        commentary_aside_open(sk_num(line, sk_num_end, e), ac, av)
+    } else if (sk_word_is(line, b, e, "noteopen")) {
+        // (noteopen C V: the note on verse V of chapter C opened, its mark
+        // tapped: read where it is read.)
+        nc: int = sk_num(line, b + 8, e);
+        nv: int = sk_num(line, sk_num_end, e);
+        if (nc >= 0 && nc < chapters) {
+            ni: int = note_of(nc, nv);
+            sk_note_open(nc, nv, if (ni >= 0) kept_notes[ni].end else nv, false)
+        }
     } else if (sk_word_is(line, b, e, "submit")) sk_submit(sk_num(line, b + 6, e)) else if (sk_word_is(line,
         b, e, "scope")) {
         id: int = sk_num(line, b + 5, e);
@@ -6078,7 +6155,16 @@ sk_take(line: []i8, b: int, e: int) {
         tc: int = sk_num(line, b + 8, e);
         tv: int = sk_num(line, sk_num_end, e);
         tp: int = sk_num(line, sk_num_end, e);
-        if (tc >= 0 && tc < chapters && tv > 0 && tp >= 0 && tp < PANES && sel_pane_reads_bible(tp)) {
+        // (Where a hand writes, the tap writes: in the verse's note.)
+        if (tc >= 0 && tc < chapters && tv > 0 && tp >= 0 && tp < PANES && commentary_writes_in(tp)) {
+            sk_awake();
+            if (sk_sel_n > 0) {
+                sk_sel_n = 0;
+                sk_sel_said();
+                ui_effect("tray_away", -1, -1)
+            }
+            commentary_write_at(tp, tc, tv)
+        } else if (tc >= 0 && tc < chapters && tv > 0 && tp >= 0 && tp < PANES && sel_pane_reads_bible(tp)) {
             sel_toggle(tp, tc, tv);
             sk_awake();
             sk_sel_said();

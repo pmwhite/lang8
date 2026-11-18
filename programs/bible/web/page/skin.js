@@ -1840,8 +1840,8 @@ function makeReader(p, main, view, opts) {
     if (t && s.links) {
       const l = s.links[+t.dataset.l];
       if (l) {
-        if (!this.opts.tap && l[2] !== 1 && l[2] !== 2) return;
-        send(l[2] === 0 ? `footnote ${c} ${l[3]}` : l[2] === 2 ? `word ${l[3]}` : l[2] === 3 ? `esvact ${l[3]} ${c}` : `preview ${l[3]} ${this.p}`);
+        if (!this.opts.tap && l[2] !== 1 && l[2] !== 2 && l[2] !== 4) return;
+        send(l[2] === 0 ? `footnote ${c} ${l[3]}` : l[2] === 2 ? `word ${l[3]}` : l[2] === 3 ? `esvact ${l[3]} ${c}` : l[2] === 4 ? `asideopen ${Math.floor(l[3] / 1000)} ${l[3] % 1000} ${this.p}` : `preview ${l[3]} ${this.p}`);
         return;
       }
     }

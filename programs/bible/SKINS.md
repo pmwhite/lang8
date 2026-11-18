@@ -134,7 +134,8 @@ a concrete implementation: `web/main.l8` (the platform) and
 | What | Lines |
 |---|---|
 | Begin, and its appearance | `start W H DENSITY DARK TZ`, `version ABBR`, `dark`, `away` |
-| Taps | `tap`, `act`, `query`, `scope`, `text`, `submit`, `tapverse`, `tapnone`, `trayact`, `word`, `footnote`, `preview`, `esvact`, `versestudy`, `back` |
+| Taps | `tap`, `act`, `query`, `scope`, `text`, `submit`, `tapverse`, `tapnone`, `trayact`, `word`, `footnote`, `preview`, `esvact`, `versestudy`, `back`, `noteopen` |
+| Writing | `notetext`, `noteend` (Panes: Writing) |
 | Keys | `command`, `commands` → `key NAME MODS` |
 | A panel beside the reader | `panelfits`, `panelvisible`, `tap shelf`, `tap full`, `beside`, `panelmake`, `panelanchor` |
 | Recordings | `audio_play`, `audio_stop` → `audiotime`, `audioended`, `audiofailed`; an address `kept:NAME` is the kept file NAME (a chapter core holds), and one that isn't there fails, so core plays it from online |
@@ -347,7 +348,9 @@ and core answers each:
   again when it has; a module still opening, the ESV's chapter loading: a
   skin draws it as tall as what of the pane is in sight, and knows a part
   that holds a place by this line alone, not by its having no verses), `name` TITLE, `span A B STYLE PARA`, `verse V A B`,
-  `link A B KIND ARG`, `gloss A B`, `mark V HEX BOOKMARK NOTE`, `gap C0 C1`
+  `link A B KIND ARG`, `gloss A B`, `mark V HEX BOOKMARK NOTE`, `edit A B
+  KEY` (words a hand may write in: the reader's note keyed KEY, below,
+  Writing), `gap C0 C1`
   (a commentary's run of chapters it says nothing on: this one part stands
   for them all, sent as C0's to a `want` of any of them), then `anchor V K
   AT` for every anchor of the chapter in order with the part it is in and
@@ -361,6 +364,31 @@ and core answers each:
   or an update of its document swapped in: then a `go P C I FRAC 0` to
   the place it said last follows, and its parts come as they are asked
   for, none `coming`); those shown stay until the new ones come.
+
+**Writing.** The reader's own notes are a commentary of theirs, My
+Commentary (Go To lists it among the commentaries, `ACT_DOC_NOTES` 421;
+only the panel reads it, linked to the page as a commentary is, each note
+under its verses' label), and set into a version's text where In the Text
+says so (Reading's, below). Wherever they are read they are written: a
+part's `edit A B KEY` lines are the words of note KEY (its chapter times
+1000 plus its first verse), the rest of the part not to be changed. A
+skin that writes there says so (`sk_has_inline_notes`); it makes the
+words editable where a hand taps in them (a link in them still opens),
+keeps what is typed within them, and says what they are as they change,
+`notetext KEY WORDS` (the note's whole words, escaped as fields are), and
+when the writing ends, `noteend KEY` (a tap elsewhere, the keyboard put
+away). Core keeps each change (an empty note, until the writing ends;
+then none) and lays the note out again once it ends (`marked`: every
+pane's parts made again where they are). With the reader's notes set into
+the page's or the panel's text, a `tapverse` there writes, not selects:
+core begins the note on the verse (or a new one after it, an empty note
+laid out until it has words) and says `noteedit P KEY`, for the skin to
+write in note KEY in pane P, its writing point at the end of its words,
+as soon as its words are shown. A note opened elsewhere (the tray's
+Note, a note's mark tapped, `noteopen C V`, the Library) is written where
+it is read too: in the page if its notes are set into its text, else in
+My Commentary in the panel, opened at it. A skin that doesn't write
+there shows a note on its screen (`SCR_NOTE`) as before.
 
 A part sent again replaces the one shown where it is; a part coming in, or
 changing height, above what is in sight never moves what is in sight.
@@ -750,6 +778,18 @@ any screen.
   A skin fits it to the room above the keys, nothing scrolling: a
   section's last row that is tinted (a Show All, All N Verses) can be its
   header's link.
+- Reading's In the Text (`ACT_IN_TEXT`, 420, a choice: None, My
+  Commentary, then each commentary on the Bookshelf) sets notes into a
+  version's text after the verses they are on, in either pane: the
+  reader's own, or a commentary's comments (each its beginning, under
+  its label, then a link that reads on in the other pane). A skin draws
+  them as core's styles say (`STYLE_ASIDE` 32 its words, `STYLE_ASIDE_LINK`
+  33 a reference in them, `STYLE_ASIDE_LABEL` 34 a comment's label; a
+  comment's "Read on" a `link` of KIND 4, ARG its first verse's key, whose
+  tap is `asideopen C V P`: the commentary read at it in the other pane): the
+  sans, a step smaller than the verses, in the headings' color, the block
+  in from both margins. A verse whose note is set into the text has no
+  note's mark.
 - A skin that shows Reading as one panel says so (`sk_has_quick_more`;
   the iPhone's ⋯, its README): Reading's screen begins with a Library
   section, a row for each collection (Highlights, Notes, Bookmarks,
@@ -921,6 +961,7 @@ Other lines from core:
 | `chapters P N` | pane P's document has N chapters (the Bible's 1,189 for a version or a commentary; a book's or a dictionary's own: see Panes above), said at `start` and as it changes |
 | `part P C K N` TEXT | part K of chapter C of pane P's document, the chapter in N parts (0: not known yet, a commentary still opening), and the panes' other lines: see Panes above |
 | `go P C I FRAC MODE`, `halt P`, `forget P C`, `line P THOUSANDTHS`, `link C MODE` | a pane to a place, its glide stopped, its parts to be asked for again, its reading line; a chapter's link map: see Panes above |
+| `noteedit P KEY` | the reader's note KEY written in, in pane P, as soon as its words (an `edit` line's) are shown: see Panes, Writing |
 | `arriving P THOUSANDTHS`, `arrived P` | a document on its way to pane P, so much come (a hairline along the foot of that pane's bar, ink at 30%); nothing on its way any more (the hairline fades out): see Panes, Arriving |
 | `goto` | the sheets away, as the platform puts them away (a `go 0` follows) |
 | `highlights SWATCH WASH STRENGTH...`, `themes DAY NIGHT PAGE INK...`, then `look SIZE SPACING MARGIN DARK RED BG INK HEADING FAINT ACCENT RULE GLOSS FONT THEME CHOSEN HAIRLINE SELECTION SHEET CELL` | all a skin needs of look.l8. `highlights`: each of the five by the color its `mark` lines name it with, and the wash a highlighted verse shows now (STRENGTH, like GLOSS, HAIRLINE and SELECTION, in thousandths). `themes`: the themes Auto follows by day and at night, then each theme's page and ink, in the Theme setting's order (for its swatches). `look`: FONT the one chosen of the skin's own (`sk_fonts`, named in its settings' Font section, each row `CUSTOM_FONT` with the font's index as its argument); THEME the theme it is and CHOSEN the one chosen (0 Auto), of `themes`; HAIRLINE a rule's strength (RULE's color), SELECTION a selection's (ACCENT's); SHEET and CELL a sheet's color and its rows' (`-`: the platform's grouped colors) |

@@ -81,6 +81,16 @@ the compiled asset catalog (`assets/`), the frameworks it links
   Library in place of it, a screen it opens (Voice, the Manual) is a
   sheet over it, and a tap beside it or ⋯ again puts it back into ⋯. A
   phone on its side has it in two columns.
+- **Notes are written where they are read.** A note's words, in My
+  Commentary (the panel's) or set into the text (Reading's In the Text:
+  My Commentary), are the part's own text view's, made editable while a
+  hand writes in them: a tap in them puts the writing point there, what
+  is typed stays within them, the row grows as they do and the writing
+  point is kept above the keys; a tap elsewhere or the keys drawn down
+  ends it. With the reader's notes in the page's text, a tap on a verse
+  writes in its note, or in a new one after it. The tray's Note, a note's
+  mark and the Library open a note there too, not on a screen of its own
+  (`sk_has_inline_notes`).
 - **The tray is the dock.** Verses selected, in either half of a split,
   the capsule grows up into a glass panel of core's tray (the reference,
   the highlights' colors, Copy, Share, Bookmark, Note, Study, Compare,
@@ -170,6 +180,7 @@ the compiled asset catalog (`assets/`), the frameworks it links
 | `look.l8` | Core's look, highlights and themes; each pane's type set and every style's attributes |
 | `part.l8` | A part decoded into an arena of its own; its attributed words, marks and washes |
 | `pane.l8` | A pane: a scroll view of measured parts on a tall canvas; places, jumps, telling core, taps |
+| `writing.l8` | Writing in a note where it is read: its words editable, typing kept within them, said to core, the keys' cover |
 | `linking.l8` | Link maps, chapter shapes (laid out or guessed by bytes), following |
 | `dock.l8` | The dock and its window, the tray, the way back, toasts, the title's menu |
 | `screens.l8` | Core's screens as sheets of lists; effects; rows, menus and swipes |
@@ -211,7 +222,7 @@ would at P% of the window's height, or width side by side: 0 closes it,
 100 fills the screen), `!drag P` (the divider dragged as a hand would,
 frame by frame for half a second, to P%, and let go: each frame's layout
 time written to the log), `!panel` (a tap on the dock's panel button), `!more` (on ⋯),
-`!tapat X Y` (a finger's tap on the words at window point X, Y), `!capsule` (a tap on the dock's capsule), `!panelcapsule` (on the panel's), `!link` (Linked, in the panel's menu), `!shot` (every window of the app's, the dock's too, drawn to the server's /shot: its glass left out), `!slow F` (every window's animations F times slower), `!dockinapp 1` (the dock moved into the app's window, so that ReplayKit records it; a sheet presented after goes over it; `!dockinapp 0` back), `!home` (Back from the first screen Go To opened), `!theme N` (theme N chosen, the one it was logged), in Go To's quick form `!type WORDS`, `!return`
+`!tapat X Y` (a finger's tap on the words at window point X, Y), `!type WORDS` (typed into the note being written, `\n` a new line), `!written` (the writing ended), `!capsule` (a tap on the dock's capsule), `!panelcapsule` (on the panel's), `!link` (Linked, in the panel's menu), `!shot` (every window of the app's, the dock's too, drawn to the server's /shot: its glass left out), `!slow F` (every window's animations F times slower), `!dockinapp 1` (the dock moved into the app's window, so that ReplayKit records it; a sheet presented after goes over it; `!dockinapp 0` back), `!home` (Back from the first screen Go To opened), `!theme N` (theme N chosen, the one it was logged), in Go To's quick form `!type WORDS`, `!return`
 and `!hold N V` (chapter N held, the finger on verse V; `!hold 0` lets
 go), `!probe N` (for N frames, where the dock and the panel are
 drawn), `!part` (the panel's first part as core sent it: its words and

@@ -394,6 +394,8 @@ pane_attach(p: int, scroll: int) {
     msg1(scroll, sel("setShowsHorizontalScrollIndicator:"), 0);
     msg1(scroll, sel("setAlwaysBounceVertical:"), 1);
     msg1(scroll, sel("setScrollsToTop:"), 0);
+    // (A note written in: the keyboard drawn down with a hand's drag.)
+    msg1(scroll, sel("setKeyboardDismissMode:"), 2);
     msg_ff(scroll, sel("setContentSize:"), 1.0f64, PANE_CANVAS);
     set_offset_y(scroll, PANE_MIDDLE);
     tap: int = autoreleased(msg2(msg(cls("UITapGestureRecognizer"), sel("alloc")),
@@ -539,6 +541,7 @@ pane_clear(p: int) {
 // A text view let go: kept for another part, or released.
 pane_view_let_go(pane: *Pane, view: int) {
     if (view == 0) return;
+    if (view == writing.view) writing_finish();
     msg(view, sel("removeFromSuperview"));
     if (pane.spare_n < len(pane.spare)) {
         pane.spare[pane.spare_n] = view;
@@ -812,7 +815,8 @@ pane_repaint(p: int, c: int) {
 pane_remake(p: int, c: int) {
     pane: *Pane = pane_of(p);
     for i in 0..pane.n {
-        if (c < 0 || pane.chapter[i] <= c && c <= pane.last[i]) {
+        // (Not the row written in: made again once the writing ends.)
+        if (pane.view[i] != writing.view && (c < 0 || pane.chapter[i] <= c && c <= pane.last[i])) {
             s: int = part_slot(p, pane.chapter[i], pane.part[i]);
             if (s >= 0) part_free(s);
             pane_redress(p, i)
@@ -1468,6 +1472,7 @@ pane_settle_soon() {
 
 pane_settle_fired(_self: int, _cmd: int, _timer: int): int {
     settle_due = false;
+    writing_end_tell();
     again: bool = false;
     for p in 0..PANES {
         pane: *Pane = pane_of(p);
@@ -1486,6 +1491,7 @@ pane_settle_fired(_self: int, _cmd: int, _timer: int): int {
     }
     if (!again) follow_settled();
     if (again) pane_settle_soon();
+    writing_due_check();
     0
 }
 
@@ -1498,6 +1504,17 @@ pane_settle_fired(_self: int, _cmd: int, _timer: int): int {
 pane_tapped(p: int, x: f64, y: f64) {
     pane: *Pane = pane_of(p);
     r: int = row_at(pane, y);
+    // (Writing: a tap in the note's words is its text view's, to move the
+    // writing point; one elsewhere ends the writing, and does nothing
+    // more.)
+    if (writing_now()) {
+        if (r >= 0 && pane.view[r] == writing.view && p == writing.pane) {
+            k: int = char_at(writing.view, x, y - pane.y[r]);
+            if (k >= writing.b && k <= writing.e) return
+        }
+        writing_finish();
+        return
+    }
     if (r < 0) {
         send0("tapnone");
         return
@@ -1512,8 +1529,8 @@ pane_tapped(p: int, x: f64, y: f64) {
     page: bool = p == PANE_PAGE;
     link: int = link_at(tv, tx, ty, KEY_LINK, 12.0f64);
     if (link > 0) {
-        kind: int = link % 4;
-        arg: int = link / 4 - 1;
+        kind: int = link % LINK_KINDS;
+        arg: int = link / LINK_KINDS - 1;
         if (kind == LINK_FOOTNOTE && page) {
             send2("footnote", c, arg);
             return
@@ -1524,6 +1541,10 @@ pane_tapped(p: int, x: f64, y: f64) {
         }
         if (kind == LINK_REFERENCE) {
             send2("preview", arg, p);
+            return
+        }
+        if (kind == LINK_ASIDE) {
+            send3("asideopen", arg / 1000, arg % 1000, p);
             return
         }
         if (kind == LINK_ESV && page) {
@@ -1542,6 +1563,17 @@ pane_tapped(p: int, x: f64, y: f64) {
     }
     k: int = char_at(tv, tx, ty);
     s: int = part_slot(p, c, pane.part[r]);
+    // (A note's words a hand may write in: written in there.)
+    if (k >= 0 && s >= 0) {
+        w: int = -1;
+        borrow parts[s] as part {
+            w = writable_at(part, k)
+        }
+        if (w >= 0) {
+            writing_begin(p, r, w, k);
+            return
+        }
+    }
     if (k >= 0 && s >= 0 && near_char(tv, k, tx, ty, 6.0f64)) {
         v: int = 0;
         borrow parts[s] as part {
@@ -1558,11 +1590,7 @@ pane_tapped(p: int, x: f64, y: f64) {
 }
 
 note_open(c: int, v: int) {
-    out_word("open");
-    out_arg(SCR_NOTE);
-    out_arg(c * 1000 + v);
-    out_arg(0);
-    out_end()
+    send2("noteopen", c, v)
 }
 
 char_at(tv: int, x: f64, y: f64): int {
@@ -1729,10 +1757,12 @@ pane_classes_make() {
     add_method2(delegate, sel("gestureRecognizer:shouldRecognizeSimultaneouslyWithGestureRecognizer:"),
         &pane_together, "B@:@@");
     add_text_menu_methods(delegate);
+    writing_methods_add(delegate);
     add_protocol(delegate, "UIScrollViewDelegate");
     add_protocol(delegate, "UITextViewDelegate");
     add_protocol(delegate, "UIGestureRecognizerDelegate");
-    if (pane_delegate == 0) pane_delegate = make("VellumPanes")
+    if (pane_delegate == 0) pane_delegate = make("VellumPanes");
+    writing_keyboard_watch(pane_delegate)
 }
 
 // ---- the words' own menu (words selected in a pane) ----
