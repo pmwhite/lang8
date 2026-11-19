@@ -13,12 +13,18 @@ use_tag std, gl, env, blockguy;
 // it is: as a share of the screen's height, as it would be at 60 frames a
 // second (so that it is as much at any rate).
 //
-// Off its way one frame and as far back onto it the next, a point
-// snapped: it jumped, or shook (what was drawn was wrong for a frame, or
-// two things fought over it). Off its way only once, it kinked: it was
-// hurried or stopped at once, which a knock does (coming down, popping),
-// and a move begun or ended all at once. A snap past jank_least is jank;
-// a kink is told only past jank_kink_least. Each is said (L8JANK), with
+// His points are judged by how they go about where he is (the mover's
+// place, as drawn between steps: see jank_root), not in the world: the mover's own way
+// is the rules', hurried or stopped at once by a knock (coming down,
+// popping off), which his drawing should follow, and does. Off its way
+// one frame and as far back onto it the next, a point snapped: it jumped,
+// or shook (what was drawn was wrong for a frame, or two things fought
+// over it). Off its way only once, it kinked: it was hurried or stopped
+// at once by itself, a move begun or ended all at once. A snap past
+// jank_least is jank; a kink is told only past jank_kink_least. And the
+// mover's place snapping (put somewhere else at once: onto a rail, say)
+// is jank too, as far as his points went with it on the screen; its knocks
+// are told as impacts, only so that they can be seen to be. Each is said (L8JANK), with
 // what he was doing, for whoever is looking into it (see
 // programs/skate/tools/jank.py); and a snap past jank_shown_least is
 // shown, as a burst with JANK! in it, as in a comic, for whoever is
@@ -65,12 +71,22 @@ jank_at: []V3 = new V3[3](V3 { x: 0.0, y: 0.0, z: 0.0 });
 
 jank_fovy: []f32 = new f32[3](1.0);
 
+// Where he is drawn, as posed (the mover's place, as drawn between steps,
+// and as far from it as he is let go of it: see Anim.rail_fix).
+jank_root: V3 = V3 { x: 0.0, y: 0.0, z: 0.0 };
+
+// (And where that was, in each frame; and how far off its way it went the
+// frame before.)
+jank_pos: []V3 = new V3[3](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+jank_pos_was_off: V3 = V3 { x: 0.0, y: 0.0, z: 0.0 };
+
 jank_dt: []f32 = new f32[3](0.0);
 
 jank_known: int = 0;
 
 // How far off its way each point went the frame before, and which way (on
-// the screen; and in the world, m), at 60 frames a second.
+// the screen; and about the mover's place, m), at 60 frames a second.
 jank_was_off: []V3 = new V3[JANK_POINTS](V3 { x: 0.0, y: 0.0, z: 0.0 });
 
 jank_was_off_world: []V3 = new V3[JANK_POINTS](V3 { x: 0.0, y: 0.0, z: 0.0 });
@@ -117,6 +133,12 @@ jank_seen(
     v3(v_dot(q, r) * k, v_dot(q, u) * k, z)
 }
 
+// How much of the screen's height a metre is, so far in front of a camera
+// fovy high.
+jank_per_m(fovy: f32, z: f32): f32 {
+    cosf(fovy * 0.5) / (2.0 * sinf(fovy * 0.5) * maxf(z, 0.05))
+}
+
 // Which way, and how far, a point went off its way in the newest frame of
 // three (a, b, c, oldest first, in frames da before b and db before c):
 // at 60 frames a second. (On the screen, only across it: flat, if not.)
@@ -158,6 +180,10 @@ jank_point(k: int, j: int): V3 {
 }
 
 jank_name(p: int) raises IoError {
+    if (p >= JANK_POINTS) {
+        write(1, "path");
+        return
+    }
     if (p >= JANK_CAM) {
         write(1, "camera");
         return
@@ -271,8 +297,10 @@ jank_frame(
         jank_eye[i] = jank_eye[i + 1];
         jank_at[i] = jank_at[i + 1];
         jank_fovy[i] = jank_fovy[i + 1];
+        jank_pos[i] = jank_pos[i + 1];
         jank_dt[i] = jank_dt[i + 1]
     }
+    jank_pos[2] = jank_root;
     jank_eye[2] = eye;
     jank_at[2] = at;
     jank_fovy[2] = fovy;
@@ -292,41 +320,65 @@ jank_frame(
     // How far off its way each went (the camera's two points of the place
     // seen from each of the three frames' cameras); the one that snapped
     // most, and the one that kinked most.
+    // The mover's: how far off its way (m), and whether it snapped as far
+    // as is seen (as far away from the camera as it is).
+    look: V3 = v_norm(v_sub(at, eye));
+    pos_off: V3 = jank_off(jank_pos[0], jank_pos[1], jank_pos[2], da, db, true);
+    pos_off = v_madd(pos_off, look, -v_dot(pos_off, look));
+    pos_seen: f32 = jank_per_m(fovy, jank_seen(eye, at, fovy, jank_root).z);
+    moved: bool = jank_known >= 4 && jank_snap(jank_pos_was_off, pos_off) * pos_seen >= jank_least;
     snap_p: int = 0;
     snap: f32 = 0.0;
     kink_p: int = 0;
     kink: f32 = 0.0;
+    snap_world: f32 = 0.0;
+    kink_world: f32 = 0.0;
     for p in 0..JANK_POINTS {
         off: V3 = v3(0.0, 0.0, 0.0);
-        off_world: V3 = v3(0.0, 0.0, 0.0);
+        about: V3 = v3(0.0, 0.0, 0.0);
+        sn: f32 = 0.0;
+        kn: f32 = 0.0;
         if (p < JANK_RIDER) {
             off = jank_off(jank_screen[p], jank_screen[JANK_POINTS + p], jank_screen[base + p],
                 da, db, false);
-            off_world = jank_off(jank_world[p], jank_world[JANK_POINTS + p], jank_world[base + p],
-                da, db, true)
+            about = v_sub(jank_off(jank_world[p], jank_world[JANK_POINTS + p], jank_world[base + p],
+                da, db, true), pos_off);
+            // (Across the screen: toward the camera or away, it hardly
+            // shows.)
+            about = v_madd(about, look, -v_dot(about, look));
+            seen: f32 = jank_per_m(fovy, jank_screen[base + p].z);
+            if (jank_known >= 4) sn = jank_snap(jank_was_off_world[p], about) * seen;
+            if (moved && jank_known >= 4) sn = maxf(sn, jank_snap(jank_was_off[p],
+                off));
+            kn = v_len(about) * seen
         } else {
             q: V3 = v_lerp(jank_eye[1], jank_at[1], 1.0 + 2.0 * (p - JANK_CAM) as f32);
             off = jank_off(jank_seen(jank_eye[0], jank_at[0], jank_fovy[0], q), jank_seen(jank_eye[1],
                 jank_at[1], jank_fovy[1], q), jank_seen(jank_eye[2], jank_at[2], jank_fovy[2],
-                q), da, db, false)
+                q), da, db, false);
+            if (jank_known >= 4) sn = jank_snap(jank_was_off[p], off);
+            kn = v_len(off)
         }
-        if (jank_known >= 4) {
-            sn: f32 = jank_snap(jank_was_off[p], off);
-            if (sn > snap) {
-                snap = sn;
-                snap_p = p
-            }
+        if (sn > snap) {
+            snap = sn;
+            snap_p = p;
+            snap_world = v_len(about)
         }
-        if (v_len(off) > kink) {
-            kink = v_len(off);
-            kink_p = p
+        if (kn > kink) {
+            kink = kn;
+            kink_p = p;
+            kink_world = v_len(about)
         }
         jank_was_off[p] = off;
-        jank_was_off_world[p] = off_world
+        jank_was_off_world[p] = about
     }
+    jank_pos_was_off = pos_off;
     // (A snap is of the frame before: off its way then, back now.)
-    if (snap >= jank_least) jank_say(m, 1, snap_p, snap, jank_frame_n - 1, step, db) else if (kink >= jank_kink_least) jank_say(m,
-        2, kink_p, kink, jank_frame_n, step, db);
+    if (snap >= jank_least) jank_say(m, 1, snap_p, snap, snap_world, jank_frame_n - 1,
+        step, db) else if (kink >= jank_kink_least) jank_say(m, 2, kink_p, kink, kink_world,
+        jank_frame_n, step, db);
+    if (!moved && v_len(pos_off) * pos_seen >= jank_kink_least) jank_say(m, 3, JANK_POINTS,
+        v_len(pos_off) * pos_seen, v_len(pos_off), jank_frame_n, step, db);
     // (Showing already, it is held longer, where it is, not begun again.)
     if (snap >= jank_shown_least && jank_show_t < JANK_SHOW_FOR) jank_show_t = minf(jank_show_t,
         0.2) else if (snap >= jank_shown_least) {
@@ -339,19 +391,21 @@ jank_frame(
 }
 
 // Say a jank: a snap (1) or a kink (2), of point p, so far off its way (as
-// a share of the screen's height), in frame n, a frame dt long, at the
-// run's step `step`: with how far in the world (cm), and what he was
-// doing.
+// a share of the screen's height), `world` m about where he is; or an
+// impact (3), the mover's own; in frame n, a frame dt long, at the run's
+// step `step`; and what he was doing.
 jank_say(
     m: *Mover,
     kind: int,
     p: int,
     off: f32,
+    world: f32,
     n: int,
     step: int,
     dt: f32
 ) raises IoError {
-    if (kind == 1) write(1, "L8JANK snap frame=") else write(1, "L8JANK kink frame=");
+    if (kind == 1) write(1, "L8JANK snap frame=") else if (kind == 2) write(1, "L8JANK kink frame=") else write(1,
+        "L8JANK impact frame=");
     write_int(1, n);
     write(1, " step=");
     write_int(1, step);
@@ -362,7 +416,7 @@ jank_say(
     write(1, " seen=");
     write_fixed(1, (off * 100.0) as f64, 2);
     write(1, " world=");
-    write_fixed(1, (v_len(jank_was_off_world[p]) * 100.0) as f64, 1);
+    write_fixed(1, (world * 100.0) as f64, 1);
     write(1, " ms=");
     write_fixed(1, (dt * 1000.0) as f64, 1);
     // (Where on the screen, in screen heights from its middle, x right, y

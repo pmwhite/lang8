@@ -15,7 +15,8 @@ of a real GPU. Into DIR (default: next to RUN, named after it):
 
     report.txt   each incident (frames of jank close together), worst first:
                  what snapped or kinked, how far (a share of the screen's
-                 height at 60 frames a second, and in the world), when in
+                 height at 60 frames a second, and about his own place, as
+                 the mover has it: see jank.l8), when in
                  the run, and what he was doing; and what the phone said,
                  for a run from one.
     NNN.png      the frames about each incident, two before to two after,
@@ -138,6 +139,7 @@ def main():
     open(os.path.join(out, "lines.txt"), "w").write("\n".join(lines) + "\n")
     events = [e for e in map(parse_line, lines) if e and e["kind"] in ("snap", "kink")]
     hitches = [e for e in map(parse_line, lines) if e and e["kind"] == "hitch"]
+    impacts = [e for e in map(parse_line, lines) if e and e["kind"] == "impact"]
     frames = {} if a.no_shots else split_shots(os.path.join(out, "shots.raw"), out)
     found = incidents(events)
     found.sort(key=lambda inc: -max(e["seen"] for e in inc))
@@ -146,6 +148,8 @@ def main():
     report.append(f"jank: {len(events)} frames ({sum(e['kind'] == 'snap' for e in events)} snaps, "
                   f"{sum(e['kind'] == 'kink' for e in events)} kinks) in {len(found)} incidents; "
                   f"snaps from {a.least * 100:.2f}%, kinks from {a.kink * 100:.2f}% of the screen's height")
+    if impacts:
+        report.append(f"impacts (the mover's own knocks, which he is drawn to follow; not jank): {len(impacts)}")
     if hitches:
         report.append(f"hitches here (this machine, not the phone): {len(hitches)}")
     report.append("")
@@ -166,7 +170,9 @@ def main():
                         # round where the jank was, at twice its size.)
                         side = h // 3
                         cx = int(w / 2 + worst.get("sx", 0) * h) - side // 2
-                        cy = int(h / 2 - worst.get("sy", 0) * h) - side // 2
+                        # (A tall window's picture is moved up: see view_shift.)
+                        shift = min(max((1 - w / h) * 0.8, 0), 0.45)
+                        cy = int(h * (0.5 - worst.get("sy", 0) - shift * 0.5)) - side // 2
                         cx, cy = max(0, min(w - side, cx)), max(0, min(h - side, cy))
                         subprocess.run(["convert", frames[k], "-crop", f"{side}x{side}+{cx}+{cy}", "+repage", "-resize", "400x400", *mark,
                                         "-gravity", "North", "-pointsize", "18", "-annotate", "+0+8", f"frame {k}", lab], check=True)
