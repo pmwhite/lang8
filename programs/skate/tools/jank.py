@@ -140,6 +140,7 @@ def main():
     events = [e for e in map(parse_line, lines) if e and e["kind"] in ("snap", "kink")]
     hitches = [e for e in map(parse_line, lines) if e and e["kind"] == "hitch"]
     impacts = [e for e in map(parse_line, lines) if e and e["kind"] == "impact"]
+    crashes = [e for e in map(parse_line, lines) if e and e["kind"] == "crash"]
     frames = {} if a.no_shots else split_shots(os.path.join(out, "shots.raw"), out)
     found = incidents(events)
     found.sort(key=lambda inc: -max(e["seen"] for e in inc))
@@ -148,6 +149,9 @@ def main():
     report.append(f"jank: {len(events)} frames ({sum(e['kind'] == 'snap' for e in events)} snaps, "
                   f"{sum(e['kind'] == 'kink' for e in events)} kinks) in {len(found)} incidents; "
                   f"snaps from {a.least * 100:.2f}%, kinks from {a.kink * 100:.2f}% of the screen's height")
+    if crashes:
+        report.append(f"crashes (down far short of a trick's end, stopped turning by the ground; not jank): {len(crashes)} frames, "
+                      + ", ".join(f"{e['t']:.2f} s" for e in crashes[:12]))
     if impacts:
         report.append(f"impacts (the mover's own knocks, which he is drawn to follow; not jank): {len(impacts)}")
     if hitches:

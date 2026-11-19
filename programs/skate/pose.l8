@@ -17,6 +17,9 @@ type Anim = {
     squash: f32;
     squash_v: f32;
     board_yaw: f32;
+    // (Eased toward in two stages: the first. Onto a rail, it turned a
+    // quarter across at once at its quickest.)
+    board_yaw_to: f32;
     board_up: V3;
     // How hard he carves (+ turning his way, 1 his hardest), for his arms
     // (see move_carve).
@@ -87,8 +90,12 @@ type Anim = {
     // lands, not at once (landing short of its end, they flew).
     tuck: f32;
     tuck_open: f32;
-    // How far a grab is held (see pose_guy).
+    // How far a grab is held (see pose_guy); and the board's tip, tail
+    // pivot and turn under him, as last shown.
     let_go: f32;
+    board_tilt: f32;
+    board_pivot: f32;
+    board_twist: f32;
     at_was: V3;
     at_was2: V3;
     shown: GuyJoints;
@@ -139,6 +146,7 @@ new_anim(yaw: f32, y: f32): *Anim@new {
         squash: 0.0,
         squash_v: 0.0,
         board_yaw: yaw,
+        board_yaw_to: yaw,
         board_up: v3(0.0, 1.0, 0.0),
         lean: 0.0,
         felt_t: -1.0,
@@ -179,6 +187,9 @@ new_anim(yaw: f32, y: f32): *Anim@new {
         tuck: 0.0,
         tuck_open: 0.0,
         let_go: 0.0,
+        board_tilt: 0.0,
+        board_pivot: 0.0,
+        board_twist: 0.0,
         at_was: v3(0.0, y, 0.0),
         at_was2: v3(0.0, y, 0.0),
         shown: guy_solve(guy_stand()),
@@ -309,6 +320,9 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
     a.air_to = lerpf(a.air_to, at, ease(24.0, dt));
     a.air = lerpf(a.air, a.air_to, ease(24.0, dt));
     if (m.air) a.down_t = 0.0 else a.down_t = a.down_t + dt;
+    // (Onto a rail or off it is coming down too, as he stands: off a
+    // halfpipe's wall onto one, he stood up from its lean in a few frames.)
+    if (a.state_was >= 0 && m.grinding != (a.state_was == 2)) a.down_t = 0.0;
     gt: f32 = 0.0;
     if (m.grinding) gt = 1.0;
     a.grind = lerpf(a.grind, gt, ease(16.0, dt));
@@ -423,12 +437,15 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
     if (m.air) state = 1 else if (m.grinding) state = 2;
     if (state != 1 && a.state_was == 1 && a.vert_air) {
         a.board_yaw = a.board_yaw + PI;
+        a.board_yaw_to = a.board_yaw_to + PI;
         a.yaw = a.yaw + PI
     }
     if (state != 1) a.vert_air = false;
     if (state != 1 && absf(m.flip + a.flip_off) < 0.001) a.flip_axis_known = false;
-    if (!(m.air && a.vert_air)) a.board_yaw = approach_angle(a.board_yaw, by, ease(14.0,
-        dt));
+    if (!(m.air && a.vert_air)) {
+        a.board_yaw_to = approach_angle(a.board_yaw_to, by, ease(28.0, dt));
+        a.board_yaw = approach_angle(a.board_yaw, a.board_yaw_to, ease(28.0, dt))
+    }
     // The board tilts with the ground under him; level in the air (but up
     // off a halfpipe's wall, as he left it: see feel_ground), until it
     // nears the ground again.
@@ -478,6 +495,10 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
             a.flip_off = a.flip_off - dl;
             a.flip_off_v = a.flip_off_v + clampf(a.flip_rate, -SNAP_RATE_MOST, SNAP_RATE_MOST)
         }
+        // (Down far short of a flip's or spin's end, he crashes: the ground
+        // stops him turning at once, as the jank meter is told (see
+        // jank_crash).)
+        if (state != 1 && maxf(absf(a.flip_off), absf(a.face_off)) > CRASH_LEAST) jank_crash()
     } else if (dt > 0.0001) {
         a.face_rate = wrap_angle(face - a.face_was) / dt;
         a.flip_rate = wrap_angle(m.flip - a.flip_was) / dt
@@ -497,6 +518,9 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
 const SNAP_LEAST: f32 = 0.3;
 
 const SNAP_OMEGA: f32 = 14.0;
+
+// (Down further than so far short (rad), he has crashed.)
+const CRASH_LEAST: f32 = 0.6;
 
 const SNAP_RATE_MOST: f32 = 15.0;
 
@@ -617,7 +641,7 @@ const BOARD_LEVEL_EASE: f32 = 5.0;
 const BOARD_TURN_MOST: f32 = 10.0;
 
 // (How quickly the board's roll follows, /s.)
-const ROLL_EASE: f32 = 40.0;
+const ROLL_EASE: f32 = 12.0;
 
 // (How quickly, flying, he stands up along his way, /s: out of a
 // halfpipe's wall, square to it, say.)
@@ -847,8 +871,21 @@ pose_guy(
             p.foot_yaw[i] = p.foot_yaw[i] + mv.board_yaw
         }
     }
-    pose_board(a, m, contact, spin, soles, a.air, mv.tilt * st.lead_x, mv.tail_pivot,
-        mv.board_yaw);
+    // (The board's tip and turn are a grab's, on his lead side or trail:
+    // as his feet swap, they follow, as his joints do, not flipped at once.)
+    tilt: f32 = mv.tilt * st.lead_x;
+    pivot: f32 = mv.tail_pivot;
+    twist: f32 = mv.board_yaw;
+    if (a.swap_t < SWAP_FOR) {
+        k: f32 = ease(SWAP_EASE, a.frame_dt);
+        tilt = lerpf(a.board_tilt, tilt, k);
+        pivot = lerpf(a.board_pivot, pivot, k);
+        twist = lerpf(a.board_twist, twist, k)
+    }
+    a.board_tilt = tilt;
+    a.board_pivot = pivot;
+    a.board_twist = twist;
+    pose_board(a, m, contact, spin, soles, a.air, tilt, pivot, twist);
     // Grabbing, his trail hand to the tail's tip.
     posed_grab = mv.grab;
     if (mv.grab > 0.001) {
