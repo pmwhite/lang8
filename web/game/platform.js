@@ -499,6 +499,10 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
       gl.texImage2D(n(target), n(level), n(internal), n(w), n(h), n(border), n(format), n(type), data);
       return 0n;
     },
+    glReadPixels(x, y, w, h, format, type, pixels) {
+      gl.readPixels(n(x), n(y), n(w), n(h), n(format), n(type), pixelView(n(type), pixels, n(w), n(h), channelsOf(n(format))));
+      return 0n;
+    },
     glTexSubImage2D(target, level, x, y, w, h, format, type, pixels) {
       const data = pixelView(n(type), pixels, n(w), n(h), channelsOf(n(format)));
       gl.texSubImage2D(n(target), n(level), n(x), n(y), n(w), n(h), n(format), n(type), data);

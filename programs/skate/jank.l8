@@ -1,0 +1,496 @@
+tag skate;
+
+use_tag std, gl, env, blockguy;
+
+// Jank. Whatever moves in the picture should move smoothly: from one
+// frame to the next, nothing should jump off the way it was going. The
+// meter (L8_JANK, which the page sets on this machine's tailnet, where
+// the game is tried out) watches what is drawn, as it is drawn: points on
+// each of his bones and his board, where they are on the screen each
+// frame, and two of the place in front of the camera, where the camera
+// alone puts them. Each frame, where each would be had it gone on as it
+// went the frame before (at each frame's own time), and how far off that
+// it is: as a share of the screen's height, as it would be at 60 frames a
+// second (so that it is as much at any rate).
+//
+// Off its way one frame and as far back onto it the next, a point
+// snapped: it jumped, or shook (what was drawn was wrong for a frame, or
+// two things fought over it). Off its way only once, it kinked: it was
+// hurried or stopped at once, which a knock does (coming down, popping),
+// and a move begun or ended all at once. A snap past jank_least is jank;
+// a kink is told only past jank_kink_least. Each is said (L8JANK), with
+// what he was doing, for whoever is looking into it (see
+// programs/skate/tools/jank.py); and a snap past jank_shown_least is
+// shown, as a burst with JANK! in it, as in a comic, for whoever is
+// riding. And a frame that took far longer than they usually do is a
+// hitch: not the picture's fault but the device's, falling behind.
+jank_on: bool = false;
+
+jank_least: f32 = 0.004;
+
+jank_kink_least: f32 = 0.03;
+
+jank_shown_least: f32 = 0.01;
+
+// The bones watched (the drums at hip and knee turn with the thigh and
+// shin), by name: four points on each, its middle and a way out along
+// each of its axes (further on the board, its nose and tail).
+const JANK_BONES: int = 12;
+
+jank_bone: []int = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, GUY_BOARD];
+
+jank_bone_name: []str = ["body", "thigh0", "thigh1", "shin0", "shin1", "foot0", "foot1",
+    "arm0", "arm1", "forearm0", "forearm1", "board"];
+
+const JANK_EACH: int = 4;
+
+const JANK_RIDER: int = JANK_BONES * JANK_EACH;
+
+// And two of the place, where the camera looked a frame ago, and three
+// times as far: the camera's own jank.
+const JANK_POINTS: int = JANK_RIDER + 2;
+
+const JANK_CAM: int = JANK_RIDER;
+
+// The last three frames: each point on the screen (x right, y up, in
+// screen heights from its middle; z, how far in front) and in the world;
+// the camera; and the frames' times. How many of them there are yet.
+jank_screen: []V3 = new V3[3 * JANK_POINTS](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+jank_world: []V3 = new V3[3 * JANK_POINTS](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+jank_eye: []V3 = new V3[3](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+jank_at: []V3 = new V3[3](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+jank_fovy: []f32 = new f32[3](1.0);
+
+jank_dt: []f32 = new f32[3](0.0);
+
+jank_known: int = 0;
+
+// How far off its way each point went the frame before, and which way (on
+// the screen; and in the world, m), at 60 frames a second.
+jank_was_off: []V3 = new V3[JANK_POINTS](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+jank_was_off_world: []V3 = new V3[JANK_POINTS](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+// Frames drawn with the meter on; and the time a frame usually takes.
+jank_frame_n: int = 0;
+
+jank_dt_usual: f32 = 0.0;
+
+// When he last took off or came down (in the run's time), and whether he
+// was in the air, to say how long since; and how far into the run the
+// last frame was (to tell a new run by).
+jank_air_was: bool = false;
+
+jank_air_t: f32 = -10.0;
+
+jank_run_was: f32 = 1000000.0;
+
+// Turn it on (L8_JANK; L8_JANK_LEAST and L8_JANK_KINK, other leasts); and
+// keep pictures of the frames about each jank (L8_JANK_SHOTS=file,
+// natively: see jank_shoot).
+jank_begin() {
+    jank_on = env_has("L8_JANK");
+    jank_least = env_number("L8_JANK_LEAST", jank_least);
+    jank_kink_least = env_number("L8_JANK_KINK", jank_kink_least);
+    jank_shots_on = jank_on && env_has("L8_JANK_SHOTS")
+}
+
+// Where p is on the screen of a camera at eye looking at `at`, fovy high.
+jank_seen(
+    eye: V3,
+    at: V3,
+    fovy: f32,
+    p: V3
+): V3 {
+    f: V3 = v_norm(v_sub(at, eye));
+    r: V3 = v_norm(v_cross(f, Y_AXIS));
+    u: V3 = v_cross(r, f);
+    q: V3 = v_sub(p, eye);
+    z: f32 = maxf(v_dot(q, f), 0.05);
+    k: f32 = cosf(fovy * 0.5) / (2.0 * sinf(fovy * 0.5) * z);
+    v3(v_dot(q, r) * k, v_dot(q, u) * k, z)
+}
+
+// Which way, and how far, a point went off its way in the newest frame of
+// three (a, b, c, oldest first, in frames da before b and db before c):
+// at 60 frames a second. (On the screen, only across it: flat, if not.)
+jank_off(
+    a: V3,
+    b: V3,
+    c: V3,
+    da: f32,
+    db: f32,
+    flat: bool
+): V3 {
+    went: V3 = v_scale(v_sub(b, a), db / da);
+    off: V3 = v_sub(c, v_add(b, went));
+    if (!flat) off.z = 0.0;
+    v_scale(off, 1.0 / 60.0 * (1.0 / 60.0) / (db * (da + db) * 0.5))
+}
+
+// How far a point snapped: off its way a frame ago (was), and back as far
+// the other way now (off). As far as the lesser, where they are opposite.
+jank_snap(was: V3, off: V3): f32 {
+    a: f32 = v_len(was);
+    b: f32 = v_len(off);
+    if (a < 0.000001 || b < 0.000001) return 0.0;
+    back: f32 = -v_dot(was, off) / (a * b);
+    if (back <= 0.0) return 0.0;
+    minf(a, b) * back
+}
+
+// The point j of bone k of the guy drawn from matrix 0 (him).
+jank_point(k: int, j: int): V3 {
+    b: int = jank_bone[k];
+    out: f32 = 0.15;
+    if (b == GUY_BOARD) out = 0.4;
+    p: V3 = v3(0.0, 0.0, 0.0);
+    if (j == 1) p = v3(out, 0.0, 0.0);
+    if (j == 2) p = v3(0.0, out, 0.0);
+    if (j == 3) p = v3(0.0, 0.0, out);
+    guy_bone_point(draw_m, 0, b, p)
+}
+
+jank_name(p: int) raises IoError {
+    if (p >= JANK_CAM) {
+        write(1, "camera");
+        return
+    }
+    write(1, jank_bone_name[p / JANK_EACH]);
+    write(1, ".");
+    write_int(1, p % JANK_EACH)
+}
+
+// What was shown of the last jank: where on the screen (in screen heights
+// from its middle), and how long ago.
+jank_show_x: f32 = 0.0;
+
+jank_show_y: f32 = 0.0;
+
+jank_show_t: f32 = 100.0;
+
+// A frame, as drawn: seen from eye looking at `at`, fovy high, dt after
+// the one before in the run's time (real_dt, in the world's). A cut (he
+// is put somewhere else, or the camera is somewhere else at once) starts
+// afresh. Step, the run's step it shows (see replay.l8).
+jank_frame(
+    m: *Mover,
+    eye: V3,
+    at: V3,
+    fovy: f32,
+    dt: f32,
+    real_dt: f32,
+    cut: bool,
+    step: int
+) raises IoError {
+    if (!jank_on) return;
+    jank_show_t = jank_show_t + real_dt;
+    jank_frame_n = jank_frame_n + 1;
+    if (jank_dt_usual > 0.0 && real_dt > jank_dt_usual * 2.2) {
+        write(1, "L8JANK hitch frame=");
+        write_int(1, jank_frame_n);
+        write(1, " step=");
+        write_int(1, step);
+        write(1, " t=");
+        write_fixed(1, m.run_t as f64, 2);
+        write(1, " ms=");
+        write_fixed(1, (real_dt * 1000.0) as f64, 1);
+        write(1, " usual=");
+        write_fixed(1, (jank_dt_usual * 1000.0) as f64, 1);
+        write(1, "\n")
+    }
+    if (jank_dt_usual <= 0.0) jank_dt_usual = real_dt else jank_dt_usual = lerpf(jank_dt_usual,
+        real_dt, 0.05);
+    // (Held still, nothing moves: no frame to judge by.)
+    if (dt < 0.0001) return;
+    if (m.run_t < jank_run_was - 0.01) {
+        write(1, "L8JANK run ");
+        write_int(1, run_id());
+        write(1, "\n");
+        jank_known = 0
+    }
+    jank_run_was = m.run_t;
+    if (cut) jank_known = 0;
+    if (m.air != jank_air_was) jank_air_t = m.run_t;
+    jank_air_was = m.air;
+    // The frames move on.
+    for i in 0..2 {
+        for p in 0..JANK_POINTS {
+            jank_screen[i * JANK_POINTS + p] = jank_screen[(i + 1) * JANK_POINTS + p];
+            jank_world[i * JANK_POINTS + p] = jank_world[(i + 1) * JANK_POINTS + p]
+        }
+        jank_eye[i] = jank_eye[i + 1];
+        jank_at[i] = jank_at[i + 1];
+        jank_fovy[i] = jank_fovy[i + 1];
+        jank_dt[i] = jank_dt[i + 1]
+    }
+    jank_eye[2] = eye;
+    jank_at[2] = at;
+    jank_fovy[2] = fovy;
+    jank_dt[2] = dt;
+    base: int = 2 * JANK_POINTS;
+    for k in 0..JANK_BONES {
+        for j in 0..JANK_EACH {
+            p: V3 = jank_point(k, j);
+            jank_world[base + k * JANK_EACH + j] = p;
+            jank_screen[base + k * JANK_EACH + j] = jank_seen(eye, at, fovy, p)
+        }
+    }
+    jank_known = mini(jank_known + 1, 4);
+    if (jank_known < 3) return;
+    da: f32 = jank_dt[1];
+    db: f32 = jank_dt[2];
+    // How far off its way each went (the camera's two points of the place
+    // seen from each of the three frames' cameras); the one that snapped
+    // most, and the one that kinked most.
+    snap_p: int = 0;
+    snap: f32 = 0.0;
+    kink_p: int = 0;
+    kink: f32 = 0.0;
+    for p in 0..JANK_POINTS {
+        off: V3 = v3(0.0, 0.0, 0.0);
+        off_world: V3 = v3(0.0, 0.0, 0.0);
+        if (p < JANK_RIDER) {
+            off = jank_off(jank_screen[p], jank_screen[JANK_POINTS + p], jank_screen[base + p],
+                da, db, false);
+            off_world = jank_off(jank_world[p], jank_world[JANK_POINTS + p], jank_world[base + p],
+                da, db, true)
+        } else {
+            q: V3 = v_lerp(jank_eye[1], jank_at[1], 1.0 + 2.0 * (p - JANK_CAM) as f32);
+            off = jank_off(jank_seen(jank_eye[0], jank_at[0], jank_fovy[0], q), jank_seen(jank_eye[1],
+                jank_at[1], jank_fovy[1], q), jank_seen(jank_eye[2], jank_at[2], jank_fovy[2],
+                q), da, db, false)
+        }
+        if (jank_known >= 4) {
+            sn: f32 = jank_snap(jank_was_off[p], off);
+            if (sn > snap) {
+                snap = sn;
+                snap_p = p
+            }
+        }
+        if (v_len(off) > kink) {
+            kink = v_len(off);
+            kink_p = p
+        }
+        jank_was_off[p] = off;
+        jank_was_off_world[p] = off_world
+    }
+    // (A snap is of the frame before: off its way then, back now.)
+    if (snap >= jank_least) jank_say(m, 1, snap_p, snap, jank_frame_n - 1, step, db) else if (kink >= jank_kink_least) jank_say(m,
+        2, kink_p, kink, jank_frame_n, step, db);
+    // (Showing already, it is held longer, where it is, not begun again.)
+    if (snap >= jank_shown_least && jank_show_t < JANK_SHOW_FOR) jank_show_t = minf(jank_show_t,
+        0.2) else if (snap >= jank_shown_least) {
+        s: V3 = jank_screen[base + mini(snap_p, JANK_RIDER - 1)];
+        if (snap_p >= JANK_CAM) s = v3(0.0, 0.0, 1.0);
+        jank_show_x = s.x;
+        jank_show_y = s.y;
+        jank_show_t = 0.0
+    }
+}
+
+// Say a jank: a snap (1) or a kink (2), of point p, so far off its way (as
+// a share of the screen's height), in frame n, a frame dt long, at the
+// run's step `step`: with how far in the world (cm), and what he was
+// doing.
+jank_say(
+    m: *Mover,
+    kind: int,
+    p: int,
+    off: f32,
+    n: int,
+    step: int,
+    dt: f32
+) raises IoError {
+    if (kind == 1) write(1, "L8JANK snap frame=") else write(1, "L8JANK kink frame=");
+    write_int(1, n);
+    write(1, " step=");
+    write_int(1, step);
+    write(1, " t=");
+    write_fixed(1, m.run_t as f64, 2);
+    write(1, " what=");
+    jank_name(p);
+    write(1, " seen=");
+    write_fixed(1, (off * 100.0) as f64, 2);
+    write(1, " world=");
+    write_fixed(1, (v_len(jank_was_off_world[p]) * 100.0) as f64, 1);
+    write(1, " ms=");
+    write_fixed(1, (dt * 1000.0) as f64, 1);
+    write(1, " d=");
+    write_fixed(1, (-m.z) as f64, 1);
+    write(1, " x=");
+    write_fixed(1, m.x as f64, 1);
+    if (m.grinding) write(1, " grind") else if (m.air) write(1, " air") else write(1,
+        " ground");
+    since: f32 = m.run_t - jank_air_t;
+    if (since < 0.3) {
+        if (m.air) write(1, " off+") else write(1, " down+");
+        write_int(1, (since * 1000.0) as int);
+        write(1, "ms")
+    }
+    if (m.since_hop < 0.3) write(1, " pop");
+    if (m.air && m.trick_d > 0.0 && m.trick_t < m.trick_d) write(1, " trick");
+    if (m.air && m.grab_t > 0.0) write(1, " grab");
+    if (m.sketch_t < 0.6) write(1, " sketchy");
+    if (m.fakie) write(1, " switch");
+    if (m.finished) write(1, " finished");
+    if (play_which >= 0) write(1, " watched");
+    f: int = takeoff_feature(m.x, -m.z);
+    if (f >= 0) {
+        write(1, " on=");
+        write(1, item_name(item_of(f)))
+    }
+    write(1, "\n");
+    jank_shot_want(n)
+}
+
+// ---- shown ----
+// JANK!, as a comic would have it: a burst, yellow inked in the red of his
+// shirt, a bolt of lightning through it, popping out where it happened
+// (up and to the side, clear of him), and gone in a moment.
+// Over the picture w by h pixels, moved up by shift (see View).
+const JANK_SHOW_FOR: f32 = 0.9;
+
+jank_paint(w: f32, h: f32, shift: f32) {
+    if (!jank_on || jank_show_t >= JANK_SHOW_FOR) return;
+    t: f32 = jank_show_t;
+    // (Out quickly, past its size and back; then held; then fading.)
+    grow: f32 = 0.5 + 0.5 * smoothstepf(0.0, 0.08, t);
+    size: f32 = grow * (1.0 + 0.25 * (1.0 - smoothstepf(0.08, 0.2, t)) * smoothstepf(0.0,
+        0.08, t));
+    a: f32 = 1.0 - smoothstepf(JANK_SHOW_FOR - 0.3, JANK_SHOW_FOR, t);
+    u: f32 = minf(w, h) * 0.09 * size;
+    if (u < 1.0) return;
+    side: f32 = 1.0;
+    if (jank_show_x > 0.15 * w / h) side = -1.0;
+    cx: f32 = clampf(w * 0.5 + jank_show_x * h + side * u * 2.8, u * 1.6, w - u * 1.6);
+    cy: f32 = clampf(h * (0.5 - jank_show_y - shift * 0.5) - u * 2.2, u * 1.4, h - u * 1.4);
+    // The burst: spikes all round, long and short by turns, inked, then
+    // filled.
+    for pass in 0..2 {
+        ink: f32 = 0.0;
+        if (pass == 0) ink = u * 0.12;
+        for k in 0..14 {
+            ang: f32 = k as f32 * TAU / 14.0 + 0.2;
+            reach: f32 = u * 1.25;
+            if (k % 2 == 1) reach = u * 0.85;
+            wide: f32 = u * 0.42 + ink * 2.0;
+            ex: f32 = cx + cosf(ang) * reach * 1.25;
+            ey: f32 = cy + sinf(ang) * reach;
+            if (pass == 0) paint_line(cx, cy, ex, ey, wide, 0.78, 0.13, 0.1, a) else paint_line(cx,
+                cy, ex, ey, wide, 1.0, 0.84, 0.25, a)
+        }
+        if (pass == 0) paint_disc(cx, cy, u * 0.95 + ink, 0.78, 0.13, 0.1, a) else paint_disc(cx,
+            cy, u * 0.95, 1.0, 0.84, 0.25, a)
+    }
+    // The bolt, down through it from its top right: inked, then white.
+    bx: []f32 = [0.75, 0.15, 0.45, -0.35];
+    by: []f32 = [-1.15, -0.25, -0.2, 0.75];
+    for pass in 0..2 {
+        wide: f32 = u * 0.16;
+        if (pass == 0) wide = u * 0.3;
+        for k in 0..3 {
+            x0: f32 = cx + bx[k] * u * 1.3;
+            y0: f32 = cy + by[k] * u;
+            x1: f32 = cx + bx[k + 1] * u * 1.3;
+            y1: f32 = cy + by[k + 1] * u;
+            if (pass == 0) paint_line(x0, y0, x1, y1, wide, 0.78, 0.13, 0.1, a) else paint_line(x0,
+                y0, x1, y1, wide, 1.0, 1.0, 0.95, a)
+        }
+    }
+    // JANK!, inked all round, across it.
+    size_t: f32 = u * 0.62;
+    tw: f32 = text_wide_str(BOLD, size_t, 0.02, "JANK!");
+    tx: f32 = cx - tw * 0.5;
+    ty: f32 = cy + size_t * 0.36;
+    for k in 0..8 {
+        ang: f32 = k as f32 * TAU / 8.0;
+        paint_str(BOLD, size_t, 0.02, tx + cosf(ang) * u * 0.05, ty + sinf(ang) * u * 0.05,
+            "JANK!", 0.78, 0.13, 0.1, a)
+    }
+    paint_str(BOLD, size_t, 0.02, tx, ty, "JANK!", 1.0, 1.0, 0.97, a)
+}
+
+// ---- pictures ----
+// Natively, with L8_JANK_SHOTS=file, the frames about each jank (two
+// before it to two after) are kept in that file, one after another: a line
+// "F frame w h", then its pixels, three bytes each (red, green, blue),
+// from the bottom row up. (Every frame is read back into a ring of the
+// last few, so that those before it can be kept once it is known.)
+jank_shots_on: bool = false;
+
+const JANK_RING: int = 5;
+
+jank_ring: []i8 = new i8[0](0i8);
+
+jank_one: []i8 = new i8[0](0i8);
+
+jank_ring_frame: []int = [-1, -1, -1, -1, -1];
+
+jank_ring_w: int = 0;
+
+jank_ring_h: int = 0;
+
+// Frames wanted, up to which; and kept so far.
+jank_want_from: int = -1;
+
+jank_want_to: int = -1;
+
+jank_kept_to: int = -1;
+
+jank_shot_fd: int = -1;
+
+jank_shot_want(frame: int) {
+    if (!jank_shots_on) return;
+    if (jank_want_from < 0) jank_want_from = frame - 2;
+    jank_want_to = frame + 2
+}
+
+// The frame just drawn, w by h, into the ring; and those wanted, once all
+// of them are there, into the file.
+jank_shoot(w: int, h: int) noregion raises IoError {
+    if (!jank_shots_on) return;
+    if (w != jank_ring_w || h != jank_ring_h) {
+        jank_ring = new i8[w * h * 3 * JANK_RING](0i8);
+        jank_one = new i8[w * h * 3](0i8);
+        jank_ring_w = w;
+        jank_ring_h = h;
+        for k in 0..JANK_RING jank_ring_frame[k] = -1
+    }
+    slot: int = jank_frame_n % JANK_RING;
+    one: []i8 = jank_one;
+    glPixelStorei(3333, 1);
+    glReadPixels(0, 0, w, h, 6407, 5121, one);
+    glPixelStorei(3333, 4);
+    for i in 0..w * h * 3 jank_ring[slot * w * h * 3 + i] = one[i];
+    jank_ring_frame[slot] = jank_frame_n;
+    if (jank_want_from < 0 || jank_frame_n < jank_want_to) return;
+    if (jank_shot_fd < 0) jank_shot_fd = open(env_value("L8_JANK_SHOTS"), 577, 420);
+    if (jank_shot_fd < 0) {
+        jank_shots_on = false;
+        return
+    }
+    f: int = maxi(maxi(jank_want_from, jank_kept_to + 1), jank_frame_n - JANK_RING + 1);
+    while (f <= jank_frame_n) {
+        s: int = f % JANK_RING;
+        if (jank_ring_frame[s] == f) {
+            write(jank_shot_fd, "F ");
+            write_int(jank_shot_fd, f);
+            write(jank_shot_fd, " ");
+            write_int(jank_shot_fd, w);
+            write(jank_shot_fd, " ");
+            write_int(jank_shot_fd, h);
+            write(jank_shot_fd, "\n");
+            for i in 0..w * h * 3 one[i] = jank_ring[s * w * h * 3 + i];
+            write_bytes_n(jank_shot_fd, one, w * h * 3)
+        }
+        f = f + 1
+    }
+    jank_kept_to = jank_frame_n;
+    jank_want_from = -1;
+    jank_want_to = -1
+}
