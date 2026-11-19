@@ -1307,6 +1307,8 @@ const gameSays = (line) => {
     postRun(lastRun.version, lastRun.course, lastRun.score, lastRun.replay);
     sendRunHome(lastRun);
   }
+  // (A run given up, told of only where the game is tried out: see trying.)
+  else if (words[0] === "L8UNDONE") sendRunHome({ version: Number(words[1]), course: Number(words[2]), score: 0, replay: words.slice(4).join(" "), finished: false });
   else if (words[0] === "L8JANK") {
     if (words[1] === "run") jankLines = [];
     else if (jankLines.length < 3000) jankLines.push(line.trim());

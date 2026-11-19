@@ -44,7 +44,7 @@ const server = http.createServer(async (req, res) => {
     const r = run?.run;
     if (!r || typeof r.replay !== "string" || !Number.isFinite(r.course) || !Number.isFinite(r.score)) return send(res, 400, { error: "not a run" });
     const when = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
-    const name = `${when}-c${r.course}-${r.score}.json`;
+    const name = `${when}-c${r.course}-${r.finished === false ? "undone" : r.score}.json`;
     await writeFile(join(dir, name), JSON.stringify(run, null, 1));
     console.log(`${name}: ${(run.jank ?? []).length} jank lines`);
     return send(res, 200, { kept: name });
