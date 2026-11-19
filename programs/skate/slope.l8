@@ -583,10 +583,17 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
     m.vz = d.z * m.speed;
     m.heading = dir_yaw(d);
     m.ground_n = course_normal(m.x, m.z);
-    // He stays on the ground unless it falls away faster than he would.
+    // He stays on the ground unless it falls away faster than he would,
+    // and further than he soaks up (see soaks_up).
     h: f32 = course_height(m.x, m.z);
     fall: f32 = m.y + m.vy * dt - 0.5 * SLOPE_G * dt * dt;
-    if (h >= fall - 0.002) {
+    vy: f32 = 0.0;
+    off: bool = h < fall - 0.002;
+    if (off) {
+        vy = thrown_up(m, d, m.vy - SLOPE_G * dt);
+        off = !soaks_up(m, d, fall, vy)
+    }
+    if (!off) {
         m.vy = (h - m.y) / dt;
         m.y = h;
         // (What he feels: see Mover.felt.)
@@ -600,38 +607,74 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
         m.felt_on = true
     } else {
         m.y = fall;
-        m.vy = m.vy - SLOPE_G * dt;
-        // Only the rise along the run throws him up, not across it (a
-        // bank's, say), but for off a kicker and up a wall. (In the park,
-        // the rise the way he heads.)
-        p: V3 = m.prev;
-        // (Its rise just behind him: a lip's is the ramp's, not the drop's
-        // past it.)
-        dh: f32 = minf((course_height(p.x, p.z) - course_height(p.x, p.z + 0.3)) / 0.3,
-            STEEP_THROW);
-        ahead: f32 = maxf(-m.vz, 0.0);
-        // (Off a kicker, the rise the way he goes, however he crosses it: up
-        // its side too.)
-        if (!park && kicker_at(p.x, -p.z) >= 0) {
-            dh = minf((course_height(p.x, p.z) - course_height(p.x - d.x * 0.3, p.z - d.z * 0.3)) / 0.3,
-                STEEP_THROW);
-            ahead = m.speed
-        }
-        if (park) {
-            // (In the park, the rise along whatever he rides off, the way
-            // it faces, as on the course: not across it, nor backward.)
-            f: V3 = d;
-            k: int = kicker_at(p.x, -p.z);
-            if (k >= 0) f = feature_fwd(features[k]);
-            dh = minf((course_height(p.x, p.z) - course_height(p.x - f.x * 0.3, p.z - f.z * 0.3)) / 0.3,
-                STEEP_THROW);
-            ahead = maxf(v_dot(d, f) * m.speed, 0.0)
-        }
-        if (!wall_at(p.x, p.z) && m.vy > 0.0) m.vy = minf(m.vy, maxf(dh * ahead, 0.0));
+        m.vy = vy;
         take_off(m)
     }
     try_course_rail(m)
 }
+
+// How fast he goes up off the ground, rising at vy, heading d: only the
+// rise along the run throws him up, not across it (a bank's, say), but
+// for off a kicker and up a wall. (In the park, the rise the way he
+// heads.)
+thrown_up(m: *Mover, d: V3, vy: f32): f32 {
+    p: V3 = m.prev;
+    // (Its rise just behind him: a lip's is the ramp's, not the drop's
+    // past it.)
+    dh: f32 = minf((course_height(p.x, p.z) - course_height(p.x, p.z + 0.3)) / 0.3,
+        STEEP_THROW);
+    ahead: f32 = maxf(-m.vz, 0.0);
+    // (Off a kicker, the rise the way he goes, however he crosses it: up
+    // its side too.)
+    if (!park && kicker_at(p.x, -p.z) >= 0) {
+        dh = minf((course_height(p.x, p.z) - course_height(p.x - d.x * 0.3, p.z - d.z * 0.3)) / 0.3,
+            STEEP_THROW);
+        ahead = m.speed
+    }
+    if (park) {
+        // (In the park, the rise along whatever he rides off, the way
+        // it faces, as on the course: not across it, nor backward.)
+        f: V3 = d;
+        k: int = kicker_at(p.x, -p.z);
+        if (k >= 0) f = feature_fwd(features[k]);
+        dh = minf((course_height(p.x, p.z) - course_height(p.x - f.x * 0.3, p.z - f.z * 0.3)) / 0.3,
+            STEEP_THROW);
+        ahead = maxf(v_dot(d, f) * m.speed, 0.0)
+    }
+    if (!wall_at(p.x, p.z) && vy > 0.0) return minf(vy, maxf(dh * ahead, 0.0));
+    vy
+}
+
+// Whether, off the ground at y rising at vy, heading d, he would come
+// down on it again so soon, and so little above it, that his legs soak
+// it up and he stays on it: over the crest of a kicker's flank onto its
+// ramp, say, not thrown up a hair's breadth for a tenth of a second.
+// (The same arc as in the air, at any pace: see step_course_air.)
+soaks_up(
+    m: *Mover,
+    d: V3,
+    y: f32,
+    vy: f32
+): bool {
+    if (m.speed < 0.1) return false;
+    for k in 1..SOAK_STEPS + 1 {
+        s: f32 = SOAK_LEN * k as f32 / SOAK_STEPS as f32;
+        t: f32 = s / m.speed;
+        above: f32 = y + vy * t - 0.5 * SLOPE_G * t * t - course_height(m.x + d.x * s,
+            m.z + d.z * s);
+        if (above <= 0.0) return true;
+        if (above > SOAK_HIGH) return false
+    }
+    false
+}
+
+// The furthest along (m) and highest (m) a hop he soaks up, looked along
+// in so many steps.
+const SOAK_LEN: f32 = 1.2;
+
+const SOAK_HIGH: f32 = 0.05;
+
+const SOAK_STEPS: int = 12;
 
 step_course_air(m: *Mover, keys: *Keys, dt: f32) {
     // Grabbing, he turns slower.
