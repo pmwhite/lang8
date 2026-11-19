@@ -82,6 +82,11 @@ type Anim = {
     // where he was as of the last two frames, to tell where he would have
     // been.
     rail_fix: V3;
+    // How far his arms are pulled in to turn a trick (see move_air), and
+    // how far they had opened again as it ended: easing out of it as he
+    // lands, not at once (landing short of its end, they flew).
+    tuck: f32;
+    tuck_open: f32;
     at_was: V3;
     at_was2: V3;
     shown: GuyJoints;
@@ -93,10 +98,17 @@ type Anim = {
     // was. Whether he was on the ground, and whether this air is up a
     // halfpipe's wall (he comes back down it switch: see update_anim). And
     // the way his flip turns about, kept while he flips (see set_tumble).
+    // (Easing off on a spring, from as fast as he was turning: landing
+    // short of a flip's end, he turned on and back upright, not back at
+    // once, the other way, in a frame.)
     face_was: f32;
     face_off: f32;
     flip_was: f32;
     flip_off: f32;
+    face_off_v: f32;
+    flip_off_v: f32;
+    face_rate: f32;
+    flip_rate: f32;
     state_was: int;
     flip_axis: V3;
     flip_axis_known: bool;
@@ -162,6 +174,8 @@ new_anim(yaw: f32, y: f32): *Anim@new {
         lead_was: -1,
         swap_t: 10.0,
         rail_fix: v3(0.0, 0.0, 0.0),
+        tuck: 0.0,
+        tuck_open: 0.0,
         at_was: v3(0.0, y, 0.0),
         at_was2: v3(0.0, y, 0.0),
         shown: guy_solve(guy_stand()),
@@ -170,6 +184,10 @@ new_anim(yaw: f32, y: f32): *Anim@new {
         face_off: 0.0,
         flip_was: 0.0,
         flip_off: 0.0,
+        face_off_v: 0.0,
+        flip_off_v: 0.0,
+        face_rate: 0.0,
+        flip_rate: 0.0,
         state_was: -1,
         flip_axis: v3(1.0, 0.0, 0.0),
         flip_axis_known: false,
@@ -316,6 +334,11 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
     spring_step(&a.absorb, &a.absorb_v, 0.0, Spring { omega: ABSORB_OMEGA, damping: ABSORB_DAMPING },
         dt);
     a.absorb_arms = lerpf(a.absorb_arms, a.absorb, ease(20.0, dt));
+    tucking: bool = m.air && m.trick_set && absf(m.flip_goal) + absf(m.spin_goal) > 0.1;
+    if (tucking) a.tuck_open = smoothstepf(0.75, 1.0, trick_turned(m));
+    tk: f32 = 0.0;
+    if (tucking) tk = smoothstepf(0.0, 0.12, m.trick_t);
+    a.tuck = lerpf(a.tuck, tk, ease(TUCK_EASE, dt));
     // (How long this air will be, from its start.)
     if (m.air && !a.was_air) a.air_total = maxf(m.air_time + predict_air(m), 0.2);
     // (A trick begun in an air already under way, off a lip, say, pops him
@@ -439,22 +462,36 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
     if (m.fakie) face = face + PI;
     if (a.state_was >= 0 && state != a.state_was) {
         df: f32 = wrap_angle(face - a.face_was);
-        if (absf(df) > SNAP_LEAST) a.face_off = a.face_off - df;
+        if (absf(df) > SNAP_LEAST) {
+            a.face_off = a.face_off - df;
+            a.face_off_v = a.face_off_v + clampf(a.face_rate, -SNAP_RATE_MOST, SNAP_RATE_MOST)
+        }
         dl: f32 = wrap_angle(m.flip - a.flip_was);
-        if (absf(dl) > SNAP_LEAST) a.flip_off = a.flip_off - dl
+        if (absf(dl) > SNAP_LEAST) {
+            a.flip_off = a.flip_off - dl;
+            a.flip_off_v = a.flip_off_v + clampf(a.flip_rate, -SNAP_RATE_MOST, SNAP_RATE_MOST)
+        }
+    } else if (dt > 0.0001) {
+        a.face_rate = wrap_angle(face - a.face_was) / dt;
+        a.flip_rate = wrap_angle(m.flip - a.flip_was) / dt
     }
-    a.face_off = a.face_off * (1.0 - ease(SNAP_EASE, dt));
-    a.flip_off = a.flip_off * (1.0 - ease(SNAP_EASE, dt));
+    spring_step(&a.face_off, &a.face_off_v, 0.0, Spring { omega: SNAP_OMEGA, damping: 1.0 },
+        dt);
+    spring_step(&a.flip_off, &a.flip_off_v, 0.0, Spring { omega: SNAP_OMEGA, damping: 1.0 },
+        dt);
     a.face_was = face;
     a.flip_was = m.flip;
     a.state_was = state
 }
 
 // A change in how he faces or flips more than so much (rad) at once, as
-// his state changes, is eased off at so much (/s): a fifth of a second.
+// his state changes, is eased off on a spring this quick (/s: about a
+// quarter of a second), from as fast as he turned, up to so fast (rad/s).
 const SNAP_LEAST: f32 = 0.3;
 
-const SNAP_EASE: f32 = 12.0;
+const SNAP_OMEGA: f32 = 14.0;
+
+const SNAP_RATE_MOST: f32 = 15.0;
 
 // He stands as he must not to fall over: along what he feels (gravity,
 // and against however he is hurried on, turned or borne up: by the wheels
@@ -559,6 +596,9 @@ const UP_LANDING: f32 = 8.0;
 // (How quickly he is let go of from where he was as he came onto a rail,
 // /s.)
 const RAIL_EASE: f32 = 25.0;
+
+// (How quickly his arms come out of a trick's tuck, landed, /s.)
+const TUCK_EASE: f32 = 14.0;
 
 // (How quickly the board turns at the most, rad/s.)
 const BOARD_TURN_MOST: f32 = 10.0;
