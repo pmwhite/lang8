@@ -11,6 +11,9 @@ type Anim = {
     up: V3;
     y: f32;
     air: f32;
+    // (Eased toward in two stages, so that it begins to change gently, not
+    // at once at its quickest: the first of them; and so the crouch.)
+    air_to: f32;
     squash: f32;
     squash_v: f32;
     board_yaw: f32;
@@ -27,6 +30,7 @@ type Anim = {
     grab: f32;
     grab_v: f32;
     crouch: f32;
+    crouch_to: f32;
     time: f32;
     // The arms' lean into a carve, a moment behind his.
     arm_lean: f32;
@@ -34,6 +38,10 @@ type Anim = {
     absorb: f32;
     absorb_v: f32;
     land_fall: f32;
+    // (The arms follow the soak a moment behind it: kicked as the legs are,
+    // they flew. And how long he has been down.)
+    absorb_arms: f32;
+    down_t: f32;
     // How long this air is, all told, from its start (see predict_air);
     // whether he was in the air, and had a trick under way.
     air_total: f32;
@@ -97,6 +105,7 @@ new_anim(yaw: f32, y: f32): *Anim@new {
         up: v3(0.0, 1.0, 0.0),
         y: y,
         air: 0.0,
+        air_to: 0.0,
         squash: 0.0,
         squash_v: 0.0,
         board_yaw: yaw,
@@ -109,11 +118,14 @@ new_anim(yaw: f32, y: f32): *Anim@new {
         grab: 0.0,
         grab_v: 0.0,
         crouch: 0.0,
+        crouch_to: 0.0,
         time: 0.0,
         arm_lean: 0.0,
         absorb: 0.0,
         absorb_v: 0.0,
         land_fall: 0.0,
+        absorb_arms: 0.0,
+        down_t: 10.0,
         air_total: 1.0,
         was_air: false,
         was_trick: false,
@@ -246,7 +258,9 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
     a.time = a.time + dt;
     at: f32 = 0.0;
     if (m.air) at = 1.0;
-    a.air = lerpf(a.air, at, ease(12.0, dt));
+    a.air_to = lerpf(a.air_to, at, ease(24.0, dt));
+    a.air = lerpf(a.air, a.air_to, ease(24.0, dt));
+    if (m.air) a.down_t = 0.0 else a.down_t = a.down_t + dt;
     gt: f32 = 0.0;
     if (m.grinding) gt = 1.0;
     a.grind = lerpf(a.grind, gt, ease(16.0, dt));
@@ -259,7 +273,8 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
     a.grab = clampf(a.grab, 0.0, 1.2);
     ct2: f32 = 0.0;
     if (m.winding) ct2 = 1.0;
-    a.crouch = lerpf(a.crouch, ct2, ease(14.0, dt));
+    a.crouch_to = lerpf(a.crouch_to, ct2, ease(28.0, dt));
+    a.crouch = lerpf(a.crouch, a.crouch_to, ease(28.0, dt));
     a.lean = lerpf(a.lean, clampf(m.speed * m.turn_rate / GRIP_ACCEL, -1.0, 1.0),
         ease(12.0, dt));
     a.arm_lean = lerpf(a.arm_lean, a.lean, ease(1.0 / 0.15, dt));
@@ -273,6 +288,7 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
     }
     spring_step(&a.absorb, &a.absorb_v, 0.0, Spring { omega: ABSORB_OMEGA, damping: ABSORB_DAMPING },
         dt);
+    a.absorb_arms = lerpf(a.absorb_arms, a.absorb, ease(20.0, dt));
     // (How long this air will be, from its start.)
     if (m.air && !a.was_air) a.air_total = maxf(m.air_time + predict_air(m), 0.2);
     // (A trick begun in an air already under way, off a lip, say, pops him
@@ -355,9 +371,20 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
     if (!(m.air && a.vert_air)) a.board_yaw = approach_angle(a.board_yaw, by, ease(14.0,
         dt));
     // The board tilts with the ground under him; level in the air (but up
-    // off a halfpipe's wall, as he left it: see feel_ground).
+    // off a halfpipe's wall, as he left it: see feel_ground), until it
+    // nears the ground again.
     bu: V3 = m.ground_n;
-    if (m.air && m.pipe_vert) bu = a.board_up else if (m.air || m.grinding) bu = Y_AXIS;
+    if (m.grinding) bu = Y_AXIS else if (m.air) {
+        bu = Y_AXIS;
+        if (m.pipe_vert) bu = a.board_up;
+        // (Coming down, he lays it to the ground under him, as it nears:
+        // else it was laid on a bank's slope, or a wall's steeper than he
+        // left it, at once as it touched.)
+        above: f32 = m.y - course_height(m.x, m.z);
+        near: f32 = 0.0;
+        if (m.vy < 0.0) near = 1.0 - smoothstepf(0.15, 1.2, above);
+        bu = v_norm(v_lerp(bu, course_normal(m.x, m.z), near))
+    }
     // (On the ground at once, nearly, or it lags the ground under it,
     // rising onto a ramp, say.)
     bk: f32 = 14.0;
@@ -443,7 +470,10 @@ feel_ground(a: *Anim, m: *Mover) {
     // he flies leaning, and rights himself only slowly (AIR_RIGHT), though
     // along his way he stands up at once. (Up off a halfpipe's wall, he
     // stays square to it, as he left it, to come back down it.)
-    if (!m.air) a.up = v_norm(v_lerp(a.up, feel, ease(UP_EASE, dt))) else if (!m.pipe_vert) {
+    // (Just down, he comes to stand as he must over a moment, not at once:
+    // landing on a bank, he tipped to its lean in a frame.)
+    if (!m.air) a.up = v_norm(v_lerp(a.up, feel, ease(lerpf(UP_LANDING, UP_EASE, smoothstepf(0.0,
+        0.3, a.down_t)), dt))) else if (!m.pipe_vert) {
         way: V3 = yaw_dir(m.heading);
         side: V3 = v_norm(v_cross(Y_AXIS, way));
         lean: f32 = atan2f(v_dot(a.up, side), a.up.y) * (1.0 - ease(AIR_RIGHT, dt));
@@ -473,6 +503,8 @@ const UPRIGHT_LEAST: f32 = 0.5;
 const BEARS_LEAST: f32 = 0.6;
 
 const UP_EASE: f32 = 40.0;
+
+const UP_LANDING: f32 = 8.0;
 
 // (How quickly what hurries him on along his way settles, /s.)
 const ALONG_EASE: f32 = 6.0;
@@ -620,14 +652,19 @@ pose_guy(
     // (The tail let go of over 0.25 s, from 0.3 s before he lands: easing
     // in and out, so the hand never snaps off.)
     leaving: f32 = smoothstepf(0.0, 1.0, (0.3 - (a.air_total - m.air_time)) / 0.25);
-    let_go: f32 = 1.0 - leaving;
+    // (And taken over 0.1 s from take-off: a grab still letting go of as
+    // he popped again at once snapped back in.)
+    let_go: f32 = (1.0 - leaving) * smoothstepf(0.0, 0.1, m.air_time);
     if (!m.air) let_go = 0.0;
     mv = mix_move(mv, move_grab(st, air), minf(a.grab, 1.0) * let_go);
     // (Snapping into it over a few frames.)
     pop: f32 = smoothstepf(0.0, 0.1, m.since_hop) * (1.0 - smoothstepf(0.14, 0.27,
         m.since_hop));
     mv = mix_move(mv, move_pop(m, st, mv), pop);
+    before: BoardMove = mv;
     mv = mix_move(mv, move_land(mv, a.land_fall), clampf(a.absorb, 0.0, 1.0));
+    for i in 0..2 mv.arms[i] = mix_arm(before.arms[i], move_land(before, a.land_fall).arms[i],
+        clampf(a.absorb_arms, 0.0, 1.0));
     wobble: f32 = 0.0;
     // (Sketchy: the windmill held a moment, then fading.)
     if (m.sketch_t < SKETCH_HOLD + SKETCH_FADE) {
@@ -811,10 +848,11 @@ on_board(
     st: Sides,
     p: *GuyPose
 ) {
-    w: f32 = 1.0 - a.air;
-    if (w < 0.001) return;
     deck: V3 = root_dir(v_rotate(a.board_up, yaw_dir(m.heading), a.roll));
-    if (deck.y < 0.3) return;
+    // (Less as the deck turns away from under him, as in a flip, and not at
+    // all past so far: all at once, his feet jumped.)
+    w: f32 = (1.0 - a.air) * smoothstepf(0.3, 0.6, deck.y);
+    if (w < 0.001) return;
     pitch: f32 = atan2f(-deck.z, deck.y);
     roll: f32 = atan2f(-deck.x, deck.y);
     for i in 0..2 {

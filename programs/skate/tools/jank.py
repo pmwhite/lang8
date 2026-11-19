@@ -161,8 +161,14 @@ def main():
                     if k in frames:
                         mark = ["-bordercolor", "red", "-border", "6"] if k == n else ["-bordercolor", "white", "-border", "6"]
                         lab = os.path.join(out, f"tmp-{k}.png")
-                        subprocess.run(["convert", frames[k], "-resize", "480x480", *mark, "-gravity", "North", "-pointsize", "18",
-                                        "-annotate", "+0+8", f"frame {k}", lab], check=True)
+                        # (About him: a square a third of the screen's height
+                        # round where the jank was, at twice its size.)
+                        side = h // 3
+                        cx = int(w / 2 + worst.get("sx", 0) * h) - side // 2
+                        cy = int(h / 2 - worst.get("sy", 0) * h) - side // 2
+                        cx, cy = max(0, min(w - side, cx)), max(0, min(h - side, cy))
+                        subprocess.run(["convert", frames[k], "-crop", f"{side}x{side}+{cx}+{cy}", "+repage", "-resize", "400x400", *mark,
+                                        "-gravity", "North", "-pointsize", "18", "-annotate", "+0+8", f"frame {k}", lab], check=True)
                         labelled.append(lab)
                 subprocess.run(["montage", *labelled, "-tile", "5x1", "-geometry", "+2+2", picture], check=True)
                 for lab in labelled:
