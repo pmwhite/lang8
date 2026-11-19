@@ -4,6 +4,8 @@ use_tag std;
 
 use_tag gl, x11;
 
+use_tag blockmesh, env;
+
 import "../../stdlib/print.l8";
 
 // A block guy and his skateboard, on a slope course or in a skatepark (see
@@ -17,10 +19,6 @@ import "../../stdlib/print.l8";
 // that steers and its right half the trick pad (see touch.l8). R starts
 // over, N lays out a new course; Escape quits.
 import "game.l8";
-
-extern getenv(name: str): ?*i8;
-
-extern l8_environment(): []str@new;
 
 // The camera follows him from behind.
 type Camera = {
@@ -249,27 +247,14 @@ drag_report() {
 
 // L8_SEED=n lays out course n; otherwise each start is a new one.
 seed_from_env(): int {
-    prefix: str = "L8_SEED=";
-    for e in l8_environment() {
-        if (len(e) > len(prefix) && starts_with(e, prefix)) {
-            n: int = 0;
-            for i in len(prefix)..len(e) {
-                c: int = e[i] as int;
-                if (c >= 48 && c <= 57) n = n * 10 + c - 48
-            }
-            return n
-        }
-    }
-    mono_ns() / 1000 % 100000
+    env_int("L8_SEED", mono_ns() / 1000 % 100000)
 }
 
 // The look's letter, from L8_LOOK (see Look, in render.l8), or 0.
 look_from_env(): int {
-    prefix: str = "L8_LOOK=";
-    for e in l8_environment() {
-        if (len(e) > len(prefix) && starts_with(e, prefix)) return e[len(prefix)] as int
-    }
-    0
+    value: str = env_value("L8_LOOK");
+    if (len(value) == 0) return 0;
+    value[0] as int
 }
 
 // Go to place id (a course's number, or a park's, negative: see run_id):
@@ -347,7 +332,7 @@ go_to(
     rec_begin();
     // (The tutorial starts with the game riding it: see tutorial.l8.)
     if (in_tutorial()) demo_begin() else demo_on = false;
-    if (getenv("L8_TRACE") != null) {
+    if (env_has("L8_TRACE")) {
         write(2, "longest without a frame, ms: ");
         write_int(2, breathe_longest / 1000000);
         write(2, " at stage ");
@@ -363,7 +348,7 @@ world_built: bool = false;
 stage_ns: int = 0;
 
 trace_stage(name: str) raises IoError {
-    if (getenv("L8_TRACE") == null) return;
+    if (!env_has("L8_TRACE")) return;
     now: int = mono_ns();
     write(2, "stage ");
     write(2, name);
@@ -408,13 +393,6 @@ const PLACE_KEY: int = 10000000000;
 
 place_key(ks: int): bool {
     absi(ks - PLACE_KEY) < 2 * MOON_BOARD
-}
-
-starts_with(s: str, prefix: str): bool {
-    for i in 0..len(prefix) {
-        if (s[i] != prefix[i]) return false
-    }
-    true
 }
 
 // Keys by direction: arrows and WASD, +x right and +z toward the camera.
@@ -472,13 +450,19 @@ trace(m: *Mover) raises IoError {
 
 main() noregion raises IoError: int {
     // The look first: the meshes take its colors.
-    grass_on = getenv("L8_NO_GRASS") == null;
+    grass_on = !env_has("L8_NO_GRASS");
     pick_look(look_from_env());
+    // (On the stage, if it is asked for, nothing of a place is drawn: see
+    // stage.l8.)
+    stage_begin();
     if (!look.night && look_from_env() != 0) day_look = look_from_env();
     world: *Mesh = new_mesh(1600000);
-    // (His figure, and one in each of the others' colors: see build_parts.)
-    parts: *Mesh = new_mesh(80000);
-    build_parts(parts);
+    // (Him and his board, which every rider is drawn with, and the
+    // finish's gate: see build_parts; and on the stage, its ground.)
+    parts: *Mesh = new_mesh(40000);
+    build_parts(parts, stage_depth);
+    if (stage_on) add_stage_part(parts);
+    if (env_has("L8_TRACE")) trace_parts();
     d0: ?*i8 = XOpenDisplay(null);
     if (d0 == null) {
         eprint("XOpenDisplay failed (need DISPLAY / XWayland)");
@@ -528,28 +512,36 @@ main() noregion raises IoError: int {
     if (ctx0 == null) die("glXCreateContext failed");
     ctx: *i8 = ctx0;
     if (glXMakeCurrent(dpy, win, ctx) == 0) die("glXMakeCurrent failed");
-    glXSwapIntervalEXT(dpy, win, 1);
+    // (L8_UNCAPPED: frames as fast as they can be drawn, not in step with
+    // the screen, for measuring how long they take: see L8FRAME.)
+    if (!env_has("L8_UNCAPPED")) glXSwapIntervalEXT(dpy, win, 1) else glXSwapIntervalEXT(dpy,
+        win, 0);
     r: *Renderer = new_renderer(parts);
     the_renderer = r;
     m: *Mover = new_mover();
     together_begin();
+    // (L8_CROWD=n: n others riding as he does, by the others' own way: see
+    // crowd_begin.)
+    crowd_begin(env_number("L8_CROWD", 0.0) as int, mono_ns() as f64 / 1000000.0f64);
     // On a page (which says so: L8_PAGE), the work of building stops for
     // frames (see breathe.l8).
-    breathe_on = getenv("L8_PAGE") != null;
+    breathe_on = env_has("L8_PAGE");
     breathe_dpy = dpy;
     breathe_win = win;
     hud_page = breathe_on;
     // L8_SEED is the course to start on; with L8_PARK, the park.
     first: int = seed_from_env();
-    if (getenv("L8_PARK") != null) first = -first;
+    if (env_has("L8_PARK")) first = -first;
     // (What the page has to show over the game already: see ui.l8.)
     if (hud_page) ui_read();
-    go_to(m, r, world, first);
+    // (On the stage, no place is built: nothing of it is drawn.)
+    if (!stage_on) go_to(m, r, world, first);
     write(1, "L8VERSION ");
     write_int(1, REPLAY_VERSION);
     print("");
     say_course();
     a: *Anim = new_anim(m.heading, m.y);
+    if (stage_on) stage_start(m, a);
     start: V3 = v3(m.x, m.y, m.z);
     cam: *Camera = new Camera {
         target: start,
@@ -560,7 +552,7 @@ main() noregion raises IoError: int {
     // A replay is watched from beside the run, or (C) from behind him as
     // he rode it. A course's number typed (then Enter), and how long ago.
     tv: bool = true;
-    hud_touch = getenv("L8_TOUCH") != null;
+    hud_touch = env_has("L8_TOUCH");
     // A friend's run to watch, once its course is built.
     watch_pending: bool = false;
     typed: int = -1;
@@ -576,9 +568,11 @@ main() noregion raises IoError: int {
     friend_over: bool = false;
     update_course_camera(cam, start, m.carve, 10.0);
     keys: Keys = no_keys();
-    shadows: bool = getenv("L8_NO_SHADOWS") == null;
-    tracing: bool = getenv("L8_TRACE") != null;
+    shadows: bool = !env_has("L8_NO_SHADOWS");
+    tracing: bool = env_has("L8_TRACE");
     trace_ns: int = 0;
+    frames_ns: int = mono_ns();
+    frames_timed: int = 0;
     ev: XEvent = XEvent.Other;
     running: bool = true;
     alive: bool = true;
@@ -897,7 +891,10 @@ main() noregion raises IoError: int {
             go_queued = 0
         }
         if (hud_building == 1) hud_building = 2;
-        if (running) {
+        if (running && stage_on) {
+            stage_frame(r, m, a, shadows);
+            glXSwapBuffers(dpy, win)
+        } else if (running) {
             now: int = mono_ns();
             dns: int = now - prev_ns;
             prev_ns = now;
@@ -1043,6 +1040,7 @@ main() noregion raises IoError: int {
             now_ms: f64 = now as f64 / 1000000.0f64;
             if (net_send && play_which < 0 && !demo_on && !in_tutorial() && !paused && !preview) say_state(m,
                 now_ms - (acc * 1000.0) as f64, real_dt);
+            if (!paused) crowd_say(m, now_ms - (acc * 1000.0) as f64, now_ms, real_dt);
             was_finished = m.finished;
             typed_t = typed_t + dt;
             if (typed_t > 4.0) typed = -1;
@@ -1245,6 +1243,17 @@ main() noregion raises IoError: int {
                 }
                 ui_paint();
                 draw_paint(r)
+            }
+            frames_timed = frames_timed + 1;
+            if (tracing && now - frames_ns > 2000000000) {
+                // (How long a frame took, on the whole, these two seconds.)
+                write(2, "L8FRAME us ");
+                write_int(2, (now - frames_ns) / frames_timed / 1000);
+                write(2, " frames ");
+                write_int(2, frames_timed);
+                write(2, "\n");
+                frames_ns = now;
+                frames_timed = 0
             }
             if (tracing && now - trace_ns > 250000000) {
                 trace_ns = now;

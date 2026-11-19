@@ -1,0 +1,1217 @@
+tag tumbledown;
+
+use_tag std, gl, skate_math, skate, blockmesh, blockguy, builder;
+
+// Drawing, trimmed from skate's (programs/skate/render.l8): a clear day's
+// sky, the hill lit by the sun with a shadow map that follows him, the
+// guy (one skinned draw: see blockguy), and what is painted over it all
+// (skate's paint.l8). Lighting is done in linear color, tone mapped and
+// gamma corrected at the end. What is left out of skate's: lamps and
+// night, other looks, grass tufts, fireflies, frosted glass, the kept
+// picture, and drawing small.
+const SHADOW_SIZE: int = 1024;
+
+const SHADOW_HALF: f32 = 20.0;
+
+tag tumbledown
+type Renderer = {
+    world: int;
+    shadow: int;
+    sky: int;
+    paint: int;
+    u_vp: int;
+    u_model: int;
+    u_light: int;
+    u_sun: int;
+    u_cam: int;
+    u_texel: int;
+    u_blob: int;
+    u_shadow_map: int;
+    u_world_noise: int;
+    u_bones: int;
+    u_tint: int;
+    u_side_shade: int;
+    u_sole: int;
+    u_no_haze: int;
+    u_no_face: int;
+    u_sea_y: int;
+    u_smvp: int;
+    u_sbones: int;
+    u_slight: int;
+    u_cam_f: int;
+    u_cam_r: int;
+    u_cam_u: int;
+    u_tan: int;
+    u_shift: int;
+    u_sky_sun: int;
+    u_time: int;
+    u_sky_noise: int;
+    // The look's uniforms in the world's and the sky's programs (see
+    // LOOK_NAMES).
+    u_look: []int;
+    u_paint_screen: int;
+    u_paint_clip: int;
+    u_paint_fade: int;
+    u_paint_font: int;
+    u_paint_frost: int;
+    u_paint_kept: int;
+    noise_tex: u32;
+    font_tex: u32;
+    shadow_tex: u32;
+    shadow_fbo: u32;
+    ground_buf: u32;
+    solid_buf: u32;
+    guy_buf: u32;
+    guy_n: int;
+    // A ring, flat, of radius 1, for a splash.
+    ring_buf: u32;
+    ring_n: int;
+    sky_buf: u32;
+    paint_buf: u32;
+    paint_idx: u32
+}
+
+// The window's size (skate's touch.l8 reads it: so it is skate's too).
+tag tumbledown, skate
+screen_w: int = 1280;
+
+tag tumbledown, skate
+screen_h: int = 720;
+
+// (Skate's paint.l8 asks whether the scene can be had blurred, for frosted
+// glass: it never can here, and glass is painted solid.)
+tag skate
+frost_live: bool = false;
+
+// (And it takes the lesser of two counts by skate's mini, which skate's
+// slope.l8 has: here is one of the same.)
+tag skate
+mini(a: int, b: int): int {
+    if (a < b) return a;
+    b
+}
+
+die(msg: str) raises IoError: noreturn {
+    eprint(msg);
+    exit(1)
+}
+
+extern exit(code: int): noreturn;
+
+// ---- the look ----
+// A clear day: the sun behind him as he runs down, a little to one side
+// and not high, so that each drop throws a long shadow on the row below it
+// (the drop reads from behind, where its face is out of sight), and the
+// side of him the camera sees is lit. (Skate's look_clear, its sun moved.)
+look_sun: V3 = V3 { x: -0.4, y: 0.55, z: 0.73 };
+
+look_sun_light: V3 = V3 { x: 2.4, y: 2.28, z: 2.06 };
+
+look_sky_up: V3 = V3 { x: 0.27, y: 0.37, z: 0.61 };
+
+look_sky_down: V3 = V3 { x: 0.29, y: 0.26, z: 0.22 };
+
+look_zenith: V3 = V3 { x: 0.14, y: 0.34, z: 0.8 };
+
+look_away: V3 = V3 { x: 0.62, y: 0.78, z: 0.95 };
+
+look_toward: V3 = V3 { x: 0.92, y: 0.9, z: 0.86 };
+
+look_glow: V3 = V3 { x: 0.2, y: 0.19, z: 0.17 };
+
+look_grade: V3 = V3 { x: 0.62, y: 0.62, z: 0.6 };
+
+look_disc: V3 = V3 { x: 1.0, y: 0.9, z: 0.75 };
+
+LOOK_NAMES: []str = ["look_zenith", "look_away", "look_toward", "look_glow", "look_sun",
+    "look_sky_up", "look_sky_down", "look_haze", "look_grade", "look_disc", "sky_sun",
+    "sky_sun_flat"];
+
+const LOOK_UNIFORMS: int = 12;
+
+// The sky's color toward d, without the clouds; the distance fades to it.
+SKY_GLSL: str = """
+#ifdef GL_ES
+#define HP highp
+#else
+#define HP
+#endif
+uniform HP vec3 sky_sun;
+uniform vec2 sky_sun_flat;
+uniform vec3 look_zenith;
+uniform vec3 look_away;
+uniform vec3 look_toward;
+uniform vec3 look_glow;
+uniform vec3 look_sun;
+uniform vec3 look_sky_up;
+uniform vec3 look_sky_down;
+uniform vec3 look_haze;
+uniform vec4 look_grade;
+uniform vec4 look_disc;
+vec3 sky_base(vec3 d) {
+  float up = clamp(d.y, 0.0, 1.0);
+  vec2 flat_d = d.xz + vec2(0.0001, 0.0);
+  float toward = dot(normalize(flat_d), sky_sun_flat) * 0.5 + 0.5;
+  float t2 = toward * toward;
+  float t4 = t2 * t2;
+  vec3 horizon = mix(look_away, look_toward, t2);
+  vec3 c = horizon;
+  float glow = t4 * t4 * t2;
+  if (up > 0.0) {
+    c = mix(horizon, look_zenith, pow(up, 0.45));
+    glow *= exp(-up * 8.0);
+  }
+  c += look_glow * glow;
+  c = mix(c, horizon * 0.8, clamp(-d.y * 3.0, 0.0, 1.0));
+  return c;
+}
+#define SUN_LIGHT look_sun
+vec3 sky_light(vec3 n) {
+  return mix(look_sky_down, look_sky_up, n.y * 0.5 + 0.5);
+}
+vec3 haze(vec3 col, vec3 V, float dist) {
+  if (dist <= 20.0) return col;
+  float f = 1.0 - exp(-(dist - 20.0) * look_haze.x);
+  return mix(col, sky_base(-V) * 0.95, f * look_haze.y);
+}
+vec3 tone(vec3 c) {
+  c *= look_grade.rgb;
+  c = (c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14);
+  float l = dot(c, vec3(0.3, 0.55, 0.15));
+  c = mix(vec3(l), c, look_grade.a);
+  return pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2));
+}
+uniform sampler2D noise_map;
+float vnoise(HP vec2 p) { return texture2D(noise_map, p * 0.015625).r; }
+""";
+
+// As skate's: the guy's bones after his first (a corner's material code
+// carries its bone: see guy_glsl_defines), and his color for MAT_BODY's
+// corners. (Built with_guy_defines, after the version line.)
+WORLD_VS: str = """
+attribute vec3 pos;
+attribute vec3 nrm;
+attribute vec4 vcol;
+uniform mat4 vp;
+uniform mat4 model;
+uniform mat4 light_vp;
+uniform mat4 bones[GUY_SKINNED_BONES];
+uniform vec3 tint;
+// How light each side's legs and arms are (side 0's and side 1's: see
+// guy_side_shade, in blockguy).
+uniform vec2 side_shade;
+// His soles: the two feet's bones, the height in a foot's frame below
+// which it is sole, and how dark the sole is, of the rest (1: as the rest).
+uniform vec4 sole;
+varying vec3 vworld;
+varying vec3 vnrm;
+varying vec4 vcolor;
+varying vec4 vlight;
+void main() {
+  float bone = floor(vcol.a / GUY_BONE_CODE);
+  float mat = vcol.a - GUY_BONE_CODE * bone;
+  mat4 m = model;
+  if (bone > 0.5) m = bones[int(bone) - 1];
+  vec4 w = m * vec4(pos, 1.0);
+  vworld = w.xyz;
+  vnrm = mat3(m[0].xyz, m[1].xyz, m[2].xyz) * nrm;
+  vec3 c = vcol.rgb;
+  if (abs(mat - MAT_BODY) < 0.1) c = tint;
+  if ((abs(bone - sole.x) < 0.5 || abs(bone - sole.y) < 0.5) && pos.y < sole.z) c *= sole.w;
+  // (The far side's limbs a shade darker, as their color: see
+  // guy_side_shade.)
+  if (bone > 0.5 && bone < GUY_BOARD - 0.5) c *= abs(mod(bone, 2.0) - GUY_SIDE0_ODD) < 0.5 ? side_shade.x : side_shade.y;
+  vcolor = vec4(pow(c, vec3(2.2)), mat);
+  vec4 wl = w;
+  if (mat > 4.5 && mat < 5.5) wl.xyz += normalize(vnrm) * 0.05;
+  vlight = light_vp * wl;
+  gl_Position = vp * w;
+}
+""";
+
+// Bare rock (material 0, the walked tops), grass (1), water (2), the guy
+// (5), rock faces and bark (6), leaves (9).
+WORLD_FS: str = """
+uniform sampler2DShadow shadow_map;
+uniform vec3 sun_dir;
+uniform HP vec3 cam_pos;
+uniform float shadow_texel;
+// For measuring what costs what (L8_PROFILE: see main.l8): the haze, and
+// the rock faces' courses, left out where 1.
+uniform float no_haze;
+uniform float no_face;
+// The sea's level: rock just over it is wet, darker.
+uniform HP float sea_y;
+uniform HP vec3 blob;
+varying HP vec3 vworld;
+varying vec3 vnrm;
+varying vec4 vcolor;
+varying HP vec4 vlight;
+float sun_visibility(float ndl) {
+  HP vec3 sc = vlight.xyz / vlight.w * 0.5 + 0.5;
+  if (sc.x < 0.002 || sc.x > 0.998 || sc.y < 0.002 || sc.y > 0.998 || sc.z > 1.0) return 1.0;
+  HP float bias = 0.0004 + 0.0012 * (1.0 - clamp(ndl, 0.0, 1.0));
+  HP float t = shadow_texel;
+  float v = shadow2D(shadow_map, vec3(sc.xy, sc.z - bias)).r * 0.36;
+  v += shadow2D(shadow_map, vec3(sc.xy + vec2(t, 0.0), sc.z - bias)).r * 0.16;
+  v += shadow2D(shadow_map, vec3(sc.xy - vec2(t, 0.0), sc.z - bias)).r * 0.16;
+  v += shadow2D(shadow_map, vec3(sc.xy + vec2(0.0, t), sc.z - bias)).r * 0.16;
+  v += shadow2D(shadow_map, vec3(sc.xy - vec2(0.0, t), sc.z - bias)).r * 0.16;
+  vec2 e = abs(sc.xy - 0.5) * 2.0;
+  return mix(v, 1.0, smoothstep(0.7, 0.95, max(e.x, e.y)));
+}
+// A cell's own number, 0..1, from where it is.
+float cell_hash(HP vec2 id) {
+  return fract(sin(dot(id, vec2(12.9898, 78.233))) * 43758.5453);
+}
+void main() {
+  vec3 n = normalize(vnrm);
+  float ao = clamp(length(vnrm), 0.0, 1.0);
+  float mat = vcolor.a;
+  vec3 albedo = vcolor.rgb;
+  HP vec3 to_cam = cam_pos - vworld;
+  HP float dist = length(to_cam);
+  vec3 V = to_cam / dist;
+  float spec = 0.0;
+  float gloss = 8.0;
+  float wrap = 0.25;
+  float ground = 0.0;
+  HP vec2 xz = vworld.xz;
+  if (mat < 0.5) {
+    // Bare rock: the tops of basalt columns, hexagons 0.9 m across, each a
+    // little lighter or darker than the next, dark seams between them and
+    // the edge of each toward the sun catching it; over them soft weather.
+    HP vec2 p = xz / 0.9;
+    HP vec2 r = vec2(1.0, 1.7320508);
+    HP vec2 a = mod(p, r) - r * 0.5;
+    HP vec2 b = mod(p - r * 0.5, r) - r * 0.5;
+    HP vec2 g = dot(a, a) < dot(b, b) ? a : b;
+    float edge = 0.5 - max(abs(g.x), max(abs(dot(g, vec2(0.5, 0.866))), abs(dot(g, vec2(-0.5, 0.866)))));
+    edge *= 0.9;
+    albedo *= 0.88 + 0.24 * cell_hash(floor((p - g) * 2.0 + 0.5));
+    // (Each top a little domed: its edge toward the sun lit, the edge
+    // away from it shaded.)
+    float toward = dot(normalize(g + vec2(0.0001, 0.0)), normalize(sun_dir.xz));
+    float rim = 1.0 - smoothstep(0.03, 0.12, edge);
+    albedo *= 1.0 + (toward > 0.0 ? 0.14 : 0.18) * toward * rim;
+    albedo *= mix(1.0, mix(0.55, 1.0, smoothstep(0.012, 0.022, edge)), step(0.8, n.y));
+    albedo *= 0.92 + 0.1 * vnoise(xz * 0.35 + 3.0) + 0.05 * vnoise(xz * 1.9);
+    spec = 0.02;
+    gloss = 8.0;
+    ground = 1.0;
+  } else if (mat < 1.5) {
+    // Grass: soft, in broad patches a little yellower or deeper.
+    float big = vnoise(xz * 0.07);
+    float mid = vnoise(xz * 0.4 + 7.0);
+    albedo *= 0.9 + 0.14 * big + 0.06 * mid;
+    albedo = mix(albedo, albedo * vec3(1.15, 1.08, 0.75), smoothstep(0.55, 0.8, mid) * 0.4);
+    wrap = 0.4;
+    ground = 1.0;
+  } else if (mat < 2.5) {
+    // Water: flat and calm, a little of the sky in it toward the horizon,
+    // and the sun's glints.
+    float grazing = 1.0 - max(V.y, 0.0);
+    albedo = mix(albedo, look_away * 0.45, grazing * grazing * 0.5);
+    wrap = 0.6;
+    spec = 0.5;
+    gloss = 90.0;
+  } else if (mat < 5.5) {
+    // The guy: soft painted block, light wrapping a little around it.
+    wrap = 0.35;
+    spec = 0.12;
+    gloss = 20.0;
+  } else if (mat < 7.5 && no_face > 0.5) {
+  } else if (mat < 7.5) {
+    // Stone's faces: basalt columns standing side by side, 0.9 m wide,
+    // each its own shade, a dark seam between each two; across them the
+    // strata, bands a little lighter or darker, with fine cracks between.
+    HP float u = abs(n.x) > abs(n.z) ? vworld.z : vworld.x;
+    HP float column = floor(u / 0.9);
+    float seam = abs(fract(u / 0.9) - 0.5) * 0.9;
+    albedo *= mix(1.0, 0.7, smoothstep(0.42, 0.43, seam));
+    // (Each column broken across every so often, at heights its own.)
+    float h1 = cell_hash(vec2(column, 3.0));
+    HP float joint = 0.8 + 0.8 * h1;
+    HP float jy = vworld.y / joint + cell_hash(vec2(column, 5.0));
+    albedo *= 0.93 + 0.12 * cell_hash(vec2(column, floor(jy)));
+    float bed = abs(fract(jy) - 0.5) * joint;
+    albedo *= mix(1.0, 0.8, smoothstep(joint * 0.5 - 0.025, joint * 0.5 - 0.012, bed));
+    // (The strata: broad bands a little lighter or darker.)
+    albedo *= 0.95 + 0.08 * vnoise(vec2(u * 0.05, vworld.y * 0.6));
+    albedo *= 0.94 + 0.1 * vnoise(vec2(u * 0.8, vworld.y * 1.7));
+    spec = 0.03;
+    gloss = 10.0;
+  } else {
+    // Leaves: lumpy color, light coming through.
+    albedo *= 0.85 + 0.3 * vnoise(vworld.xz * 2.3 + vworld.y * 3.0);
+    wrap = 0.5;
+  }
+  float ndl = dot(n, sun_dir);
+  float diff = max((ndl + wrap) / (1.0 + wrap), 0.0);
+  float vis = 0.0;
+  // (The sea takes no shadows: calmer, and cheaper.)
+  if (mat > 1.5 && mat < 2.5) vis = 1.0; else if (diff > 0.0 || (mat > 4.5 && mat < 5.5)) vis = sun_visibility(ndl);
+  vec3 sky = sky_light(n) * ao;
+  // Contact darkening on the ground under him.
+  HP vec2 bq = vworld.xz - blob.xz;
+  if (ground > 0.5 && dot(bq, bq) < 0.5625) {
+    float d = length(bq);
+    float near = (1.0 - smoothstep(0.0, 0.75, d)) * (1.0 - smoothstep(0.0, 1.0, abs(vworld.y - blob.y)));
+    sky *= 1.0 - 0.5 * near;
+  }
+  // (Rock just over the sea wet and darker, and a line of foam where it
+  // meets it.)
+  if (mat < 0.5 || (mat > 5.5 && mat < 7.5)) {
+    HP float over = vworld.y - sea_y;
+    albedo *= mix(0.55, 1.0, smoothstep(0.1, 1.6, over));
+    albedo = mix(albedo, vec3(0.85, 0.88, 0.88), 1.0 - smoothstep(0.04, 0.16, abs(over)));
+  }
+  vec3 col = albedo * (SUN_LIGHT * diff * vis * (0.6 + 0.4 * ao) + sky);
+  // Rock's sides take light back from the sunlit rock and sea round them,
+  // warm: never black, however they face.
+  if (mat < 0.5 || (mat > 5.5 && mat < 7.5)) col += albedo * vec3(0.3, 0.27, 0.22) * (0.8 + 0.5 * max(-n.y, 0.0)) * (1.0 - max(n.y, 0.0));
+  if (mat > 4.5 && mat < 5.5) {
+    float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0);
+    col += (SUN_LIGHT * 0.5 * max(dot(-V, sun_dir), 0.0) * vis + vec3(0.35, 0.42, 0.62) * 0.3) * rim;
+  }
+  if (spec > 0.0 && vis > 0.0 && ndl >= 0.0) {
+    vec3 H = normalize(sun_dir + V);
+    col += SUN_LIGHT * vis * spec * pow(max(dot(n, H), 0.0), gloss) * (gloss + 8.0) / 60.0;
+  }
+  // (The sea hazes half as much as the land: it stays blue to the horizon,
+  // against the paler sky.)
+  if (no_haze > 0.5) {
+  } else if (mat > 1.5 && mat < 2.5) col = mix(col, haze(col, V, dist), 0.5); else col = haze(col, V, dist);
+  gl_FragColor = vec4(tone(col), 1.0);
+}
+""";
+
+// (Built with_guy_defines, as WORLD_VS is.)
+SHADOW_VS: str = """
+attribute vec3 pos;
+attribute vec4 vcol;
+uniform mat4 mvp;
+uniform mat4 light_vp;
+uniform mat4 bones[GUY_SKINNED_BONES];
+void main() {
+  float bone = floor(vcol.a / GUY_BONE_CODE);
+  if (bone > 0.5) gl_Position = light_vp * (bones[int(bone) - 1] * vec4(pos, 1.0));
+  else gl_Position = mvp * vec4(pos, 1.0);
+}
+""";
+
+SHADOW_FS: str = """
+#version 120
+void main() {
+  gl_FragColor = vec4(1.0);
+}
+""";
+
+SKY_VS: str = """
+#version 120
+attribute vec3 pos;
+varying vec2 vscreen;
+void main() {
+  vscreen = pos.xy;
+  gl_Position = vec4(pos.xy, 1.0, 1.0);
+}
+""";
+
+SKY_FS: str = """
+uniform HP vec3 cam_f;
+uniform HP vec3 cam_r;
+uniform HP vec3 cam_u;
+uniform HP vec2 tan_half;
+uniform HP float shift;
+uniform vec3 sun_dir;
+uniform HP float time;
+varying HP vec2 vscreen;
+float clouds(HP vec2 p) {
+  float v = 0.0;
+  float a = 0.5;
+  for (int i = 0; i < 4; i++) {
+    v += a * vnoise(p);
+    p = p * 2.03 + vec2(1.7, 9.2);
+    a *= 0.5;
+  }
+  return v;
+}
+void main() {
+  HP vec3 d = normalize(cam_f + vscreen.x * tan_half.x * cam_r + (vscreen.y - shift) * tan_half.y * cam_u);
+  vec3 c = sky_base(d);
+  HP float s = max(dot(d, sky_sun), 0.0);
+  float s2 = s * s;
+  c += look_disc.rgb * (s2 * s2 * s2 * 0.3 + pow(s, 400.0) * 3.0);
+  if (d.y > 0.0) {
+    HP vec2 p = d.xz / (d.y + 0.1) * 0.9 + vec2(time * 0.01, time * 0.003);
+    float k = smoothstep(0.5, 0.7, clouds(p));
+    float shade = clouds(p + sky_sun.xz * 0.12);
+    float toward = max(dot(normalize(d.xz + vec2(0.0001, 0.0)), sky_sun_flat), 0.0);
+    toward *= toward;
+    vec3 lit = mix(vec3(1.0, 0.96, 0.98), vec3(1.15, 0.94, 0.8), toward);
+    vec3 cloud = mix(lit, vec3(0.74, 0.7, 0.86), smoothstep(0.45, 0.72, shade));
+    c = mix(c, cloud, k * smoothstep(0.0, 0.2, d.y) * 0.8);
+  }
+  gl_FragColor = vec4(tone(c), 1.0);
+}
+""";
+
+// Painting over the scene, as skate's (copied unchanged: see skate's
+// render.l8, where it is explained).
+PAINT_VS: str = """
+#version 120
+#ifdef GL_ES
+#define HP highp
+#else
+#define HP
+#endif
+attribute vec4 pos;
+attribute vec4 nrm;
+attribute vec4 vcol;
+attribute vec4 inst;
+uniform HP vec2 screen;
+varying HP vec2 vat;
+varying HP vec2 vuv;
+varying HP vec4 vshape;
+varying HP vec4 vsoft;
+varying vec4 vcolor;
+void main() {
+  vat = pos.xy;
+  vuv = pos.zw;
+  vshape = nrm;
+  vsoft = vcol;
+  vcolor = inst;
+  gl_Position = vec4(pos.x / screen.x * 2.0 - 1.0, 1.0 - pos.y / screen.y * 2.0, 0.0, 1.0);
+}
+""";
+
+PAINT_FS: str = """
+#version 120
+#ifdef GL_ES
+#define HP highp
+#else
+#define HP
+#endif
+uniform sampler2D font;
+uniform sampler2D frost;
+uniform sampler2D kept;
+uniform HP vec2 screen;
+uniform HP vec4 clip;
+uniform HP float fade;
+varying HP vec2 vat;
+varying HP vec2 vuv;
+varying HP vec4 vshape;
+varying HP vec4 vsoft;
+varying vec4 vcolor;
+HP float box(HP vec2 p, HP vec2 b, HP float r) {
+  HP vec2 q = abs(p) - b + vec2(r);
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+HP float segment(HP vec2 p, HP vec2 b) {
+  HP float h = clamp(dot(p, b) / max(dot(b, b), 0.0001), 0.0, 1.0);
+  return length(p - b * h);
+}
+HP float triangle(HP vec2 p, HP vec2 p0, HP vec2 p1, HP vec2 p2) {
+  HP vec2 e0 = p1 - p0;
+  HP vec2 e1 = p2 - p1;
+  HP vec2 e2 = p0 - p2;
+  HP vec2 v0 = p - p0;
+  HP vec2 v1 = p - p1;
+  HP vec2 v2 = p - p2;
+  HP vec2 q0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
+  HP vec2 q1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
+  HP vec2 q2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
+  HP float s = sign(e0.x * e2.y - e0.y * e2.x);
+  HP vec2 d = min(min(vec2(dot(q0, q0), s * (v0.x * e0.y - v0.y * e0.x)),
+                      vec2(dot(q1, q1), s * (v1.x * e1.y - v1.y * e1.x))),
+                      vec2(dot(q2, q2), s * (v2.x * e2.y - v2.y * e2.x)));
+  return -sqrt(d.x) * sign(d.y);
+}
+float edge(HP float d) {
+  HP float w = max(fwidth(d), 0.0001);
+  return clamp(0.5 - d / w, 0.0, 1.0);
+}
+void main() {
+  float kind = vshape.z;
+  vec3 rgb = vcolor.rgb;
+  float a = 0.0;
+  float alpha = vcolor.a;
+  if (kind < 0.5 || (kind > 3.5 && kind < 4.5)) {
+    HP float d = box(vuv, vshape.xy, vshape.w);
+    HP float dbox = d;
+    if (kind < 0.5 && vsoft.y > 0.0) d = abs(d + vsoft.y * 0.5) - vsoft.y * 0.5;
+    if (vsoft.x > 0.0) a = 1.0 - smoothstep(-vsoft.x, vsoft.x, d);
+    else a = edge(d);
+    if (kind > 3.5) {
+      vec3 behind = texture2D(frost, vec2(vat.x / screen.x, 1.0 - vat.y / screen.y)).rgb;
+      rgb = mix(behind, vcolor.rgb, vsoft.y);
+    }
+    // An edge round it, over its fill.
+    if (vsoft.z > 0.0) {
+      HP float p = floor(vsoft.w + 0.5);
+      float ea = edge(abs(dbox + vsoft.z * 0.5) - vsoft.z * 0.5) * mod(p, 256.0) / 255.0;
+      vec3 ec = p >= 256.0 ? vec3(1.0, 0.827, 0.42) : vec3(1.0, 0.973, 0.925);
+      float fa = a * vcolor.a;
+      float oa = ea + fa * (1.0 - ea);
+      rgb = (ec * ea + rgb * fa * (1.0 - ea)) / max(oa, 0.0001);
+      a = oa;
+      alpha = 1.0;
+    }
+  } else if (kind < 1.5) {
+    float d = texture2D(font, vuv).r;
+    float e = 0.5 - vsoft.y;
+    float w = max(fwidth(d) * 0.7, 0.002) + vsoft.x;
+    a = smoothstep(e - w, e + w, d);
+  } else if (kind < 2.5) {
+    a = edge(segment(vuv, vshape.xy) - vshape.w);
+  } else if (kind < 3.5) {
+    HP vec2 b = vshape.xy - vec2(vshape.w);
+    a = edge(triangle(vuv, vec2(-b.x, -b.y), vec2(b.x, 0.0), vec2(-b.x, b.y)) - vshape.w);
+  } else if (kind < 5.5) {
+    HP float ang = atan(vuv.y, vuv.x) - vshape.w;
+    ang = mod(ang, 6.2831853);
+    HP float d = abs(length(vuv) - vshape.x) - vshape.y;
+    if (ang > vsoft.x) {
+      HP vec2 p0 = vshape.x * vec2(cos(vshape.w), sin(vshape.w));
+      HP vec2 p1 = vshape.x * vec2(cos(vshape.w + vsoft.x), sin(vshape.w + vsoft.x));
+      d = min(length(vuv - p0), length(vuv - p1)) - vshape.y;
+    }
+    a = edge(d);
+  } else if (kind > 6.5) {
+    HP float d = max(length(vuv) - vshape.x, -(length(vuv - vec2(0.5, -0.42) * vshape.x) - 0.8 * vshape.x));
+    a = edge(d);
+  } else {
+    rgb = texture2D(kept, vec2(vat.x / screen.x, 1.0 - vat.y / screen.y)).rgb;
+    a = 1.0;
+  }
+  HP float cx = min(vat.x - clip.x, clip.z - vat.x);
+  HP float cy = min(vat.y - clip.y, clip.w - vat.y);
+  float c = clamp(cx + 0.5, 0.0, 1.0);
+  if (fade > 0.0) c *= clamp(cy / fade, 0.0, 1.0); else c *= clamp(cy + 0.5, 0.0, 1.0);
+  gl_FragColor = vec4(rgb, a * c * alpha);
+}
+""";
+
+compile_shader(kind: int, src: []i8) raises IoError: int {
+    sh: int = glCreateShader(kind);
+    sp: *i8 = src;
+    ln: []i32 = new i32[1](len(src) trunc i32);
+    glShaderSource(sh, 1, &sp, ln);
+    glCompileShader(sh);
+    st: []i32 = new i32[1](0i32);
+    glGetShaderiv(sh, 35713, st);
+    if (st[0] == 0i32) {
+        logn: []i32 = new i32[1](0i32);
+        glGetShaderiv(sh, 35716, logn);
+        n: int = logn[0] as int;
+        if (n < 1) n = 1;
+        if (n > 4096) n = 4096;
+        buf: []i8 = new i8[n](0i8);
+        glGetShaderInfoLog(sh, n, null, buf);
+        write_bytes_n(2, buf, n);
+        write(2, "\n");
+        die("shader compile failed")
+    }
+    sh
+}
+
+// A vertex shader that draws him: its version line, the figure's facts it
+// needs (see guy_glsl_defines) and MAT_BODY (main.l8), then src. (As
+// skate's with_guy.)
+with_guy_defines(src: str): []i8@new {
+    out: *ByteBuilder = builder_new(len(src) + 512);
+    builder_str(out, "#version 120\n");
+    guy_glsl_defines(out);
+    // (MAT_BODY in hundredths: 5.25.)
+    builder_str(out, "#define MAT_BODY (");
+    builder_int(out, (MAT_BODY * 100.0 + 0.5) as int);
+    builder_str(out, ".0 / 100.0)\n");
+    builder_str(out, src);
+    builder_slice(out)
+}
+
+link_program(vs: []i8, fs: []i8) raises IoError: int {
+    prog: int = glCreateProgram();
+    glAttachShader(prog, compile_shader(35633, vs));
+    glAttachShader(prog, compile_shader(35632, fs));
+    glBindAttribLocation(prog, 0, "pos");
+    glBindAttribLocation(prog, 1, "nrm");
+    glBindAttribLocation(prog, 2, "vcol");
+    glBindAttribLocation(prog, 3, "inst");
+    glLinkProgram(prog);
+    st: []i32 = new i32[1](0i32);
+    glGetProgramiv(prog, 35714, st);
+    if (st[0] == 0i32) die("program link failed");
+    prog
+}
+
+// GLSL source with the sky's prelude after its version line.
+with_prelude(src: str): []i8@new {
+    head: str = "#version 120\n";
+    out: []i8 = new i8[len(head) + len(SKY_GLSL) + len(src)](0i8);
+    n: int = 0;
+    for c in head {
+        out[n] = c;
+        n = n + 1
+    }
+    for c in SKY_GLSL {
+        out[n] = c;
+        n = n + 1
+    }
+    for c in src {
+        out[n] = c;
+        n = n + 1
+    }
+    out
+}
+
+// A mesh is drawn whole or not at all: one built past its room is the
+// program's mistake, said with the room it needed, and the game stops.
+tag tumbledown
+require_whole(m: *Mesh, what: str) raises IoError {
+    if (mesh_dropped(m) == 0) return;
+    write(2, "the ");
+    write(2, what);
+    write(2, " mesh needs room for ");
+    write_int(2, m.n + mesh_dropped(m));
+    write(2, " vertices; it has room for ");
+    write_int(2, mesh_capacity(m));
+    die("")
+}
+
+gen_buffer(): u32 {
+    ids: []u32 = new u32[1](0u32);
+    glGenBuffers(1, ids);
+    ids[0]
+}
+
+upload(buf: u32, m: *Mesh) {
+    glBindBuffer(34962, buf);
+    glBufferData(34962, m.n * VERTEX_FLOATS * 4, m.data, 35044)
+}
+
+bind_vertices(buf: u32) {
+    glBindBuffer(34962, buf);
+    glVertexAttribPointer(0, 3, 5126, 0, VERTEX_FLOATS * 4, 0);
+    glVertexAttribPointer(1, 3, 5126, 0, VERTEX_FLOATS * 4, 12);
+    glVertexAttribPointer(2, 4, 5126, 0, VERTEX_FLOATS * 4, 24)
+}
+
+tag tumbledown
+new_renderer() raises IoError: *Renderer@new {
+    world: int = link_program(with_guy_defines(WORLD_VS), with_prelude(WORLD_FS));
+    shadow: int = link_program(with_guy_defines(SHADOW_VS), bytes(SHADOW_FS));
+    sky: int = link_program(bytes(SKY_VS), with_prelude(SKY_FS));
+    paint: int = link_program(bytes(PAINT_VS), bytes(PAINT_FS));
+    va: []u32 = new u32[1](0u32);
+    glGenVertexArrays(1, va);
+    glBindVertexArray(va[0]);
+    for i in 0..3 glEnableVertexAttribArray(i);
+    r: *Renderer = new Renderer {
+        world: world,
+        shadow: shadow,
+        sky: sky,
+        paint: paint,
+        u_vp: glGetUniformLocation(world, "vp"),
+        u_model: glGetUniformLocation(world, "model"),
+        u_light: glGetUniformLocation(world, "light_vp"),
+        u_sun: glGetUniformLocation(world, "sun_dir"),
+        u_cam: glGetUniformLocation(world, "cam_pos"),
+        u_texel: glGetUniformLocation(world, "shadow_texel"),
+        u_blob: glGetUniformLocation(world, "blob"),
+        u_shadow_map: glGetUniformLocation(world, "shadow_map"),
+        u_world_noise: glGetUniformLocation(world, "noise_map"),
+        u_bones: glGetUniformLocation(world, "bones"),
+        u_tint: glGetUniformLocation(world, "tint"),
+        u_side_shade: glGetUniformLocation(world, "side_shade"),
+        u_sole: glGetUniformLocation(world, "sole"),
+        u_no_haze: glGetUniformLocation(world, "no_haze"),
+        u_no_face: glGetUniformLocation(world, "no_face"),
+        u_sea_y: glGetUniformLocation(world, "sea_y"),
+        u_smvp: glGetUniformLocation(shadow, "mvp"),
+        u_sbones: glGetUniformLocation(shadow, "bones"),
+        u_slight: glGetUniformLocation(shadow, "light_vp"),
+        u_cam_f: glGetUniformLocation(sky, "cam_f"),
+        u_cam_r: glGetUniformLocation(sky, "cam_r"),
+        u_cam_u: glGetUniformLocation(sky, "cam_u"),
+        u_tan: glGetUniformLocation(sky, "tan_half"),
+        u_shift: glGetUniformLocation(sky, "shift"),
+        u_sky_sun: glGetUniformLocation(sky, "sun_dir"),
+        u_time: glGetUniformLocation(sky, "time"),
+        u_sky_noise: glGetUniformLocation(sky, "noise_map"),
+        u_look: new int[2 * LOOK_UNIFORMS](0),
+        u_paint_screen: glGetUniformLocation(paint, "screen"),
+        u_paint_clip: glGetUniformLocation(paint, "clip"),
+        u_paint_fade: glGetUniformLocation(paint, "fade"),
+        u_paint_font: glGetUniformLocation(paint, "font"),
+        u_paint_frost: glGetUniformLocation(paint, "frost"),
+        u_paint_kept: glGetUniformLocation(paint, "kept"),
+        noise_tex: make_noise_texture(),
+        font_tex: make_font_texture(),
+        shadow_tex: 0u32,
+        shadow_fbo: 0u32,
+        ground_buf: gen_buffer(),
+        solid_buf: gen_buffer(),
+        guy_buf: gen_buffer(),
+        guy_n: 0,
+        ring_buf: gen_buffer(),
+        ring_n: 0,
+        sky_buf: gen_buffer(),
+        paint_buf: gen_buffer(),
+        paint_idx: make_paint_index()
+    };
+    progs: []int = [world, sky];
+    for k in 0..2 {
+        for u in 0..LOOK_UNIFORMS r.u_look[k * LOOK_UNIFORMS + u] = glGetUniformLocation(progs[k],
+            LOOK_NAMES[u])
+    }
+    // One triangle over the whole screen.
+    tri: []f32 = new f32[30](0.0);
+    tri[0] = -1.0;
+    tri[1] = -1.0;
+    tri[10] = 3.0;
+    tri[11] = -1.0;
+    tri[20] = -1.0;
+    tri[21] = 3.0;
+    glBindBuffer(34962, r.sky_buf);
+    glBufferData(34962, 120, tri, 35044);
+    stex: []u32 = new u32[1](0u32);
+    glGenTextures(1, stex);
+    glBindTexture(3553, stex[0]);
+    // Hardware bilinear PCF: filter depth comparisons, not depth values.
+    glTexParameteri(3553, 10241, 9729);
+    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 34892, 34894);
+    glTexParameteri(3553, 34893, 515);
+    glTexParameteri(3553, 10242, 33071);
+    glTexParameteri(3553, 10243, 33071);
+    glTexImage2D(3553, 0, 33189, SHADOW_SIZE, SHADOW_SIZE, 0, 6402, 5123, null);
+    fbo: []u32 = new u32[1](0u32);
+    glGenFramebuffers(1, fbo);
+    glBindFramebuffer(36160, fbo[0]);
+    glFramebufferTexture2D(36160, 36096, 3553, stex[0], 0);
+    glDrawBuffer(0);
+    glReadBuffer(0);
+    if (glCheckFramebufferStatus(36160) != 36053) die("shadow framebuffer incomplete");
+    glBindFramebuffer(36160, 0u32);
+    r.shadow_tex = stex[0];
+    r.shadow_fbo = fbo[0];
+    ring: *Mesh = new_mesh(RING_SIDES * 6);
+    for i in 0..RING_SIDES {
+        a0: f32 = TAU * i as f32 / RING_SIDES as f32;
+        a1: f32 = TAU * (i + 1) as f32 / RING_SIDES as f32;
+        put_quad(ring, v3(cosf(a0) * 0.8, 0.0, sinf(a0) * 0.8), v3(cosf(a0), 0.0,
+            sinf(a0)), v3(cosf(a1), 0.0, sinf(a1)), v3(cosf(a1) * 0.8, 0.0, sinf(a1) * 0.8),
+            v3(0.0, 1.0, 0.0), v3(0.95, 0.97, 0.98), 6.0)
+    }
+    upload(r.ring_buf, ring);
+    r.ring_n = ring.n;
+    glEnable(2929);
+    r
+}
+
+const RING_SIDES: int = 32;
+
+// A splash ring to draw this frame: whether, where (on the water), and
+// how wide (m).
+tag tumbledown
+type Splash = {
+    shown: bool;
+    at: V3;
+    size: f32
+}
+
+tag tumbledown
+splash: Splash = Splash { shown: false, at: v3(0.0, 0.0, 0.0), size: 1.0 };
+
+ring_m: []f32 = new f32[16](0.0);
+
+// The hill's meshes (see hill_build), and his.
+tag tumbledown
+set_hill_meshes(r: *Renderer, ground: *Mesh, solid: *Mesh) raises IoError {
+    require_whole(ground, "ground");
+    require_whole(solid, "solid");
+    upload(r.ground_buf, ground);
+    upload(r.solid_buf, solid)
+}
+
+tag tumbledown
+set_guy_mesh(r: *Renderer, guy: *Mesh) raises IoError {
+    require_whole(guy, "guy");
+    upload(r.guy_buf, guy);
+    r.guy_n = guy.n
+}
+
+const NOISE_SIZE: int = 256;
+
+const NOISE_CELLS: int = 64;
+
+// The font's picture (see skate's font.l8), as a texture.
+make_font_texture(): u32 {
+    bits: []i8 = new i8[FONT_W * FONT_H](0i8);
+    level: []int = new int[128](0);
+    for k in 0..len(FONT_LEVELS) level[FONT_LEVELS[k] as int] = k;
+    for y in 0..FONT_H {
+        for x in 0..FONT_W bits[y * FONT_W + x] = (level[font_rows[y][x] as int] * 4) trunc i8
+    }
+    tex: []u32 = new u32[1](0u32);
+    glGenTextures(1, tex);
+    glBindTexture(3553, tex[0]);
+    glPixelStorei(3317, 1);
+    glTexParameteri(3553, 10241, 9729);
+    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 10242, 33071);
+    glTexParameteri(3553, 10243, 33071);
+    glTexImage2D(3553, 0, 6409, FONT_W, FONT_H, 0, 6409, 5121, bits);
+    glPixelStorei(3317, 4);
+    tex[0]
+}
+
+// The order the corners of each painted quad are drawn in: two triangles.
+make_paint_index(): u32 {
+    idx: []i32 = new i32[PAINT_QUADS * 6](0i32);
+    for q in 0..PAINT_QUADS {
+        c: int = q * 4;
+        idx[q * 6] = c trunc i32;
+        idx[q * 6 + 1] = (c + 1) trunc i32;
+        idx[q * 6 + 2] = (c + 2) trunc i32;
+        idx[q * 6 + 3] = c trunc i32;
+        idx[q * 6 + 4] = (c + 2) trunc i32;
+        idx[q * 6 + 5] = (c + 3) trunc i32
+    }
+    buf: u32 = gen_buffer();
+    glBindBuffer(34963, buf);
+    glNamedBufferData(buf, PAINT_QUADS * 24, idx, 35044);
+    buf
+}
+
+// Smooth value noise, one lattice cell to a unit, tiling (as skate's).
+make_noise_texture(): u32 {
+    lattice: []f32 = new f32[NOISE_CELLS * NOISE_CELLS](0.0);
+    rng: int = 99991;
+    for i in 0..NOISE_CELLS * NOISE_CELLS {
+        rng = (rng * 1103515245 + 12345) % 2147483648;
+        if (rng < 0) rng = -rng;
+        lattice[i] = (rng / 65536 % 32768) as f32 / 32767.0
+    }
+    level: []i8 = new i8[NOISE_SIZE * NOISE_SIZE](0i8);
+    k: int = NOISE_SIZE / NOISE_CELLS;
+    for y in 0..NOISE_SIZE {
+        for x in 0..NOISE_SIZE {
+            cx: int = x / k;
+            cy: int = y / k;
+            fx: f32 = (x % k) as f32 / k as f32;
+            fy: f32 = (y % k) as f32 / k as f32;
+            fx = fx * fx * (3.0 - 2.0 * fx);
+            fy = fy * fy * (3.0 - 2.0 * fy);
+            x1: int = (cx + 1) % NOISE_CELLS;
+            y1: int = (cy + 1) % NOISE_CELLS;
+            a: f32 = lerpf(lattice[cy * NOISE_CELLS + cx], lattice[cy * NOISE_CELLS + x1],
+                fx);
+            b: f32 = lerpf(lattice[y1 * NOISE_CELLS + cx], lattice[y1 * NOISE_CELLS + x1],
+                fx);
+            level[y * NOISE_SIZE + x] = (lerpf(a, b, fy) * 255.0) as int trunc i8
+        }
+    }
+    tex: []u32 = new u32[1](0u32);
+    glGenTextures(1, tex);
+    glBindTexture(3553, tex[0]);
+    glPixelStorei(3317, 1);
+    glTexParameteri(3553, 10241, 9987);
+    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 10242, 10497);
+    glTexParameteri(3553, 10243, 10497);
+    size: int = NOISE_SIZE;
+    lod: int = 0;
+    next: []i8 = new i8[NOISE_SIZE * NOISE_SIZE / 4](0i8);
+    while (size >= 1) {
+        glTexImage2D(3553, lod, 6409, size, size, 0, 6409, 5121, level);
+        if (size > 1) {
+            half: int = size / 2;
+            for y in 0..half {
+                for x in 0..half {
+                    sum: int = byte_value(level[2 * y * size + 2 * x]) + byte_value(level[2 * y * size + 2 * x + 1]) + byte_value(level[(2 * y + 1) * size + 2 * x]) + byte_value(level[(2 * y + 1) * size + 2 * x + 1]);
+                    next[y * half + x] = (sum / 4) trunc i8
+                }
+            }
+            for i in 0..half * half level[i] = next[i]
+        }
+        size = size / 2;
+        lod = lod + 1
+    }
+    tex[0]
+}
+
+byte_value(b: i8): int {
+    v: int = b as int;
+    if (v < 0) v = v + 256;
+    v
+}
+
+// What a frame needs from the game: the camera (where it is, what it
+// looks at, its lens up and down, and how far up the picture moves, in
+// screen heights times two); what the shadows are round and where he
+// stands; and the time, for the clouds.
+tag tumbledown
+type View = {
+    eye: V3;
+    at: V3;
+    fovy: f32;
+    shift: f32;
+    focus: V3;
+    time: f32
+}
+
+set3(loc: int, v: V3) {
+    glUniform3f(loc, v.x, v.y, v.z)
+}
+
+// The look into program k's uniforms (0 the world's, 1 the sky's).
+set_look(r: *Renderer, k: int) {
+    u: []int = r.u_look;
+    b: int = k * LOOK_UNIFORMS;
+    set3(u[b], look_zenith);
+    set3(u[b + 1], look_away);
+    set3(u[b + 2], look_toward);
+    set3(u[b + 3], look_glow);
+    set3(u[b + 4], look_sun_light);
+    set3(u[b + 5], look_sky_up);
+    set3(u[b + 6], look_sky_down);
+    glUniform3f(u[b + 7], 0.0012, 0.55, 1.0);
+    glUniform4f(u[b + 8], look_grade.x, look_grade.y, look_grade.z, 1.12);
+    glUniform4f(u[b + 9], look_disc.x, look_disc.y, look_disc.z, 0.0);
+    sun: V3 = v_norm(look_sun);
+    set3(u[b + 10], sun);
+    flat: f32 = sqrtf(sun.x * sun.x + sun.z * sun.z);
+    glUniform2f(u[b + 11], sun.x / flat, sun.z / flat)
+}
+
+view_m: []f32 = new f32[16](0.0);
+
+proj_m: []f32 = new f32[16](0.0);
+
+// The camera's, once the frame's camera is set (for putting places in the
+// world on the screen: see hud.l8).
+tag tumbledown
+vp_m: []f32 = new f32[16](0.0);
+
+light_view: []f32 = new f32[16](0.0);
+
+light_proj: []f32 = new f32[16](0.0);
+
+light_vp: []f32 = new f32[16](0.0);
+
+mvp_m: []f32 = new f32[16](0.0);
+
+ident_m: []f32 = new f32[16](0.0);
+
+// The sun's view: an orthographic box round the focus, moved in whole
+// shadow texels so shadows do not crawl as it follows.
+fit_shadow(focus: V3) {
+    sun: V3 = v_norm(look_sun);
+    mat_look(light_view, v_scale(sun, 200.0), v3(0.0, 0.0, 0.0), v3(0.0, 1.0, 0.0));
+    c: V3 = mat_point(light_view, focus);
+    texel: f32 = 2.0 * SHADOW_HALF / SHADOW_SIZE as f32;
+    cx: f32 = floorf(c.x / texel) * texel;
+    cy: f32 = floorf(c.y / texel) * texel;
+    mat_ortho(light_proj, cx - SHADOW_HALF, cx + SHADOW_HALF, cy - SHADOW_HALF, cy + SHADOW_HALF,
+        -c.z - 90.0, -c.z + 90.0);
+    mat_mul(light_vp, light_proj, light_view)
+}
+
+// The pieces of one of the hill's meshes from d0 to d1 down it.
+draw_pieces(p: *HillPieces, d0: f32, d1: f32) {
+    for i in 0..p.n {
+        if (p.d1[i] >= d0 && p.d0[i] <= d1 && p.count[i] > 0 && !(p == ground_pieces && i == sea_piece)) {
+            glDrawArrays(4, p.first[i], p.count[i]);
+            frame_draws = frame_draws + 1;
+            frame_vertices = frame_vertices + p.count[i]
+        }
+    }
+}
+
+// The draws this frame, and the vertices they drew (for L8_TRACE: see
+// main.l8); main sets them to 0 at each frame's start.
+tag tumbledown
+frame_draws: int = 0;
+
+tag tumbledown
+frame_vertices: int = 0;
+
+// Him: his bones (from gait_bones) into a program's uniforms.
+set_bones(model_loc: int, bones_loc: int, model: []f32) {
+    glUniformMatrix4fv(model_loc, 1, 0, model);
+    glUniformMatrix4fv(bones_loc, GUY_BONES - 1, 0, &gait_bones[16])
+}
+
+// His soles, the bottom SOLE_HIGH of each foot, are this dark of the rest
+// of him (L8_SOLE=0.7, to try: so that from behind a foot kicked up
+// reads; 1, as now, the same).
+tag tumbledown
+sole_shade: f32 = 1.0;
+
+const SOLE_HIGH: f32 = 0.015;
+
+// What to leave out of a frame, to measure what it costs (L8_PROFILE: see
+// main.l8).
+tag tumbledown
+type Profile = {
+    no_shadows: bool;
+    no_haze: bool;
+    no_face: bool;
+    near_only: bool
+}
+
+tag tumbledown
+profile: Profile = Profile {
+    no_shadows: false,
+    no_haze: false,
+    no_face: false,
+    near_only: false
+};
+
+// The frame: the sun's shadows, the hill, him, the sky.
+tag tumbledown
+draw_scene(r: *Renderer, view: View, tint: V3) {
+    mat_identity(ident_m);
+    fit_shadow(view.focus);
+    d: f32 = -view.focus.z;
+    glBindFramebuffer(36160, r.shadow_fbo);
+    glViewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
+    glClear(256);
+    glUseProgram(r.shadow);
+    glEnable(32823);
+    glPolygonOffset(1.5, 2.0);
+    glUniformMatrix4fv(r.u_slight, 1, 0, light_vp);
+    mat_mul(mvp_m, light_vp, ident_m);
+    glUniformMatrix4fv(r.u_smvp, 1, 0, mvp_m);
+    bind_vertices(r.solid_buf);
+    if (!profile.no_shadows) draw_pieces(solid_pieces, d - 30.0, d + 30.0);
+    mat_mul(mvp_m, light_vp, gait_bones);
+    set_bones(r.u_smvp, r.u_sbones, mvp_m);
+    bind_vertices(r.guy_buf);
+    glDrawArrays(4, 0, r.guy_n);
+    frame_draws = frame_draws + 1;
+    frame_vertices = frame_vertices + r.guy_n;
+    glDisable(32823);
+    glBindFramebuffer(36160, 0u32);
+    glViewport(0, 0, screen_w, screen_h);
+    glClear(16640);
+    aspect: f32 = screen_w as f32 / maxf(screen_h as f32, 1.0);
+    mat_persp(proj_m, view.fovy, aspect, 0.1, 1500.0);
+    proj_m[9] = -view.shift;
+    mat_look(view_m, view.eye, view.at, v3(0.0, 1.0, 0.0));
+    mat_mul(vp_m, proj_m, view_m);
+    sun: V3 = v_norm(look_sun);
+    glActiveTexture(33985);
+    glBindTexture(3553, r.noise_tex);
+    glActiveTexture(33984);
+    glBindTexture(3553, r.shadow_tex);
+    glUseProgram(r.world);
+    set_look(r, 0);
+    glUniformMatrix4fv(r.u_vp, 1, 0, vp_m);
+    glUniformMatrix4fv(r.u_light, 1, 0, light_vp);
+    glUniform3f(r.u_sun, sun.x, sun.y, sun.z);
+    glUniform3f(r.u_cam, view.eye.x, view.eye.y, view.eye.z);
+    glUniform1f(r.u_texel, 1.0 / SHADOW_SIZE as f32);
+    glUniform3f(r.u_blob, view.focus.x, view.focus.y, view.focus.z);
+    glUniform1i(r.u_shadow_map, 0);
+    glUniform1i(r.u_world_noise, 1);
+    glUniformMatrix4fv(r.u_model, 1, 0, ident_m);
+    bind_vertices(r.ground_buf);
+    far: f32 = 260.0;
+    if (profile.near_only) far = 120.0;
+    glUniform1f(r.u_no_haze, 0.0);
+    if (profile.no_haze) glUniform1f(r.u_no_haze, 1.0);
+    glUniform1f(r.u_no_face, 0.0);
+    glUniform1f(r.u_sea_y, hill.sea);
+    if (profile.no_face) glUniform1f(r.u_no_face, 1.0);
+    draw_pieces(ground_pieces, d - 40.0, d + far);
+    bind_vertices(r.solid_buf);
+    draw_pieces(solid_pieces, d - 40.0, d + far);
+    set_bones(r.u_model, r.u_bones, gait_bones);
+    glUniform3f(r.u_tint, tint.x, tint.y, tint.z);
+    shade: GuyShade = guy_side_shade(gait_bones, 0, view.eye);
+    glUniform2f(r.u_side_shade, shade.side0, shade.side1);
+    glUniform4f(r.u_sole, guy_foot(0) as f32, guy_foot(1) as f32, -GUY_ANKLE_UP + SOLE_HIGH,
+        sole_shade);
+    bind_vertices(r.guy_buf);
+    glDrawArrays(4, 0, r.guy_n);
+    frame_draws = frame_draws + 2;
+    frame_vertices = frame_vertices + r.guy_n + 3;
+    if (splash.shown) {
+        mat_identity(ring_m);
+        mat_translate(ring_m, v3(splash.at.x, splash.at.y + 0.02, splash.at.z));
+        mat_scale(ring_m, v3(splash.size, 1.0, splash.size));
+        glUniformMatrix4fv(r.u_model, 1, 0, ring_m);
+        bind_vertices(r.ring_buf);
+        glDrawArrays(4, 0, r.ring_n);
+        frame_draws = frame_draws + 1
+    }
+    // The sea, where nothing else is (the depth spares it most of what is
+    // drawn over it).
+    if (sea_piece >= 0) {
+        glUniformMatrix4fv(r.u_model, 1, 0, ident_m);
+        bind_vertices(r.ground_buf);
+        glDrawArrays(4, ground_pieces.first[sea_piece], ground_pieces.count[sea_piece]);
+        frame_draws = frame_draws + 1
+    }
+    // The sky last, only where nothing else is.
+    glDepthMask(0);
+    glDepthFunc(515);
+    glUseProgram(r.sky);
+    set_look(r, 1);
+    f: V3 = v_norm(v_sub(view.at, view.eye));
+    rt: V3 = v_norm(v_cross(f, v3(0.0, 1.0, 0.0)));
+    up: V3 = v_cross(rt, f);
+    set3(r.u_cam_f, f);
+    set3(r.u_cam_r, rt);
+    set3(r.u_cam_u, up);
+    th: f32 = sinf(view.fovy * 0.5) / cosf(view.fovy * 0.5);
+    glUniform2f(r.u_tan, th * aspect, th);
+    glUniform1f(r.u_shift, view.shift);
+    glUniform3f(r.u_sky_sun, sun.x, sun.y, sun.z);
+    glUniform1f(r.u_time, view.time);
+    glUniform1i(r.u_sky_noise, 1);
+    bind_vertices(r.sky_buf);
+    glDrawArrays(4, 0, 3);
+    glDepthFunc(513);
+    glDepthMask(1)
+}
+
+// What has been painted (see skate's paint.l8), over the scene.
+tag tumbledown
+draw_paint(r: *Renderer) {
+    if (paint_n == 0) return;
+    glDisable(2929);
+    glEnable(3042);
+    glBlendFunc(770, 771);
+    glUseProgram(r.paint);
+    glUniform2f(r.u_paint_screen, screen_w as f32, screen_h as f32);
+    glActiveTexture(33984);
+    glBindTexture(3553, r.font_tex);
+    glUniform1i(r.u_paint_font, 0);
+    // (Nothing is painted that shows frosted glass or a kept picture: the
+    // font's picture stands in for theirs.)
+    glUniform1i(r.u_paint_frost, 0);
+    glUniform1i(r.u_paint_kept, 0);
+    glBindBuffer(34962, r.paint_buf);
+    glBufferData(34962, paint_n * 4 * PAINT_FLOATS * 4, paint_verts, 35048);
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(0, 4, 5126, 0, PAINT_FLOATS * 4, 0);
+    glVertexAttribPointer(1, 4, 5126, 0, PAINT_FLOATS * 4, 16);
+    glVertexAttribPointer(2, 4, 5126, 0, PAINT_FLOATS * 4, 32);
+    glVertexAttribPointer(3, 4, 5126, 0, PAINT_FLOATS * 4, 48);
+    glBindBuffer(34963, r.paint_idx);
+    for b in 0..nbatches {
+        if (batch_count[b] > 0) {
+            glUniform4f(r.u_paint_clip, batch_clip[b * 5], batch_clip[b * 5 + 1],
+                batch_clip[b * 5 + 2], batch_clip[b * 5 + 3]);
+            glUniform1f(r.u_paint_fade, batch_clip[b * 5 + 4]);
+            glDrawElements(4, batch_count[b] * 6, 5125, batch_first[b] * 24)
+        }
+    }
+    glDisableVertexAttribArray(3);
+    glDisable(3042);
+    glEnable(2929)
+}

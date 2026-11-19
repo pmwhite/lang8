@@ -1,0 +1,1215 @@
+tag tumbledown;
+
+use_tag std;
+
+use_tag gl, x11;
+
+use_tag skate_math, skate;
+
+use_tag blockmesh, blockguy, env;
+
+import "../../stdlib/print.l8";
+
+// Tumbledown: the block guy runs down a hillside of stone terraces and
+// jumps off the ledges. It is skate's game on foot, with skate's thumbs
+// and rules for tricks (see runner.l8).
+//
+//   .build/tumbledown
+//
+// The arrows (or WASD) move him, up being the way the camera looks. Space
+// is the trick pad: held, he gathers, and each arrow pressed adds a turn
+// that way (up a front flip, down a back flip, to a side a half turn); let
+// go, he jumps into the trick (best at a lip: a kick-off). Held in the air
+// (or X), he tucks. On a phone the screen's left half is a stick (see
+// player_move), and its right half is the trick pad: press, slide to
+// choose, let go to jump (see skate's touch.l8). R starts over; Escape
+// quits.
+//
+// For looking at it:
+//
+//   L8_SEED=n          the hill laid out from n (1)
+//   L8_AUTO            the run played by itself (see pilot.l8)
+//   L8_FREEZE=seconds  the run (or the stage's motion) so far in, held
+//                      still: worked out in fixed steps, so exactly
+//   L8_LOOK=ex,ey,ez,ax,ay,az  the camera put there, looking there
+//   L8_STAGE=motion    the stage (see stage.l8), and its L8_CAM, L8_CAMD
+//   L8_TOUCH           a touch screen: the thumbs' pads are drawn
+//   L8_UNCAPPED        frames as fast as they can be drawn (see L8FRAME)
+//   L8_SOLE=k          his soles k as dark as the rest of him (1)
+//   L8_SIZE=w,h        the window's size (1280,720)
+//   L8_PROFILE=a,b     leave out, to measure their cost: shadows, haze,
+//                      face (the rock faces' shading), far (anything over
+//                      120 m ahead), strata (one box a block)
+//   L8_TRACE           each second, where he is (L8RUN: s, cm down
+//                      the hill and across, speed in cm/s); each foot
+//                      down and up (L8STEP: when, which side, how far it
+//                      slid while down, mm, and its knee, deg: as it
+//                      left the ground, or the most it bent swinging), each landing
+//                      (L8LAND: when, ms; how fast he fell, cm/s; how:
+//                      LAND_SOFT, HARD, ROLL, STUMBLE), each takeoff
+//                      (L8TAKEOFF: when, how, off which row, its drop
+//                      there in cm); how tall he is
+//                      in the picture (L8SIZE, tenths of a percent of its
+//                      height, and where his feet are down it, and the
+//                      lens's height, the camera's pitch down, degrees,
+//                      and the picture's shift, hundredths; and L8CAM:
+//                      frames with the camera in the hill, its steepest
+//                      look down, deg, its fastest tip, deg/s); every
+//                      120 frames how long one took to draw, from the
+//                      clock read to the buffers swapped, and its draws
+//                      and vertices (L8FRAME); and the roll's lowest point (L8ROLL, mm)
+import "../gl/gl.l8";
+
+import "../skate/math.l8";
+
+import "../skate/font.l8";
+
+import "../skate/paint.l8";
+
+import "../skate/mover.l8";
+
+import "../skate/touch.l8";
+
+import "../blockmesh/blockmesh.l8";
+
+import "../blockguy/blockguy.l8";
+
+import "../env/env.l8";
+
+import "hill.l8";
+
+import "score.l8";
+
+import "runner.l8";
+
+import "gait.l8";
+
+import "pilot.l8";
+
+import "stage.l8";
+
+import "render.l8";
+
+import "hud.l8";
+
+extern clock_gettime(clk: int, ts: *Timespec): int;
+
+type Timespec = {
+    sec: int;
+    nsec: int
+}
+
+mono_ns(): int {
+    ts: Timespec = Timespec { sec: 0, nsec: 0 };
+    clock_gettime(1, &ts);
+    ts.sec * 1000000000 + ts.nsec
+}
+
+// ---- the environment (see programs/env) ----
+// Whether the value e (L8_PROFILE's) holds word.
+env_has_word(e: str, word: str): bool {
+    if (len(e) < len(word)) return false;
+    for at in 0..len(e) - len(word) + 1 {
+        same: bool = true;
+        for k in 0..len(word) {
+            if (e[at + k] != word[k]) same = false
+        }
+        if (same) return true
+    }
+    false
+}
+
+// ---- the camera ----
+// Behind him, CHASE_BACK back and CHASE_UP up, high enough to see over
+// him the way he goes. It turns round after the way he faces, slowly
+// (CHASE_FOLLOW_RATE: about 0.7 s behind), so that it never snaps and the
+// stick's way stays steady under the thumb. With a lens that makes him
+// CHASE_SIZE of the picture's height, always (the lens never widens, so
+// his size is steady). His feet are held at CHASE_FEET of the way down the
+// picture (a tall window's lower part is for the thumbs).
+//
+// - Coming to a lip it rises and tips down until the near edge of the row
+//   he will land on is CHASE_LAND_AT down the picture: CHASE_LEAD before a
+//   lip (CHASE_LEAD_BIG before a big drop, rising more), holding that view
+//   until a moment after he takes off. In the air it draws back to keep
+//   him and where he will land in view.
+// - It is never in the hill, nor with the hill between it and him: it
+//   first rises (CHASE_LIFT_MOST), then comes in toward him (down to
+//   CHASE_NEAREST), then rises more.
+//   It comes in no faster than CHASE_IN_RATE and goes out no faster than
+//   CHASE_OUT_RATE, keeping its turn meanwhile.
+// - It never looks down more than CHASE_STEEPEST, never rises faster than
+//   CHASE_RISE_RATE, and never tips faster than CHASE_TIP_RATE.
+// - The horizon stays at least CHASE_HORIZON down (more in a tall
+//   window), unless that would put his feet below CHASE_FEET_LOWEST: his
+//   feet first.
+// - In the sea, the run over, it stays where it was.
+// - It follows a drop a little late, but never more than CHASE_SLACK off
+//   his height.
+type Chase = {
+    eye: V3;
+    at: V3;
+    yaw: f32;
+    // The height it follows; how far it has risen and tipped toward a
+    // landing (0 to 1), toward which point, and whether for a big drop;
+    // how far drawn back (m); how far up the picture is moved (see View);
+    // the lens.
+    y: f32;
+    lip: f32;
+    lip_to: V3;
+    lip_big: f32;
+    // How much further it has turned toward the sea for a big drop (0 to
+    // 1).
+    back: f32;
+    shift: f32;
+    fovy: f32;
+    // How far it has come in toward him, and risen, to see him past the
+    // hill (eased); its height last frame; its look's pitch down, with the
+    // shift's (rad), and last frame's.
+    pulled: f32;
+    over: f32;
+    eye_y: f32;
+    pitch: f32;
+    pitch_was: f32;
+    // For L8_TRACE: frames with the eye inside the hill, and the steepest
+    // pitch (rad) and fastest tip (rad/s) seen.
+    inside: int;
+    steepest: f32;
+    fastest: f32;
+    // The dive (see dive_begin): how long since it began (-1: not), the
+    // view it began from, and the view it goes to.
+    dive_t: f32;
+    from: Shot;
+    dive: Shot
+}
+
+// A view: where from, looking where, its lens and its shift.
+type Shot = {
+    eye: V3;
+    at: V3;
+    fovy: f32;
+    shift: f32
+}
+
+no_shot(): Shot {
+    Shot {
+        eye: v3(0.0, 0.0, 0.0),
+        at: v3(0.0, 0.0, 0.0),
+        fovy: 0.0,
+        shift: 0.0
+    }
+}
+
+no_chase(): Chase {
+    Chase {
+        eye: v3(0.0, 0.0, 0.0),
+        at: v3(0.0, 0.0, 0.0),
+        yaw: 0.0,
+        y: 0.0,
+        lip: 0.0,
+        lip_to: v3(0.0, 0.0, 0.0),
+        lip_big: 0.0,
+        back: 0.0,
+        shift: 0.0,
+        fovy: 0.0,
+        pulled: 0.0,
+        over: 0.0,
+        eye_y: 0.0,
+        pitch: 0.0,
+        pitch_was: 0.0,
+        inside: 0,
+        steepest: 0.0,
+        fastest: 0.0,
+        dive_t: -1.0,
+        from: no_shot(),
+        dive: no_shot()
+    }
+}
+
+// The point looked at, ahead of him and over his feet; the camera, behind
+// him and over his feet, turned toward the sun's side. (Low enough that,
+// with him as big as CHASE_SIZE and his feet held at CHASE_FEET, the top of
+// the picture reaches the horizon: the hill ahead is seen.)
+const CHASE_AHEAD: f32 = 1.2;
+
+const CHASE_LIFT: f32 = 0.7;
+
+const CHASE_BACK: f32 = 7.0;
+
+const CHASE_UP: f32 = 2.8;
+
+// The least drop the camera leads as a big one.
+const CHASE_BIG_DROP: f32 = 2.5;
+
+// How fast it comes in toward him, and goes out again (m/s).
+const CHASE_IN_RATE: f32 = 4.0;
+
+const CHASE_OUT_RATE: f32 = 2.0;
+
+// How fast it turns round after the way he faces (1/s: about 0.7 s
+// behind).
+const CHASE_FOLLOW_RATE: f32 = 1.4;
+
+// How long before a lip it rises (s), and how much (m); before a big drop
+// (ROLL_DROP or more), sooner and more.
+const CHASE_LEAD: f32 = 1.0;
+
+const CHASE_RISE: f32 = 1.8;
+
+const CHASE_LEAD_BIG: f32 = 1.6;
+
+const CHASE_RISE_BIG: f32 = 2.6;
+
+// How far down the picture the near edge of the row he will land on is
+// brought, near a lip; and how low his feet may go meanwhile.
+const CHASE_LAND_AT: f32 = 0.45;
+
+const CHASE_FEET_LOWEST: f32 = 0.75;
+
+// How long after takeoff the lip's view is held.
+const CHASE_LIP_HOLD: f32 = 0.25;
+
+// The most it is ever from him, drawn back in the air.
+const CHASE_FARTHEST: f32 = 10.0;
+
+const CHASE_SLACK: f32 = 0.8;
+
+const CHASE_SLACK_FALLING: f32 = 4.0;
+
+// How near him it may come to see him past the hill, and how far it stays
+// out of it (a ball this big round it).
+const CHASE_NEAREST: f32 = 2.2;
+
+const CHASE_ROOM: f32 = 0.35;
+
+// How far it rises to see him past the hill before it comes in.
+const CHASE_LIFT_MOST: f32 = 2.5;
+
+// The steepest it looks down (rad), the fastest it rises (m/s) and tips
+// (rad/s).
+const CHASE_STEEPEST: f32 = 0.785;
+
+// How far down the picture the horizon is, at the least.
+const CHASE_HORIZON: f32 = 0.08;
+
+// In a tall window, at the least (it rides high there).
+const CHASE_HORIZON_TALL: f32 = 0.12;
+
+const CHASE_RISE_RATE: f32 = 3.0;
+
+const CHASE_TIP_RATE: f32 = 1.047;
+
+// The least share of the picture's height he is, the lens widened (of
+// his standing height: running, crouched or tucked, he is a little less).
+const CHASE_SIZE_LEAST: f32 = 0.17;
+
+// His height, soles to cap (m), for the lens.
+const GUY_TALL: f32 = 0.99;
+
+// The share of the picture's height he is, and how far down it his feet
+// are, in a tall window and a wide one (between, by its shape).
+chase_size(): f32 {
+    lerpf(0.17, 0.2, aspect_wide())
+}
+
+chase_feet(): f32 {
+    lerpf(0.64, 0.68, aspect_wide())
+}
+
+// 0 for a window as tall as a phone held upright, 1 as wide as a laptop's.
+aspect_wide(): f32 {
+    aspect: f32 = screen_w as f32 / maxf(screen_h as f32, 1.0);
+    smoothstepf(0.5, 1.6, aspect)
+}
+
+// Whether the hill is within CHASE_ROOM of p (or above it).
+in_hill(p: V3): bool {
+    e: f32 = CHASE_ROOM;
+    g: f32 = maxf(maxf(hill_height(p.x + e, p.z), hill_height(p.x - e, p.z)), maxf(hill_height(p.x,
+        p.z + e), hill_height(p.x, p.z - e)));
+    p.y < maxf(g, hill_height(p.x, p.z)) + e
+}
+
+// Whether the hill is between a and b (or round a).
+hill_between_points(a: V3, b: V3): bool {
+    if (in_hill(a)) return true;
+    for k in 1..10 {
+        p: V3 = v_lerp(a, b, k as f32 / 10.0);
+        if (p.y < hill_height(p.x, p.z) + 0.1) return true
+    }
+    false
+}
+
+update_chase(
+    c: *Chase,
+    r: *Runner,
+    at: V3,
+    dt: f32
+) {
+    if (c.dive_t >= 0.0) {
+        dive_follow(c, dt);
+        return
+    }
+    if (r.in_water) return;
+    // (Off the last cliff, coming down in the sea: the dive's shot.)
+    if (r.air && hill.sea > -999.0 && dt > 0.0) {
+        left: f32 = maxf(r.air_total - r.air_time, 0.0);
+        entry: V3 = v3(r.x + r.vx * left, hill.sea, r.z + r.vz * left);
+        if (in_sea(entry.x, -entry.z)) {
+            dive_begin(c, r, entry);
+            dive_follow(c, dt);
+            return
+        }
+    }
+    c.yaw = approach_angle(c.yaw, r.carve, ease(CHASE_FOLLOW_RATE, dt));
+    rate: f32 = 8.0;
+    if (at.y < c.y) rate = 6.0;
+    if (at.y < c.y && r.air) rate = 1.5;
+    c.y = lerpf(c.y, at.y, ease(rate, dt));
+    // (Falling, it may stay higher behind him, looking down over the edge
+    // he went off rather than following him down behind it.)
+    slack: f32 = CHASE_SLACK;
+    if (r.air) slack = CHASE_SLACK_FALLING;
+    c.y = clampf(c.y, at.y - CHASE_SLACK, at.y + slack);
+    // Coming to a lip: how soon, along his way, how big the drop, and the
+    // near edge of the row he will land on. (Held a moment past takeoff.)
+    way: V3 = run_dir(r.carve);
+    d: f32 = -at.z;
+    k: int = row_at(d);
+    lip: f32 = 0.0;
+    if (!r.air && k < hill.n - 1 && r.speed > 0.5) {
+        drop: f32 = edge_drop(k, at.x);
+        big: bool = drop >= CHASE_BIG_DROP;
+        lead: f32 = CHASE_LEAD;
+        if (big) lead = CHASE_LEAD_BIG;
+        soon: f32 = (row_end_d(d) - d) / maxf(-way.z * r.speed, 0.3);
+        if (soon < lead && drop > 0.4) {
+            lip = 1.0;
+            next: Row = hill.rows[k + 1];
+            c.lip_to = v3(at.x, row_top(next, at.x), -next.start);
+            c.lip_big = 0.0;
+            if (big) c.lip_big = 1.0
+        }
+    }
+    if (r.air && r.air_time < CHASE_LIP_HOLD && c.lip > 0.5) lip = 1.0;
+    c.lip = lerpf(c.lip, lip, ease(4.0, dt));
+    // In the air, back as far as keeps where he lands in view.
+    back: f32 = 0.0;
+    if (r.air && r.air_time >= CHASE_LIP_HOLD) {
+        left: f32 = maxf(r.air_total - r.air_time, 0.0);
+        ahead: V3 = v3(at.x + r.vx * left, r.air_land_y, at.z + r.vz * left);
+        back = clampf(v_len(v_sub(ahead, at)) * 0.5, 0.0, CHASE_FARTHEST - CHASE_BACK)
+    }
+    back_rate: f32 = 3.0;
+    if (back < c.back) back_rate = 5.0;
+    c.back = lerpf(c.back, back, ease(back_rate, dt));
+    // (The way it looks: the way he faces, a while ago.)
+    look_way: V3 = run_dir(c.yaw);
+    behind: V3 = v_scale(look_way, -1.0);
+    base: V3 = v3(at.x, c.y, at.z);
+    target: V3 = v_add(v_madd(base, look_way, CHASE_AHEAD), v3(0.0, CHASE_LIFT, 0.0));
+    reach: f32 = (CHASE_BACK + c.back) / CHASE_BACK;
+    rise: f32 = lerpf(CHASE_RISE, CHASE_RISE_BIG, c.lip_big) * c.lip;
+    want: V3 = v_add(v_madd(base, behind, CHASE_BACK * reach), v3(0.0, CHASE_UP * reach + rise,
+        0.0));
+    // Clear of the hill, and seeing him past it: up first (to
+    // CHASE_LIFT_MOST), then in toward him, then up again.
+    // (His feet as well as his chest.)
+    chest: V3 = v3(at.x, at.y + 0.5, at.z);
+    shins: V3 = v3(at.x, at.y + 0.15, at.z);
+    pull: f32 = 0.0;
+    far: f32 = v_len(v_sub(want, chest));
+    lift: f32 = 0.0;
+    for _try in 0..40 {
+        eye: V3 = v_add(v_lerp(want, chest, pull / maxf(far, 0.01)), v3(0.0, lift,
+            0.0));
+        if (hill_between_points(eye, chest) || hill_between_points(eye, shins)) {
+            if (lift < CHASE_LIFT_MOST || far - pull <= CHASE_NEAREST + 0.01) lift = lift + 0.25 else pull = minf(pull + 0.25,
+                far - CHASE_NEAREST)
+        }
+    }
+    // (In no faster than CHASE_IN_RATE, out no faster than CHASE_OUT_RATE;
+    // at once when snapped. Up no faster than CHASE_RISE_RATE.)
+    if (dt <= 0.0 || dt >= 1.0) c.pulled = pull else c.pulled = clampf(pull, c.pulled - CHASE_OUT_RATE * dt,
+        c.pulled + CHASE_IN_RATE * dt);
+    if (lift > c.over) c.over = minf(lift, c.over + CHASE_RISE_RATE * dt) else c.over = lerpf(c.over,
+        lift, ease(2.0, dt));
+    eye: V3 = v_add(v_lerp(want, chest, c.pulled / maxf(far, 0.01)), v3(0.0, c.over,
+        0.0));
+    // (No faster up than CHASE_RISE_RATE, once it has a height to rise
+    // from; but never into the hill.)
+    if (dt > 0.0 && c.eye_y != 0.0) eye.y = minf(eye.y, c.eye_y + CHASE_RISE_RATE * dt);
+    if (in_hill(eye)) {
+        // (Rising slowly, the hill came first: it rises as it must.)
+        for _up in 0..100 {
+            if (in_hill(eye)) eye.y = eye.y + 0.1
+        }
+    }
+    c.eye = eye;
+    c.eye_y = eye.y;
+    c.at = target;
+    // The lens: him (standing: his feet, and GUY_TALL over them)
+    // CHASE_SIZE of the picture high; his feet held CHASE_FEET down it.
+    look: V3 = v_norm(v_sub(c.at, c.eye));
+    right: V3 = v_norm(v_cross(look, v3(0.0, 1.0, 0.0)));
+    up: V3 = v_cross(right, look);
+    feet: V3 = v_sub(at, c.eye);
+    head: V3 = v_add(feet, v3(0.0, GUY_TALL, 0.0));
+    feet_k: f32 = v_dot(feet, up) / maxf(v_dot(feet, look), 0.5);
+    head_k: f32 = v_dot(head, up) / maxf(v_dot(head, look), 0.5);
+    tan_half: f32 = maxf((head_k - feet_k) / (2.0 * chase_size()), 0.05);
+    // (In the air, as it was: drawing back is to see more.)
+    // (Eased, so that coming down from the air it doesn't jump.)
+    if (!r.air || c.fovy <= 0.0) {
+        lens: f32 = 2.0 * atan2f(tan_half, 1.0);
+        if (c.fovy <= 0.0 || dt <= 0.0 || dt >= 1.0) c.fovy = lens else c.fovy = lerpf(c.fovy,
+            lens, ease(3.0, dt))
+    }
+    tan_now: f32 = sinf(c.fovy * 0.5) / cosf(c.fovy * 0.5);
+    // (Widened, never so far that he is less than CHASE_SIZE_LEAST of the
+    // picture: his feet may leave it for a moment instead.)
+    widest: f32 = (head_k - feet_k) / (2.0 * CHASE_SIZE_LEAST);
+    // (Nor, drawn back in the air with the lens held, so far that he is.)
+    if (tan_now > widest) {
+        tan_now = widest;
+        c.fovy = 2.0 * atan2f(widest, 1.0)
+    }
+    shift: f32 = clampf(1.0 - 2.0 * chase_feet() - feet_k / tan_now, -0.9, 0.9);
+    // Near a lip, the picture moves down (the camera tips down), until the
+    // near edge of where he lands is CHASE_LAND_AT down it, his feet no
+    // lower than CHASE_FEET_LOWEST.
+    if (c.lip > 0.01) {
+        edge: V3 = v_sub(c.lip_to, c.eye);
+        edge_k: f32 = v_dot(edge, up) / maxf(v_dot(edge, look), 0.5);
+        tipped: f32 = minf(1.0 - 2.0 * CHASE_LAND_AT - edge_k / tan_now, 1.0 - 2.0 * CHASE_FEET_LOWEST - feet_k / tan_now);
+        shift = lerpf(shift, maxf(tipped, shift), c.lip)
+    }
+    // The horizon no higher than horizon_at down the picture, nor his feet
+    // lower than CHASE_FEET_LOWEST: the lip's view tips less where it would
+    // be; and where both can't be, his feet win (on the ground: in the air,
+    // falling away from the camera, the lens widens, so that it needn't
+    // tip fast after him).
+    flat: V3 = v_norm(v3(look.x, 0.0, look.z));
+    horizon_k: f32 = v_dot(flat, up) / maxf(v_dot(flat, look), 0.05);
+    horizon_at: f32 = lerpf(CHASE_HORIZON_TALL, CHASE_HORIZON, aspect_wide());
+    room: f32 = 2.0 * (CHASE_FEET_LOWEST - horizon_at);
+    if (r.air && (horizon_k - feet_k) / tan_now > room) {
+        wide: f32 = minf((horizon_k - feet_k) / room, maxf(widest, tan_now));
+        shift = shift * tan_now / wide;
+        tan_now = wide;
+        c.fovy = 2.0 * atan2f(wide, 1.0)
+    }
+    shift = minf(shift, 1.0 - 2.0 * horizon_at - horizon_k / tan_now);
+    shift = maxf(shift, 1.0 - 2.0 * CHASE_FEET_LOWEST - feet_k / tan_now);
+    // Never looking down more than CHASE_STEEPEST, nor tipping faster than
+    // CHASE_TIP_RATE: by the look's own pitch and the shift's, together.
+    pitch: f32 = asin_l(-look.y);
+    most: f32 = sinf(CHASE_STEEPEST - pitch) / cosf(CHASE_STEEPEST - pitch) / tan_now;
+    shift = minf(shift, most);
+    if (dt > 0.0) {
+        was: f32 = c.pitch;
+        now: f32 = pitch + atan2f(shift * tan_now, 1.0);
+        step: f32 = CHASE_TIP_RATE * dt;
+        if (absf(now - was) > step && c.fovy > 0.0 && was != 0.0) {
+            goal: f32 = clampf(now, was - step, was + step);
+            shift = sinf(goal - pitch) / cosf(goal - pitch) / tan_now
+        }
+    }
+    // (Held back from tipping, it may leave his feet out of the bottom of
+    // the picture: then the lens widens, which doesn't tip it, till they
+    // are in. The horizon may go out of the top for that while.)
+    tipped_by: f32 = shift * tan_now;
+    lowest: f32 = 1.0 - 2.0 * CHASE_FEET_LOWEST;
+    wide: f32 = tan_now;
+    if (feet_k + tipped_by < lowest * wide) wide = minf((feet_k + tipped_by) / lowest,
+        maxf(widest, tan_now));
+    if (wide > tan_now) {
+        tan_now = wide;
+        shift = tipped_by / wide;
+        c.fovy = 2.0 * atan2f(wide, 1.0)
+    }
+    c.shift = shift;
+    c.pitch = pitch + atan2f(shift * tan_now, 1.0);
+    // (Measures, for L8_TRACE.)
+    if (in_hill_core(c.eye)) c.inside = c.inside + 1;
+    c.steepest = maxf(c.steepest, c.pitch);
+    if (dt > 0.0) c.fastest = maxf(c.fastest, absf(c.pitch - c.pitch_was) / dt);
+    c.pitch_was = c.pitch
+}
+
+// The dive: once he is off the last cliff, the camera goes over DIVE_BLEND
+// to a fixed view from the side, out over the sea DIVE_OUT to the sea's
+// side of him (DIVE_OUT_FAR if on the way there it would go through the
+// hill; never nearer the run's sea cliff than 3 m), halfway between his takeoff and the water in height and
+// along the hill, looking at where he will go in: that held DIVE_ENTRY_AT
+// down the picture, the lens wide enough that where he took off is in it.
+// He falls through the picture into the splash.
+const DIVE_BLEND: f32 = 0.4;
+
+const DIVE_OUT: f32 = 12.0;
+
+const DIVE_OUT_FAR: f32 = 16.0;
+
+const DIVE_ENTRY_AT: f32 = 0.72;
+
+dive_begin(c: *Chase, r: *Runner, entry: V3) {
+    c.dive_t = 0.0;
+    c.from = Shot {
+        eye: c.eye,
+        at: c.at,
+        fovy: c.fovy,
+        shift: c.shift
+    };
+    take: V3 = v3(r.x, r.takeoff_y, r.z);
+    cliff: f32 = HILL_HALF + WALL_WIDE;
+    eye: V3 = v3(maxf(entry.x + DIVE_OUT, cliff + 3.0), (r.takeoff_y + hill.sea) * 0.5,
+        (take.z + entry.z) * 0.5);
+    clear: bool = true;
+    for k in 1..9 {
+        if (in_hill(dive_path(c.eye, eye, k as f32 / 8.0))) clear = false
+    }
+    if (!clear) eye.x = maxf(entry.x + DIVE_OUT_FAR, cliff + 3.0);
+    look: V3 = v_norm(v_sub(entry, eye));
+    right: V3 = v_norm(v_cross(look, v3(0.0, 1.0, 0.0)));
+    up: V3 = v_cross(right, look);
+    // (Where he took off, a little over his head, near the picture's
+    // top; across, inside its sides.)
+    head: V3 = v_sub(v3(take.x, take.y + 1.0, take.z), eye);
+    head_k: f32 = v_dot(head, up) / maxf(v_dot(head, look), 0.5);
+    across_k: f32 = absf(v_dot(head, right)) / maxf(v_dot(head, look), 0.5);
+    shift: f32 = 1.0 - 2.0 * DIVE_ENTRY_AT;
+    aspect: f32 = screen_w as f32 / maxf(screen_h as f32, 1.0);
+    tan_half: f32 = maxf(maxf(head_k / (0.8 - shift), across_k / (0.85 * aspect)),
+        0.2);
+    c.dive = Shot {
+        eye: eye,
+        at: entry,
+        fovy: 2.0 * atan2f(tan_half, 1.0),
+        shift: shift
+    }
+}
+
+// The way there: out and along at once, down only late (so that it goes
+// out over the cliff's edge, not through it).
+dive_path(a: V3, b: V3, s: f32): V3 {
+    v3(lerpf(a.x, b.x, s), lerpf(a.y, b.y, s * s), lerpf(a.z, b.z, s))
+}
+
+dive_follow(c: *Chase, dt: f32) {
+    if (dt > 0.0 && dt < 1.0) c.dive_t = c.dive_t + dt;
+    s: f32 = smoothstepf(0.0, DIVE_BLEND, c.dive_t);
+    c.eye = dive_path(c.from.eye, c.dive.eye, s);
+    c.at = v_lerp(c.from.at, c.dive.at, s);
+    c.fovy = lerpf(c.from.fovy, c.dive.fovy, s);
+    c.shift = lerpf(c.from.shift, c.dive.shift, s)
+}
+
+// Whether p is inside the hill itself (no room round it).
+in_hill_core(p: V3): bool {
+    p.y < hill_height(p.x, p.z)
+}
+
+asin_l(a: f32): f32 {
+    atan2f(a, sqrtf(maxf(1.0 - a * a, 0.0)))
+}
+
+snap_chase(c: *Chase, r: *Runner, at: V3) {
+    keep: Chase = c.*;
+    c.* = no_chase();
+    c.inside = keep.inside;
+    c.steepest = keep.steepest;
+    c.fastest = keep.fastest;
+    c.yaw = r.carve;
+    c.y = at.y;
+    update_chase(c, r, at, 0.0);
+    update_chase(c, r, at, 10.0);
+    c.pitch_was = c.pitch
+}
+
+// ---- keys ----
+key_dir(ks: int): int {
+    if (ks == 65363 || ks == 100) return 0;
+    if (ks == 65364 || ks == 115) return 1;
+    if (ks == 65361 || ks == 97) return 2;
+    if (ks == 65362 || ks == 119) return 3;
+    -1
+}
+
+key_down(keys: *Keys, ks: int) {
+    d: int = key_dir(ks);
+    if (keys.hop_held && d >= 0) aim_key(keys, d);
+    if (d >= 0) keys.held[d] = true;
+    if (ks == 32) {
+        if (!keys.hop_held) keys.hop = true;
+        keys.hop_held = true;
+        pad_press(keys)
+    }
+    if (ks == 120) {
+        if (!keys.style_held) keys.style = true;
+        keys.style_held = true
+    }
+}
+
+key_up(keys: *Keys, ks: int) {
+    if (ks == 120) keys.style_held = false;
+    if (ks == 32) {
+        keys.hop_held = false;
+        pad_release(keys)
+    }
+    d: int = key_dir(ks);
+    if (d >= 0) keys.held[d] = false
+}
+
+// ---- the stick ----
+// The left thumb is a stick (see put_pads in hud.l8 for how it is drawn):
+// a thumb down anywhere on the screen's left half takes hold of it, and
+// how far it then slides from where it came down, out to STICK_REACH of
+// the screen's smaller side, is how hard it pulls, and which way: up the
+// screen is the way the camera looks. The arrows (or WASD) are the stick
+// pulled all the way; while Space is held they aim the trick, and he goes
+// on as he was.
+const STICK_REACH: f32 = 0.12;
+
+// The stick's own frame (see player_move): the camera's way it reads up
+// as, while held; the stick's way (rad from up, + right) when that was
+// taken; and whether it is held. A turn of the stick more than
+// STICK_RELATCH takes the camera's way afresh; within STICK_AHEAD of
+// straight up it goes over to the camera's.
+stick_frame: f32 = 0.0;
+
+stick_aim: f32 = 0.0;
+
+stick_held: bool = false;
+
+const STICK_RELATCH: f32 = 0.52;
+
+const STICK_AHEAD: f32 = 0.35;
+
+player_move(p: *Play) {
+    sx: f32 = 0.0;
+    sy: f32 = 0.0;
+    s: int = pointers.stick;
+    if (s >= 0) {
+        reach: f32 = STICK_REACH * min_side();
+        sx = (pointers.x[s] - pointers.x0[s]) / reach;
+        sy = (pointers.y0[s] - pointers.y[s]) / reach
+    } else {
+        if (p.keys.hop_held) return;
+        if (p.keys.held[0]) sx = sx + 1.0;
+        if (p.keys.held[2]) sx = sx - 1.0;
+        if (p.keys.held[3]) sy = sy + 1.0;
+        if (p.keys.held[1]) sy = sy - 1.0
+    }
+    n: f32 = sqrtf(sx * sx + sy * sy);
+    if (n > 1.0) {
+        sx = sx / n;
+        sy = sy / n;
+        n = 1.0
+    }
+    move_on = n > 0.0;
+    move_amount = n;
+    if (n <= 0.0) {
+        stick_held = false;
+        return
+    }
+    // (The camera's way, level.)
+    look: V3 = v3(p.cam.at.x - p.cam.eye.x, 0.0, p.cam.at.z - p.cam.eye.z);
+    live: f32 = p.cam.yaw;
+    if (v_len(look) > 0.01) live = atan2f(look.x, -look.z);
+    // The way "up" is: the camera's as the thumb came down, or as it
+    // turned the stick more than STICK_RELATCH; going over to the
+    // camera's own only while the stick is pushed about straight up and
+    // he goes that way. (So that, the camera swinging round after him, a
+    // stick held still runs him straight.)
+    aim: f32 = atan2f(sx, sy);
+    if (!stick_held || absf(wrap_angle(aim - stick_aim)) > STICK_RELATCH) {
+        stick_frame = live;
+        stick_aim = aim
+    }
+    stick_held = true;
+    if (absf(aim) < STICK_AHEAD && absf(wrap_angle(move_dir - p.r.carve)) < STICK_AHEAD) stick_frame = approach_angle(stick_frame,
+        live, ease(3.0, STEP_DT));
+    fwd: V3 = run_dir(stick_frame);
+    right: V3 = v3(-fwd.z, 0.0, fwd.x);
+    v: V3 = v_add(v_scale(right, sx), v_scale(fwd, sy));
+    move_dir = atan2f(v.x, -v.z)
+}
+
+// ---- the game ----
+// The guy's colors (skate's).
+body_color: V3 = V3 { x: 0.9, y: 0.22, z: 0.18 };
+
+cap_color: V3 = V3 { x: 0.98, y: 0.72, z: 0.28 };
+
+// The material codes his shader knows him by (see render.l8): his body's
+// color is the draw's tint.
+const MAT_SOFT: f32 = 5.0;
+
+const MAT_BODY: f32 = 5.25;
+
+// One step of the run: its keys (the pilot's, the stage's, or the
+// player's), and the runner on.
+type Play = {
+    r: *Runner;
+    keys: Keys;
+    g: *Gait;
+    cam: Chase;
+    // Time since the start (for the stage's motion and the clouds).
+    t: f32;
+    auto: bool
+}
+
+play_step(p: *Play) {
+    if (stage_on) stage_keys(p.r, &p.keys, p.t) else if (p.auto) pilot_step(pilot,
+        p.r, &p.keys, STEP_DT) else player_move(p);
+    was_air: bool = p.r.air;
+    step_runner(p.r, &p.keys, STEP_DT);
+    if (p.r.again) {
+        restart(p);
+        return
+    }
+    if (was_air && !p.r.air) landed_now = true;
+    if (!was_air && p.r.air) {
+        took_off_now = true;
+        took_off_t = p.t
+    }
+    p.keys.hop = false;
+    p.keys.style = false;
+    p.t = p.t + STEP_DT
+}
+
+// How long a splash's ring spreads (s).
+const SPLASH_TIME: f32 = 0.6;
+
+// Whether he landed, and took off, since this was last said (for
+// L8_TRACE), and when he took off.
+landed_now: bool = false;
+
+took_off_now: bool = false;
+
+took_off_t: f32 = 0.0;
+
+// Start over, at the top.
+// Whether the keys and thumbs are the player's: always, but for a run
+// played by itself, until it is over (then a tap goes again, as after a
+// run of the player's own).
+listening(p: *Play): bool {
+    !p.auto || p.r.finished
+}
+
+restart(p: *Play) {
+    if (stage_on) stage_start(p.r) else runner_start(p.r);
+    p.keys = no_keys();
+    pointers_clear(&p.keys);
+    pilot.t = 0.0;
+    pilot.lip = -1;
+    p.t = 0.0;
+    said_second = -1;
+    said_size = -1;
+    p.g.* = fresh_gait.*;
+    p.g.yaw = atan2f(0.0, -1.0);
+    at: V3 = v3(p.r.x, p.r.y, p.r.z);
+    gait_update(p.g, p.r, at, 0.0);
+    snap_chase(&p.cam, p.r, at)
+}
+
+fresh_gait: *Gait = new_gait();
+
+// Whether the terminal has been told of hits past MAX_HITS (see score.l8).
+hits_said: bool = false;
+
+// The latest second of the run L8_TRACE has said where he is at.
+said_second: int = -1;
+
+said_size: int = -1;
+
+// What L8_TRACE says each frame.
+trace_frame(p: *Play) raises IoError {
+    for i in 0..gait_nnotes {
+        n: GaitNote = gait_notes[i];
+        write(2, "L8STEP ");
+        write_int(2, (n.time * 1000.0) as int);
+        write(2, " ");
+        write_int(2, n.side);
+        if (n.down) write(2, " down") else {
+            write(2, " up ");
+            write_int(2, (n.slip * 1000.0) as int)
+        }
+        write(2, " knee ");
+        write_int(2, n.knee as int);
+        write(2, " speed ");
+        write_int(2, (p.r.speed * 100.0) as int);
+        write(2, "\n")
+    }
+    gait_nnotes = 0;
+    // (Every second of the run: how far down he is, and across, and his
+    // speed, in cm and cm/s.)
+    if (p.t as int > said_second) {
+        said_second = p.t as int;
+        write(2, "L8RUN ");
+        write_int(2, p.t as int);
+        write(2, " ");
+        write_int(2, (-p.r.z * 100.0) as int);
+        write(2, " ");
+        write_int(2, (p.r.x * 100.0) as int);
+        write(2, " ");
+        write_int(2, (p.r.speed * 100.0) as int);
+        write(2, "\n")
+    }
+    // (And with it, how tall he is in the picture, of its height, in
+    // tenths of a percent; and where his feet are down it.)
+    if (p.t as int > said_size) {
+        said_size = p.t as int;
+        cap: V3 = guy_bone_point(gait_bones, 0, GUY_BODY, v3(0.0, GUY_H + 0.06 - GUY_PELVIS_Y,
+            -GUY_PELVIS_Z));
+        low: f32 = 0.0;
+        top: f32 = 0.0;
+        if (project(cap)) top = proj_y;
+        for side in 0..2 {
+            if (project(guy_sole(gait_bones, 0, side))) low = maxf(low, proj_y)
+        }
+        write(2, "L8SIZE ");
+        write_int(2, ((low - top) / screen_h as f32 * 1000.0) as int);
+        write(2, " feet ");
+        write_int(2, (low / screen_h as f32 * 1000.0) as int);
+        look: V3 = v_norm(v_sub(p.cam.at, p.cam.eye));
+        write(2, " lens ");
+        write_int(2, (p.cam.fovy / DEG) as int);
+        write(2, " pitch ");
+        write_int(2, (asin_l(-look.y) / DEG) as int);
+        write(2, " shift ");
+        write_int(2, (p.cam.shift * 100.0) as int);
+        // (How high over his feet it is, and how far back, cm; how far it
+        // has risen for a lip, %.)
+        write(2, " up ");
+        write_int(2, ((p.cam.eye.y - p.r.y) * 100.0) as int);
+        write(2, " back ");
+        write_int(2, (sqrtf((p.cam.eye.x - p.r.x) * (p.cam.eye.x - p.r.x) + (p.cam.eye.z - p.r.z) * (p.cam.eye.z - p.r.z)) * 100.0) as int);
+        write(2, " lip ");
+        write_int(2, (p.cam.lip * 100.0) as int);
+        write(2, "\n");
+        // (And the camera's record so far: frames with its eye in the hill,
+        // the steepest it has looked down, deg, and the fastest it has
+        // tipped, deg/s.)
+        write(2, "L8CAM inside ");
+        write_int(2, p.cam.inside);
+        write(2, " steepest ");
+        write_int(2, (p.cam.steepest / DEG) as int);
+        write(2, " fastest ");
+        write_int(2, (p.cam.fastest / DEG) as int);
+        write(2, "\n")
+    }
+    if (took_off_now) {
+        took_off_now = false;
+        write(2, "L8TAKEOFF ");
+        write_int(2, (took_off_t * 1000.0) as int);
+        write(2, " ");
+        write_int(2, p.r.takeoff);
+        write(2, " row ");
+        write_int(2, row_at(p.r.takeoff_d));
+        write(2, " drop ");
+        write_int(2, (edge_drop(row_at(p.r.takeoff_d), p.r.x) * 100.0) as int);
+        write(2, "\n")
+    }
+    if (landed_now) {
+        landed_now = false;
+        write(2, "L8LAND ");
+        write_int(2, (p.t * 1000.0) as int);
+        write(2, " ");
+        write_int(2, (p.r.land_fall * 100.0) as int);
+        write(2, " ");
+        write_int(2, p.r.landing);
+        write(2, "\n")
+    }
+    if (!p.r.air && p.r.landing == LAND_ROLL && p.r.since_land < 0.6) {
+        write(2, "L8ROLL ");
+        write_int(2, (gait_roll_low * 1000.0) as int);
+        write(2, "\n")
+    }
+}
+
+main() raises IoError: int {
+    stage_begin();
+    seed: int = env_int("L8_SEED", 1);
+    if (stage_on) stage_lay_out() else hill_lay_out(seed);
+    ground: *Mesh = new_mesh(160000);
+    solid: *Mesh = new_mesh(160000);
+    hill_one_box = env_has_word(env_value("L8_PROFILE"), "strata");
+    hill_build(ground, solid);
+    // (The stage's ground, its own piece: drawn wherever he is.)
+    if (stage_on) {
+        piece_begin(ground_pieces, ground, -100000.0, 100000.0);
+        stage_build(ground);
+        piece_end(ground_pieces, ground)
+    }
+    // (Nothing left out unsaid.)
+    if (ground.dropped + solid.dropped > 0 || pieces_dropped > 0) eprint("Tumbledown: the hill's meshes were too small: some of it is not drawn");
+    if (env_has("L8_TRACE")) {
+        write(2, "L8MESH ground ");
+        write_int(2, ground.n);
+        write(2, " solid ");
+        write_int(2, solid.n);
+        write(2, " dropped ");
+        write_int(2, ground.dropped + solid.dropped);
+        write(2, "\n")
+    }
+    guy: *Mesh = new_mesh(20000);
+    guy_vertices: int = guy_build(guy, GuyLook {
+        body_color: body_color,
+        body_material: MAT_BODY,
+        cap_color: cap_color,
+        cap_material: MAT_SOFT,
+        column_depth: GUY_COLUMN_DEPTH
+    });
+    d0: ?*i8 = XOpenDisplay(null);
+    if (d0 == null) {
+        eprint("XOpenDisplay failed (need DISPLAY / XWayland)");
+        return 1
+    }
+    dpy: *i8 = d0;
+    screen: int = XDefaultScreen(dpy);
+    attr: []i32 = [4i32, 5i32, 8i32, 8i32, 9i32, 8i32, 10i32, 8i32, 12i32, 24i32,
+        0i32];
+    vis0: ?*XVisualInfo = glXChooseVisual(dpy, screen, attr);
+    if (vis0 == null) die("glXChooseVisual failed");
+    vis: *XVisualInfo = vis0;
+    root: int = XRootWindow(dpy, screen);
+    cmap: int = XCreateColormap(dpy, root, vis.visual, 0);
+    wa: XSetWindowAttributes = XSetWindowAttributes {
+        background_pixmap: 0,
+        background_pixel: 0,
+        border_pixmap: 0,
+        border_pixel: 0,
+        bit_gravity: 0i32,
+        win_gravity: 0i32,
+        backing_store: 0i32,
+        backing_planes: 0,
+        backing_pixel: 0,
+        save_under: 0i32,
+        event_mask: 163919,
+        do_not_propagate_mask: 0,
+        override_redirect: 0i32,
+        colormap: cmap,
+        cursor: 0
+    };
+    screen_w = 1280;
+    screen_h = 720;
+    size: []f32 = new f32[2](0.0);
+    if (env_numbers("L8_SIZE", size) == 2) {
+        screen_w = maxf(size[0], 64.0) as int;
+        screen_h = maxf(size[1], 64.0) as int
+    }
+    win: int = XCreateWindow(dpy, root, 0, 0, screen_w, screen_h, 0, vis.depth as int,
+        1, vis.visual, 10248, &wa);
+    if (win == 0) die("XCreateWindow failed");
+    XStoreName(dpy, win, "Tumbledown");
+    proto: []int = new int[1](0);
+    proto[0] = XInternAtom(dpy, "WM_DELETE_WINDOW", 0);
+    XSetWMProtocols(dpy, win, &proto[0], 1);
+    XMapRaised(dpy, win);
+    XkbSetDetectableAutoRepeat(dpy, 1, null);
+    XFlush(dpy);
+    eprint("Tumbledown: arrows move; hold Space, tap arrows, let go to jump; Space or X in the air tucks; R starts over; Escape quits");
+    ctx0: ?*i8 = glXCreateContext(dpy, vis, null, 1);
+    if (ctx0 == null) die("glXCreateContext failed");
+    ctx: *i8 = ctx0;
+    if (glXMakeCurrent(dpy, win, ctx) == 0) die("glXMakeCurrent failed");
+    // (L8_UNCAPPED: frames as fast as they can be drawn, for measuring
+    // how long they take: see L8FRAME.)
+    if (!env_has("L8_UNCAPPED")) glXSwapIntervalEXT(dpy, win, 1) else glXSwapIntervalEXT(dpy,
+        win, 0);
+    r: *Renderer = new_renderer();
+    set_hill_meshes(r, ground, solid);
+    set_guy_mesh(r, guy);
+    hud_touch = env_has("L8_TOUCH");
+    sole_shade = env_number("L8_SOLE", 1.0);
+    // (L8_PROFILE=what: shadows, haze, face, far, or strata left out, to
+    // measure what each costs.)
+    what: str = env_value("L8_PROFILE");
+    profile.no_shadows = env_has_word(what, "shadows");
+    profile.no_haze = env_has_word(what, "haze");
+    profile.no_face = env_has_word(what, "face");
+    profile.near_only = env_has_word(what, "far");
+    page: bool = env_has("L8_PAGE");
+    tracing: bool = env_has("L8_TRACE");
+    if (tracing) {
+        // (The hill: each row's kind, where it starts and ends (cm), the
+        // gap after it, its ramp's side, and its blocks' tops.)
+        for k in 0..hill.n {
+            row: Row = hill.rows[k];
+            write(2, "L8ROW ");
+            write_int(2, k);
+            write(2, " kind ");
+            write_int(2, row.kind);
+            write(2, " d ");
+            write_int(2, (row.start * 100.0) as int);
+            write(2, " ");
+            write_int(2, (row.end * 100.0) as int);
+            write(2, " gap ");
+            write_int(2, (row.gap * 100.0) as int);
+            write(2, " ramp ");
+            write_int(2, row.ramp as int);
+            write(2, " tops");
+            for i in 0..row.n {
+                write(2, " ");
+                write_int(2, (row.top[i] * 100.0) as int)
+            }
+            write(2, "\n")
+        }
+        write(2, "L8PART guy ");
+        write_int(2, guy_vertices);
+        write(2, " ground ");
+        write_int(2, ground.n);
+        write(2, " solid ");
+        write_int(2, solid.n);
+        write(2, "\n")
+    }
+    play: Play = Play {
+        r: new_runner(),
+        keys: no_keys(),
+        g: new_gait(),
+        cam: no_chase(),
+        t: 0.0,
+        auto: env_has("L8_AUTO")
+    };
+    pilot.on = play.auto;
+    restart(&play);
+    // Frozen: worked out to then in fixed steps, and held.
+    freeze: f32 = env_number("L8_FREEZE", -1.0);
+    frozen: bool = freeze >= 0.0;
+    if (frozen) {
+        while (play.t < freeze) {
+            play_step(&play);
+            at: V3 = v3(play.r.x, play.r.y, play.r.z);
+            gait_update(play.g, play.r, at, STEP_DT);
+            update_chase(&play.cam, play.r, at, STEP_DT);
+            if (tracing) trace_frame(&play)
+        }
+    }
+    cam_at: []f32 = new f32[6](0.0);
+    fixed_cam: bool = env_numbers("L8_LOOK", cam_at) == 6;
+    ev: XEvent = XEvent.Other;
+    running: bool = true;
+    frames: int = 0;
+    frames_ns: int = 0;
+    prev_ns: int = mono_ns();
+    acc: f32 = 0.0;
+    while (running) {
+        while (XPending(dpy) != 0) {
+            XNextEvent(dpy, &ev);
+            match ev {
+                KeyPress -> {
+                    ks: int = XLookupKeysym(&ev, 0);
+                    if (ks == 65307 && !page) running = false;
+                    if (ks == 114) restart(&play) else if (listening(&play)) key_down(&play.keys,
+                        ks)
+                }
+                KeyRelease -> {
+                    ks: int = XLookupKeysym(&ev, 0);
+                    if (listening(&play)) key_up(&play.keys, ks)
+                }
+                ButtonPress b -> {
+                    if (listening(&play)) pointer_down(&play.keys, b.button as int,
+                        b.x as f32, b.y as f32)
+                }
+                ButtonRelease b -> {
+                    if (listening(&play)) pointer_up(&play.keys, b.button as int)
+                }
+                MotionNotify mo -> pointer_move(mo.state as int, mo.x as f32, mo.y as f32);
+                ConfigureNotify c -> {
+                    if (c.width > 0i32 && c.height > 0i32) {
+                        screen_w = c.width as int;
+                        screen_h = c.height as int
+                    }
+                }
+                DestroyNotify -> running = false;
+                ClientMessage c -> {
+                    if (c.l0 == proto[0]) running = false
+                }
+                _ -> { }
+            }
+        }
+        if (!running)
+            break;
+        now: int = mono_ns();
+        dns: int = now - prev_ns;
+        prev_ns = now;
+        if (dns < 0) dns = 0;
+        if (dns > 100000000) dns = 100000000;
+        dt: f32 = dns as f32 / 1000000000.0;
+        if (frozen) dt = 0.0;
+        acc = acc + dt;
+        if (!play.auto && !stage_on) read_pads(&play.keys);
+        steps: int = 0;
+        while (acc >= STEP_DT && steps < 12) {
+            play_step(&play);
+            acc = acc - STEP_DT;
+            steps = steps + 1
+        }
+        if (acc > STEP_DT) acc = 0.0;
+        alpha: f32 = acc / STEP_DT;
+        at: V3 = v_lerp(play.r.prev, v3(play.r.x, play.r.y, play.r.z), alpha);
+        if (!frozen) {
+            gait_update(play.g, play.r, at, dt);
+            update_chase(&play.cam, play.r, at, dt)
+        }
+        if (tracing) trace_frame(&play);
+        if (score.dropped > 0 && !hits_said) {
+            eprint("Tumbledown: more hits this run than MAX_HITS: the rest scored but not kept");
+            hits_said = true
+        }
+        view: View = View {
+            eye: play.cam.eye,
+            at: play.cam.at,
+            fovy: play.cam.fovy,
+            shift: play.cam.shift,
+            focus: at,
+            time: play.t
+        };
+        if (stage_on && !stage_game_camera()) view = stage_view(play.r, play.t);
+        if (fixed_cam) {
+            view.eye = v3(cam_at[0], cam_at[1], cam_at[2]);
+            view.at = v3(cam_at[3], cam_at[4], cam_at[5]);
+            view.fovy = 50.0 * DEG;
+            view.shift = 0.0
+        }
+        frame_draws = 0;
+        frame_vertices = 0;
+        // (A splash where he went into the sea: a ring spreading over
+        // SPLASH_TIME.)
+        // (Or where he came down in a gap's water.)
+        splash.shown = play.r.in_water && play.r.finish_t < SPLASH_TIME;
+        splash.at = play.r.splash_at;
+        splash.size = 0.4 + 1.4 * smoothstepf(0.0, SPLASH_TIME, play.r.finish_t);
+        if (play.r.dunk_t < SPLASH_TIME) {
+            splash.shown = true;
+            splash.at = play.r.dunk_at;
+            splash.size = 0.4 + 1.4 * smoothstepf(0.0, SPLASH_TIME, play.r.dunk_t)
+        }
+        draw_scene(r, view, body_color);
+        paint_reset();
+        if (!stage_on) build_hud(play.r, at, screen_w as f32, screen_h as f32);
+        draw_paint(r);
+        glXSwapBuffers(dpy, win);
+        if (tracing) {
+            frames = frames + 1;
+            frames_ns = frames_ns + (mono_ns() - now);
+            if (frames >= 120) {
+                write(2, "L8FRAME us ");
+                write_int(2, frames_ns / frames / 1000);
+                write(2, " draws ");
+                write_int(2, frame_draws);
+                write(2, " vertices ");
+                write_int(2, frame_vertices);
+                write(2, " window ");
+                write_int(2, screen_w);
+                write(2, "x");
+                write_int(2, screen_h);
+                write(2, "\n");
+                frames = 0;
+                frames_ns = 0
+            }
+        }
+    }
+    0
+}

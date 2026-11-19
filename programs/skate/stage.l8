@@ -1,0 +1,580 @@
+tag skate;
+
+use_tag std, blockguy, env;
+
+// The stage: him alone on flat ground ruled in a grid, under the sky and
+// sun, doing one motion over and over, seen by a fixed camera, for looking
+// at how he moves (see programs/blockguy). It is chosen by
+// L8 variables, and is nothing of the game: no course is drawn, nothing is
+// ridden or scored, and the HUD is not shown.
+//
+//   L8_STAGE=motion    what he does (STAGE_NAMES); the stage is on with it
+//   L8_CAM=view        where the camera is: front, back, side, q45, top,
+//                      chase or q45tail (front, his face side, is the
+//                      brim's way; side is his +x, the board's nose riding
+//                      regular; q45 between them, q45tail between the
+//                      front and his -x side)
+//   L8_CAMH=metres     the camera so much higher, looking down at his hip
+//   L8_CAMD=metres     how far off it is (6)
+//   L8_CAMZ=metres     the camera held still, at so far along (not
+//                      following him), its height at his hip's standing
+//   L8_SPEED=k         how fast time goes (1)
+//   L8_FREEZE=seconds  the motion so far in, held still
+//   L8_JOINT=name:degrees,...  joints held at those angles, on both
+//                      sides (see guy_joint_name), within their ranges
+//   L8_DEPTH=metres    how deep his legs are (GUY_COLUMN_DEPTH)
+//   L8_SQUASH=k        both legs squashed so (see GuyLeg), held
+//   L8_TRACE           each frame, an L8STAGE line of measures (see
+//                      stage_trace); and the parts' sizes at the start
+//   L8_FREE            in the air, his middle not kept on its arc (see
+//                      keep_on_arc), to compare
+//
+// The camera is level at his hip's height over his board (following him up
+// into the air), with a narrow lens, 20 degrees high, so that there is
+// little perspective.
+// Time goes in fixed steps, so many to a frame drawn, not by the clock: a
+// recording of it is evenly spaced however slowly the frames come.
+stage_on: bool = false;
+
+const STAGE_STAND: int = 0;
+
+const STAGE_RIDE: int = 1;
+
+const STAGE_CARVE_LEFT: int = 2;
+
+const STAGE_CARVE_RIGHT: int = 3;
+
+const STAGE_WINDUP: int = 4;
+
+const STAGE_OLLIE: int = 5;
+
+const STAGE_GRAB: int = 6;
+
+const STAGE_FRONTFLIP: int = 7;
+
+const STAGE_BACKFLIP: int = 8;
+
+const STAGE_SPIN: int = 9;
+
+const STAGE_BIGLAND: int = 10;
+
+const STAGE_SKETCH: int = 11;
+
+const STAGE_GRIND: int = 12;
+
+const STAGE_STOP: int = 13;
+
+// (Not a motion of the game's: him as the figure stands, legs straight
+// and arms down, on his board.)
+const STAGE_REST: int = 14;
+
+const STAGE_PUSH: int = 15;
+
+const STAGE_FLIP180: int = 16;
+
+// (Off a kicker: up its face, tipped back with it, and into the air, a
+// front flip.)
+const STAGE_KICKER: int = 17;
+
+// (Carving one way, then the other: a slalom.)
+const STAGE_SLALOM: int = 18;
+
+STAGE_NAMES: []str = ["stand", "ride", "carveL", "carveR", "windup", "ollie", "grab",
+    "frontflip", "backflip", "spin360", "bigland", "sketch", "grind", "stop", "rest",
+    "push", "flip180", "kicker", "slalom"];
+
+const CAM_FRONT: int = 0;
+
+const CAM_BACK: int = 1;
+
+const CAM_SIDE: int = 2;
+
+const CAM_Q45: int = 3;
+
+const CAM_TOP: int = 4;
+
+const CAM_CHASE: int = 5;
+
+// (Between the front and his -x side: the tail's, riding regular.)
+const CAM_Q45_TAIL: int = 6;
+
+CAM_NAMES: []str = ["front", "back", "side", "q45", "top", "chase", "q45tail"];
+
+stage_motion: int = STAGE_STAND;
+
+stage_cam: int = CAM_Q45;
+
+stage_camd: f32 = 6.0;
+
+stage_speed: f32 = 1.0;
+
+// The motion's time, and the last step's (for what happens once as time
+// passes it: a landing).
+stage_t: f32 = 0.0;
+
+stage_t_was: f32 = 0.0;
+
+// Whether time stands still (L8_FREEZE), and the camera's height, which
+// follows his.
+stage_frozen: bool = false;
+
+stage_cam_y: f32 = 0.0;
+
+// How far he has gone along (+z, as a treadmill: the camera goes with him
+// and the ground passes under), and how long this air of the motion's is.
+stage_dist: f32 = 0.0;
+
+// (The camera held still: whether, and where along: see L8_CAMZ.)
+stage_camz_on: bool = false;
+
+stage_camz: f32 = 0.0;
+
+stage_flight: f32 = 1.0;
+
+// (L8_CAMH: the camera that much higher, looking down at his hip.)
+stage_camh: f32 = 0.0;
+
+// A step of the stage's time, and how many to a frame drawn (a frame is
+// a sixtieth of a second of it, at L8_SPEED 1).
+const STAGE_STEP: f32 = 0.004166667;
+
+const STAGE_STEPS: int = 4;
+
+// Whether text holds word at `at`, followed by its end or `end`.
+stage_text_at(
+    text: str,
+    at: int,
+    word: str,
+    end: i8
+): bool {
+    if (at + len(word) > len(text)) return false;
+    for i in 0..len(word) {
+        if (text[at + i] != word[i]) return false
+    }
+    at + len(word) == len(text) || text[at + len(word)] == end
+}
+
+// From the environment: whether the stage is on, and how. An unknown
+// motion or view is said, and the stage stays off.
+stage_begin() raises IoError {
+    if (!env_has("L8_STAGE")) return;
+    stage_motion = env_choice("L8_STAGE", STAGE_NAMES);
+    if (stage_motion < 0) {
+        write(2, "L8_STAGE: no such motion; the stage has:");
+        for name in STAGE_NAMES {
+            write(2, " ");
+            write(2, name)
+        }
+        write(2, "\n");
+        return
+    }
+    if (env_has("L8_CAM")) {
+        stage_cam = env_choice("L8_CAM", CAM_NAMES);
+        if (stage_cam < 0) {
+            write(2, "L8_CAM: no such view; there are front, back, side, q45, top, chase, q45tail\n");
+            return
+        }
+    }
+    // (Nothing is held unless all of L8_JOINT is understood: see
+    // stage_holds.)
+    if (!stage_holds()) return;
+    stage_camd = env_number("L8_CAMD", 6.0);
+    stage_camh = env_number("L8_CAMH", 0.0);
+    stage_camz_on = env_has("L8_CAMZ");
+    stage_camz = env_number("L8_CAMZ", 0.0);
+    held_squash = env_number("L8_SQUASH", 0.0);
+    arc_kept = !env_has("L8_FREE");
+    stage_depth = env_number("L8_DEPTH", GUY_COLUMN_DEPTH);
+    stage_speed = env_number("L8_SPEED", 1.0);
+    stage_on = true;
+    // (Nothing of a place is drawn.)
+    grass_on = false;
+    glows_on = false
+}
+
+// The joints L8_JOINT holds (see held_joint, in pose.l8), if all of it
+// names known joints, at most once each; else none (and what it may name
+// is said), and false.
+stage_holds() raises IoError: bool {
+    value: str = env_value("L8_JOINT");
+    at: int = 0;
+    count: int = 0;
+    while (at < len(value)) {
+        joint: int = -1;
+        for k in 0..GUY_JOINTS {
+            if (stage_text_at(value, at, guy_joint_name(k), 58i8)) joint = k
+        }
+        if (joint < 0 || count >= GUY_JOINTS) {
+            write(2, "L8_JOINT: name:degrees,... of these joints:");
+            for k in 0..GUY_JOINTS {
+                write(2, " ");
+                write(2, guy_joint_name(k))
+            }
+            write(2, "\n");
+            return false
+        }
+        n: EnvNumber = env_read_number(value, at + len(guy_joint_name(joint)) + 1);
+        held_joint[count] = joint;
+        held_angle[count] = n.value * PI / 180.0;
+        count = count + 1;
+        at = n.next + 1
+    }
+    nheld = count;
+    true
+}
+
+// (L8_DEPTH: how deep his legs are, front to back: see GuyLook.)
+stage_depth: f32 = GUY_COLUMN_DEPTH;
+
+// The stage's mover and animation at its start, and, frozen, as they are
+// so far in.
+stage_start(m: *Mover, a: *Anim) raises IoError {
+    reset_mover(m);
+    m.heading = 0.0;
+    stage_script(m, 0.0);
+    a.* = new_anim(0.0, 0.0).*;
+    a.board_yaw = m.heading;
+    a.yaw = m.heading - PI * 0.5;
+    freeze: f32 = env_number("L8_FREEZE", -1.0);
+    if (freeze < 0.0) return;
+    stage_frozen = true;
+    while (stage_t < freeze) stage_advance(m, a, minf(STAGE_STEP, freeze - stage_t))
+}
+
+stage_advance(m: *Mover, a: *Anim, dt: f32) raises IoError {
+    stage_t_was = stage_t;
+    stage_t = stage_t + dt;
+    stage_dist = stage_dist + m.speed * dt;
+    stage_script(m, stage_t);
+    update_anim(a, m, dt);
+    if (m.air) a.air_total = stage_flight;
+    // (Posed each step, as the game poses him each frame: posing keeps
+    // where a pushing foot is planted.)
+    ndraw = 0;
+    nmatrix = 0;
+    pose_guy(a, m, v3(m.x, m.y, m.z), body_color, 1.0)
+}
+
+// The fraction of the way from t0 to t1 that t is, eased in and out.
+stage_ease(t0: f32, t1: f32, t: f32): f32 {
+    smoothstepf(t0, t1, t)
+}
+
+// Up in the air from `hop` with upward speed vy (falling as on the
+// course): whether he is, and he as he is then. A landing's speed is told
+// once, as time passes it.
+stage_jump(
+    m: *Mover,
+    t: f32,
+    was: f32,
+    hop: f32,
+    vy: f32
+): f32 {
+    flight: f32 = 2.0 * vy / SLOPE_G;
+    stage_flight = flight;
+    since: f32 = t - hop;
+    m.since_hop = maxf(since, 0.0);
+    if (since < 0.0) m.since_hop = 10.0;
+    if (since >= 0.0 && since < flight) {
+        m.air = true;
+        m.trick_set = true;
+        m.y = vy * since - 0.5 * SLOPE_G * since * since;
+        m.vy = vy - SLOPE_G * since;
+        m.air_time = since
+    }
+    land: f32 = hop + flight;
+    if (was < land && t >= land) m.land = vy;
+    // (How far through the air he is, 0 to 1.)
+    clampf(since / flight, 0.0, 1.0)
+}
+
+// The mover as the motion has it at t (time loops for each motion).
+stage_script(m: *Mover, t0: f32) {
+    m.x = 0.0;
+    m.z = stage_dist;
+    m.y = 0.0;
+    m.vx = 0.0;
+    m.vz = 0.0;
+    m.vy = 0.0;
+    m.prev = v3(0.0, 0.0, 0.0);
+    m.speed = 6.0;
+    m.turn_rate = 0.0;
+    m.air = false;
+    m.grinding = false;
+    m.winding = false;
+    m.wind_x = 0.0;
+    m.wind_y = 0.0;
+    m.flip = 0.0;
+    m.spin = 0.0;
+    m.flip_goal = 0.0;
+    m.spin_goal = 0.0;
+    m.grab_t = 0.0;
+    m.sketch_t = 10.0;
+    m.since_hop = 10.0;
+    m.trick_set = false;
+    m.finished = false;
+    m.ground_n = v3(0.0, 1.0, 0.0);
+    k: int = stage_motion;
+    if (k == STAGE_STAND || k == STAGE_REST) m.speed = 0.0;
+    if (k == STAGE_CARVE_LEFT) m.turn_rate = TURN_RATE;
+    if (k == STAGE_CARVE_RIGHT) m.turn_rate = -TURN_RATE;
+    if (k == STAGE_SLALOM) {
+        // Straight, left, right and straight again.
+        t: f32 = t0 - stage_lap(t0, 2.4);
+        if (t >= 0.4 && t < 1.2) m.turn_rate = TURN_RATE;
+        if (t >= 1.2 && t < 2.0) m.turn_rate = -TURN_RATE
+    }
+    if (k == STAGE_WINDUP) {
+        // Crouched from 0.3 s; aiming a spin, then a flip.
+        t: f32 = t0 - stage_lap(t0, 3.0);
+        m.winding = t > 0.3;
+        m.wind_x = stage_ease(1.0, 1.4, t) - stage_ease(1.8, 2.0, t);
+        m.wind_y = stage_ease(2.0, 2.4, t)
+    }
+    if (k == STAGE_OLLIE) {
+        lap: f32 = stage_lap(t0, 2.0);
+        t: f32 = t0 - lap;
+        m.winding = t > 0.2 && t < 0.6;
+        stage_jump(m, t, stage_t_was - lap, 0.6, OLLIE_SPEED)
+    }
+    if (k == STAGE_GRAB) {
+        lap: f32 = stage_lap(t0, 2.4);
+        t: f32 = t0 - lap;
+        m.winding = t > 0.2 && t < 0.6;
+        f: f32 = stage_jump(m, t, stage_t_was - lap, 0.6, 7.0);
+        if (f > 0.15 && f < 0.85) m.grab_t = t - 0.6
+    }
+    if (k == STAGE_KICKER) {
+        lap: f32 = stage_lap(t0, 2.6);
+        t: f32 = t0 - lap;
+        // (Tipped as a kicker's face is near its lip, 35 degrees.)
+        if (t < 0.6) m.ground_n = v3(0.0, cosf(35.0 * DEG), -sinf(35.0 * DEG))
+    }
+    if (k == STAGE_FRONTFLIP || k == STAGE_BACKFLIP || k == STAGE_SPIN || k == STAGE_FLIP180 || k == STAGE_KICKER) {
+        lap: f32 = stage_lap(t0, 2.6);
+        t: f32 = t0 - lap;
+        m.winding = t > 0.2 && t < 0.6;
+        stage_jump(m, t, stage_t_was - lap, 0.6, 8.0);
+        // (Turned as the game paces a trick: see start_trick.)
+        nf: int = 0;
+        nh: int = 0;
+        if (k == STAGE_FRONTFLIP || k == STAGE_FLIP180 || k == STAGE_KICKER) nf = 1;
+        if (k == STAGE_BACKFLIP) nf = -1;
+        if (k == STAGE_SPIN) nh = 2;
+        if (k == STAGE_FLIP180) nh = 1;
+        d: f32 = trick_time(nf, nh, stage_flight);
+        turned: f32 = trick_share(clampf((t - 0.6) / d, 0.0, 1.0));
+        m.flip = nf as f32 * TAU * turned;
+        m.spin = -nh as f32 * PI * turned;
+        m.flip_goal = nf as f32 * TAU;
+        m.spin_goal = -nh as f32 * PI
+    }
+    if (k == STAGE_BIGLAND) {
+        // Falling from 1.5 m at the start, onto flat ground.
+        lap: f32 = stage_lap(t0, 2.0);
+        t: f32 = t0 - lap;
+        fall: f32 = sqrtf(2.0 * 1.5 / SLOPE_G);
+        stage_flight = fall;
+        if (t < fall) {
+            m.air = true;
+            m.air_time = t;
+            m.y = 1.5 - 0.5 * SLOPE_G * t * t;
+            m.vy = -SLOPE_G * t
+        }
+        if (stage_t_was - lap < fall && t >= fall) m.land = SLOPE_G * fall
+    }
+    if (k == STAGE_SKETCH) m.sketch_t = t0 - stage_lap(t0, 1.5);
+    if (k == STAGE_GRIND) m.grinding = true;
+    if (k == STAGE_PUSH) {
+        m.speed = 3.0;
+        m.pushing = true
+    }
+    if (k == STAGE_STOP) {
+        t: f32 = t0 - stage_lap(t0, 2.0);
+        m.finished = true;
+        m.speed = 6.0 * (1.0 - stage_ease(0.0, 1.5, t))
+    }
+}
+
+// When the loop `period` long that t is in began. (Things once in a
+// loop, such as a landing, are told by the last step's time and this one's
+// within the loop.)
+stage_lap(t: f32, period: f32): f32 {
+    floorf(t / period) * period
+}
+
+// One frame of the stage: time on, if it goes; him posed, and the
+// picture drawn.
+stage_frame(
+    r: *Renderer,
+    m: *Mover,
+    a: *Anim,
+    shadows: bool
+) raises IoError {
+    if (!stage_frozen) {
+        for _i in 0..STAGE_STEPS stage_advance(m, a, STAGE_STEP * stage_speed)
+    }
+    ndraw = 0;
+    nmatrix = 0;
+    pos: V3 = v3(m.x, m.y, m.z);
+    pose_guy(a, m, pos, body_color, 1.0);
+    if (stage_motion == STAGE_REST) guy_bones(record_shown_joints(guy_solve_unlimited(guy_stand())),
+        root_m, draw_m, draw_first[0]);
+    // (The ground, by whole metres, under him.)
+    mat_identity(part_m);
+    mat_translate(part_m, v3(0.0, 0.0, floorf(m.z)));
+    add_draw(PART_STAGE, part_m);
+    draw_scene(r, stage_view(a, m), shadows);
+    if (env_has("L8_TRACE")) stage_trace(m, a)
+}
+
+// The measures of this frame, as a line: the time; how square the hinges
+// are (see guy_hinge_alignment, in millionths); the joint furthest past
+// its range as the pose asked for it (before it was kept within it: see
+// guy_excess), and by how many degrees; how far each shin's lowest point
+// is over its sole (mm); grabbing (in hundredths) and how far his mitt is
+// from the tail's tip it goes for (mm); whether his trail foot is planted,
+// and how far its ankle is from where it was planted (mm); whether he is
+// in the air; his lean (thousandths); where his middle (see rider_middle)
+// and the mover are, and
+// each toe's tip (mm, in the world);
+// each side's hip flex, abduction and twist, knee, ankle, shoulder flex
+// and abduction, and elbow
+// (degrees); and where each sole's middle and mitt is (mm, in the
+// world).
+stage_trace(m: *Mover, a: *Anim) raises IoError {
+    first: int = draw_first[0];
+    write(2, "L8STAGE t ");
+    write_int(2, (stage_t * 1000.0) as int);
+    write(2, " hinge ");
+    write_int(2, (guy_hinge_alignment(draw_m, first, posed_joints) * 1000000.0) as int);
+    worst: GuyExcess = guy_excess(posed_asked);
+    write(2, " past ");
+    if (worst.joint < 0) write(2, "none 0") else {
+        write(2, guy_joint_name(worst.joint));
+        write(2, " ");
+        write_int(2, (worst.angle * 180.0 / PI) as int)
+    }
+    for side in 0..2 {
+        leg: GuyLeg = posed_joints.legs[side];
+        arm: GuyArm = posed_joints.arms[side];
+        write(2, " joints");
+        write_int(2, side);
+        for angle in [leg.flex, leg.abduct, leg.twist, leg.knee, leg.ankle, arm.flex,
+            arm.abduct, arm.elbow] {
+            write(2, " ");
+            write_int(2, (angle * 180.0 / PI) as int)
+        }
+    }
+    write(2, " shin");
+    for side in 0..2 {
+        write(2, " ");
+        write_int(2, (guy_shin_clearance(draw_m, first, side) * 1000.0) as int)
+    }
+    // (The trail hand's mitt against the tail's tip it goes for, while he
+    // grabs; and whether the trail foot is planted, pushing.)
+    write(2, " grab ");
+    write_int(2, (posed_grab * 100.0) as int);
+    write(2, " ");
+    trail: int = sides_of(m).trail;
+    write_int(2, (v_len(v_sub(guy_mitt(draw_m, first, trail), posed_tail)) * 1000.0) as int);
+    write(2, " planted ");
+    write_int(2, a.planted as int);
+    write(2, " off ");
+    write_int(2, (v_len(v_sub(guy_bone_point(draw_m, first, guy_foot(trail), v3(0.0,
+        0.0, 0.0)), a.plant)) * 1000.0) as int);
+    write(2, " air ");
+    write_int(2, m.air as int);
+    write(2, " lean ");
+    write_int(2, (a.lean * 1000.0) as int);
+    // (His middle, the board's with his, and the mover's place.)
+    write(2, " mid");
+    stage_trace_point(rider_middle(draw_m, first));
+    write(2, " mover");
+    stage_trace_point(v3(m.x, m.y, m.z));
+    for side in 0..2 {
+        write(2, " toe");
+        write_int(2, side);
+        stage_trace_point(guy_bone_point(draw_m, first, guy_foot(side), guy_toe_tip()))
+    }
+    for side in 0..2 {
+        write(2, " sole");
+        write_int(2, side);
+        stage_trace_point(guy_sole(draw_m, first, side))
+    }
+    for side in 0..2 {
+        write(2, " shoulder");
+        write_int(2, side);
+        stage_trace_point(guy_bone_point(draw_m, first, guy_upper_arm(side), v3(0.0,
+            0.0, 0.0)))
+    }
+    for side in 0..2 {
+        write(2, " mitt");
+        write_int(2, side);
+        stage_trace_point(guy_mitt(draw_m, first, side))
+    }
+    write(2, "\n")
+}
+
+stage_trace_point(p: V3) raises IoError {
+    write(2, " ");
+    write_int(2, (p.x * 1000.0) as int);
+    write(2, " ");
+    write_int(2, (p.y * 1000.0) as int);
+    write(2, " ");
+    write_int(2, (p.z * 1000.0) as int)
+}
+
+// At the start (under L8_TRACE): how many vertices each part is, and how
+// many draws a guy takes, for its cost.
+trace_parts() raises IoError {
+    names: []str = ["guy", "gate", "stage"];
+    for k in 0..PART_COUNT {
+        write(2, "L8PART ");
+        write(2, names[k]);
+        write(2, " ");
+        write_int(2, part_count[k]);
+        write(2, "\n")
+    }
+    write(2, "L8PART guy draws a pass 1\n")
+}
+
+// The camera, by the way he faces when he stands (not turning with a
+// spin), so that a motion is seen the same way through.
+stage_view(a: *Anim, m: *Mover): View {
+    front: V3 = yaw_dir(-PI * 0.5);
+    right: V3 = yaw_dir(0.0);
+    // (It follows him up into the air, and back down, a little behind.)
+    stage_cam_y = lerpf(stage_cam_y, a.y, 0.2);
+    if (stage_frozen) stage_cam_y = a.y;
+    hip: V3 = v3(0.0, stage_cam_y + DECK_TOP + 0.45, m.z);
+    if (stage_camz_on) hip = v3(0.0, DECK_TOP + 0.45 + stage_camh, stage_camz);
+    d: f32 = stage_camd;
+    eye: V3 = v_madd(hip, front, d);
+    if (stage_cam == CAM_BACK) eye = v_madd(hip, front, -d);
+    if (stage_cam == CAM_SIDE) eye = v_madd(hip, right, d);
+    if (stage_cam == CAM_Q45) eye = v_madd(hip, v_norm(v_add(front, right)), d);
+    if (stage_cam == CAM_Q45_TAIL) eye = v_madd(hip, v_norm(v_sub(front, right)),
+        d);
+    eye.y = eye.y + stage_camh;
+    at: V3 = hip;
+    if (stage_cam == CAM_TOP) {
+        eye = v_madd(v_madd(hip, Y_AXIS, d), front, 0.01);
+        at = v3(hip.x, stage_cam_y, hip.z)
+    }
+    if (stage_cam == CAM_CHASE) {
+        // Behind him the way he rides, a little above, as the game's
+        // camera is.
+        eye = v_madd(v_madd(hip, right, -d), Y_AXIS, d * 0.35);
+        at = v_madd(hip, Y_AXIS, 0.2)
+    }
+    View {
+        eye: eye,
+        at: at,
+        fovy: 20.0 * PI / 180.0,
+        focus: v3(0.0, stage_cam_y, m.z),
+        rider: v3(0.0, a.y, m.z),
+        time: stage_t,
+        shift: 0.0
+    }
+}

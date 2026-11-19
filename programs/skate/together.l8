@@ -46,7 +46,10 @@ const NET_KEY: int = 65302;
 // (mrad, mm a second, mrad a second); his flip and spin and how fast they
 // turn (mrad, and mrad a second, each); his wind-up (thousandths); since
 // he popped, since a sketchy landing, and how long he has grabbed (ms);
-// and what he is doing (FLAG_ bits).
+// what he is doing (FLAG_ bits); and the flip and spin his trick goes
+// for (mrad: see Mover.flip_goal). (The last two, and FLAG_PUSHING and
+// FLAG_TRICK, came later in the same format: a game that does not say
+// them is read as saying 0, and one that does not read them leaves them.)
 const NET_FORMAT: int = 2;
 
 const NET_HZ: f32 = 20.0;
@@ -58,6 +61,10 @@ const FLAG_GRIND: int = 2;
 const FLAG_FAKIE: int = 4;
 
 const FLAG_WINDING: int = 8;
+
+const FLAG_PUSHING: int = 16;
+
+const FLAG_TRICK: int = 32;
 
 // How many others can be shown at once (more than can ride a place with
 // him: see LIVE_ROOM, in the worker; any more are left out), how many of each one's states are kept, and
@@ -86,7 +93,9 @@ type Moment = {
     since_hop: f32;
     sketch_t: f32;
     grab_t: f32;
-    flags: int
+    flags: int;
+    flip_goal: f32;
+    spin_goal: f32
 }
 
 no_moment(): Moment {
@@ -107,7 +116,9 @@ no_moment(): Moment {
         since_hop: 10.0,
         sketch_t: 10.0,
         grab_t: 0.0,
-        flags: 0
+        flags: 0,
+        flip_goal: 0.0,
+        spin_goal: 0.0
     }
 }
 
@@ -340,6 +351,8 @@ net_line(now: f64) raises IoError {
         mo.sketch_t = milli(net_int());
         mo.grab_t = milli(net_int());
         mo.flags = net_int();
+        mo.flip_goal = milli(net_int());
+        mo.spin_goal = milli(net_int());
         take_moment(i, mo, now - age as f64)
     }
 }
@@ -487,7 +500,11 @@ tick_other(i: int, now: f64, dt: f32) {
     m.x = m.x + others[i].err.x;
     m.y = m.y + others[i].err.y;
     m.z = m.z + others[i].err.z;
-    // Landing, they squash, as he does (see update_anim).
+    // How long they have been in the air, on their clock (for the pose's
+    // timing through it, as his: see pose); landing, they squash, as he
+    // does (see update_anim).
+    if (m.air && !others[i].air) m.air_time = 0.0;
+    if (m.air) m.air_time = m.air_time + dt * pace_of(i) else m.air_time = 0.0;
     if (others[i].air && !m.air) m.land = maxf(-others[i].fall, 0.0);
     if (m.air) others[i].fall = m.vy;
     others[i].air = m.air;
@@ -620,6 +637,10 @@ put_moment(m: *Mover, mo: Moment) {
     m.grinding = (mo.flags & FLAG_GRIND) != 0;
     m.fakie = (mo.flags & FLAG_FAKIE) != 0;
     m.winding = (mo.flags & FLAG_WINDING) != 0;
+    m.pushing = (mo.flags & FLAG_PUSHING) != 0;
+    m.trick_set = (mo.flags & FLAG_TRICK) != 0;
+    m.flip_goal = mo.flip_goal;
+    m.spin_goal = mo.spin_goal;
     if (m.air || m.grinding) m.ground_n = v3(0.0, 1.0, 0.0) else m.ground_n = course_normal(mo.pos.x,
         mo.pos.z)
 }
@@ -638,13 +659,13 @@ others_here(): bool {
 const OTHERS_FAR: f32 = 160.0;
 
 // Add them to the draw list (after him: see pose), seen from eye.
-pose_others(eye: V3) {
+pose_others(eye: V3) raises IoError {
     for i in 0..MAX_OTHERS {
         if (others[i].id != 0 && others[i].n > 0 && others[i].shown > 0.0) {
             m: *Mover = other_movers[i];
             p: V3 = v3(m.x, m.y, m.z);
             if (v_len(v_sub(p, eye)) < OTHERS_FAR) pose_guy(other_anims[i], m, p,
-                other_figure(others[i].slot), smooth(others[i].shown))
+                rider_color(others[i].slot), smooth(others[i].shown))
         }
     }
 }
@@ -715,6 +736,13 @@ say_state(m: *Mover, at: f64, dt: f32) raises IoError {
     net_due = minf(net_due - 1.0 / NET_HZ, 1.0 / NET_HZ);
     net_out_n = 0;
     for c in "L8NET" out_byte(c);
+    out_state(m, at);
+    out_byte(10i8);
+    write_bytes_n(1, net_out, net_out_n)
+}
+
+// His state's fields (see NET_FORMAT) onto net_out.
+out_state(m: *Mover, at: f64) {
     out_int(NET_FORMAT);
     out_int(at as int);
     out_int(run_id());
@@ -742,7 +770,71 @@ say_state(m: *Mover, at: f64, dt: f32) raises IoError {
     if (m.grinding) flags = flags | FLAG_GRIND;
     if (m.fakie) flags = flags | FLAG_FAKIE;
     if (m.winding) flags = flags | FLAG_WINDING;
+    if (m.pushing) flags = flags | FLAG_PUSHING;
+    if (m.trick_set) flags = flags | FLAG_TRICK;
     out_int(flags);
-    out_byte(10i8);
-    write_bytes_n(1, net_out, net_out_n)
+    out_milli(m.flip_goal);
+    out_milli(m.spin_goal)
+}
+
+// ---- the crowd ----
+// For seeing the others' whole way from his state to their pose, and
+// measuring what riders with him cost (L8_CROWD=n: see main.l8): n others
+// riding as he does, his own states said and taken back as theirs, as if
+// the page had brought them (see net_line), each CROWD_APART further to
+// his side (along x). They take the first of the others' places; anyone
+// really riding with him comes after them, and as ever, beyond
+// MAX_OTHERS, is left out.
+crowd: int = 0;
+
+const CROWD_APART: f32 = 1.5;
+
+// The crowd comes: n of them, at once.
+crowd_begin(n: int, now: f64) raises IoError {
+    crowd = clampi(n, 0, MAX_OTHERS);
+    for k in 0..crowd {
+        net_out_n = 0;
+        for c in "join" out_byte(c);
+        out_int(CROWD_ID + k);
+        out_int(k);
+        for c in " Crowd" out_byte(c);
+        take_out_line(now)
+    }
+}
+
+// (The ids the worker gives are from 1 on: the crowd's are far from them.)
+const CROWD_ID: int = 900000000;
+
+// His state at `at` (our ms), said as each of the crowd's, if it is time
+// (NET_HZ times a second, as his own is said).
+crowd_say(
+    m: *Mover,
+    at: f64,
+    now: f64,
+    dt: f32
+) raises IoError {
+    if (crowd == 0) return;
+    crowd_due = crowd_due + dt;
+    if (crowd_due < 1.0 / NET_HZ) return;
+    crowd_due = minf(crowd_due - 1.0 / NET_HZ, 1.0 / NET_HZ);
+    beside: Mover = m.*;
+    for k in 0..crowd {
+        beside.x = m.x + CROWD_APART * (k + 1) as f32;
+        net_out_n = 0;
+        for c in "state" out_byte(c);
+        out_int(CROWD_ID + k);
+        out_int(0);
+        out_state(&beside, at);
+        take_out_line(now)
+    }
+}
+
+crowd_due: f32 = 0.0;
+
+// What net_out holds, read as a line the page wrote (see net_read).
+take_out_line(now: f64) raises IoError {
+    for i in 0..net_out_n net_in[i] = net_out[i];
+    net_at = 0;
+    net_end = net_out_n;
+    net_line(now)
 }

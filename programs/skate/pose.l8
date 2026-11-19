@@ -1,5 +1,7 @@
 tag skate;
 
+use_tag std, blockguy;
+
 // The guy's pose each frame, from the mover: he rides sideways on the
 // board, crouches to aim a trick, tumbles through it, and squashes when he
 // lands or bonks and springs back. Each part's matrix goes in the draw
@@ -13,12 +15,52 @@ type Anim = {
     squash_v: f32;
     board_yaw: f32;
     board_up: V3;
+    // How hard he carves (+ turning his way, 1 his hardest), for his arms
+    // (see move_carve).
     lean: f32;
+    // When he last felt the ground (see feel_ground), and how far the
+    // board rolls under him (rad, about the way he goes).
+    felt_t: f32;
+    roll: f32;
     grind: f32;
     grab: f32;
     grab_v: f32;
     crouch: f32;
-    time: f32
+    time: f32;
+    // The arms' lean into a carve, a moment behind his.
+    arm_lean: f32;
+    // The landing's soak (a spring, 1 at its deepest) and how fast he fell.
+    absorb: f32;
+    absorb_v: f32;
+    land_fall: f32;
+    // How long this air is, all told, from its start (see predict_air);
+    // whether he was in the air, and had a trick under way.
+    air_total: f32;
+    was_air: bool;
+    was_trick: bool;
+    // Dragging the tail to stop (0 to 1).
+    stop: f32;
+    // Pushing: how far into it (0 to 1, stepping off and back on), the
+    // stroke's clock, and his trail foot: where it is planted in the world,
+    // whether it is, and where (in his frame) it came up from the ground.
+    push_w: f32;
+    push_t: f32;
+    plant: V3;
+    planted: bool;
+    plant_done: bool;
+    lift: V3;
+    // (When in its stroke it came up, or -1.)
+    lift_at: f32;
+    // In the air his middle flies on an arc (see keep_on_arc): where it was
+    // from the mover at the arc's start (and when in the air that was), and
+    // where it will be at the landing; whether this air's are known; and how
+    // far he is moved from where his moves put him to keep it there (let go
+    // of once down).
+    arc_from: V3;
+    arc_start: f32;
+    arc_to: V3;
+    arc_known: bool;
+    arc_fix: V3
 }
 
 new_anim(yaw: f32, y: f32): *Anim@new {
@@ -32,36 +74,93 @@ new_anim(yaw: f32, y: f32): *Anim@new {
         board_yaw: yaw,
         board_up: v3(0.0, 1.0, 0.0),
         lean: 0.0,
+        felt_t: -1.0,
+        roll: 0.0,
         grind: 0.0,
         grab: 0.0,
         grab_v: 0.0,
         crouch: 0.0,
-        time: 0.0
+        time: 0.0,
+        arm_lean: 0.0,
+        absorb: 0.0,
+        absorb_v: 0.0,
+        land_fall: 0.0,
+        air_total: 1.0,
+        was_air: false,
+        was_trick: false,
+        stop: 0.0,
+        push_w: 0.0,
+        push_t: 0.0,
+        plant: v3(0.0, 0.0, 0.0),
+        planted: false,
+        plant_done: false,
+        lift: v3(0.0, 0.0, 0.0),
+        lift_at: -1.0,
+        arc_from: v3(0.0, 0.0, 0.0),
+        arc_start: 0.0,
+        arc_to: v3(0.0, 0.0, 0.0),
+        arc_known: false,
+        arc_fix: v3(0.0, 0.0, 0.0)
     }
 }
 
-// Him, his board, and the finish's gate; and as many again for each other
-// rider with him (see together.l8).
-const GUY_DRAWS: int = 6;
+// The draw list: him, and each other rider with him (see together.l8),
+// each a draw of PART_GUY with a matrix for each of his bones and his
+// color; the finish's gate; the stage's ground. A draw's matrices are
+// draw_m's from its draw_first on (one for a part that is not a guy). It
+// has room for all of those at once: more is the program's mistake (see
+// draw_list_full).
+const MAX_DRAWS: int = 1 + MAX_OTHERS + 2;
 
-const MAX_DRAWS: int = GUY_DRAWS * (1 + MAX_OTHERS) + 1;
+const MAX_MATRICES: int = GUY_BONES * (1 + MAX_OTHERS) + 2;
 
-draw_m: []f32 = new f32[MAX_DRAWS * 16](0.0);
+draw_m: []f32 = new f32[MAX_MATRICES * 16](0.0);
 
 draw_part: []int = new int[MAX_DRAWS](0);
 
+draw_first: []int = new int[MAX_DRAWS](0);
+
+draw_tint: []V3 = new V3[MAX_DRAWS](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
 ndraw: int = 0;
 
-add_draw(part: int, m: []f32) {
-    if (ndraw >= MAX_DRAWS) return;
-    for i in 0..16 draw_m[ndraw * 16 + i] = m[i];
+nmatrix: int = 0;
+
+// A part drawn where m puts it.
+add_draw(part: int, m: []f32) raises IoError {
+    if (ndraw >= MAX_DRAWS || nmatrix >= MAX_MATRICES) draw_list_full();
+    for i in 0..16 draw_m[nmatrix * 16 + i] = m[i];
     draw_part[ndraw] = part;
-    ndraw = ndraw + 1
+    draw_first[ndraw] = nmatrix;
+    draw_tint[ndraw] = body_color;
+    ndraw = ndraw + 1;
+    nmatrix = nmatrix + 1
+}
+
+// A guy drawn in a color: room for his bones' matrices, from the matrix
+// this gives on.
+add_guy_draw(tint: V3) raises IoError: int {
+    if (ndraw >= MAX_DRAWS || nmatrix + GUY_BONES > MAX_MATRICES) draw_list_full();
+    first: int = nmatrix;
+    draw_part[ndraw] = PART_GUY;
+    draw_first[ndraw] = first;
+    draw_tint[ndraw] = tint;
+    ndraw = ndraw + 1;
+    nmatrix = nmatrix + GUY_BONES;
+    first
+}
+
+// More drawn than the draw list was made for: said, and the game stops.
+draw_list_full() raises IoError: noreturn {
+    write(2, "the draw list is full: it has room for ");
+    write_int(2, MAX_DRAWS);
+    write(2, " draws and ");
+    write_int(2, MAX_MATRICES);
+    write(2, " matrices");
+    die("")
 }
 
 root_m: []f32 = new f32[16](0.0);
-
-body_m: []f32 = new f32[16](0.0);
 
 part_m: []f32 = new f32[16](0.0);
 
@@ -85,80 +184,20 @@ frame_m(
     mat_frame(m, v_cross(u, f), u, f, origin)
 }
 
-// The limb angles of one pose; poses blend by mixing these. Side 0 is the
-// body's -x (riding, toward the board's tail), side 1 its +x. Pitch swings
-// a limb forward; roll swings it out to its side.
-type Limbs = {
-    leg_pitch: [2]f32;
-    leg_roll: [2]f32;
-    leg_len: [2]f32;
-    arm_pitch: [2]f32;
-    arm_roll: [2]f32;
-    arm_len: [2]f32;
-    drop: f32
-}
+// The springs (see Spring): the grab's (snapping in, overshooting a
+// little), the legs' soak on landing (deepest 0.07 s after, settled by
+// 0.35 s) and the body's squash (springing back, ringing a little).
+const GRAB_OMEGA: f32 = 14.8;
 
-no_limbs(): Limbs {
-    Limbs {
-        leg_pitch: [0.0, 0.0],
-        leg_roll: [0.0, 0.0],
-        leg_len: [1.0, 1.0],
-        arm_pitch: [0.0, 0.0],
-        arm_roll: [0.0, 0.0],
-        arm_len: [1.0, 1.0],
-        drop: 0.0
-    }
-}
+const GRAB_DAMPING: f32 = 0.54;
 
-mix_limbs(a: Limbs, b: Limbs, t: f32): Limbs {
-    r: Limbs = a;
-    for i in 0..2 {
-        r.leg_pitch[i] = lerpf(a.leg_pitch[i], b.leg_pitch[i], t);
-        r.leg_roll[i] = lerpf(a.leg_roll[i], b.leg_roll[i], t);
-        r.leg_len[i] = lerpf(a.leg_len[i], b.leg_len[i], t);
-        r.arm_pitch[i] = lerpf(a.arm_pitch[i], b.arm_pitch[i], t);
-        r.arm_roll[i] = lerpf(a.arm_roll[i], b.arm_roll[i], t);
-        r.arm_len[i] = lerpf(a.arm_len[i], b.arm_len[i], t)
-    }
-    r.drop = lerpf(a.drop, b.drop, t);
-    r
-}
+const ABSORB_OMEGA: f32 = 16.0;
 
-side_sign(i: int): f32 {
-    if (i == 0) return -1.0;
-    1.0
-}
+const ABSORB_DAMPING: f32 = 0.7;
 
-ride_limbs(a: *Anim): Limbs {
-    l: Limbs = no_limbs();
-    // Halves apart along the board, a little crouched, arms out.
-    l.leg_roll[0] = 0.12;
-    l.leg_roll[1] = 0.12;
-    l.leg_len[0] = 0.9;
-    l.leg_len[1] = 0.9;
-    l.drop = -0.03;
-    l.arm_roll[0] = 0.75 + a.lean * 0.5;
-    l.arm_roll[1] = 0.75 - a.lean * 0.5;
-    l.arm_pitch[1] = 0.25;
-    l.leg_len[0] = lerpf(l.leg_len[0], 0.72, a.air);
-    l.leg_len[1] = lerpf(l.leg_len[1], 0.72, a.air);
-    l.arm_roll[0] = lerpf(l.arm_roll[0], 1.15, a.air);
-    l.arm_roll[1] = lerpf(l.arm_roll[1], 1.15, a.air);
-    l
-}
+const SQUASH_OMEGA: f32 = 14.1;
 
-// Grinding: low, arms wide for balance.
-grind_limbs(): Limbs {
-    l: Limbs = no_limbs();
-    l.leg_roll[0] = 0.16;
-    l.leg_roll[1] = 0.16;
-    l.leg_len[0] = 0.78;
-    l.leg_len[1] = 0.78;
-    l.drop = -0.06;
-    l.arm_roll[0] = 1.45;
-    l.arm_roll[1] = 1.45;
-    l
-}
+const SQUASH_DAMPING: f32 = 0.42;
 
 update_anim(a: *Anim, m: *Mover, dt: f32) {
     a.time = a.time + dt;
@@ -172,25 +211,61 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
     if (m.air && m.grab_t > 0.0) gt2 = 1.0;
     // It snaps in on a spring, overshooting a little, and lets go as
     // quickly.
-    a.grab_v = a.grab_v + (220.0 * (gt2 - a.grab) - 16.0 * a.grab_v) * dt;
-    a.grab = clampf(a.grab + a.grab_v * dt, 0.0, 1.2);
+    spring_step(&a.grab, &a.grab_v, gt2, Spring { omega: GRAB_OMEGA, damping: GRAB_DAMPING },
+        dt);
+    a.grab = clampf(a.grab, 0.0, 1.2);
     ct2: f32 = 0.0;
     if (m.winding) ct2 = 1.0;
     a.crouch = lerpf(a.crouch, ct2, ease(14.0, dt));
-    a.lean = lerpf(a.lean, clampf(m.turn_rate / TURN_RATE, -1.0, 1.0) * clampf(m.speed / 4.0,
-        0.0, 1.0), ease(9.0, dt));
-    // Landings and bonks squash him; the squash springs back.
+    a.lean = lerpf(a.lean, clampf(m.speed * m.turn_rate / GRIP_ACCEL, -1.0, 1.0),
+        ease(12.0, dt));
+    a.arm_lean = lerpf(a.arm_lean, a.lean, ease(1.0 / 0.15, dt));
+    // Landings squash his body a little and kick his legs' soak (see
+    // ABSORB_OMEGA); bonks squash him more. The squash springs back.
     if (m.land > 0.0) {
-        a.squash_v = a.squash_v - minf(m.land, 12.0) * 0.04;
+        a.squash_v = a.squash_v - minf(m.land, 12.0) * 0.02;
+        a.absorb_v = a.absorb_v + ABSORB_KICK;
+        a.land_fall = m.land;
         m.land = 0.0
+    }
+    spring_step(&a.absorb, &a.absorb_v, 0.0, Spring { omega: ABSORB_OMEGA, damping: ABSORB_DAMPING },
+        dt);
+    // (How long this air will be, from its start.)
+    if (m.air && !a.was_air) a.air_total = maxf(m.air_time + predict_air(m), 0.2);
+    // (A trick begun in an air already under way, off a lip, say, pops him
+    // again, or may: its length foreseen again, and his arc begun afresh.)
+    if (m.air && a.was_air && m.trick_set && !a.was_trick) {
+        a.air_total = maxf(m.air_time + predict_air(m), 0.2);
+        a.arc_known = false
+    }
+    a.was_air = m.air;
+    a.was_trick = m.trick_set;
+    // (Down, he is let go of from the arc quickly: see keep_on_arc.)
+    if (!m.air) {
+        a.arc_known = false;
+        a.arc_fix = v_scale(a.arc_fix, 1.0 - ease(ARC_LET_GO, dt))
+    }
+    st: f32 = 0.0;
+    if (m.finished && m.speed > 0.3 && !m.air) st = 1.0;
+    a.stop = lerpf(a.stop, st, ease(6.0, dt));
+    // Pushing: stepping off onto the push over a quarter second, and back.
+    pt: f32 = 0.0;
+    if (m.pushing && !m.air && !m.winding && !m.grinding) pt = 1.0;
+    // (A push starts in its stance, so that its first stroke holds as the
+    // rest do; it eases out.)
+    if (pt > 0.5) a.push_w = 1.0 else a.push_w = lerpf(a.push_w, pt, ease(4.0, dt));
+    if (a.push_w > 0.01) a.push_t = a.push_t + dt else {
+        a.push_t = 0.0;
+        a.planted = false;
+        a.plant_done = false
     }
     if (m.bonk > 0.0) {
         a.squash_v = a.squash_v - minf(m.bonk, 6.0) * 0.12;
         m.bonk = 0.0
     }
-    acc: f32 = -200.0 * a.squash - 12.0 * a.squash_v;
-    a.squash_v = a.squash_v + acc * dt;
-    a.squash = clampf(a.squash + a.squash_v * dt, -0.3, 0.25);
+    spring_step(&a.squash, &a.squash_v, 0.0, Spring { omega: SQUASH_OMEGA, damping: SQUASH_DAMPING },
+        dt);
+    a.squash = clampf(a.squash, -0.3, 0.25);
     // On the ground, his height eases after the ground's.
     if (m.air || m.grinding) a.y = m.y else a.y = lerpf(a.y, m.y, ease(22.0, dt));
     // Grinding, he slides the board across the rail, turned a quarter to
@@ -202,33 +277,85 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
     bu: V3 = m.ground_n;
     if (m.air || m.grinding) bu = Y_AXIS;
     a.board_up = v_norm(v_lerp(a.board_up, bu, ease(14.0, dt)));
-    a.yaw = approach_angle(a.yaw, a.board_yaw - PI * 0.5, ease(18.0, dt));
-    // He leans into the bend.
-    tu: V3 = v_rotate(a.board_up, yaw_dir(m.heading), -a.lean * 0.3);
-    a.up = v_norm(v_lerp(a.up, tu, ease(14.0, dt)))
+    a.yaw = approach_angle(a.yaw, a.board_yaw - PI * 0.5, ease(18.0, dt))
 }
 
-// An indy grab: knees pulled up hard, the board coming up with his feet
-// still on it; his back hand (the tail side's, toward the camera) reaching
-// down between his knees to the board's toe edge, the front arm out for
-// balance.
-const GRAB_TUCK: f32 = 0.55;
-
-const GRAB_KNEES: f32 = 0.5;
-
-grab_limbs(): Limbs {
-    l: Limbs = no_limbs();
-    l.leg_len[0] = GRAB_TUCK;
-    l.leg_len[1] = GRAB_TUCK;
-    l.leg_pitch[0] = GRAB_KNEES;
-    l.leg_pitch[1] = GRAB_KNEES;
-    l.arm_roll[0] = -0.12;
-    l.arm_pitch[0] = 1.05;
-    l.arm_len[0] = 1.3;
-    l.arm_roll[1] = 1.5;
-    l.arm_pitch[1] = -0.25;
-    l
+// He stands as he must not to fall over: along what he feels (gravity,
+// and against however he is hurried on, turned or borne up: by the wheels
+// and the ground, not gravity, which pulls on all of him alike), not
+// square to the ground. Carving, he leans into the turn as far as
+// holds him up at his speed; on a slope across his way, going straight, he
+// stands upright and the board tips under him; up a halfpipe's wall, the
+// wall bearing him round, square to it. His middle goes where the mover
+// does, so the board is out from under it as far as he leans: beginning a
+// turn, it swings out under him as he leans in. Into a.up (and the board's
+// roll, a.roll), from how the mover is hurried, turned and borne up (see
+// Mover.felt).
+feel_ground(a: *Anim, m: *Mover) {
+    dt: f32 = a.time - a.felt_t;
+    if (dt <= 0.0001) return;
+    a.felt_t = a.time;
+    feel: V3 = Y_AXIS;
+    n: V3 = a.board_up;
+    if (!m.air && !m.grinding) {
+        side: V3 = v_cross(Y_AXIS, yaw_dir(m.heading));
+        if (m.felt_on) feel = v_add(v3(0.0, SLOPE_G, 0.0), m.felt) else {
+            // (Riding with others, and on the stage, he is not stepped here:
+            // only his turning is known, its pull toward his side.)
+            feel = v_madd(v3(0.0, SLOPE_G, 0.0), side, m.speed * m.turn_rate)
+        }
+        // (He leans no further than the wheels grip (LEAN_MOST_TAN) from
+        // square to the ground. And as the ground bears him up less, falling away
+        // nearly as fast as he would, he is as good as off it, with
+        // nothing to balance on: he stays square to it.)
+        bears: f32 = v_dot(feel, n);
+        up: f32 = maxf(bears, SLOPE_G * 0.3);
+        across: V3 = v_madd(feel, n, -bears);
+        most: f32 = up * LEAN_MOST_TAN;
+        if (v_len(across) > most) across = v_scale(across, most / v_len(across));
+        feel = v_norm(v_lerp(n, v_norm(v_madd(across, n, up)), clampf(bears / (SLOPE_G * BEARS_LEAST),
+            0.0, 1.0)));
+        // (Nor further than UPRIGHT_LEAST from upright.)
+        if (feel.y < UPRIGHT_LEAST) {
+            flat: V3 = v_norm(v3(feel.x, 0.0, feel.z));
+            feel = v_madd(v_scale(flat, sqrtf(1.0 - UPRIGHT_LEAST * UPRIGHT_LEAST)),
+                Y_AXIS, UPRIGHT_LEAST)
+        }
+    }
+    a.up = v_norm(v_lerp(a.up, feel, ease(UP_EASE, dt)));
+    // (The board rolls onto its edge a share of his lean against it.)
+    way2: V3 = yaw_dir(m.heading);
+    lean_across: f32 = atan2f(v_dot(a.up, v_cross(way2, n)), v_dot(a.up, n));
+    a.roll = BOARD_ROLL * lean_across;
+    if (m.air || m.grinding) a.roll = 0.0
 }
+
+// The furthest he leans from square to the ground (tan 50 degrees: as far
+// as the wheels grip, see GRIP_ACCEL), and from upright (cos 60 degrees:
+// further, nobody balances), how quickly he stands as he feels (/s), how
+// far his middle is over the board (m), and how much of his lean the board
+// rolls with.
+const LEAN_MOST_TAN: f32 = 1.19;
+
+const UPRIGHT_LEAST: f32 = 0.5;
+
+// (Borne up less than so much of his weight, he is square to the ground
+// as much less.)
+const BEARS_LEAST: f32 = 0.6;
+
+const UP_EASE: f32 = 40.0;
+
+const BALANCE_H: f32 = 0.65;
+
+const BOARD_ROLL: f32 = 0.3;
+
+// A sketchy landing's windmill: held so long (s), then fading over so long.
+const SKETCH_HOLD: f32 = 0.45;
+
+const SKETCH_FADE: f32 = 0.3;
+
+// (A kick to the soak's speed that takes it to 1 at its deepest.)
+const ABSORB_KICK: f32 = 34.9;
 
 // On the course, his flip turns him and the board head over heels about
 // his middle, across the way he flies.
@@ -260,9 +387,10 @@ apply_tumble(mat: []f32) {
 // Start the draw list afresh with him at pos (x, z from it; height from
 // the animation), his board, and the finish's gate. (Anyone riding with
 // him comes after: see pose_others, in together.l8.)
-pose(a: *Anim, m: *Mover, pos: V3) {
+pose(a: *Anim, m: *Mover, pos: V3) raises IoError {
     ndraw = 0;
-    pose_guy(a, m, pos, own_figure(), 1.0);
+    nmatrix = 0;
+    pose_guy(a, m, pos, body_color, 1.0);
     // The finish's gate, where this place finishes (see PART_GATE).
     if (!park) {
         mat_identity(part_m);
@@ -271,136 +399,453 @@ pose(a: *Anim, m: *Mover, pos: V3) {
     }
 }
 
-// Add a guy at pos and his board to the draw list, in a figure's parts, and
-// at `size` of his size about his feet (less as he comes or goes).
+// Joints held by the stage (see stage.l8): which, and at what angles; the
+// rest are as the pose has them.
+held_joint: []int = new int[GUY_JOINTS](0);
+
+held_angle: []f32 = new f32[GUY_JOINTS](0.0);
+
+nheld: int = 0;
+
+// (And both legs' squash, if more than 0.)
+held_squash: f32 = 0.0;
+
+// The joints of the last guy posed, for the stage's measures.
+posed_joints: GuyJoints = guy_solve(guy_stand());
+
+// (And as asked for, before they were kept within their ranges.)
+posed_asked: GuyJoints = guy_solve(guy_stand());
+
+// The joints as shown: as asked, but those the stage holds (see
+// held_joint), within their ranges. Each guy's, as he is posed, is
+// recorded (posed_joints, and posed_asked before the ranges) for the
+// stage's measures.
+record_shown_joints(asked: GuyJoints): GuyJoints {
+    j: GuyJoints = asked;
+    for k in 0..nheld {
+        for side in 0..2 guy_set_joint(&j, held_joint[k], side, held_angle[k])
+    }
+    if (held_squash > 0.0) {
+        for side in 0..2 j.legs[side].squash = held_squash
+    }
+    posed_asked = j;
+    posed_joints = guy_clamp(j);
+    posed_joints
+}
+
+// Add a guy at pos and his board to the draw list, in his color (tint),
+// and at `size` of his size about his feet (less as he comes or goes):
+// the moves the animation has (see moves.l8) mixed into a pose. (Pushing,
+// it keeps where his trail foot is planted in the world: see push_foot.)
 pose_guy(
     a: *Anim,
     m: *Mover,
     pos: V3,
-    figure: Figure,
+    tint: V3,
     size: f32
-) {
-    first: int = ndraw;
-    limbs: Limbs = mix_limbs(ride_limbs(a), grind_limbs(), a.grind);
-    limbs = mix_limbs(limbs, grab_limbs(), a.grab);
-    // Winding up: crouched, ready to spring.
-    for i in 0..2 limbs.leg_len[i] = limbs.leg_len[i] * (1.0 - 0.22 * a.crouch);
-    limbs.drop = limbs.drop - 0.05 * a.crouch;
-    wobble: f32 = 0.0;
-    if (m.sketch_t < 0.7) {
-        k: f32 = 1.0 - m.sketch_t / 0.7;
-        wobble = sinf(m.sketch_t * 26.0) * 0.22 * k;
-        limbs.arm_roll[0] = lerpf(limbs.arm_roll[0], 2.3, k);
-        limbs.arm_roll[1] = lerpf(limbs.arm_roll[1], 2.3, k)
-    }
+) raises IoError {
+    first: int = add_guy_draw(tint);
+    feel_ground(a, m);
     feet: V3 = v3(pos.x, a.y, pos.z);
     if (m.air || m.grinding) feet.y = pos.y;
-    origin: V3 = v_madd(feet, a.up, DECK_TOP);
+    // (The board out from under his middle as far as he leans against it,
+    // along the ground: see feel_ground.)
+    n: V3 = a.board_up;
+    contact: V3 = v_madd(feet, v_madd(a.up, n, -v_dot(a.up, n)), -BALANCE_H);
+    origin: V3 = v_madd(contact, n, DECK_TOP);
     // Riding switch, he faces the other way round.
     spin: f32 = m.spin;
     if (m.fakie) spin = spin + PI;
-    // Wound up, his body turns against the way he will spin; the board
-    // stays.
-    wound: f32 = m.wind_x * 0.7;
-    frame_m(root_m, yaw_dir(a.yaw + spin + wound), a.up, origin);
+    frame_m(root_m, yaw_dir(a.yaw + spin), a.up, origin);
     set_tumble(m, a, origin);
     apply_tumble(root_m);
-    // And leans against the way he will flip.
-    if (absf(m.wind_y) > 0.01) {
-        back: f32 = 0.22 * m.wind_y;
-        if (m.fakie) back = -back;
-        mat_rotate(root_m, Z_AXIS, back)
+    st: Sides = sides_of(m);
+    // (Turning his way, the animation's lean is +, and he leans to his
+    // heels: a heelside carve.)
+    mv: BoardMove = move_ride(a);
+    toe: f32 = clampf(-a.arm_lean, -1.0, 1.0);
+    mv = mix_move(mv, move_carve(a, st, toe), absf(toe));
+    mv = mix_move(mv, move_grind(a), a.grind);
+    mv = mix_move(mv, move_windup(m), a.crouch);
+    through: f32 = clampf(m.air_time / a.air_total, 0.0, 1.0);
+    if (!m.air) through = 1.0;
+    air: BoardMove = move_air(a, m, st, through);
+    mv = mix_move(mv, air, a.air);
+    // (The tail let go of over 0.25 s, from 0.3 s before he lands: easing
+    // in and out, so the hand never snaps off.)
+    leaving: f32 = smoothstepf(0.0, 1.0, (0.3 - (a.air_total - m.air_time)) / 0.25);
+    let_go: f32 = 1.0 - leaving;
+    if (!m.air) let_go = 0.0;
+    mv = mix_move(mv, move_grab(st, air), minf(a.grab, 1.0) * let_go);
+    pop: f32 = 1.0 - smoothstepf(0.12, 0.25, m.since_hop);
+    mv = mix_move(mv, move_pop(m, st, mv), pop);
+    mv = mix_move(mv, move_land(mv, a.land_fall), clampf(a.absorb, 0.0, 1.0));
+    wobble: f32 = 0.0;
+    // (Sketchy: the windmill held a moment, then fading.)
+    if (m.sketch_t < SKETCH_HOLD + SKETCH_FADE) {
+        k: f32 = 1.0 - smoothstepf(SKETCH_HOLD, SKETCH_HOLD + SKETCH_FADE, m.sketch_t);
+        wobble = sinf(m.sketch_t * 26.0) * 0.22 * k;
+        mv = mix_move(mv, move_sketch(mv, m.sketch_t), k)
     }
-    if (wobble != 0.0) mat_rotate(root_m, Z_AXIS, wobble);
-    // Grabbing, he hunches a little forward over the board.
-    if (a.grab > 0.001) {
-        mat_translate(root_m, v3(0.0, LEG_H, 0.0));
-        mat_rotate(root_m, X_AXIS, 0.22 * a.grab);
-        mat_translate(root_m, v3(0.0, -LEG_H, 0.0))
+    mv.roll = mv.roll - wobble;
+    mv = mix_move(mv, move_stop(st, mv), a.stop);
+    mv = mix_move(mv, move_push(a, st), a.push_w);
+    p: GuyPose = move_pose(mv, st, a.air, 1.0 + 0.01 * sinf(a.time * 2.1), a.squash);
+    if (a.push_w > 0.001) push_feet(a, st, &p);
+    on_board(a, m, &p);
+    // The board: under his feet as they are (up off the ground with them
+    // in the air), tipped as the move has it.
+    soles: V3 = v_scale(v_add(p.ankle[0], p.ankle[1]), 0.5);
+    if (a.push_w > 0.001) soles = v_lerp(soles, p.ankle[st.lead], a.push_w);
+    soles.y = soles.y - GUY_ANKLE_UP;
+    // (The board turned under him: his feet turn with it, about their
+    // middle.)
+    if (absf(mv.board_yaw) > 0.0001) {
+        middle: V3 = v_scale(v_add(p.ankle[0], p.ankle[1]), 0.5);
+        for i in 0..2 {
+            p.ankle[i] = v_add(middle, v_rotate(v_sub(p.ankle[i], middle), Y_AXIS,
+                mv.board_yaw));
+            p.foot_yaw[i] = p.foot_yaw[i] + mv.board_yaw
+        }
     }
-    sy: f32 = 1.0 + a.squash - 0.06 * minf(a.grab, 1.0);
-    sxz: f32 = 1.0 / sqrtf(sy);
-    mat_translate(root_m, v3(0.0, limbs.drop, 0.0));
-    mat_scale(root_m, v3(sxz, sy, sxz));
-    mat_copy(body_m, root_m);
-    breath: f32 = 1.0 + 0.01 * sinf(a.time * 2.1);
-    mat_translate(body_m, v3(0.0, LEG_H, 0.0));
-    mat_scale(body_m, v3(1.0, breath, 1.0));
-    mat_translate(body_m, v3(0.0, -LEG_H, 0.0));
-    add_draw(figure.body, body_m);
-    lw: f32 = (GUY_W - LEG_GAP) * 0.25;
-    for i in 0..2 {
-        s: f32 = side_sign(i);
-        mat_copy(part_m, root_m);
-        mat_translate(part_m, v3(s * (lw + LEG_GAP * 0.5), LEG_H, 0.0));
-        mat_rotate(part_m, X_AXIS, -limbs.leg_pitch[i]);
-        mat_rotate(part_m, Z_AXIS, s * limbs.leg_roll[i]);
-        mat_scale(part_m, v3(1.0, limbs.leg_len[i], 1.0));
-        add_draw(figure.leg, part_m);
-        mat_copy(part_m, body_m);
-        mat_translate(part_m, v3(s * (GUY_W * 0.5 + 0.01), 0.68, 0.0));
-        mat_rotate(part_m, Z_AXIS, s * limbs.arm_roll[i]);
-        mat_rotate(part_m, X_AXIS, -limbs.arm_pitch[i]);
-        mat_scale(part_m, v3(1.0, limbs.arm_len[i], 1.0));
-        add_draw(figure.arm, part_m)
+    pose_board(a, m, contact, spin, soles, a.air, mv.tilt * st.lead_x, mv.tail_pivot,
+        mv.board_yaw);
+    // Grabbing, his trail hand to the tail's tip.
+    posed_grab = mv.grab;
+    if (mv.grab > 0.001) {
+        tip: V3 = mat_point(board_m, v3(0.0, DECK_TOP + 0.036 + GRAB_ABOVE, -GRAB_REACH * st.lead_x));
+        posed_tail = tip;
+        p.hand[st.trail] = from_root(tip);
+        // (All the way to it once the grab is most of the way in, so that
+        // the mitt is on the tail, not near it; and let go of as the grab
+        // is, over the whole let-go, not the end of it.)
+        p.hand_reach[st.trail] = smoothstepf(0.3, 0.85, minf(a.grab, 1.0)) * let_go
     }
-    pose_board(a, m, pos, spin);
+    j: GuyJoints = guy_solve(p);
+    // (A planted push toe: the ankle moved by however far the toe missed,
+    // twice, so that it stays put.)
+    if (a.planted && a.push_w > 0.999) {
+        for _round in 0..3 {
+            missed: V3 = v_sub(from_root(a.plant), guy_point_on(j, guy_foot(st.trail),
+                guy_toe_tip()));
+            p.ankle[st.trail] = v_add(p.ankle[st.trail], missed);
+            hip: V3 = guy_hip(p.body, p.hips_yaw, st.trail);
+            p.leg_squash[st.trail] = clampf(v_len(v_sub(p.ankle[st.trail], hip)) / (GUY_THIGH + GUY_SHIN) * 1.004,
+                1.0, PUSH_STRETCH);
+            j = guy_solve(p)
+        }
+    }
+    j = record_shown_joints(j);
+    guy_bones(j, root_m, draw_m, first);
+    // (A planted push foot comes up once his leg cannot reach it.)
+    if (a.planted && j.pin_short[st.trail] > 0.003) {
+        a.planted = false;
+        a.plant_done = true
+    }
+    if (a.plant_done && a.lift_at < 0.0) a.lift_at = push_phase(a);
+    if (!a.plant_done) a.lift_at = -1.0;
+    if (a.push_w > 0.001 && !a.plant_done) a.lift = from_root(guy_bone_point(draw_m,
+        first, guy_foot(st.trail), v3(0.0, 0.0, 0.0)));
+    for k in 0..16 draw_m[(first + GUY_BOARD) * 16 + k] = board_m[k];
+    keep_on_arc(a, m, st, pos, first);
     if (size < 0.999) {
         mat_identity(size_m);
         mat_translate(size_m, feet);
         mat_scale(size_m, v3(size, size, size));
         mat_translate(size_m, v_scale(feet, -1.0));
-        for i in first..ndraw {
-            for k in 0..16 part_m[k] = draw_m[i * 16 + k];
+        for b in first..first + GUY_BONES {
+            for k in 0..16 part_m[k] = draw_m[b * 16 + k];
             mat_mul(tumble_tmp, size_m, part_m);
-            for k in 0..16 draw_m[i * 16 + k] = tumble_tmp[k]
+            for k in 0..16 draw_m[b * 16 + k] = tumble_tmp[k]
         }
     }
 }
 
+// In the air nothing pushes him: his middle (his centre of mass, the
+// board's with his) flies on an arc however he moves about it, and every
+// turn of a trick is about it. The mover's place flies on such an arc;
+// his middle keeps to one beside it, from where it was from the mover at
+// the start of the air (or of a trick begun in it: see update_anim) to
+// where it will be at the landing (see
+// landing_middle), going from the one to the other evenly over the air,
+// which keeps it an arc as the mover's is. His moves are of his body
+// about its middle, then: tucking up brings the board up and his body
+// down to meet it. Each bone (the board's too) is moved by as much as
+// keeps it there; once down, by what was left at the landing, let go of
+// quickly (see update_anim). (A guy's bones are from matrix `first`.)
+keep_on_arc(
+    a: *Anim,
+    m: *Mover,
+    st: Sides,
+    pos: V3,
+    first: int
+) {
+    mid: V3 = rider_middle(draw_m, first);
+    if (m.air && arc_kept) {
+        if (!a.arc_known) {
+            a.arc_known = true;
+            a.arc_from = v_sub(v_add(mid, a.arc_fix), pos);
+            a.arc_start = m.air_time;
+            a.arc_to = landing_middle(a, m, st)
+        }
+        through: f32 = clampf((m.air_time - a.arc_start) / maxf(a.air_total - a.arc_start,
+            0.05), 0.0, 1.0);
+        a.arc_fix = v_sub(v_add(pos, v_lerp(a.arc_from, a.arc_to, through)), mid)
+    }
+    if (v_len(a.arc_fix) < 0.0001) return;
+    if (posed_grab > 0.001) posed_tail = v_add(posed_tail, a.arc_fix);
+    for b in first..first + GUY_BONES {
+        draw_m[b * 16 + 12] = draw_m[b * 16 + 12] + a.arc_fix.x;
+        draw_m[b * 16 + 13] = draw_m[b * 16 + 13] + a.arc_fix.y;
+        draw_m[b * 16 + 14] = draw_m[b * 16 + 14] + a.arc_fix.z
+    }
+}
+
+// (Whether he is kept on the arc: the stage's L8_FREE turns it off, to
+// compare.)
+arc_kept: bool = true;
+
+// How quickly he is let go of from the arc once down (/s).
+const ARC_LET_GO: f32 = 25.0;
+
+// The board's share of him and it (a board is about a twenty-fifth of a
+// skater), and its middle in its frame: halfway up to the deck.
+const BOARD_MASS: f32 = 0.04;
+
+// His middle and the board's together, where the bones from matrix
+// `first` (the board's too) put them.
+rider_middle(bones: []f32, first: int): V3 {
+    board: V3 = guy_bone_point(bones, first, GUY_BOARD, v3(0.0, DECK_TOP * 0.5, 0.0));
+    v_lerp(guy_middle(bones, first), board, BOARD_MASS)
+}
+
+landing_bones: []f32 = new f32[GUY_BONES * 16](0.0);
+
+landing_root: []f32 = new f32[16](0.0);
+
+// Where his middle will be from the mover as he lands: standing tall, his
+// legs reaching down for the ground (the air's last pose), turned as his
+// trick will leave him, leaning as he does now.
+landing_middle(a: *Anim, m: *Mover, st: Sides): V3 {
+    spin: f32 = m.spin;
+    if (m.trick_set) spin = m.spin_goal;
+    if (m.fakie) spin = spin + PI;
+    frame_m(landing_root, yaw_dir(a.yaw + spin), a.up, v_scale(a.up, DECK_TOP));
+    p: GuyPose = move_pose(move_air(a, m, st, 1.0), st, 1.0, 1.0, 0.0);
+    guy_bones(guy_clamp(guy_solve(p)), landing_root, landing_bones, 0);
+    // (The board under his feet, on the ground.)
+    mat_identity(part_m);
+    for k in 0..16 landing_bones[GUY_BOARD * 16 + k] = part_m[k];
+    rider_middle(landing_bones, 0)
+}
+
+// Where his trail hand holds the tail: so far along the board from its
+// middle (its tip is 0.44), and the mitt's middle so far over the deck.
+const GRAB_REACH: f32 = 0.4;
+
+const GRAB_ABOVE: f32 = 0.06;
+
+// (For the stage's measures: how far he is grabbing, and where the tail's
+// tip his hand goes for is, in the world.)
+posed_grab: f32 = 0.0;
+
+posed_tail: V3 = V3 { x: 0.0, y: 0.0, z: 0.0 };
+
+// His feet flat on the board, which is not square to him as he stands
+// (see feel_ground), as far as he is on the ground: each ankle as high as
+// the deck under it, and each foot tipped as the deck is.
+on_board(a: *Anim, m: *Mover, p: *GuyPose) {
+    w: f32 = 1.0 - a.air;
+    if (w < 0.001) return;
+    deck: V3 = root_dir(v_rotate(a.board_up, yaw_dir(m.heading), a.roll));
+    if (deck.y < 0.3) return;
+    pitch: f32 = atan2f(-deck.z, deck.y);
+    roll: f32 = atan2f(-deck.x, deck.y);
+    for i in 0..2 {
+        ankle: V3 = p.ankle[i];
+        p.ankle[i].y = ankle.y - (deck.x * ankle.x + deck.z * ankle.z) / deck.y * w;
+        p.foot_pitch[i] = p.foot_pitch[i] + pitch * w;
+        p.foot_roll[i] = p.foot_roll[i] + roll * w
+    }
+}
+
+// A way in the world in his frame (root_m's: see from_root).
+root_dir(w: V3): V3 {
+    v3(w.x * root_m[0] + w.y * root_m[1] + w.z * root_m[2], w.x * root_m[4] + w.y * root_m[5] + w.z * root_m[6],
+        w.x * root_m[8] + w.y * root_m[9] + w.z * root_m[10])
+}
+
+// A place in the world in his frame (root_m's: turned and moved, never
+// scaled, so its transpose turns back).
+from_root(w: V3): V3 {
+    d: V3 = v3(w.x - root_m[12], w.y - root_m[13], w.z - root_m[14]);
+    v3(d.x * root_m[0] + d.y * root_m[1] + d.z * root_m[2], d.x * root_m[4] + d.y * root_m[5] + d.z * root_m[6],
+        d.x * root_m[8] + d.y * root_m[9] + d.z * root_m[10])
+}
+
+// Pushing (as far as a.push_w), drawn to read from behind him: the lead
+// foot on the bolts, turned forward; the trail leg one long slab, its foot
+// reaching down behind and beside the tail, its toe planted where it comes
+// down in the world (the board carrying him on, the heel lifting as the
+// leg sweeps back), up when the leg cannot reach it any longer, and back
+// onto the board in a quick tuck. Keeps where the toe is planted, in the
+// animation.
+push_feet(a: *Anim, st: Sides, p: *GuyPose) {
+    w: f32 = a.push_w;
+    trail: int = st.trail;
+    deck: V3 = p.ankle[trail];
+    yaw: f32 = PUSH_FOOT_YAW * st.lead_x * DEG;
+    // (His hips turn as far as his body: so that the pushing leg, planted
+    // toward the tail, reaches out behind them, not in front.)
+    p.hips_yaw = lerpf(p.hips_yaw, 1.0, w);
+    // (Planting, he dips and leans a little into it.)
+    phase0: f32 = push_phase(a);
+    dip: f32 = 0.0;
+    if (a.planted || phase0 >= PUSH_DOWN && !a.plant_done) dip = sinf(PI * clampf((phase0 - PUSH_DOWN) / 0.15,
+        0.0, 1.0));
+    p.body.drop = lerpf(p.body.drop, PUSH_DROP + 0.03 * dip, w);
+    p.body.pitch = p.body.pitch + 6.0 * DEG * dip * w;
+    // (Where the toe comes down: a little ahead of the hip, out past the
+    // toe edge.)
+    hip: V3 = guy_hip(p.body, p.hips_yaw, trail);
+    toe: V3 = v3(hip.x + PUSH_PLANT_AHEAD * st.lead_x, -DECK_TOP, PUSH_PLANT_OUT);
+    ankle_down: V3 = push_planted_ankle(toe, yaw);
+    phase: f32 = push_phase(a);
+    foot: V3 = deck;
+    squash: f32 = PUSH_STRETCH;
+    if (phase < PUSH_DOWN) {
+        a.planted = false;
+        a.plant_done = false;
+        k: f32 = smoothstepf(0.0, PUSH_DOWN, phase);
+        foot = v_lerp(deck, ankle_down, k);
+        foot.y = foot.y + 0.05 * sinf(k * PI)
+    } else if (!a.plant_done) {
+        if (!a.planted) {
+            a.planted = true;
+            a.plant = mat_point(root_m, toe)
+        }
+        pinned: V3 = from_root(a.plant);
+        // (Up once it is so far behind the hip, or the leg, stretched its
+        // most, no longer reaches it.)
+        foot = toe_pointed_ankle(pinned, hip, yaw);
+        if ((pinned.x - hip.x) * st.lead_x < -PUSH_PLANT_BEHIND || v_len(v_sub(foot,
+            hip)) > (GUY_THIGH + GUY_SHIN) * PUSH_STRETCH * 0.98) {
+            a.planted = false;
+            a.plant_done = true
+        } else {
+            // (The foot held as its shin has it, toe pointed: see
+            // toe_pointed_ankle.)
+            p.foot_pitch[trail] = toe_pointed_pitch(foot, hip, yaw)
+        }
+    }
+    if (a.plant_done) {
+        // (Back up onto the board, over what is left of the stroke, in a
+        // quick tuck: the leg squashed and its knee up for a moment.)
+        k: f32 = smoothstepf(maxf(a.lift_at, PUSH_DOWN), PUSH_STROKE, phase);
+        foot = v_lerp(a.lift, deck, k);
+        foot.y = foot.y + 0.12 * sinf(k * PI);
+        squash = lerpf(PUSH_STRETCH, 0.75, sinf(k * PI));
+        if (k > 0.5) squash = lerpf(1.0, 0.75, sinf(k * PI))
+    } else {
+        // (Reaching down, and planted, the leg is one long slab: stretched
+        // just as long as it must be to reach, so that its knee stays
+        // nearly straight.)
+        squash = clampf(v_len(v_sub(foot, hip)) / (GUY_THIGH + GUY_SHIN) * 1.004,
+            1.0, PUSH_STRETCH)
+    }
+    p.ankle[trail] = v_lerp(deck, foot, w);
+    p.foot_yaw[st.lead] = lerpf(p.foot_yaw[st.lead], PUSH_LEAD_YAW * st.lead_x * DEG,
+        w);
+    p.foot_yaw[trail] = lerpf(p.foot_yaw[trail], yaw, w);
+    p.leg_squash[trail] = lerpf(p.leg_squash[trail], squash, w)
+}
+
+// The ankle of a nearly straight leg from `hip` whose toe is at `toe`, the
+// foot rigid with the shin, toe pointed (the ankle at PUSH_POINT): so
+// that the foot touches by its toe's edge and the shin's end stays inside
+// the foot, however far the leg leans. (The shin taken along hip to
+// ankle: the knee is all but straight.)
+toe_pointed_ankle(toe: V3, hip: V3, yaw: f32): V3 {
+    ankle: V3 = push_planted_ankle(toe, yaw);
+    for _round in 0..4 {
+        down: V3 = v_norm(v_sub(ankle, hip));
+        fwd: V3 = v_norm(v_reject(yaw_dir(yaw), down));
+        foot: V3 = toe_pointed_foot(down, yaw);
+        foot_down: V3 = v_sub(v_scale(down, cosf(PUSH_POINT)), v_scale(fwd, sinf(PUSH_POINT)));
+        ankle = v_sub(toe, v_add(v_scale(foot, GUY_FOOT_FRONT), v_scale(foot_down,
+            GUY_ANKLE_UP)))
+    }
+    ankle
+}
+
+// The foot's pitch (+ toe up) toe pointed, its ankle at `ankle`, turned
+// `yaw`.
+toe_pointed_pitch(ankle: V3, hip: V3, yaw: f32): f32 {
+    foot: V3 = toe_pointed_foot(v_norm(v_sub(ankle, hip)), yaw);
+    atan2f(foot.y, sqrtf(foot.x * foot.x + foot.z * foot.z))
+}
+
+// The foot's forward, toe pointed, on a shin pointing `down`: square to it
+// (in the plane of the way the foot turns), and turned PUSH_POINT toward
+// it.
+toe_pointed_foot(down: V3, yaw: f32): V3 {
+    fwd: V3 = v_norm(v_reject(yaw_dir(yaw), down));
+    v_add(v_scale(fwd, cosf(PUSH_POINT)), v_scale(down, sinf(PUSH_POINT)))
+}
+
+// The ankle over a pushing toe planted at `toe` (in his frame), the foot
+// turned `yaw`, flat.
+push_planted_ankle(toe: V3, yaw: f32): V3 {
+    v_madd(v_madd(toe, Y_AXIS, GUY_ANKLE_UP), yaw_dir(yaw), -GUY_FOOT_FRONT)
+}
+
+// How far through its stroke a push is (s).
+push_phase(a: *Anim): f32 {
+    a.push_t - floorf(a.push_t / PUSH_STROKE) * PUSH_STROKE
+}
+
 size_m: []f32 = new f32[16](0.0);
 
+// The board under him, at `contact`: on the ground, as the ground has it,
+// rolled as he leans (see feel_ground); in the air, up under his soles
+// (`soles`, in his frame), as far as `up`. Tipped up at
+// its nose (+) by `tilt`, about its middle or (as far as tail_pivot) about
+// its trailing wheels.
 pose_board(
     a: *Anim,
     m: *Mover,
-    pos: V3,
-    spin: f32
+    contact: V3,
+    spin: f32,
+    soles: V3,
+    up: f32,
+    tilt: f32,
+    tail_pivot: f32,
+    turn: f32
 ) {
     rfwd: V3 = yaw_dir(a.board_yaw + spin);
     rup: V3 = a.board_up;
+    // (Turned under him about his up.)
+    if (absf(turn) > 0.0001) rfwd = v_rotate(rfwd, a.up, turn);
     // An ollie pops the nose.
-    if (m.since_hop < 0.35) {
-        pop: f32 = sinf(m.since_hop / 0.35 * PI) * 0.35;
+    nose_up: f32 = tilt;
+    if (m.since_hop < 0.35) nose_up = nose_up + sinf(m.since_hop / 0.35 * PI) * 0.35;
+    if (absf(nose_up) > 0.0001) {
         r: V3 = v_cross(rup, rfwd);
-        rfwd = v_rotate(rfwd, r, -pop);
-        rup = v_rotate(rup, r, -pop)
+        rfwd = v_rotate(rfwd, r, -nose_up);
+        rup = v_rotate(rup, r, -nose_up)
     }
-    rup = v_rotate(rup, yaw_dir(m.heading), -a.lean * 0.15);
-    rpos: V3 = v3(pos.x, a.y, pos.z);
-    if (m.air || m.grinding) rpos.y = pos.y;
-    // Grabbing, it comes up with his feet, which stay on it: where his
-    // tucked legs put them (just under their soles), its toe edge pulled up
-    // a little by his hand, toward him (the deck turning toward his
-    // heels).
-    // (He faces his toe side; the flip, if any, comes after.)
-    if (a.grab > 0.001) {
-        toe: V3 = yaw_dir(a.yaw + spin);
-        tilt: f32 = 0.3 * a.grab;
-        if (v_dot(v_cross(rfwd, rup), toe) > 0.0) tilt = -tilt;
-        rup = v_rotate(rup, rfwd, tilt)
-    }
+    rup = v_rotate(rup, yaw_dir(m.heading), a.roll);
+    rpos: V3 = contact;
+    // (Turned about its trailing wheels, it comes up as its middle does.)
+    rpos.y = rpos.y + sinf(absf(tilt)) * STANCE_X * tail_pivot;
     frame_m(board_m, rfwd, rup, rpos);
     apply_tumble(board_m);
-    // Its place, when grabbed: under his tucked soles, which already turn
-    // with any flip.
-    if (a.grab > 0.001) {
-        g: f32 = minf(a.grab, 1.0);
-        foot: f32 = LEG_H * GRAB_TUCK;
-        soles: V3 = mat_point(root_m, v3(0.0, LEG_H - foot * cosf(GRAB_KNEES) - DECK_TOP,
-            foot * sinf(GRAB_KNEES)));
-        board_m[12] = lerpf(board_m[12], soles.x, g);
-        board_m[13] = lerpf(board_m[13], soles.y, g);
-        board_m[14] = lerpf(board_m[14], soles.z, g)
+    // Its place, up with his feet: under his soles, which already turn with
+    // any flip.
+    if (up > 0.001) {
+        under: V3 = mat_point(root_m, v3(0.0, soles.y - DECK_TOP, soles.z));
+        board_m[12] = lerpf(board_m[12], under.x, up);
+        board_m[13] = lerpf(board_m[13], under.y, up);
+        board_m[14] = lerpf(board_m[14], under.z, up)
     }
-    add_draw(PART_BOARD, board_m)
 }

@@ -1,0 +1,1775 @@
+tag tumbledown;
+
+use_tag std, skate_math, blockguy;
+
+// ---- the interface: runner state in, pose out ----
+// The game (runner.l8, hill.l8, main.l8) and his pose (this file) meet
+// here, and only here.
+//
+// In, each frame: gait_update(g, r, at, dt), with r the Runner (read only:
+// the pose never writes it), `at` where his root is shown (between physics
+// steps: on the ground under his hips, or where he flies; m, world), and dt
+// the frame's seconds. Of the Runner it reads (see Runner for each):
+//
+//   carve, speed       which way and how fast he goes: he faces that way,
+//                      turning there by small quick steps when slow (see
+//                      stand_steps), and strides at that speed (gait_rows),
+//                      standing below STAND_SPEED
+//   air, vx, vy, vz    in the air or not, and how he flies
+//   air_time, air_total   how far through this air he is, and how long it
+//                      is, as foreseen
+//   trick_set, flip, flip_goal, spin, spin_goal   the trick he went for,
+//                      and how far it has turned (and run_trick_turned)
+//   tucking            held tight in the air
+//   winding, wind_x, wind_y   gathering on the ground for a trick, and
+//                      which it aims at
+//   landing, since_land, land_fall   how the latest landing went, when,
+//                      and how fast he fell
+//   in_water, x, z     into the sea (and, foreseen, in_sea where he will
+//                      land: he dives)
+//
+// And of the game: hill_height(x, z), the ground, for planting his feet.
+//
+// Out: gait_bones (GUY_BONES matrices, for render.l8: one skinned draw),
+// gait_root (his frame without the tumble, for the camera and HUD),
+// gait_tumbled (with it), gait_joints; and for L8_TRACE: gait_notes and
+// gait_nnotes (each foot down and up: time, side, slip, knee) and
+// gait_roll_low. The game keeps a Gait (new_gait, made afresh on a
+// restart).
+
+// How he moves, from the runner (see runner.l8) to a pose of the block guy
+// (programs/blockguy) each frame.
+//
+// - On the ground he walks, jogs, runs or sprints by his speed: a stride
+//   cycle at the cadence of gait_rows, each foot down for its time and
+//   swinging through the rest. A foot that is down is pinned to the world
+//   by its toe's tip (blockguy's GuyPose.pin): it never slides nor turns,
+//   its heel lifting about the toe (at most HEEL_STANCE) when the leg can
+//   no longer reach it flat; it leaves the ground when its time is up, or
+//   before it would slide (see gait_update). The stance knee follows the
+//   table (bent at touchdown, most at mid-stance, nearly straight at
+//   toe-off), the pelvis as high as that needs. A swinging leg goes by its
+//   angles: the heel kicked up behind (the more the faster), the thigh
+//   driven forward, and reaches to come down nearly flat ahead. The arms
+//   swing opposite the legs; the body pitches forward more the faster he
+//   goes (back a little slowing), rolls toward the stance foot, and leans
+//   into turns.
+// - Standing, his weight shifts from foot to foot; a foot away from its
+//   place steps back under him. Turning slowly or on the spot, his body
+//   turns ahead and his feet follow by small quick steps (stand_steps).
+// - Gathering (the pad held), he runs lower and quicker, arms back, wound up
+//   for the trick he aims at.
+// - In the air: a takeoff (the leg he left from extended behind, the other
+//   knee driven up, arms thrown the trick's way); then a long jumper's
+//   stride held, a sit, and the legs reaching to land; or tucked for a
+//   flip, legs together for a spin; held on the pad, tight, his mitts on
+//   his shins; and before he lands he opens up.
+// - Landing: soft, into the stride, the knees soaking it up; hard, both
+//   feet pinned for the absorb's bottom, deep, arms ahead, then the stride
+//   again from there; harder, he rolls head over heels on his round back;
+//   crooked, he stumbles three quick steps, arms going round.
+// - Into the sea: foreseeing it, he dives, and goes under as he dived.
+//
+// Angles in the tables are degrees, as the design gives them.
+const DEG: f32 = 0.017453292;
+
+// A row of the gait table, at a speed (m/s): steps a second; a foot's
+// time down (s); how far ahead of the hip its ankle comes down (m); the
+// stance knee at touchdown, mid-stance and toe-off; the swinging knee's
+// kick up behind (its most, 30% into the swing) and its bend as the leg
+// reaches to land; the swinging hip's flex forward and back; the
+// shoulders' swing forward and back and the elbow's bend; the body's
+// pitch, its squash at mid-stance and stretch in mid-flight (shares of
+// its height); how high a swinging ankle passes under the hip, and how
+// much the pelvis rises in flight (m). (A stylized run: the legs swing
+// from the hips, high inside the block, the knees modest but for the kick
+// behind.)
+type GaitRow = {
+    speed: f32;
+    cadence: f32;
+    contact: f32;
+    ahead: f32;
+    knee_down: f32;
+    knee_mid: f32;
+    knee_off: f32;
+    kick: f32;
+    knee_reach: f32;
+    hip_fwd: f32;
+    hip_back: f32;
+    arm_fwd: f32;
+    arm_back: f32;
+    elbow: f32;
+    pitch: f32;
+    squash: f32;
+    stretch: f32;
+    clear: f32;
+    rise: f32
+}
+
+// Walk, jog, run, sprint.
+gait_rows: []GaitRow = [GaitRow {
+    speed: 1.0,
+    cadence: 2.6,
+    contact: 0.46,
+    ahead: 0.23,
+    knee_down: 5.0,
+    knee_mid: 8.0,
+    knee_off: 5.0,
+    kick: 25.0,
+    knee_reach: 5.0,
+    hip_fwd: 20.0,
+    hip_back: -18.0,
+    arm_fwd: 20.0,
+    arm_back: 15.0,
+    elbow: 10.0,
+    pitch: 0.0,
+    squash: 0.0,
+    stretch: 0.0,
+    clear: 0.03,
+    rise: 0.0
+}, GaitRow {
+    speed: 2.0,
+    cadence: 3.5,
+    contact: 0.13,
+    ahead: 0.12,
+    knee_down: 10.0,
+    knee_mid: 20.0,
+    knee_off: 10.0,
+    kick: 45.0,
+    knee_reach: 15.0,
+    hip_fwd: 32.0,
+    hip_back: -26.0,
+    arm_fwd: 30.0,
+    arm_back: 25.0,
+    elbow: 70.0,
+    pitch: 5.0,
+    squash: 0.07,
+    stretch: 0.05,
+    clear: 0.06,
+    rise: 0.02
+}, GaitRow {
+    speed: 3.4,
+    cadence: 4.3,
+    contact: 0.1,
+    ahead: 0.12,
+    knee_down: 15.0,
+    knee_mid: 25.0,
+    knee_off: 10.0,
+    kick: 65.0,
+    knee_reach: 20.0,
+    hip_fwd: 40.0,
+    hip_back: -32.0,
+    arm_fwd: 45.0,
+    arm_back: 35.0,
+    elbow: 70.0,
+    pitch: 10.0,
+    squash: 0.1,
+    stretch: 0.08,
+    clear: 0.08,
+    rise: 0.03
+}, GaitRow {
+    speed: 4.5,
+    cadence: 4.8,
+    contact: 0.08,
+    ahead: 0.12,
+    knee_down: 15.0,
+    knee_mid: 25.0,
+    knee_off: 10.0,
+    kick: 75.0,
+    knee_reach: 20.0,
+    hip_fwd: 45.0,
+    hip_back: -36.0,
+    arm_fwd: 55.0,
+    arm_back: 40.0,
+    elbow: 75.0,
+    pitch: 14.0,
+    squash: 0.1,
+    stretch: 0.08,
+    clear: 0.08,
+    rise: 0.03
+}];
+
+// The table at speed v, between its rows.
+gait_row(v: f32): GaitRow {
+    if (v <= gait_rows[0].speed) return gait_rows[0];
+    for i in 1..len(gait_rows) {
+        b: GaitRow = gait_rows[i];
+        if (v <= b.speed) {
+            a: GaitRow = gait_rows[i - 1];
+            t: f32 = (v - a.speed) / (b.speed - a.speed);
+            return GaitRow {
+                speed: v,
+                cadence: lerpf(a.cadence, b.cadence, t),
+                contact: lerpf(a.contact, b.contact, t),
+                ahead: lerpf(a.ahead, b.ahead, t),
+                knee_down: lerpf(a.knee_down, b.knee_down, t),
+                knee_mid: lerpf(a.knee_mid, b.knee_mid, t),
+                knee_off: lerpf(a.knee_off, b.knee_off, t),
+                kick: lerpf(a.kick, b.kick, t),
+                knee_reach: lerpf(a.knee_reach, b.knee_reach, t),
+                hip_fwd: lerpf(a.hip_fwd, b.hip_fwd, t),
+                hip_back: lerpf(a.hip_back, b.hip_back, t),
+                arm_fwd: lerpf(a.arm_fwd, b.arm_fwd, t),
+                arm_back: lerpf(a.arm_back, b.arm_back, t),
+                elbow: lerpf(a.elbow, b.elbow, t),
+                pitch: lerpf(a.pitch, b.pitch, t),
+                squash: lerpf(a.squash, b.squash, t),
+                stretch: lerpf(a.stretch, b.stretch, t),
+                clear: lerpf(a.clear, b.clear, t),
+                rise: lerpf(a.rise, b.rise, t)
+            }
+        }
+    }
+    gait_rows[len(gait_rows) - 1]
+}
+
+// Walking below this (and running above it), the change over a stride.
+const WALK_SPEED: f32 = 1.4;
+
+// Below this speed he stands.
+const STAND_SPEED: f32 = 0.25;
+
+// How far out from his middle each foot is put, and how much further out
+// the outside foot goes in a full lean (m).
+const FOOT_OUT: f32 = 0.16;
+
+const LEAN_OUT: f32 = 0.03;
+
+// A foot that is down: how far its heel may lift about its toe (10
+// degrees, late in its time down), and how far its ankle may bend toe up
+// (20) before the heel lifts instead.
+const HEEL_STANCE: f32 = 0.1745;
+
+const ANKLE_STANCE: f32 = 0.349;
+
+// The motion's state, kept from frame to frame.
+tag tumbledown
+type Gait = {
+    // Where in the stride cycle he is (0 to 1; side 0's foot comes down at
+    // 0, side 1's at a half).
+    phase: f32;
+    // Each foot: whether it is down, and if so where its toe's tip is in
+    // the world, which way the foot faces (world yaw), and how far its heel
+    // was lifted; where its ankle was (his frame), its pitch, and the hip
+    // and knee when it left the ground; and the most it has slid while down
+    // (m, measured: see gait_measure).
+    planted: [2]bool;
+    toe: [2]V3;
+    toe_yaw: [2]f32;
+    heel: [2]f32;
+    lift_at: [2]V3;
+    lift_pitch: [2]f32;
+    lift_flex: [2]f32;
+    lift_knee: [2]f32;
+    slip: [2]f32;
+    // Where in the stride each foot's swing began, and the most its knee
+    // has bent since (rad).
+    swing_from: [2]f32;
+    swing_knee: [2]f32;
+    // The pelvis's drop as it last was, and at the latest toe-off (for the
+    // flight between).
+    drop: f32;
+    drop_off: f32;
+    // Which way he faces (world yaw, his hips and feet's frame), the way
+    // he is going (world yaw), his body turned ahead toward it (deg), and
+    // his lean into a turn.
+    yaw: f32;
+    heading: f32;
+    body_lead: f32;
+    lean: f32;
+    // The knees' extra give on landing (deg) and the body's squash:
+    // springs.
+    absorb: f32;
+    absorb_v: f32;
+    squash: f32;
+    squash_v: f32;
+    // How much of the air's pose is shown, and of the tight tuck; and how
+    // far he is squashed down gathering.
+    air_w: f32;
+    gather_w: f32;
+    tuck_w: f32;
+    // Standing: a small step a foot is taking to come back under him (or
+    // -1), how far through it (0 to 1), where its ankle set off from
+    // (world) and which way it faced (world yaw); and since when he has
+    // stood (s).
+    step_side: int;
+    step_done: f32;
+    step_from: V3;
+    step_from_yaw: f32;
+    stood: f32;
+    // Diving into the sea: how far into the dive's pose he is (0 to 1),
+    // and how far head over heels the dive has turned him (rad), on top
+    // of any flip.
+    dive_w: f32;
+    dive_turn: f32;
+    // His speed as shown, and its change.
+    speed: f32;
+    accel: f32;
+    // The side that was last down (he takes off from it).
+    last_down: int;
+    // Whether the latest landing has been taken up yet (a roll's, once he
+    // is back on his feet).
+    landed_seen: bool;
+    // Whether the stride has gone on from a hard landing's hold.
+    hard_on: bool;
+    was_air: bool;
+    time: f32
+}
+
+tag tumbledown
+new_gait(): *Gait@new {
+    new Gait {
+        phase: 0.0,
+        planted: [false, false],
+        toe: [v3(0.0, 0.0, 0.0), v3(0.0, 0.0, 0.0)],
+        toe_yaw: [0.0, 0.0],
+        heel: [0.0, 0.0],
+        lift_at: [v3(0.0, 0.0, 0.0), v3(0.0, 0.0, 0.0)],
+        lift_pitch: [0.0, 0.0],
+        lift_flex: [0.0, 0.0],
+        lift_knee: [0.0, 0.0],
+        slip: [0.0, 0.0],
+        swing_from: [0.5, 0.5],
+        swing_knee: [0.0, 0.0],
+        drop: 0.0,
+        drop_off: 0.0,
+        yaw: PI,
+        heading: PI,
+        body_lead: 0.0,
+        lean: 0.0,
+        absorb: 0.0,
+        absorb_v: 0.0,
+        squash: 0.0,
+        squash_v: 0.0,
+        air_w: 0.0,
+        gather_w: 0.0,
+        tuck_w: 0.0,
+        step_side: -1,
+        step_done: 0.0,
+        step_from: v3(0.0, 0.0, 0.0),
+        step_from_yaw: 0.0,
+        stood: 0.0,
+        dive_w: 0.0,
+        dive_turn: 0.0,
+        speed: 0.0,
+        accel: 0.0,
+        last_down: 0,
+        landed_seen: true,
+        hard_on: true,
+        was_air: false,
+        time: 0.0
+    }
+}
+
+// His root (his frame in the world: on the ground under his hips, facing
+// his way, leaning), without a flip's or spin's tumble; and with it, for
+// his bones.
+tag tumbledown
+gait_root: []f32 = new f32[16](0.0);
+
+tag tumbledown
+gait_tumbled: []f32 = new f32[16](0.0);
+
+// His bones, posed (see guy_bones).
+tag tumbledown
+gait_bones: []f32 = new f32[GUY_BONES * 16](0.0);
+
+// The joints, as last solved.
+tag tumbledown
+gait_joints: GuyJoints = guy_solve(guy_stand());
+
+// ---- frames ----
+// A place in the world, in his root's frame (the root is rigid).
+to_root(p: V3): V3 {
+    m: []f32 = gait_root;
+    q: V3 = v3(p.x - m[12], p.y - m[13], p.z - m[14]);
+    v3(q.x * m[0] + q.y * m[1] + q.z * m[2], q.x * m[4] + q.y * m[5] + q.z * m[6],
+        q.x * m[8] + q.y * m[9] + q.z * m[10])
+}
+
+from_root(p: V3): V3 {
+    mat_point(gait_root, p)
+}
+
+// From a foot's toe tip to its ankle, the foot turned by yaw and pitched by
+// pitch (+ toe up).
+toe_to_ankle(yaw: f32, pitch: f32): V3 {
+    f: V3 = v3(sinf(yaw) * cosf(pitch), sinf(pitch), cosf(yaw) * cosf(pitch));
+    u: V3 = v3(-sinf(yaw) * sinf(pitch), cosf(pitch), -cosf(yaw) * sinf(pitch));
+    v_add(v_scale(f, -GUY_FOOT_FRONT), v_scale(u, GUY_ANKLE_UP))
+}
+
+// The ground's height under a place in his frame, from his root's.
+ground_under(p: V3): f32 {
+    w: V3 = from_root(v3(p.x, 0.0, p.z));
+    hill_height(w.x, w.z) - gait_root[13]
+}
+
+// The ground a foot of his is put on, under a place in his frame: as
+// ground_under where that is within FOOT_STEP of the ground he is on (his
+// root's: a slope, a little step), else his own ground's height. Beside a
+// block's edge where the next block is a step lower (or higher), or over a
+// lip, a foot reaching over it stays at his own ground's height, out over
+// the edge, rather than going down to the lower block and pulling him
+// after it.
+foot_ground(p: V3): f32 {
+    g: f32 = ground_under(p);
+    if (absf(g) > FOOT_STEP) return 0.0;
+    g
+}
+
+// (How far that is: about a stair's step.)
+const FOOT_STEP: f32 = 0.2;
+
+// And how far his pelvis may drop from standing, whatever his feet ask:
+// deeper than a hard landing's crouch, it would only be a foot planted
+// too low.
+const DROP_MOST: f32 = 0.32;
+
+// ---- legs and arms by angle ----
+// A leg put by its hip flex and knee (degrees, to the trunk), the foot
+// square to the shin and pointed further by `point` (+ toe down): its ankle
+// by blockguy's own leg (guy_leg_ankle).
+set_leg(
+    p: *GuyPose,
+    side: int,
+    hip: f32,
+    knee: f32,
+    point: f32,
+    squash: f32
+) {
+    p.ankle[side] = guy_leg_ankle(p.body, side, hip * DEG, knee * DEG, 0.0, squash);
+    p.foot_pitch[side] = leg_foot_pitch(p.body, hip, knee, point);
+    p.foot_yaw[side] = 0.0;
+    p.leg_squash[side] = squash;
+    // (Its foot square to its shin: the ankle at 0.)
+    p.foot_square[side] = 1.0
+}
+
+// The pitch of a foot square to its shin, for a hip flex and knee, pointed
+// further by `point` (degrees; the leg in his front-to-back plane): the
+// shin's own angle, which the body's pitch forward turns back.
+leg_foot_pitch(
+    body: GuyBody,
+    hip: f32,
+    knee: f32,
+    point: f32
+): f32 {
+    (hip - knee - point) * DEG - body.pitch
+}
+
+arm(flex: f32, abduct: f32, elbow: f32): GuyArm {
+    GuyArm {
+        flex: flex * DEG,
+        abduct: abduct * DEG,
+        twist: guy_flipper_twist(abduct * DEG),
+        elbow: elbow * DEG,
+        forearm_twist: 0.0
+    }
+}
+
+body_at(
+    pitch: f32,
+    roll: f32,
+    yaw: f32,
+    drop: f32
+): GuyBody {
+    GuyBody {
+        pitch: pitch * DEG,
+        roll: roll * DEG,
+        yaw: yaw * DEG,
+        drop: drop,
+        shift: 0.0,
+        squash: 0.0,
+        breath: 1.0
+    }
+}
+
+// A stance foot pinned by its toe (see GuyPose.pin), as the gait keeps it.
+pin_stance(p: *GuyPose, g: *Gait, side: int) {
+    p.pin[side] = true;
+    p.pin_point[side] = to_root(g.toe[side]);
+    p.pin_yaw[side] = wrap_angle(g.toe_yaw[side] - g.yaw);
+    p.heel_lift_most[side] = HEEL_STANCE;
+    // (On the ground the foot is turned by its pin, never held square to
+    // its shin, whatever of the air's pose is still mixed in.)
+    p.foot_square[side] = 0.0;
+    p.pin_ankle_most[side] = ANKLE_STANCE
+}
+
+// ---- the frame's pose ----
+// Pose him for this frame: the runner r shown at `at` (between physics
+// steps), dt seconds on. Sets gait_root, gait_tumbled, gait_joints and
+// gait_bones.
+tag tumbledown
+gait_update(
+    g: *Gait,
+    r: *Runner,
+    at: V3,
+    dt: f32
+) {
+    g.time = g.time + dt;
+    // Which way he faces: the way he goes.
+    way: V3 = run_dir(r.carve);
+    if (r.air && r.vx * r.vx + r.vz * r.vz > 0.01) way = v_norm(v3(r.vx, 0.0, r.vz));
+    yaw_was: f32 = g.yaw;
+    g.heading = atan2f(way.x, way.z);
+    // (Slow, he turns at most SLOW_TURN a second, and freely by a run;
+    // and on the ground, slower than FEET_TURN_SPEED, no further than
+    // FEET_TWIST_MOST from a foot that is down, which his feet catch up
+    // by quick steps: see stand_steps.)
+    want_yaw: f32 = approach_angle(g.yaw, g.heading, ease(12.0, dt));
+    most: f32 = lerpf(SLOW_TURN, 100.0, smoothstepf(2.5, 4.0, g.speed)) * dt;
+    if (r.air) most = 100.0;
+    turned_yaw: f32 = g.yaw + clampf(wrap_angle(want_yaw - g.yaw), -most, most);
+    if (!r.air && g.speed < FEET_TURN_SPEED) turned_yaw = held_by_feet(g, turned_yaw);
+    g.yaw = turned_yaw;
+    // Speed shown, and how fast it changes.
+    v: f32 = r.speed;
+    if (r.air) v = sqrtf(r.vx * r.vx + r.vz * r.vz);
+    was: f32 = g.speed;
+    g.speed = lerpf(g.speed, v, ease(10.0, dt));
+    g.accel = lerpf(g.accel, (g.speed - was) / maxf(dt, 0.001), ease(4.0, dt));
+    // Leaning into a turn, on the ground: by the speed and how fast he
+    // turns (as he is shown turning), at most 25 degrees; running, not
+    // walking or jogging, whose feet are down too long to lean over.
+    lean: f32 = 0.0;
+    turning: f32 = wrap_angle(g.yaw - yaw_was) / maxf(dt, 0.001);
+    if (!r.air && dt > 0.0) lean = clampf(atan2f(g.speed * turning, 9.8), -25.0 * DEG,
+        25.0 * DEG) * smoothstepf(2.2, 3.2, g.speed);
+    g.lean = lerpf(g.lean, lean, ease(6.0, dt));
+    mat_identity(gait_root);
+    mat_translate(gait_root, at);
+    mat_rotate(gait_root, v3(0.0, 1.0, 0.0), g.yaw);
+    mat_rotate(gait_root, v3(0.0, 0.0, 1.0), g.lean);
+    // Landing: the knees give (into the stride, by how hard), and the body
+    // squashes.
+    // (Into the sea he does not land: he goes under as he dived.)
+    if (!r.air && g.was_air && !r.in_water) {
+        fall: f32 = minf(r.land_fall, 9.0);
+        if (r.landing == LAND_SOFT || r.landing == LAND_STUMBLE) g.absorb_v = g.absorb_v + GAIT_ABSORB_KICK * minf(15.0 + 6.0 * fall,
+            45.0);
+        // (A squash on its own spring, one rebound: deeper for a harder
+        // landing.)
+        deep: f32 = LAND_SQUASH_SOFT;
+        if (r.landing == LAND_HARD) deep = LAND_SQUASH_HARD;
+        if (r.landing == LAND_ROLL) deep = LAND_SQUASH_ROLL;
+        g.squash_v = g.squash_v - deep * LAND_SQUASH_KICK;
+        // (Rolling, his feet come back under him at the roll's end.)
+        g.landed_seen = r.landing != LAND_ROLL;
+        g.hard_on = r.landing != LAND_HARD;
+        if (g.landed_seen) gait_land(g, r.landing == LAND_HARD)
+    }
+    if (!r.air && !g.landed_seen && r.since_land >= ROLL_TIME) {
+        g.landed_seen = true;
+        gait_land(g, false)
+    }
+    // From a hard landing's hold, the stride goes on from the foot ahead,
+    // just down; the other leaves the ground.
+    if (!r.air && !g.hard_on && r.since_land >= HARD_HOLD) {
+        g.hard_on = true;
+        ahead: int = 0;
+        if (to_root(g.toe[1]).z > to_root(g.toe[0]).z) ahead = 1;
+        // (The other steps through quickly, to come down in STEP_OUT.)
+        other: int = 1 - ahead;
+        f_other: f32 = 1.0 - STEP_OUT * gait_row(maxf(g.speed, 1.0)).cadence * 0.5;
+        g.phase = frac(f_other - 0.5 * other as f32);
+        foot_up(g, other, f_other)
+    }
+    spring_step(&g.absorb, &g.absorb_v, 0.0, Spring { omega: GAIT_ABSORB_OMEGA, damping: GAIT_ABSORB_DAMPING },
+        dt);
+    spring_step(&g.squash, &g.squash_v, 0.0, Spring { omega: LAND_SQUASH_OMEGA, damping: LAND_SQUASH_DAMPING },
+        dt);
+    // The air's pose in (0.08 s, the takeoff) and out.
+    if (r.air) g.air_w = minf(g.air_w + dt / 0.08, 1.0) else g.air_w = maxf(g.air_w - dt / 0.1,
+        0.0);
+    tucked: f32 = 0.0;
+    if (r.tucking) tucked = 1.0;
+    g.tuck_w = lerpf(g.tuck_w, tucked, ease(14.0, dt));
+    dive_update(g, r);
+    ground: GuyPose = ground_pose(g, r, dt);
+    p: GuyPose = ground;
+    if (g.air_w > 0.0) {
+        k: f32 = g.air_w * g.air_w * (3.0 - 2.0 * g.air_w);
+        p = guy_mix(ground, air_pose(g, r), k);
+        // (A foot already down stays pinned where it came down, whatever
+        // the air's pose is still mixed in.)
+        for side in 0..2 {
+            if (g.planted[side] && !r.air) pin_stance(&p, g, side)
+        }
+    }
+    p = landing_pose(r, p);
+    // Diving: his pose goes over to the dive's.
+    if (g.dive_w > 0.0) p = guy_mix(p, dive_pose(), smoothstepf(0.0, 1.0, g.dive_w));
+    if (r.in_water) {
+        for side in 0..2 g.planted[side] = false
+    }
+    g.was_air = r.air;
+    gait_joints = solve_stance(p);
+    // A foot down that its leg can no longer reach, even with its heel up,
+    // leaves the ground (but not in a landing's held crouch).
+    if (!r.air && !landing_held(r)) {
+        for side in 0..2 {
+            // (Nor can it, its hip as far back as it goes: kept there, the
+            // foot would be dragged.)
+            at_limit: bool = gait_joints.legs[side].flex <= guy_limit_low_of(GUY_JOINT_HIP_FLEX) + 0.001;
+            // (Nor, its heel up as far as it goes and its ankle bent as far
+            // as a foot down may: he has got ahead of it.)
+            at_limit = at_limit || gait_joints.heel_lift[side] >= HEEL_STANCE - 0.01 && gait_joints.legs[side].ankle >= ANKLE_STANCE - 0.01;
+            // (Nor, its toe not where it was put, as a leg reaching its
+            // farthest leaves it: it leaves before it would slide.)
+            if (g.planted[side]) at_limit = at_limit || v_len(v_sub(guy_point_on(gait_joints,
+                guy_foot(side), guy_toe_tip()), to_root(g.toe[side]))) > TOE_HOLD;
+            if (g.planted[side] && (gait_joints.pin_short[side] > 0.002 || at_limit) && g.speed >= STAND_SPEED) foot_up(g,
+                side, frac(g.phase + 0.5 * side as f32))
+        }
+    }
+    for side in 0..2 g.heel[side] = gait_joints.heel_lift[side];
+    // The tumble: a flip about his middle, across; a spin about upright;
+    // and the roll after a big landing, on its own pivot (see roll_lift).
+    mat_copy(gait_tumbled, gait_root);
+    mat_rotate(gait_tumbled, v3(0.0, 1.0, 0.0), r.spin);
+    turned: f32 = roll_turn(r);
+    flip: f32 = r.flip + turned + g.dive_turn;
+    if (!r.air && r.landing == LAND_ROLL && r.since_land < ROLL_TIME) mat_translate(gait_tumbled,
+        v3(0.0, roll_lift(r.since_land), 0.0));
+    mat_translate(gait_tumbled, v3(0.0, TUMBLE_HEIGHT, 0.0));
+    mat_rotate(gait_tumbled, v3(1.0, 0.0, 0.0), flip);
+    mat_translate(gait_tumbled, v3(0.0, -TUMBLE_HEIGHT, 0.0));
+    guy_bones(gait_joints, gait_tumbled, gait_bones, 0);
+    // Rolling, his lowest point is measured against the ground (and put on
+    // it, by the little the pivot misses: see keep_on_ground).
+    if (!r.air && r.landing == LAND_ROLL && r.since_land < ROLL_TIME) keep_on_ground(at.y);
+    gait_measure(g)
+}
+
+// A kick to the landing's give, so that it is deepest (by the kick's
+// times 1) about 0.08 s after (as skate's: see ABSORB_KICK there).
+const GAIT_ABSORB_KICK: f32 = 34.9;
+
+// The knees' give's spring: as skate's landing soak, omega 16, damped 0.7.
+const GAIT_ABSORB_OMEGA: f32 = 16.0;
+
+const GAIT_ABSORB_DAMPING: f32 = 0.7;
+
+// The joints of a pose with feet down: solved with each stance leg's
+// stretch set for its knee's target with its heel as the stride's schedule
+// lifts it (see ground_pose); and where a heel had to lift further than
+// that (the ankle at the end of its bend, or the leg short), solved again
+// with that heel kept and the leg's stretch set for it.
+solve_stance(p: GuyPose): GuyJoints {
+    // (With no foot down, as solved, without guy_solve's sitting back for
+    // a bent ankle: a runner in the air does not.)
+    if (!(p.pin[0] || p.pin[1])) return guy_clamp(guy_solve_unlimited(p));
+    j: GuyJoints = guy_solve(p);
+    q: GuyPose = p;
+    again: bool = false;
+    for side in 0..2 {
+        if (q.pin[side] && stance_knee[side] > 0.0 && j.heel_lift[side] > q.heel_lift_least[side] + 0.01) {
+            q.heel_lift_least[side] = j.heel_lift[side];
+            q.leg_squash[side] = stance_squash(q, side, j.heel_lift[side], stance_knee[side],
+                stance_stretch[side]);
+            again = true
+        }
+    }
+    if (again) j = guy_solve(q);
+    // (A pinned toe the solve misses by a little, as a leg twisting and
+    // leaning against its foot can, is aimed again by as much the other
+    // way: so that it stays where it was put. Not where the leg falls
+    // short: that foot is lifted off.)
+    for _round in 0..2 {
+        moved: bool = false;
+        for side in 0..2 {
+            if (q.pin[side] && j.pin_short[side] <= 0.0) {
+                miss: V3 = v_sub(p.pin_point[side], guy_point_on(j, guy_foot(side),
+                    guy_toe_tip()));
+                if (v_len(miss) > 0.0005 && v_len(miss) < 0.15) {
+                    q.pin_point[side] = v_add(q.pin_point[side], miss);
+                    moved = true
+                }
+            }
+        }
+        if (moved) j = guy_solve(q)
+    }
+    j
+}
+
+// The stance knee each pinned leg aims for, and the most it may stretch,
+// this frame (set by ground_pose, for solve_stance).
+stance_knee: [2]f32 = [0.0, 0.0];
+
+stance_stretch: [2]f32 = [1.0, 1.0];
+
+// How long a pinned leg must be (as a squash, see GuyLeg) for its knee to
+// be `knee` (rad) reaching its foot, the heel lifted `heel`: within the
+// squash a stance leg may have, up to `most`.
+stance_squash(
+    p: GuyPose,
+    side: int,
+    heel: f32,
+    knee: f32,
+    most: f32
+): f32 {
+    a: V3 = v_add(p.pin_point[side], toe_to_ankle(p.pin_yaw[side], -heel));
+    hip: V3 = guy_hip(p.body, p.hips_yaw, side);
+    clampf(v_len(v_sub(a, hip)) / guy_leg_reach(knee, 1.0), 0.8, most)
+}
+
+// Whether a landing's own pose holds his feet (a hard one's absorb, or a
+// roll).
+landing_held(r: *Runner): bool {
+    r.landing == LAND_ROLL && r.since_land < ROLL_TIME || r.landing == LAND_HARD && r.since_land < HARD_HOLD
+}
+
+// How far a toe that is down may be from where it was put before its foot
+// leaves the ground (m).
+const TOE_HOLD: f32 = 0.0015;
+
+// How far the heels lift in a hard landing's crouch (25 degrees), as he
+// goes on over his feet.
+const HEEL_HARD: f32 = 0.436;
+
+// Out of a hard landing's hold, how soon the first step comes down (s).
+const STEP_OUT: f32 = 0.12;
+
+// Landing hard, both feet stay pinned for the absorb's bottom.
+const HARD_HOLD: f32 = 0.1;
+
+// How high up he tumbles about.
+const TUMBLE_HEIGHT: f32 = 0.5;
+
+// Gathering, his body squashes down by TAKEOFF_SQUASH; leaving the
+// ground, it stretches by TAKEOFF_STRETCH, for TAKEOFF_STRETCH_FOR.
+const TAKEOFF_SQUASH: f32 = 0.08;
+
+// How far he sinks gathering for a jump from standing.
+const GATHER_STAND_DROP: f32 = 0.07;
+
+const TAKEOFF_STRETCH: f32 = 0.1;
+
+const TAKEOFF_STRETCH_FOR: f32 = 0.1;
+
+// The body's squash on landing, at its deepest (shares of his height),
+// soft, hard and rolling; and a spring of 14 a second, damped 0.5, that
+// rebounds once visibly, kicked so as to reach them (its first peak is
+// 0.546 of the kick over 14).
+const LAND_SQUASH_SOFT: f32 = 0.12;
+
+const LAND_SQUASH_HARD: f32 = 0.18;
+
+const LAND_SQUASH_ROLL: f32 = 0.15;
+
+const LAND_SQUASH_KICK: f32 = 25.6;
+
+const LAND_SQUASH_OMEGA: f32 = 14.0;
+
+const LAND_SQUASH_DAMPING: f32 = 0.5;
+
+frac(a: f32): f32 {
+    a - floorf(a)
+}
+
+// ---- on the ground ----
+// The stride's pose, keeping each foot's place.
+ground_pose(g: *Gait, r: *Runner, dt: f32): GuyPose {
+    p: GuyPose = guy_stand();
+    p.hips_yaw = 0.0;
+    row: GaitRow = gait_row(maxf(g.speed, 1.0));
+    gathering: bool = r.winding && !r.air;
+    stumbling: bool = r.landing == LAND_STUMBLE && r.since_land < STUMBLE_TIME && !r.air;
+    held: bool = landing_held(r) && !r.air;
+    cadence: f32 = row.cadence;
+    contact: f32 = row.contact;
+    ahead: f32 = row.ahead;
+    if (gathering) {
+        // (10% quicker steps, 15% shorter.)
+        cadence = cadence * 1.1;
+        contact = contact * 0.85 / 1.1;
+        ahead = ahead * 0.85
+    }
+    if (stumbling) {
+        cadence = STUMBLE_CADENCE;
+        contact = 0.08;
+        ahead = 0.05
+    }
+    // (Below a walk, the stride slows with him: the same stride, slower.)
+    slow: f32 = clampf(g.speed / row.speed, 0.0, 1.0);
+    if (g.speed < 1.0) {
+        cadence = cadence * maxf(slow, 0.3);
+        contact = contact / maxf(slow, 0.3)
+    }
+    period: f32 = 2.0 / cadence;
+    duty: f32 = clampf(contact / period, 0.08, 0.7);
+    standing: bool = r.speed < STAND_SPEED && !r.air && !held;
+    walking: f32 = 1.0 - smoothstepf(WALK_SPEED - 0.2, WALK_SPEED + 0.2, g.speed);
+    // The stride goes on only on the ground, while he goes.
+    before: f32 = g.phase;
+    if (!r.air && !standing && !held) g.phase = g.phase + cadence * 0.5 * dt;
+    g.phase = frac(g.phase);
+    // The feet: down where each swing ends, up when its time is up (or
+    // sooner, when its leg can no longer reach it: see gait_update).
+    for side in 0..2 {
+        f0: f32 = frac(before + 0.5 * side as f32);
+        f1: f32 = frac(g.phase + 0.5 * side as f32);
+        if (!r.air && !standing && !held) {
+            if (f1 < f0 && !g.planted[side]) foot_down(g, side, ahead);
+            if (g.planted[side] && f1 >= duty && f1 < 0.999) foot_up(g, side, f1)
+        }
+        if (r.air) g.planted[side] = false
+    }
+    if (standing) stand_steps(g, dt) else {
+        g.stood = 0.0;
+        // (Off again from a standing step: that foot down where it is.)
+        if (g.step_side >= 0) {
+            side: int = g.step_side;
+            g.step_side = -1;
+            if (!g.planted[side]) foot_down_at(g, side, to_root(guy_bone_point(gait_bones,
+                0, guy_foot(side), guy_toe_tip())), foot_facing(side))
+        }
+    }
+    // The body: pitched forward by the speed and the speeding up (and back
+    // a little, by BRAKE_LEAN at most, slowing), rolling toward the foot
+    // that is down, its shoulders turning with the arms.
+    leaning: f32 = atan2f(g.accel, 9.8) / DEG;
+    pitch: f32 = row.pitch + clampf(leaning, -row.pitch - BRAKE_LEAN, 12.0);
+    // (Toward side 0 at its mid-stance, side 1 at its: smoothly between.)
+    roll: f32 = -3.0 * cosf(TAU * (g.phase - duty * 0.5));
+    swing0: f32 = arm_swing(g, 0);
+    yaw: f32 = 6.0 * swing0;
+    if (standing) {
+        // Idle: weight shifting slowly from foot to foot, his body
+        // rolling a little over the foot it is on.
+        pitch = clampf(leaning, -BRAKE_LEAN, 0.0);
+        yaw = 0.0;
+        roll = IDLE_ROLL * sinf(TAU * IDLE_SHIFT * g.stood) * smoothstepf(0.5, 1.5,
+            g.stood)
+    }
+    if (gathering) {
+        pitch = pitch + 6.0 - 6.0 * r.wind_y;
+        yaw = yaw - 20.0 * r.wind_x
+    }
+    // (Turning slowly, his body turns on ahead of his hips toward his way.)
+    lead: f32 = clampf(wrap_angle(g.heading - g.yaw) / DEG, -BODY_LEAD_MOST, BODY_LEAD_MOST) * (1.0 - smoothstepf(FEET_TURN_SPEED,
+        4.0, g.speed));
+    if (r.air) lead = 0.0;
+    g.body_lead = lerpf(g.body_lead, lead, ease(14.0, dt));
+    yaw = yaw + g.body_lead;
+    p.body = body_at(pitch, roll, yaw, 0.0);
+    p.body.breath = 1.0 + 0.012 * sinf(g.time * 2.4);
+    // The stance legs: each pinned by its toe; the knee it aims for by how
+    // far through its time down it is; and the pelvis as high as those
+    // knees need (lowest of what they need, both feet down).
+    need: f32 = -1.0;
+    squash: f32 = 0.0;
+    for side in 0..2 {
+        stance_knee[side] = 0.0;
+        stance_stretch[side] = 1.0;
+        if (g.planted[side]) {
+            f: f32 = frac(g.phase + 0.5 * side as f32);
+            prog: f32 = clampf(f / duty, 0.0, 1.0);
+            if (standing || held) prog = 0.4;
+            knee: f32 = stance_knee_at(row, prog) + g.absorb;
+            if (standing) knee = 3.0;
+            // (No stretch: the long leg reaches its foot as it is.)
+            stance_knee[side] = knee * DEG;
+            stance_stretch[side] = 1.0;
+            pin_stance(&p, g, side);
+            // (Its heel peeling up late in its time down.)
+            if (!standing && !held) p.heel_lift_least[side] = HEEL_STANCE * smoothstepf(0.6,
+                1.0, prog) * (1.0 - walking);
+            heel: f32 = p.heel_lift_least[side];
+            ankle: V3 = v_add(p.pin_point[side], toe_to_ankle(p.pin_yaw[side], -heel));
+            // (The hip, at the pelvis's height; the drop that puts it over
+            // the ankle with the knee so.)
+            hip: V3 = guy_hip(p.body, p.hips_yaw, side);
+            reach: f32 = guy_leg_reach(knee * DEG, 1.0);
+            out: V3 = v_sub(hip, ankle);
+            flat: f32 = out.x * out.x + out.z * out.z;
+            up: f32 = sqrtf(maxf(reach * reach - flat, 0.0));
+            need = maxf(need, hip.y - (ankle.y + up));
+            squash = squash + row.squash * sinf(PI * prog)
+        }
+    }
+    drop: f32 = 0.0;
+    if (need > -0.5) {
+        drop = need;
+        g.drop_off = need
+    } else {
+        // Both feet up: from the drop at the latest toe-off to that at the
+        // next touchdown, rising a little between. (A step is half the
+        // stride, from one foot down to the other; its first 2 duty is the
+        // foot's time down.)
+        step: f32 = frac(g.phase * 2.0);
+        u: f32 = clampf((step - 2.0 * duty) / maxf(1.0 - 2.0 * duty, 0.01), 0.0, 1.0);
+        drop = lerpf(g.drop_off, touchdown_drop(row, ahead), smoothstepf(0.0, 1.0,
+            u)) - row.rise * sinf(PI * u)
+    }
+    if (standing) drop = 0.005;
+    // (Gathering, he sinks: from standing, deeper and eased in, for a
+    // jump from both feet.)
+    if (gathering && standing) drop = drop + GATHER_STAND_DROP * g.gather_w else if (gathering) drop = drop + 0.03;
+    drop = clampf(drop, -0.1, DROP_MOST);
+    g.drop = drop;
+    p.body.drop = drop;
+    // (The body squashed at mid-stance, stretched in mid-flight.)
+    flight: f32 = 0.0;
+    if (need <= -0.5) flight = sinf(PI * clampf((frac(g.phase * 2.0) - 2.0 * duty) / maxf(1.0 - 2.0 * duty,
+        0.01), 0.0, 1.0));
+    p.body.squash = g.squash - squash + row.stretch * flight;
+    // (Gathering for a jump, he squashes down, ready to spring: see also
+    // air_pose's stretch as he leaves.)
+    gt: f32 = 0.0;
+    if (gathering) gt = 1.0;
+    g.gather_w = lerpf(g.gather_w, gt, ease(1.0 / 0.08, dt));
+    p.body.squash = p.body.squash - TAKEOFF_SQUASH * g.gather_w;
+    for side in 0..2 {
+        if (g.planted[side]) p.leg_squash[side] = stance_squash(p, side, p.heel_lift_least[side],
+            stance_knee[side], stance_stretch[side])
+    }
+    // The swinging legs, by their angles, from where each left the ground
+    // to where it will come down.
+    for side in 0..2 {
+        if (!g.planted[side] && side == g.step_side) step_leg(g, &p, side) else if (!g.planted[side]) swing_leg(g,
+            &p, row, side, ahead, cadence)
+    }
+    // The arms, opposite the legs: out from his sides, curving in as an
+    // arm swings forward and out as it swings back.
+    for side in 0..2 {
+        c: f32 = arm_swing(g, side);
+        mid: f32 = (row.arm_fwd - row.arm_back) * 0.5;
+        amp: f32 = (row.arm_fwd + row.arm_back) * 0.5;
+        flex: f32 = mid + amp * c;
+        elbow: f32 = row.elbow;
+        if (g.speed < 1.0) {
+            // (Slower than a walk, the swing dies away to standing.)
+            k: f32 = smoothstepf(STAND_SPEED, 1.0, g.speed);
+            flex = flex * k;
+            elbow = lerpf(8.0, elbow, k)
+        }
+        if (gathering) {
+            // (Swinging back to -25 at the bottom, elbows 30.)
+            flex = lerpf(-25.0, row.arm_fwd, 0.5 + 0.5 * c);
+            elbow = 30.0
+        }
+        out: f32 = 15.0;
+        if (standing) {
+            flex = 2.0 * sinf(g.time * 1.3 + side as f32);
+            elbow = 8.0;
+            out = 8.0
+        }
+        p.arms[side] = arm(flex, out, elbow)
+    }
+    if (stumbling) {
+        // Stumbling: the arms go round, out of step, one low as the other
+        // goes high; the body rocks, less and less.
+        k: f32 = 1.0 - r.since_land / STUMBLE_TIME;
+        for side in 0..2 {
+            w: f32 = sinf(26.0 * r.since_land + PI * side as f32);
+            p.arms[side] = arm(10.0, 80.0 + 50.0 * w * k, lerpf(10.0, 60.0, 0.5 + 0.5 * w))
+        }
+        p.body.roll = p.body.roll + 10.0 * DEG * k * sinf(13.0 * r.since_land)
+    }
+    p
+}
+
+// A stumble: three quick steps, at 6 a second.
+const STUMBLE_TIME: f32 = 0.5;
+
+const STUMBLE_CADENCE: f32 = 6.0;
+
+// The stance knee (deg) prog of the way through its time down: from
+// touchdown's, deepest at 40%, to toe-off's.
+stance_knee_at(row: GaitRow, prog: f32): f32 {
+    if (prog < 0.4) return lerpf(row.knee_down, row.knee_mid, smoothstepf(0.0, 0.4,
+        prog));
+    lerpf(row.knee_mid, row.knee_off, smoothstepf(0.4, 1.0, prog))
+}
+
+// The pelvis's drop with a foot just down `ahead` of its hip, flat, its
+// knee at touchdown's.
+touchdown_drop(row: GaitRow, ahead: f32): f32 {
+    reach: f32 = guy_leg_reach(row.knee_down * DEG, 1.0);
+    up: f32 = sqrtf(maxf(reach * reach - ahead * ahead, 0.0));
+    GUY_PELVIS_Y - (GUY_ANKLE_UP + up)
+}
+
+// How far forward side's arm is swung (-1 back to 1 forward): opposite its
+// leg, most forward as the other foot comes down.
+arm_swing(g: *Gait, side: int): f32 {
+    -cosf(TAU * frac(g.phase + 0.5 * side as f32))
+}
+
+// A swinging leg: by its hip and knee, from where it left the ground (the
+// angles it had) to the swing's peak (the knee folded, the heel up behind)
+// and the thigh driven forward, then reaching to come down `ahead` of the
+// hip, nearly flat; passing under the hip at least row.clear up.
+swing_leg(
+    g: *Gait,
+    p: *GuyPose,
+    row: GaitRow,
+    side: int,
+    ahead: f32,
+    cadence: f32
+) {
+    f: f32 = frac(g.phase + 0.5 * side as f32);
+    from_f: f32 = g.swing_from[side];
+    u: f32 = clampf((f - from_f) / maxf(1.0 - from_f, 0.05), 0.0, 1.0);
+    hip_deg: f32 = lerpf(g.lift_flex[side] / DEG, row.hip_fwd, smoothstepf(0.15, 0.8,
+        u));
+    // (The kick up behind, its most 30% in, then opening to reach.)
+    knee_deg: f32 = lerpf(g.lift_knee[side] / DEG, row.kick, smoothstepf(0.0, 0.3,
+        u));
+    if (u > 0.3) knee_deg = lerpf(row.kick, row.knee_reach, smoothstepf(0.3, 0.85,
+        u));
+    a: V3 = guy_leg_ankle(p.body, side, hip_deg * DEG, knee_deg * DEG, 0.0, 1.0);
+    // (From where it left the ground at first, and to where it comes down
+    // at the end.)
+    s: f32 = guy_side_sign(side);
+    land: V3 = v3(s * FOOT_OUT + side_out(g, side), 0.0, GUY_PELVIS_Z + ahead);
+    land.y = foot_ground(land) + GUY_ANKLE_UP;
+    a.x = lerpf(g.lift_at[side].x, land.x, smoothstepf(0.0, 1.0, u));
+    a = v_lerp(a, land, smoothstepf(0.7, 1.0, u));
+    // (Clear of the ground under it, passing under the hip.)
+    low: f32 = foot_ground(a) + GUY_ANKLE_UP + row.clear * smoothstepf(0.2, 0.5, u) * (1.0 - smoothstepf(0.6,
+        0.9, u));
+    if (a.y < low) a.y = low;
+    p.ankle[side] = a;
+    // The foot: square to its shin all through the swing (its ankle at
+    // 0), from as it left the ground; flat to come down.
+    swing_time: f32 = maxf((1.0 - from_f) * 2.0 / maxf(cadence, 0.5), 0.05);
+    hanging: f32 = leg_foot_pitch(p.body, hip_deg, knee_deg, 0.0);
+    pitch: f32 = lerpf(g.lift_pitch[side], hanging, smoothstepf(0.0, minf(0.06 / swing_time,
+        0.5), u));
+    p.foot_pitch[side] = lerpf(pitch, 0.0, smoothstepf(0.75, 0.97, u));
+    p.foot_yaw[side] = 0.0;
+    p.leg_squash[side] = 1.0
+}
+
+// How much further out a foot goes for his lean (the outside foot, in a
+// turn).
+side_out(g: *Gait, side: int): f32 {
+    s: f32 = guy_side_sign(side);
+    // (Leaning toward +x, the -x foot is the outside one.)
+    if (s * g.lean < 0.0) return s * LEAN_OUT * minf(absf(g.lean) / (25.0 * DEG),
+        1.0);
+    0.0
+}
+
+// A foot coming down, where its swing has brought it: its toe there, on
+// the ground, is where it stays, turned the way he goes.
+foot_down(g: *Gait, side: int, ahead: f32) {
+    s: f32 = guy_side_sign(side);
+    land: V3 = v3(s * FOOT_OUT + side_out(g, side), 0.0, GUY_PELVIS_Z + ahead);
+    toe: V3 = v_add(land, v3(0.0, 0.0, GUY_FOOT_FRONT));
+    toe.y = foot_ground(toe);
+    g.toe[side] = from_root(toe);
+    // (Facing his way: he turns no faster than a step can follow, see
+    // SLOW_TURN, so each foot down is turned from the last by little.)
+    g.toe_yaw[side] = g.yaw;
+    g.planted[side] = true;
+    g.heel[side] = 0.0;
+    g.slip[side] = 0.0;
+    g.last_down = side;
+    gait_note(g, side, true, 0.0)
+}
+
+// A foot leaving the ground at stride point f: from where it is, as it is,
+// it swings.
+foot_up(g: *Gait, side: int, f: f32) {
+    if (!g.planted[side]) return;
+    g.lift_at[side] = to_root(guy_bone_point(gait_bones, 0, guy_foot(side), v3(0.0,
+        0.0, 0.0)));
+    g.lift_pitch[side] = -g.heel[side];
+    g.lift_flex[side] = gait_joints.legs[side].flex;
+    g.lift_knee[side] = gait_joints.legs[side].knee;
+    g.swing_from[side] = f;
+    g.swing_knee[side] = 0.0;
+    g.planted[side] = false;
+    gait_note(g, side, false, g.slip[side])
+}
+
+// A yaw for his hips kept within FEET_TWIST_MOST of each foot that is
+// down (no further from it than it already is, if that is more), so that
+// no leg twists past its hip's limit and drags its foot round.
+held_by_feet(g: *Gait, yaw: f32): f32 {
+    held: f32 = yaw;
+    for side in 0..2 {
+        if (g.planted[side]) {
+            already: f32 = absf(wrap_angle(g.yaw - g.toe_yaw[side]));
+            most: f32 = maxf(FEET_TWIST_MOST, already);
+            held = g.toe_yaw[side] + clampf(wrap_angle(held - g.toe_yaw[side]), -most,
+                most)
+        }
+    }
+    held
+}
+
+// Standing: each foot comes back under his hip, facing his way, by small
+// steps, one foot at a time, never by sliding or turning a foot that is
+// down. A foot still swinging as he stops steps down under him; a foot down
+// but away from its place (he stopped with it ahead or behind, or turned
+// on the spot) steps over to it. Turning, each step is quick and the foot
+// comes down turned ahead of his hips, toward his way (see land_turn), so
+// that his hips can turn on past it.
+stand_steps(g: *Gait, dt: f32) {
+    g.stood = g.stood + dt;
+    g.phase = 0.0;
+    if (g.step_side >= 0) {
+        // (Quick while he turns or the foot does: see STEP_TIME_QUICK.)
+        step_time: f32 = STEP_TIME;
+        if (absf(wrap_angle(g.heading - g.yaw)) > STEP_TURN || absf(wrap_angle(g.step_from_yaw - g.yaw - land_turn(g))) > STEP_TURN) step_time = STEP_TIME_QUICK;
+        g.step_done = g.step_done + dt / step_time;
+        if (g.step_done >= 1.0) {
+            side: int = g.step_side;
+            g.step_side = -1;
+            turn: f32 = land_turn(g);
+            foot_down_at(g, side, stand_toe(side, turn), g.yaw + turn)
+        }
+        return
+    }
+    // (Neither down, as when he is put somewhere: both under him at once.)
+    if (!g.planted[0] && !g.planted[1] && g.step_side < 0) {
+        for side in 0..2 foot_down_at(g, side, stand_toe(side, 0.0), g.yaw);
+        return
+    }
+    // (A foot in the air: it steps down under him at once.)
+    for side in 0..2 {
+        if (!g.planted[side] && g.step_side < 0) begin_step(g, side)
+    }
+    if (g.step_side >= 0) return;
+    // (Else the foot furthest from its place, if it is far enough off,
+    // and the other is down.)
+    worst: int = -1;
+    off: f32 = 0.0;
+    for side in 0..2 {
+        d: f32 = foot_off(g, side);
+        if (g.planted[1 - side] && d > off) {
+            off = d;
+            worst = side
+        }
+    }
+    if (worst >= 0 && off > 1.0) {
+        foot_up(g, worst, 0.5);
+        begin_step(g, worst)
+    }
+}
+
+// Which way a standing step's foot comes down, from his hips' way (rad):
+// toward the way he is going, by at most FEET_TWIST_MOST.
+land_turn(g: *Gait): f32 {
+    clampf(wrap_angle(g.heading - g.yaw), -FEET_TWIST_MOST, FEET_TWIST_MOST)
+}
+
+// How far a foot that is down is from its standing place: as shares of
+// STEP_OFF (across the ground) and STEP_TURN (in which way it faces); 1 or
+// more is far enough to step.
+foot_off(g: *Gait, side: int): f32 {
+    if (!g.planted[side]) return 0.0;
+    turn: f32 = land_turn(g);
+    at: V3 = to_root(g.toe[side]);
+    want: V3 = stand_toe(side, turn);
+    across: f32 = sqrtf((at.x - want.x) * (at.x - want.x) + (at.z - want.z) * (at.z - want.z));
+    maxf(across / STEP_OFF, absf(wrap_angle(g.toe_yaw[side] - g.yaw - turn)) / STEP_TURN)
+}
+
+// A foot's standing place's toe (his frame): under its hip, with his hips
+// turned `turn` (rad) from now, facing their way.
+stand_toe(side: int, turn: f32): V3 {
+    x: f32 = guy_side_sign(side) * FOOT_OUT;
+    z: f32 = GUY_PELVIS_Z + GUY_FOOT_FRONT;
+    toe: V3 = v3(x * cosf(turn) + z * sinf(turn), 0.0, z * cosf(turn) - x * sinf(turn));
+    toe.y = foot_ground(toe);
+    toe
+}
+
+// A standing step begins.
+begin_step(g: *Gait, side: int) {
+    g.step_side = side;
+    g.step_done = 0.0;
+    g.step_from = guy_bone_point(gait_bones, 0, guy_foot(side), v3(0.0, 0.0, 0.0));
+    g.step_from_yaw = foot_facing(side)
+}
+
+// Which way a foot faces as drawn (world yaw).
+foot_facing(side: int): f32 {
+    ankle: V3 = guy_bone_point(gait_bones, 0, guy_foot(side), v3(0.0, 0.0, 0.0));
+    toe: V3 = guy_bone_point(gait_bones, 0, guy_foot(side), guy_toe_tip());
+    atan2f(toe.x - ankle.x, toe.z - ankle.z)
+}
+
+// A foot put down with its toe at `toe` (his frame), facing `yaw` (world).
+foot_down_at(
+    g: *Gait,
+    side: int,
+    toe: V3,
+    yaw: f32
+) {
+    g.toe[side] = from_root(toe);
+    g.toe_yaw[side] = yaw;
+    g.planted[side] = true;
+    g.heel[side] = 0.0;
+    g.slip[side] = 0.0;
+    g.last_down = side;
+    gait_note(g, side, true, 0.0)
+}
+
+// A standing step's leg: its ankle from where it set off to its place,
+// over a low arc, the foot flat, turning to the way it comes down.
+step_leg(g: *Gait, p: *GuyPose, side: int) {
+    u: f32 = smoothstepf(0.0, 1.0, clampf(g.step_done, 0.0, 1.0));
+    turn: f32 = land_turn(g);
+    to: V3 = v_add(stand_toe(side, turn), toe_to_ankle(turn, 0.0));
+    a: V3 = v_lerp(to_root(g.step_from), to, u);
+    a.y = a.y + STEP_HIGH * sinf(PI * u);
+    // (The leg shortening as a toy's does, by STEP_SQUASH at the top, so
+    // that the knee need not come up.)
+    from_turn: f32 = wrap_angle(g.step_from_yaw - g.yaw);
+    p.ankle[side] = a;
+    p.foot_pitch[side] = 0.0;
+    p.foot_yaw[side] = from_turn + wrap_angle(turn - from_turn) * u;
+    p.foot_square[side] = 0.0;
+    p.leg_squash[side] = 1.0 - STEP_SQUASH * sinf(PI * u)
+}
+
+// How far back he leans slowing down (deg).
+const BRAKE_LEAN: f32 = 5.0;
+
+// How fast he turns standing or walking (rad/s); and below what speed
+// (m/s) his hips turn no further than FEET_TWIST_MOST (rad) from a foot
+// down, his body turning on ahead of them by at most BODY_LEAD_MOST (deg).
+const SLOW_TURN: f32 = 6.0;
+
+const FEET_TURN_SPEED: f32 = 2.5;
+
+const FEET_TWIST_MOST: f32 = 0.61;
+
+const BODY_LEAD_MOST: f32 = 25.0;
+
+// A standing step: how long (turning a foot, and else), how high, how
+// much its leg shortens at the top (see GuyPose.leg_squash), and how far
+// off (across, and in which way it faces) a foot must be to take one.
+const STEP_TIME_QUICK: f32 = 0.18;
+
+const STEP_TIME: f32 = 0.26;
+
+const STEP_HIGH: f32 = 0.04;
+
+const STEP_SQUASH: f32 = 0.12;
+
+const STEP_OFF: f32 = 0.07;
+
+const STEP_TURN: f32 = 0.25;
+
+// Standing, his weight shifts from foot to foot so often (a second), his
+// body rolling so far (degrees).
+const IDLE_SHIFT: f32 = 0.25;
+
+const IDLE_ROLL: f32 = 2.0;
+
+// Back on the ground from the air (or a roll): the stride goes on from
+// where his feet are. Both down, landing hard, where they came down. Else
+// the lower foot comes down where it is, at the stride's point of a foot
+// just down, and the other swings on from where it is.
+gait_land(g: *Gait, both: bool) {
+    at: [2]V3 = [v3(0.0, 0.0, 0.0), v3(0.0, 0.0, 0.0)];
+    for side in 0..2 at[side] = to_root(guy_bone_point(gait_bones, 0, guy_foot(side),
+        v3(0.0, 0.0, 0.0)));
+    down: int = 0;
+    if (at[1].y < at[0].y) down = 1;
+    g.phase = 0.5 * down as f32;
+    for side in 0..2 {
+        if (both || side == down) {
+            toe: V3 = v3(at[side].x, 0.0, at[side].z + GUY_FOOT_FRONT);
+            // (Landing hard, both under him, a little ahead: as far as he
+            // goes in half the absorb's hold, so that his hips are over
+            // them at its middle.)
+            if (both) toe = v3(guy_side_sign(side) * FOOT_OUT, 0.0, GUY_PELVIS_Z + g.speed * HARD_HOLD * 0.5 + GUY_FOOT_FRONT);
+            toe.y = foot_ground(toe);
+            g.toe[side] = from_root(toe);
+            g.toe_yaw[side] = g.yaw;
+            g.planted[side] = true;
+            g.heel[side] = 0.0;
+            g.slip[side] = 0.0;
+            g.last_down = side;
+            gait_note(g, side, true, 0.0)
+        } else {
+            g.lift_at[side] = at[side];
+            g.lift_pitch[side] = -20.0 * DEG;
+            g.lift_flex[side] = gait_joints.legs[side].flex;
+            g.lift_knee[side] = gait_joints.legs[side].knee;
+            g.swing_from[side] = 0.5;
+            g.planted[side] = false
+        }
+    }
+    // (Landing hard, the stride goes on from his feet side by side: the one
+    // a little behind leaves first.)
+    if (both) g.phase = 0.0
+}
+
+// ---- in the air ----
+air_pose(g: *Gait, r: *Runner): GuyPose {
+    t: f32 = r.air_time;
+    total: f32 = maxf(r.air_total, 0.2);
+    left: f32 = maxf(total - t, 0.0);
+    flipping: bool = absf(r.flip_goal) > 0.01;
+    spinning: bool = absf(r.spin_goal) > 0.01;
+    up: int = g.last_down;
+    drive: int = 1 - up;
+    // Taking off: the leg he left from out behind (ankle locked, toe
+    // pointed), the other knee driven up; the arms thrown the trick's way.
+    p: GuyPose = guy_stand();
+    pitch: f32 = 8.0;
+    if (flipping && r.flip_goal > 0.0) pitch = 35.0;
+    if (flipping && r.flip_goal < 0.0) pitch = -10.0;
+    p.body = body_at(pitch, 0.0, 0.0, 0.0);
+    set_leg(&p, up, -20.0, 10.0, 0.0, 1.0);
+    set_leg(&p, drive, 60.0, 80.0, 0.0, 0.85);
+    p.arms[up] = arm(100.0, 15.0, 40.0);
+    p.arms[drive] = arm(-30.0, 15.0, 30.0);
+    if (flipping && r.flip_goal > 0.0) {
+        // (Into a front flip the body dives and the arms reach down ahead.)
+        p.arms[0] = arm(50.0, 15.0, 50.0);
+        p.arms[1] = arm(50.0, 15.0, 50.0)
+    } else if (flipping) {
+        p.arms[0] = arm(150.0, 15.0, 10.0);
+        p.arms[1] = arm(150.0, 15.0, 10.0)
+    } else if (spinning) {
+        // The leading arm opens the way of the spin; the other wraps the
+        // chest.
+        lead: int = 0;
+        if (r.spin_goal > 0.0) lead = 1;
+        p.arms[lead] = arm(20.0, 90.0, 20.0);
+        p.arms[1 - lead] = arm(60.0, 10.0, 90.0)
+    }
+    // Then: tucked for a flip, together for a spin, or a plain jump's
+    // stride held, a sit, and the reach to land.
+    mid: GuyPose = guy_stand();
+    if (flipping) {
+        mid.body = body_at(10.0, 0.0, 0.0, 0.0);
+        for side in 0..2 {
+            set_leg(&mid, side, 60.0, 90.0, 0.0, 0.85);
+            mid.arms[side] = arm(40.0, 15.0, 45.0)
+        }
+    } else if (spinning) {
+        mid.body = body_at(0.0, 0.0, 0.0, 0.0);
+        for side in 0..2 {
+            set_leg(&mid, side, 10.0, 20.0, 0.0, 1.0);
+            mid.arms[side] = arm(40.0, 15.0, 100.0)
+        }
+    } else {
+        share: f32 = t / total;
+        // (In a long air, the legs swap once between the stride and the
+        // sit: the front leg goes back as the other comes through.)
+        front: int = drive;
+        if (total > 0.9 && share > 0.4) front = up;
+        hold: GuyPose = guy_stand();
+        hold.body = body_at(6.0, 0.0, 0.0, 0.0);
+        set_leg(&hold, front, 35.0, 50.0, 0.0, 1.0);
+        set_leg(&hold, 1 - front, -15.0, 70.0, 0.0, 1.0);
+        hold.arms[1 - front] = arm(100.0, 15.0, 70.0);
+        hold.arms[front] = arm(-10.0, 15.0, 30.0);
+        sit: GuyPose = guy_stand();
+        sit.body = body_at(6.0, 0.0, 0.0, 0.0);
+        set_leg(&sit, front, 60.0, 80.0, 0.0, 0.9);
+        set_leg(&sit, 1 - front, 35.0, 90.0, 0.0, 0.85);
+        sit.arms[0] = arm(55.0, 15.0, 40.0);
+        sit.arms[1] = arm(55.0, 15.0, 40.0);
+        mid = guy_mix(hold, sit, smoothstepf(0.25, 0.4, share))
+    }
+    p = guy_mix(p, mid, smoothstepf(0.08, 0.22, t));
+    // (Leaving the ground he stretches tall, a moment.)
+    p.body.squash = TAKEOFF_STRETCH * (1.0 - smoothstepf(TAKEOFF_STRETCH_FOR * 0.5,
+        TAKEOFF_STRETCH_FOR, t));
+    // Held on the pad: tucked tight, his mitts on the front of his shins,
+    // just under the knees.
+    if (g.tuck_w > 0.01) {
+        tight: GuyPose = guy_stand();
+        tight.body = body_at(30.0, 0.0, 0.0, 0.0);
+        for side in 0..2 {
+            set_leg(&tight, side, 70.0, 90.0, 0.0, 0.8);
+            tight.arms[side] = arm(60.0, 10.0, 60.0)
+        }
+        p = guy_mix(p, tight, g.tuck_w);
+        // (Held: the hands reach as far as the tuck is in, to the knees as
+        // they are.)
+        legs: GuyJoints = guy_clamp(guy_solve_unlimited(p));
+        for side in 0..2 {
+            p.hand[side] = v_add(guy_point_on(legs, guy_knee_drum(side), v3(0.0, 0.0,
+                0.0)), knee_hold(side));
+            p.hand_reach[side] = g.tuck_w
+        }
+    }
+    // Opening to land: over the trick's last quarter, and before any
+    // landing (from 0.18 s before it): legs together under him, knees 30,
+    // arms out.
+    open: f32 = smoothstepf(0.18, 0.08, left);
+    // (Diving, he opens into the dive instead: see dive_update.)
+    if (dive_coming(r)) open = 0.0;
+    if (r.trick_set && (flipping || spinning)) open = maxf(open, smoothstepf(0.75,
+        1.0, run_trick_turned(r)));
+    if (!flipping && !spinning) open = maxf(open, smoothstepf(0.75, 0.9, t / total));
+    if (open > 0.0) {
+        reach: GuyPose = guy_stand();
+        reach.body = body_at(6.0, 0.0, 0.0, 0.0);
+        for side in 0..2 {
+            set_leg(&reach, side, 20.0, 30.0, 0.0, 1.0);
+            reach.arms[side] = arm(30.0, 60.0, 15.0)
+        }
+        p = guy_mix(p, reach, open * (1.0 - 0.6 * g.tuck_w));
+        for side in 0..2 p.hand_reach[side] = p.hand_reach[side] * (1.0 - open)
+    }
+    p
+}
+
+// Where a mitt holds its knee in a tuck: on the knee's top (from the knee's
+// axis, in his frame: up by the knee drum's round and half the mitt), the
+// body pitched forward 30 to bring his shoulders over his knees. (On
+// the shins, as a diver holds a tuck, is out of reach: his arms are a
+// third as long as he is tall, and his shins, tucked, are out in front of
+// his block below its middle.)
+// (On its outer half: reaching across the block's front, his arm would go
+// into it.)
+knee_hold(side: int): V3 {
+    v3(guy_side_sign(side) * 0.14, 0.27, 0.02)
+}
+
+// ---- landing ----
+// A hard landing's, a roll's: over what the ground or air gave.
+landing_pose(r: *Runner, p: GuyPose): GuyPose {
+    if (r.air) return p;
+    t: f32 = r.since_land;
+    if (r.landing == LAND_HARD && t < HARD_RISE) {
+        // Deep: knees from 60 at touchdown to 75 at the bottom (0.10 s),
+        // the legs squashed to 0.80, the body pitched forward its most,
+        // arms straight out ahead and level; rising over 0.4 s.
+        bottom: f32 = smoothstepf(0.0, HARD_HOLD, t);
+        rise: f32 = smoothstepf(HARD_HOLD, HARD_RISE, t);
+        hard: GuyPose = p;
+        hard.body = body_at(35.0, 0.0, 0.0, 0.0);
+        k: f32 = lerpf(60.0, 75.0, bottom);
+        sq: f32 = lerpf(0.9, 0.8, bottom);
+        for side in 0..2 {
+            hard.arms[side] = arm(95.0, 15.0, 15.0);
+            if (hard.pin[side]) {
+                stance_knee[side] = k * DEG;
+                hard.leg_squash[side] = sq;
+                // (Crouched deep, the heels come up, as a person's do.)
+                hard.heel_lift_most[side] = HEEL_HARD;
+                hard.heel_lift_least[side] = HEEL_HARD * bottom
+            }
+        }
+        // (The pelvis as low as that needs, over the feet.)
+        need: f32 = 0.0;
+        for side in 0..2 {
+            if (hard.pin[side]) {
+                ankle: V3 = v_add(hard.pin_point[side], toe_to_ankle(hard.pin_yaw[side],
+                    -hard.heel_lift_least[side]));
+                hip: V3 = guy_hip(hard.body, 0.0, side);
+                reach: f32 = guy_leg_reach(k * DEG, sq);
+                out: V3 = v_sub(hip, ankle);
+                need = maxf(need, hip.y - (ankle.y + sqrtf(maxf(reach * reach - out.x * out.x - out.z * out.z,
+                    0.0))))
+            }
+        }
+        hard.body.drop = clampf(need, 0.0, DROP_MOST);
+        // (Falling fast, a mitt to the ground ahead of his feet.)
+        if (r.land_fall > 6.0) {
+            reach_down: f32 = bottom * (1.0 - rise);
+            ahead: V3 = v3(-0.12, 0.0, GUY_PELVIS_Z + 0.42);
+            ahead.y = foot_ground(ahead) + 0.05;
+            hard.hand[0] = ahead;
+            hard.hand_reach[0] = reach_down
+        }
+        return guy_mix(p, hard, 1.0 - rise)
+    }
+    if (r.landing == LAND_ROLL && t < ROLL_TIME) {
+        // (Getting up out of it: his feet under him, his knees from 90 to
+        // 40, into the stride from ROLL_TIME.)
+        return roll_shown(t)
+    }
+    // Soft: the arms come forward as the knees give.
+    if (t < 0.35) {
+        k: f32 = 1.0 - smoothstepf(0.1, 0.35, t);
+        for side in 0..2 p.arms[side] = mix_arm(p.arms[side], arm(60.0, 15.0, 25.0),
+            k * minf(r.land_fall / 4.0, 1.0))
+    }
+    p
+}
+
+// The roll as shown, t into it: tumbling, and getting up.
+roll_shown(t: f32): GuyPose {
+    guy_mix(rise_pose(t), roll_pose(t), 1.0 - smoothstepf(ROLL_UP, ROLL_TIME, t))
+}
+
+// Up out of a roll, t into it: crouched over his feet, which are under
+// his hips on the ground, the knees from 90 (at ROLL_UP) to 40.
+rise_pose(t: f32): GuyPose {
+    p: GuyPose = guy_stand();
+    p.hips_yaw = 0.0;
+    k: f32 = smoothstepf(ROLL_UP, ROLL_TIME, t);
+    knee: f32 = lerpf(90.0, 40.0, k);
+    p.body = body_at(lerpf(25.0, 10.0, k), 0.0, 0.0, 0.0);
+    for side in 0..2 {
+        set_leg(&p, side, knee * 0.6, knee, 0.0, 1.0);
+        p.arms[side] = arm(lerpf(60.0, 20.0, k), 15.0, 30.0)
+    }
+    // (The pelvis as low as puts those feet on the ground.)
+    p.body.drop = p.ankle[0].y - GUY_ANKLE_UP;
+    for side in 0..2 {
+        set_leg(&p, side, knee * 0.6, knee, 0.0, 1.0);
+        p.foot_pitch[side] = 0.0
+    }
+    p
+}
+
+// A hard landing: its absorb's bottom at HARD_HOLD, up by HARD_RISE.
+const HARD_RISE: f32 = 0.5;
+
+// ---- the roll ----
+// Rolling: crouched at contact (hips 50, knees 90, pitched 40), his hands
+// reaching to the ground ahead by 0.08 s, then tucked as in the air's tuck
+// (hips 70, knees 90, squash 0.8, arms in); he turns head over heels over ROLL_TURN, his feet back
+// under him from ROLL_UP, up into the run by ROLL_TIME.
+roll_pose(t: f32): GuyPose {
+    p: GuyPose = guy_stand();
+    p.hips_yaw = 0.0;
+    p.body = body_at(40.0, 0.0, 0.0, 0.08);
+    for side in 0..2 {
+        set_leg(&p, side, 50.0, 90.0, 0.0, 0.8);
+        p.arms[side] = arm(90.0, 15.0, 20.0)
+    }
+    tuck: GuyPose = roll_tuck();
+    reach: f32 = smoothstepf(0.02, 0.08, t) * (1.0 - smoothstepf(0.14, 0.22, t));
+    for side in 0..2 tuck.arms[side] = mix_arm(tuck.arms[side], arm(120.0, 20.0, 10.0),
+        reach);
+    guy_mix(p, tuck, smoothstepf(0.02, 0.1, t))
+}
+
+// The roll's tuck.
+roll_tuck(): GuyPose {
+    p: GuyPose = guy_stand();
+    p.hips_yaw = 0.0;
+    p.body = body_at(30.0, 0.0, 0.0, 0.0);
+    for side in 0..2 {
+        set_leg(&p, side, 70.0, 90.0, 0.0, 0.8);
+        p.arms[side] = arm(60.0, 15.0, 70.0)
+    }
+    p
+}
+
+// How long the roll's turn takes, and when his feet are back under him.
+const ROLL_TURN: f32 = 0.5;
+
+const ROLL_UP: f32 = 0.42;
+
+// How far round he has rolled (a whole turn forward, eased, over
+// ROLL_TURN from landing).
+roll_turn(r: *Runner): f32 {
+    if (r.air || r.landing != LAND_ROLL || r.since_land >= ROLL_TIME) return 0.0;
+    k: f32 = clampf(r.since_land / ROLL_TURN, 0.0, 1.0);
+    TAU * k * k * (3.0 - 2.0 * k)
+}
+
+// The roll's pivot: how high his tumbling point must be lifted, so far
+// into the roll (s), for his lowest point to sit on the ground: his round
+// back rolling over it. Worked out once, from the roll's own poses and
+// turn, for each hundredth of its time.
+const ROLL_STEPS: int = 60;
+
+roll_lows: []f32 = new f32[ROLL_STEPS + 1](0.0);
+
+roll_lows_made: bool = false;
+
+roll_m: []f32 = new f32[16](0.0);
+
+roll_bones: []f32 = new f32[GUY_BONES * 16](0.0);
+
+roll_lift(t: f32): f32 {
+    if (!roll_lows_made) make_roll_lows();
+    k: f32 = clampf(t / ROLL_TIME, 0.0, 1.0) * ROLL_STEPS as f32;
+    i: int = mini_g(floorf(k) as int, ROLL_STEPS - 1);
+    lerpf(roll_lows[i], roll_lows[i + 1], k - i as f32)
+}
+
+make_roll_lows() {
+    for i in 0..ROLL_STEPS + 1 {
+        t: f32 = ROLL_TIME * i as f32 / ROLL_STEPS as f32;
+        k: f32 = clampf(t / ROLL_TURN, 0.0, 1.0);
+        turn: f32 = TAU * k * k * (3.0 - 2.0 * k);
+        mat_identity(roll_m);
+        mat_translate(roll_m, v3(0.0, TUMBLE_HEIGHT, 0.0));
+        mat_rotate(roll_m, v3(1.0, 0.0, 0.0), turn);
+        mat_translate(roll_m, v3(0.0, -TUMBLE_HEIGHT, 0.0));
+        guy_bones(guy_clamp(guy_solve_unlimited(roll_shown(t))), roll_m, roll_bones,
+            0);
+        roll_lows[i] = -lowest_point(roll_bones)
+    }
+    roll_lows_made = true
+}
+
+mini_g(a: int, b: int): int {
+    if (a < b) return a;
+    b
+}
+
+// The lowest point of him, posed in bones: the body's rounded corners, the
+// soles' ends, the mitts, the knees' fronts.
+lowest_point(bones: []f32): f32 {
+    least: f32 = 1000.0;
+    for sx in [-1.0, 1.0] {
+        for sy in [0.0, 1.0] {
+            for sz in [-1.0, 1.0] {
+                c: V3 = v3(sx * (GUY_W * 0.5 - 0.1), lerpf(GUY_HEM, GUY_H, sy) - GUY_PELVIS_Y + (0.1 - 0.2 * sy),
+                    sz * (GUY_D * 0.5 - 0.1) - GUY_PELVIS_Z);
+                least = minf(least, guy_bone_point(bones, 0, GUY_BODY, c).y - 0.1)
+            }
+        }
+    }
+    for side in 0..2 {
+        least = minf(least, guy_bone_point(bones, 0, guy_foot(side), v3(0.0, -GUY_ANKLE_UP,
+            GUY_FOOT_FRONT)).y);
+        least = minf(least, guy_bone_point(bones, 0, guy_foot(side), v3(0.0, -GUY_ANKLE_UP,
+            -GUY_FOOT_BACK)).y);
+        least = minf(least, guy_mitt(bones, 0, side).y - 0.05);
+        for zz in [-0.22, 0.22] least = minf(least, guy_bone_point(bones, 0, guy_shin(side),
+            v3(0.0, 0.0, zz)).y - 0.0)
+    }
+    least
+}
+
+// His lowest point onto the ground at height y: each bone moved up or down
+// by as much; and how far it was from it before (for L8_TRACE).
+keep_on_ground(y: f32) {
+    least: f32 = lowest_point(gait_bones);
+    gait_roll_low = least - y;
+    lift: f32 = y - least;
+    for b in 0..GUY_BONES gait_bones[b * 16 + 13] = gait_bones[b * 16 + 13] + lift
+}
+
+// ---- the dive ----
+// Off the last headland into the sea: once the air will end in the water,
+// over its last part he goes over into a dive, calmly: body straight, legs
+// together, toes pointed, arms forward over his head, and turned head over
+// heels until he points along the way he falls, so that he goes in hands
+// first. A trick still turning opens into it as it finishes. In the water
+// he holds it and goes under as the runner sinks him.
+//
+// Whether this air ends in the sea.
+dive_coming(r: *Runner): bool {
+    if (!r.air || r.in_water) return r.in_water;
+    left: f32 = maxf(r.air_total - r.air_time, 0.0);
+    in_sea(r.x + r.vx * left, -(r.z + r.vz * left))
+}
+
+// The dive begins this far through the air (of the air's whole time),
+// and is in by DIVE_IN before he goes in.
+const DIVE_FROM: f32 = 0.35;
+
+const DIVE_IN: f32 = 0.12;
+
+dive_update(g: *Gait, r: *Runner) {
+    if (r.in_water) {
+        g.dive_w = 1.0;
+        return
+    }
+    if (!dive_coming(r)) {
+        g.dive_w = 0.0;
+        g.dive_turn = 0.0;
+        return
+    }
+    total: f32 = maxf(r.air_total, 0.2);
+    left: f32 = maxf(total - r.air_time, 0.0);
+    w: f32 = smoothstepf(DIVE_FROM * total, maxf(total - DIVE_IN, DIVE_FROM * total + 0.05),
+        r.air_time);
+    // (Not until a trick is nearly turned: then it opens into the dive.)
+    if (r.trick_set && absf(r.flip_goal) + absf(r.spin_goal) > 0.1) w = w * smoothstepf(0.75,
+        1.0, run_trick_turned(r));
+    g.dive_w = w;
+    // Turned so that his head points along the way he will be falling as
+    // he goes in: a quarter turn, and as far again as that way is below
+    // level.
+    across: f32 = sqrtf(r.vx * r.vx + r.vz * r.vz);
+    down: f32 = -(r.vy - RUN_G * left);
+    g.dive_turn = (PI * 0.5 + atan2f(down, maxf(across, 0.1))) * w
+}
+
+// The dive's pose: straight, legs together, toes pointed (as far as an
+// ankle goes), arms forward over his head and close together.
+dive_pose(): GuyPose {
+    p: GuyPose = guy_stand();
+    p.hips_yaw = 0.0;
+    p.body = body_at(0.0, 0.0, 0.0, 0.0);
+    for side in 0..2 {
+        p.ankle[side] = guy_leg_ankle(p.body, side, 0.0, 0.0, 0.0, 1.0);
+        p.foot_pitch[side] = -30.0 * DEG;
+        p.foot_square[side] = 0.0;
+        p.leg_squash[side] = 1.0;
+        p.arms[side] = arm(170.0, 8.0, 5.0)
+    }
+    // (Stretched long, a little.)
+    p.body.squash = 0.04;
+    p
+}
+
+// ---- measures ----
+// Each foot coming down and leaving the ground: when, which, and (leaving)
+// the most it slid while down (its toe, from where it came down, m); for
+// main to say under L8_TRACE, and then empty.
+tag tumbledown
+type GaitNote = {
+    time: f32;
+    side: int;
+    down: bool;
+    slip: f32;
+    // Its knee (deg): leaving the ground, as it left; coming down, the most
+    // it bent swinging.
+    knee: f32
+}
+
+tag tumbledown
+gait_notes: []GaitNote = new GaitNote[64](GaitNote {
+    time: 0.0,
+    side: 0,
+    down: false,
+    slip: 0.0,
+    knee: 0.0
+});
+
+tag tumbledown
+gait_nnotes: int = 0;
+
+gait_note(
+    g: *Gait,
+    side: int,
+    down: bool,
+    slip: f32
+) {
+    if (gait_nnotes >= len(gait_notes)) return;
+    knee: f32 = gait_joints.legs[side].knee;
+    if (down) knee = g.swing_knee[side];
+    gait_notes[gait_nnotes] = GaitNote {
+        time: g.time,
+        side: side,
+        down: down,
+        slip: slip,
+        knee: knee / DEG
+    };
+    gait_nnotes = gait_nnotes + 1
+}
+
+// And the roll's lowest point against the ground, before it is put there
+// (m; under it, less than 0).
+tag tumbledown
+gait_roll_low: f32 = 0.0;
+
+gait_measure(g: *Gait) {
+    for side in 0..2 {
+        if (!g.planted[side]) g.swing_knee[side] = maxf(g.swing_knee[side], gait_joints.legs[side].knee)
+    }
+    for side in 0..2 {
+        if (g.planted[side]) {
+            toe: V3 = guy_bone_point(gait_bones, 0, guy_foot(side), guy_toe_tip());
+            g.slip[side] = maxf(g.slip[side], v_len(v_sub(toe, g.toe[side])))
+        }
+    }
+}

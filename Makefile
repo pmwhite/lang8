@@ -415,7 +415,7 @@ wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume $(OK)/wasm-rel
 # The playground: a static site in .build/web with the compiler as a module.
 # Serve it with `python3 -m http.server -d .build/web`.
 WEB_SITE := $(BUILD)/web
-WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/* web/race/* web/cad/* web/recipes/* web/better/* web/people/*) programs/cad/handheld.pcb programs/cad/dock.pcb programs/recipes/recipes.txt programs/block-game/world.txt \
+WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/* web/tumbledown/* web/race/* web/cad/* web/recipes/* web/better/* web/people/*) programs/cad/handheld.pcb programs/cad/dock.pcb programs/recipes/recipes.txt programs/block-game/world.txt \
 	programs/block-game/garden.txt
 
 $(BUILD)/block-game.wasm: l8c3 $(PROGRAMS) | $(OK)
@@ -436,12 +436,13 @@ $(BUILD)/better.wasm: l8c3 $(PROGRAMS) | $(OK)
 $(BUILD)/race.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'race wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/race/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
-$(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD)/race.wasm $(BUILD)/cad.wasm $(BUILD)/recipes.wasm $(BUILD)/better.wasm web/race/protocol.js $(WEB_FILES) $(STDLIB) | $(OK)
-	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game $(WEB_SITE)/skate $(WEB_SITE)/race $(WEB_SITE)/cad $(WEB_SITE)/recipes $(WEB_SITE)/better $(WEB_SITE)/people && \
+$(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD)/tumbledown.wasm $(BUILD)/race.wasm $(BUILD)/cad.wasm $(BUILD)/recipes.wasm $(BUILD)/better.wasm web/race/protocol.js $(WEB_FILES) $(STDLIB) | $(OK)
+	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game $(WEB_SITE)/skate $(WEB_SITE)/tumbledown $(WEB_SITE)/race $(WEB_SITE)/cad $(WEB_SITE)/recipes $(WEB_SITE)/better $(WEB_SITE)/people && \
 		cp web/index.html web/*.js $(WEB_SITE)/ && cp web/examples/*.l8 $(WEB_SITE)/examples/ && \
 		cp $(STDLIB) $(WEB_SITE)/stdlib/ && cp $(BUILD)/l8.wasm $(WEB_SITE)/ && \
 		cp web/game/* $(BUILD)/block-game.wasm programs/block-game/world.txt programs/block-game/garden.txt $(WEB_SITE)/game/ && \
 		cp web/skate/* $(BUILD)/skate.wasm $(WEB_SITE)/skate/ && \
+		cp web/tumbledown/* $(BUILD)/tumbledown.wasm $(WEB_SITE)/tumbledown/ && \
 		cp web/race/* $(BUILD)/race.wasm $(WEB_SITE)/race/ && \
 		cp web/cad/* $(BUILD)/cad.wasm programs/cad/handheld.pcb programs/cad/dock.pcb $(WEB_SITE)/cad/ && \
 		cp web/recipes/* $(BUILD)/recipes.wasm programs/recipes/recipes.txt $(WEB_SITE)/recipes/ && \
@@ -483,7 +484,7 @@ help:
 	@echo '  fmt             format src2 with the stage-2 compiler'
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
-	@echo '  game, skate, race, cad, recipes'
+	@echo '  game, skate, tumbledown, race, cad, recipes'
 	@echo '  skate-route     the best line down a slopestyle: .build/skate-route COURSE'
 	@echo '  better, bible-web, bible-tui, bible-follow-test'
 	@echo '  terminal, callback-test'
@@ -515,3 +516,20 @@ lemma-web: $(BUILD)/lemma.wasm $(wildcard web/lemma/*) $(LEMMA_FILES)
 	@mkdir -p $(WEB_SITE)/lemma/regions
 	@cp web/lemma/* $(BUILD)/lemma.wasm programs/lemma/hol.txt $(WEB_SITE)/lemma/
 	@cp programs/lemma/regions/*.txt $(WEB_SITE)/lemma/regions/
+
+# ---- Tumbledown, the running game (programs/tumbledown) ----
+.PHONY: tumbledown tumbledown-web
+
+check: $(BUILD)/tumbledown
+
+$(BUILD)/tumbledown: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'tumbledown' sh -c '$(call build,l8c3,programs/tumbledown/main.l8)'
+
+tumbledown: $(BUILD)/tumbledown
+
+# The page, built with the rest of the site (`make web`, or tumbledown-web:
+# .build/web/tumbledown).
+$(BUILD)/tumbledown.wasm: l8c3 $(PROGRAMS) | $(OK)
+	@$(STEP) 'tumbledown wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/tumbledown/main.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+tumbledown-web: $(OK)/web

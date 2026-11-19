@@ -4,6 +4,8 @@ use_tag std;
 
 use_tag gl;
 
+use_tag blockmesh, blockguy, builder;
+
 // Drawing: a daytime sky, the ground and features lit by a warm sun with a
 // shadow map that follows the player, and the guy. Lighting is done in
 // linear color, tone mapped and gamma corrected at the end.
@@ -27,6 +29,13 @@ type Renderer = {
     u_blob: int;
     u_shadow_map: int;
     u_smvp: int;
+    // The guy's bones and color, in the world's and the shadows' programs
+    // (see WORLD_VS).
+    u_bones: int;
+    u_tint: int;
+    u_side_shade: int;
+    u_sbones: int;
+    u_slight: int;
     u_cam_f: int;
     u_cam_r: int;
     u_cam_u: int;
@@ -270,25 +279,48 @@ uniform sampler2D noise_map;
 float vnoise(HP vec2 p) { return texture2D(noise_map, p * 0.015625).r; }
 """;
 
+// (Built with_guy: the figure's GUY_ defines and MAT_BODY's, after the
+// version line.)
 WORLD_VS: str = """
-#version 120
 attribute vec3 pos;
 attribute vec3 nrm;
 attribute vec4 vcol;
 uniform mat4 vp;
 uniform mat4 model;
 uniform mat4 light_vp;
+// The guy's bones after his first (see guy_glsl_defines). A corner's
+// material code carries its bone: bone 0, which all of the world is, is
+// model; bone b, bones[b - 1].
+uniform mat4 bones[GUY_SKINNED_BONES];
+// The guy's color, for his corners of MAT_BODY; and how light each side's
+// legs and arms are (side 0's and side 1's: see guy_side_shade).
+uniform vec3 tint;
+uniform vec2 side_shade;
 varying vec3 vworld;
 varying vec3 vnrm;
 varying vec4 vcolor;
 varying vec4 vlight;
 void main() {
-  vec4 w = model * vec4(pos, 1.0);
+  float bone = floor(vcol.a / GUY_BONE_CODE);
+  float mat = vcol.a - GUY_BONE_CODE * bone;
+  mat4 m = model;
+  if (bone > 0.5) m = bones[int(bone) - 1];
+  vec4 w = m * vec4(pos, 1.0);
   vworld = w.xyz;
-  vnrm = mat3(model[0].xyz, model[1].xyz, model[2].xyz) * nrm;
+  vnrm = mat3(m[0].xyz, m[1].xyz, m[2].xyz) * nrm;
+  vec3 c = vcol.rgb;
+  if (abs(mat - MAT_BODY) < 0.1) c = tint;
   // (Its color as light, worked out here once a corner, not once a pixel.)
-  vcolor = vec4(pow(vcol.rgb, vec3(2.2)), vcol.a);
-  vlight = light_vp * w;
+  // (The far side's limbs a shade darker, as their color: see
+  // guy_side_shade.)
+  if (bone > 0.5 && bone < GUY_BOARD - 0.5) c *= abs(mod(bone, 2.0) - GUY_SIDE0_ODD) < 0.5 ? side_shade.x : side_shade.y;
+  vcolor = vec4(pow(c, vec3(2.2)), mat);
+  // His shadows are looked up a little off his surface, out along it (two
+  // of the sun's shadow texels: see SHADOW_HALF), so that the small round
+  // shapes of him do not shadow themselves in speckles.
+  vec4 wl = w;
+  if (mat > 4.5 && mat < 5.5) wl.xyz += normalize(vnrm) * 0.1;
+  vlight = light_vp * wl;
   gl_Position = vp * w;
 }
 """;
@@ -789,12 +821,22 @@ void main() {
 // its mesh. (What casts is picked out when a place is built, so that the
 // ground is not drawn into the map only to be thrown away: see
 // build_shadow_index.)
+// (Built with_guy, as WORLD_VS is.)
 SHADOW_VS: str = """
-#version 120
 attribute vec3 pos;
+attribute vec4 vcol;
 uniform mat4 mvp;
+// (The guy's bones after his first, as for WORLD_VS; bone 0 is mvp's.)
+uniform mat4 light_vp;
+uniform mat4 bones[GUY_SKINNED_BONES];
 void main() {
-  gl_Position = mvp * vec4(pos, 1.0);
+  float bone = floor(vcol.a / GUY_BONE_CODE);
+  if (bone > 0.5) gl_Position = light_vp * (bones[int(bone) - 1] * vec4(pos, 1.0));
+  else gl_Position = mvp * vec4(pos, 1.0);
+  // (His arms cast no shadow: held close to his side, the little shadow
+  // they cast would be a dark smudge on it. Put out of the light's view,
+  // they are clipped away.)
+  if (bone > GUY_ARM_FIRST - 0.5 && bone < GUY_ARM_LAST + 0.5) gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
 }
 """;
 
@@ -910,6 +952,34 @@ with_prelude(src: str): []i8@new {
     out
 }
 
+// A vertex shader that draws him: its version line, the figure's facts it
+// needs (see guy_glsl_defines) and MAT_BODY, then src.
+with_guy(src: str): []i8@new {
+    out: *ByteBuilder = builder_new(len(src) + 512);
+    builder_str(out, "#version 120\n");
+    guy_glsl_defines(out);
+    // (MAT_BODY in hundredths: 5.25.)
+    builder_str(out, "#define MAT_BODY (");
+    builder_int(out, (MAT_BODY * 100.0 + 0.5) as int);
+    builder_str(out, ".0 / 100.0)\n");
+    builder_str(out, src);
+    builder_slice(out)
+}
+
+// A mesh is drawn whole or not at all. One built past its room is the
+// program's mistake (too little room made for what is built in it): said,
+// with the room it needed, and the game stops.
+require_whole(m: *Mesh, what: str) raises IoError {
+    if (mesh_dropped(m) == 0) return;
+    write(2, "the ");
+    write(2, what);
+    write(2, " mesh needs room for ");
+    write_int(2, m.n + mesh_dropped(m));
+    write(2, " vertices; it has room for ");
+    write_int(2, mesh_capacity(m));
+    die("")
+}
+
 gen_buffer(): u32 {
     ids: []u32 = new u32[1](0u32);
     glGenBuffers(1, ids);
@@ -929,8 +999,8 @@ bind_vertices(buf: u32) {
 }
 
 new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
-    world: int = link_program(bytes(WORLD_VS), with_prelude(WORLD_FS));
-    shadow: int = link_program(bytes(SHADOW_VS), bytes(SHADOW_FS));
+    world: int = link_program(with_guy(WORLD_VS), with_prelude(WORLD_FS));
+    shadow: int = link_program(with_guy(SHADOW_VS), bytes(SHADOW_FS));
     sky: int = link_program(bytes(SKY_VS), with_prelude(SKY_FS));
     stretch: int = link_program(bytes(SKY_VS), bytes(STRETCH_FS));
     paint: int = link_program(bytes(PAINT_VS), bytes(PAINT_FS));
@@ -957,6 +1027,11 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
         u_blob: glGetUniformLocation(world, "blob"),
         u_shadow_map: glGetUniformLocation(world, "shadow_map"),
         u_smvp: glGetUniformLocation(shadow, "mvp"),
+        u_bones: glGetUniformLocation(world, "bones"),
+        u_tint: glGetUniformLocation(world, "tint"),
+        u_side_shade: glGetUniformLocation(world, "side_shade"),
+        u_sbones: glGetUniformLocation(shadow, "bones"),
+        u_slight: glGetUniformLocation(shadow, "light_vp"),
         u_cam_f: glGetUniformLocation(sky, "cam_f"),
         u_cam_r: glGetUniformLocation(sky, "cam_r"),
         u_cam_u: glGetUniformLocation(sky, "cam_u"),
@@ -1048,6 +1123,7 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
             r.u_lamp_rect[k] = glGetUniformLocation(progs[k], "lamp_rect")
         }
     }
+    require_whole(parts, "parts");
     upload(r.part_buf, parts);
     // One triangle over the whole screen.
     tri: []f32 = new f32[30](0.0);
@@ -1088,7 +1164,8 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
     r
 }
 
-set_course_mesh(r: *Renderer, m: *Mesh) {
+set_course_mesh(r: *Renderer, m: *Mesh) raises IoError {
+    require_whole(m, "world");
     // (Its corners by number: see index_mesh.)
     index_mesh(m);
     glBindBuffer(34962, r.course_buf);
@@ -2194,15 +2271,25 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
         glUseProgram(r.shadow);
         glEnable(32823);
         glPolygonOffset(1.5, 2.0);
-        draw_shadow_mesh(r, ident_m);
         // Only what is near enough to cast a shadow he could see.
-        draw_casters(r, light_vp, -view.focus.z - 40.0, -view.focus.z + 40.0);
+        if (!stage_on) {
+            draw_shadow_mesh(r, ident_m);
+            draw_casters(r, light_vp, -view.focus.z - 40.0, -view.focus.z + 40.0)
+        }
         bind_vertices(r.part_buf);
+        // (The stage's ground casts none: it is flat.)
+        glUniformMatrix4fv(r.u_slight, 1, 0, light_vp);
         for i in 0..ndraw {
-            for k in 0..16 part_tmp[k] = draw_m[i * 16 + k];
-            mat_mul(mvp_m, light_vp, part_tmp);
-            glUniformMatrix4fv(r.u_smvp, 1, 0, mvp_m);
-            glDrawArrays(4, part_first[draw_part[i]], part_count[draw_part[i]])
+            part: int = draw_part[i];
+            f: int = draw_first[i];
+            if (part != PART_STAGE) {
+                for k in 0..16 part_tmp[k] = draw_m[f * 16 + k];
+                mat_mul(mvp_m, light_vp, part_tmp);
+                glUniformMatrix4fv(r.u_smvp, 1, 0, mvp_m);
+                if (part == PART_GUY) glUniformMatrix4fv(r.u_sbones, GUY_BONES - 1,
+                    0, &draw_m[(f + 1) * 16]);
+                glDrawArrays(4, part_first[part], part_count[part])
+            }
         }
         glDisable(32823)
     }
@@ -2246,7 +2333,8 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     glUniform1i(r.u_shadow_map, 0);
     glUniform1i(r.u_world_noise, 1);
     glUniformMatrix4fv(r.u_model, 1, 0, ident_m);
-    draw_world(r, vp_m, -view.focus.z - 40.0, -view.focus.z + 110.0, -view.focus.z + 600.0);
+    if (!stage_on) draw_world(r, vp_m, -view.focus.z - 40.0, -view.focus.z + 110.0,
+        -view.focus.z + 600.0);
     if (grass_on && look.tufts) {
         frame_phase("grass");
         draw_grass(r, view)
@@ -2256,8 +2344,17 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     set_near_lamps(r, view.rider);
     bind_vertices(r.part_buf);
     for i in 0..ndraw {
-        glUniformMatrix4fv(r.u_model, 1, 0, &draw_m[i * 16]);
-        glDrawArrays(4, part_first[draw_part[i]], part_count[draw_part[i]])
+        part: int = draw_part[i];
+        f: int = draw_first[i];
+        glUniformMatrix4fv(r.u_model, 1, 0, &draw_m[f * 16]);
+        if (part == PART_GUY) {
+            glUniformMatrix4fv(r.u_bones, GUY_BONES - 1, 0, &draw_m[(f + 1) * 16]);
+            t: V3 = draw_tint[i];
+            glUniform3f(r.u_tint, t.x, t.y, t.z);
+            shade: GuyShade = guy_side_shade(draw_m, f, view.eye);
+            glUniform2f(r.u_side_shade, shade.side0, shade.side1)
+        }
+        glDrawArrays(4, part_first[part], part_count[part])
     }
     // The sky last of what is solid, and only where nothing else is: at
     // the far end of the depth, which it passes by being no further.

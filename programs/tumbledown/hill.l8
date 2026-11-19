@@ -1,0 +1,1253 @@
+tag tumbledown;
+
+use_tag skate_math, blockmesh;
+
+// The hill: a causeway of basalt pillars going down to the sea, set in
+// rows, most with a gap of water between them and the next, a meadow at
+// the top, and at the bottom a headland he dives off into the sea. Down
+// the hill is -z; d (= -z) is how far down it a place is, x across it. The
+// sea is on the right (+x): past the run's right edge, behind a low wall
+// of columns, a sheer cliff goes down to the water; on the left the grassy
+// hillside rises.
+//
+// - Each row is 5 to 9 m long (a tower's 8 to 12, the row before a tower
+//   9 to 11, the meadows longer) and three to five blocks across the 16 m
+//   run. A block is a pillar from the sea up to a flat top of column ends;
+//   neighbouring blocks in a row differ in height by 0.3 to 1 m, so where
+//   he crosses a row chooses how far he falls off its end. A row's edge
+//   where it drops is broken into columns, a little lower (see put_lip).
+// - From one row to the next he drops, 0.5 to 3.5 m: onto the next row
+//   where it touches, or (after 85% of rows) across a gap 1 to 1.8 m wide
+//   down to the water. Every gap can be cleared by running off without a
+//   jump: a jump gives air for tricks, never the way across. Come down in
+//   a gap, he is put on the next row (see climb_out in runner.l8).
+// - Three or four times down the hill a row has a tower, at the sea's side:
+//   a block 2.5 m taller than its neighbours, come to up a ramp at the end
+//   of the row before (whose blocks fall toward it), with a drop of 5 to
+//   6 m off it onto a wide, flat landing.
+// - The last row is a headland, with a cliff of FINISH_CLIFF into the sea
+//   at its end: the run ends as he enters the water.
+// - At one side of some rows a ramp runs down to the next, the way down
+//   without jumping.
+// - On the left the ground rises into a grassy bank, and on the right the
+//   wall stands: he can't go past either (see step_ground in runner.l8).
+// - Off the coast stand sea stacks; on the hillside, trees.
+//
+// Everything is laid out once from a seed, and the same seed always gives
+// the same hill.
+const HILL_HALF: f32 = 8.0;
+
+// How far past the run's edge the banks reach.
+const HILL_BANK: f32 = 7.0;
+
+const HILL_TOP: f32 = 50.0;
+
+// The meadow at the top that a run starts on, from here to its first edge.
+const HILL_START: f32 = -10.0;
+
+const START_END: f32 = 5.0;
+
+// How long the hill is (to the headland at the bottom), how long the
+// headland is, and how high its cliff over the sea.
+const HILL_LENGTH: f32 = 172.0;
+
+const HEADLAND_LENGTH: f32 = 14.0;
+
+const FINISH_CLIFF: f32 = 8.0;
+
+// How many of the rows are across a gap from the one before.
+const GAP_SHARE_OF_ROWS: f32 = 0.85;
+
+// The narrowest a block is across, and the fewest and most a row has.
+const BLOCK_LEAST: f32 = 3.0;
+
+const MAX_ROWS: int = 48;
+
+const MAX_ACROSS: int = 5;
+
+// How far a tower stands over the rest of its row, and the slope of the
+// ramp up to it at the end of the row before.
+const TOWER_HIGH: f32 = 2.5;
+
+const UP_SLOPE: f32 = 0.35;
+
+// A ramp's width and slope, down from a row's end into the next row.
+const RAMP_WIDTH: f32 = 2.6;
+
+const RAMP_SLOPE: f32 = 0.55;
+
+// The speed the gaps are made for (he runs at it on the flat: see
+// runner.l8), and how much of the way across, running off, a gap may
+// take.
+const GAP_SPEED: f32 = 3.4;
+
+const GAP_SHARE: f32 = 0.8;
+
+// What kind of row.
+const ROW_BLOCKS: int = 0;
+
+// A row with a tower: its block `tower` is the tall one.
+const ROW_TOWER: int = 1;
+
+// One wide flat grassy block: the meadow at the top, the landing under a
+// tower, the headland.
+const ROW_FLAT: int = 2;
+
+// The sea, past the headland's cliff (its top is the sea's level).
+const ROW_SEA: int = 3;
+
+// A row: from start to end down the hill, then a gap of `gap` (0: none)
+// before the next; its blocks across, between edge[i] and edge[i + 1], the
+// tops of them; and a ramp down from its end into the next row at one side
+// (-1 the left, 1 the right, 0 none).
+type Row = {
+    kind: int;
+    start: f32;
+    end: f32;
+    gap: f32;
+    n: int;
+    edge: [6]f32;
+    top: [5]f32;
+    tower: int;
+    ramp: f32
+}
+
+no_row(): Row {
+    Row {
+        kind: ROW_BLOCKS,
+        start: 0.0,
+        end: 0.0,
+        gap: 0.0,
+        n: 1,
+        edge: [-HILL_HALF, HILL_HALF, HILL_HALF, HILL_HALF, HILL_HALF, HILL_HALF],
+        top: [0.0, 0.0, 0.0, 0.0, 0.0],
+        tower: -1,
+        ramp: 0.0
+    }
+}
+
+// The hill laid out: its rows (the last is the sea), where the finish is
+// (the headland's cliff), and the sea's level.
+tag tumbledown
+type Hill = {
+    rows: []Row;
+    n: int;
+    finish: f32;
+    sea: f32
+}
+
+tag tumbledown
+hill: *Hill = new Hill {
+    rows: new Row[MAX_ROWS](no_row()),
+    n: 0,
+    finish: 0.0,
+    sea: -1000.0
+};
+
+// Whether the hill is the stage's flat ground (see stage.l8) instead: no
+// banks, and only as wide as the stage is ruled.
+tag tumbledown
+hill_flat: bool = false;
+
+// ---- laying out ----
+hill_rng: int = 1;
+
+hill_rand(): f32 {
+    hill_rng = (hill_rng * 1103515245 + 12345) % 2147483648;
+    if (hill_rng < 0) hill_rng = -hill_rng;
+    (hill_rng / 65536 % 32768) as f32 / 32768.0
+}
+
+hill_between(a: f32, b: f32): f32 {
+    a + (b - a) * hill_rand()
+}
+
+// The block of a row x is over (the outermost, past the run's edges).
+block_at(row: Row, x: f32): int {
+    for i in 0..row.n - 1 {
+        if (x < row.edge[i + 1]) return i
+    }
+    row.n - 1
+}
+
+tag tumbledown
+row_top(row: Row, x: f32): f32 {
+    row.top[block_at(row, x)]
+}
+
+// Where a row and the next change block, across: the middles of the
+// stretches of x over which both are one block. (At most 2 MAX_ACROSS - 1
+// of them.)
+const MAX_PIECES: int = 2 * MAX_ACROSS;
+
+piece_x: []f32 = new f32[MAX_PIECES](0.0);
+
+// How many there are, put in piece_x.
+pieces_of(a: Row, b: Row): int {
+    cuts: []f32 = new f32[2 * MAX_ACROSS + 2](0.0);
+    n: int = 0;
+    for i in 0..a.n + 1 {
+        cuts[n] = a.edge[i];
+        n = n + 1
+    }
+    for i in 1..b.n {
+        cuts[n] = b.edge[i];
+        n = n + 1
+    }
+    // (Sorted, small.)
+    for i in 0..n {
+        for j in i + 1..n {
+            if (cuts[j] < cuts[i]) {
+                t: f32 = cuts[i];
+                cuts[i] = cuts[j];
+                cuts[j] = t
+            }
+        }
+    }
+    k: int = 0;
+    for i in 0..n - 1 {
+        if (cuts[i + 1] - cuts[i] > 0.01 && k < MAX_PIECES) {
+            piece_x[k] = (cuts[i] + cuts[i + 1]) * 0.5;
+            k = k + 1
+        }
+    }
+    k
+}
+
+// The least and most drop from row a's end onto row b, over the run.
+least_drop(a: Row, b: Row): f32 {
+    least: f32 = 1000.0;
+    for i in 0..pieces_of(a, b) least = minf(least, row_top(a, piece_x[i]) - row_top(b,
+        piece_x[i]));
+    least
+}
+
+most_drop(a: Row, b: Row): f32 {
+    most: f32 = -1000.0;
+    for i in 0..pieces_of(a, b) most = maxf(most, row_top(a, piece_x[i]) - row_top(b,
+        piece_x[i]));
+    most
+}
+
+// A row of n blocks across, of random widths (none narrower than
+// BLOCK_LEAST), their tops above 0 by random steps of 0.5 to 1.5 m from
+// one to the next, no more than 2 m.
+blocks_row(n: int): Row {
+    row: Row = no_row();
+    row.n = n;
+    spare: f32 = 2.0 * HILL_HALF - n as f32 * BLOCK_LEAST;
+    shares: []f32 = new f32[MAX_ACROSS](0.0);
+    sum: f32 = 0.0;
+    for i in 0..n {
+        shares[i] = 0.3 + hill_rand();
+        sum = sum + shares[i]
+    }
+    x: f32 = -HILL_HALF;
+    row.edge[0] = x;
+    for i in 0..n {
+        x = x + BLOCK_LEAST + spare * shares[i] / sum;
+        row.edge[i + 1] = x
+    }
+    row.edge[n] = HILL_HALF;
+    top: f32 = hill_between(0.0, 0.6);
+    row.top[0] = top;
+    for i in 1..n {
+        step: f32 = hill_between(0.3, 1.0);
+        // (Up or down from the last, keeping between 0 and 2.)
+        if (top + step > 1.2 || top - step >= 0.0 && hill_rand() < 0.5) step = -step;
+        top = clampf(top + step, 0.0, 1.2);
+        row.top[i] = top
+    }
+    row
+}
+
+// Row's tops, the same, highest at the left, lowest at the right.
+tops_falling_right(row: Row): Row {
+    r: Row = row;
+    for i in 0..r.n {
+        for j in i + 1..r.n {
+            if (r.top[j] > r.top[i]) {
+                t: f32 = r.top[i];
+                r.top[i] = r.top[j];
+                r.top[j] = t
+            }
+        }
+    }
+    r
+}
+
+// One flat block across, at 0.
+flat_row(): Row {
+    row: Row = no_row();
+    row.kind = ROW_FLAT;
+    row
+}
+
+// Row b's tops moved down by as much as puts its least drop from a at
+// `least`.
+lower_onto(a: Row, b: Row, least: f32): Row {
+    r: Row = b;
+    by: f32 = least_drop(a, b) - least;
+    for i in 0..r.n r.top[i] = r.top[i] + by;
+    r
+}
+
+// How wide a gap with this least drop across it may be: as far as he goes
+// running off it, by GAP_SHARE.
+gap_most(least: f32): f32 {
+    GAP_SHARE * GAP_SPEED * sqrtf(2.0 * maxf(least, 0.0) / 16.0)
+}
+
+// Lay out the hill for a seed.
+tag tumbledown
+hill_lay_out(seed: int) {
+    hill_rng = seed * 7919 + 17;
+    for _i in 0..4 hill_rand();
+    h: *Hill = hill;
+    first: Row = flat_row();
+    first.start = HILL_START;
+    first.end = START_END;
+    first.top[0] = HILL_TOP;
+    h.rows[0] = first;
+    h.n = 1;
+    d: f32 = START_END;
+    last_big: f32 = -1000.0;
+    bigs: int = 0;
+    tower_next: bool = false;
+    while (d < HILL_LENGTH && h.n < MAX_ROWS - 2) {
+        prev: Row = h.rows[h.n - 1];
+        // A tower's row (its end the big drop), now and then: three or
+        // four down the hill, no two within 40 m.
+        // (Decided a row ahead, so that the row before it can be made
+        // one he can run across to it on: see below.)
+        towering: bool = tower_next;
+        tower_next = false;
+        row: Row = blocks_row(3 + (hill_rand() * 2.99) as int);
+        if (prev.kind == ROW_TOWER) row = flat_row();
+        // The row before a tower: its blocks lower and lower toward the
+        // tower's side (the sea's), so that from wherever he lands on it he
+        // can run across to the ramp up.
+        if (!towering && row.kind != ROW_FLAT && d - last_big >= 40.0 && bigs < 4 && (hill_rand() < 0.5 || d - last_big > 50.0) && d > 20.0 && d < HILL_LENGTH - 16.0) {
+            tower_next = true;
+            row = tops_falling_right(row)
+        }
+        if (towering) {
+            // (At the sea's side: the rightmost block, the others level with
+            // it while the row is set down onto the one before; raised
+            // after.)
+            row = blocks_row(3 + (hill_rand() * 1.99) as int);
+            row.kind = ROW_TOWER;
+            row.tower = row.n - 1;
+            most: f32 = 0.0;
+            for i in 0..row.n - 1 most = maxf(most, row.top[i]);
+            row.top[row.tower] = most;
+            last_big = d
+        }
+        row.start = d;
+        long: f32 = hill_between(5.0, 9.0);
+        if (row.kind == ROW_TOWER) long = hill_between(8.0, 12.0);
+        if (row.kind == ROW_FLAT) long = hill_between(12.0, 16.0);
+        // (Long enough to get across to the tower's ramp.)
+        if (tower_next) long = hill_between(9.0, 11.0);
+        row.end = d + long;
+        // How it meets the last: a big drop off a tower; across a gap; or
+        // touching.
+        gap: f32 = 0.0;
+        if (prev.kind == ROW_TOWER) {
+            row = lower_onto(prev, row, 0.0);
+            // (5 to 6 m off the tower itself.)
+            tower_drop: f32 = prev.top[prev.tower] - row.top[0];
+            want: f32 = hill_between(5.0, 6.0);
+            for i in 0..row.n row.top[i] = row.top[i] - (want - tower_drop);
+            bigs = bigs + 1
+        } else {
+            least: f32 = hill_between(0.5, 1.4);
+            // (Most rows are across a gap from the last, the first always:
+            // a tower is come to up a ramp, never across a gap.)
+            if ((hill_rand() < GAP_SHARE_OF_ROWS || h.n == 1) && !towering) {
+                least = hill_between(1.2, 2.0);
+                gap = minf(hill_between(1.0, 1.8), gap_most(least));
+                if (gap < 1.0) gap = 0.0
+            }
+            row = lower_onto(prev, row, least);
+            // (No drop over 3.5 m but off a tower.)
+            over: f32 = most_drop(prev, row) - 3.5;
+            if (over > 0.0) {
+                for i in 0..row.n row.top[i] = row.top[i] + over
+            }
+            // A tower stands TOWER_HIGH over the rest of its row: up a ramp
+            // from the row before (see tower_ramp).
+            if (towering) row.top[row.tower] = row.top[row.tower] + TOWER_HIGH
+        }
+        if (gap > 0.0) {
+            row.start = row.start + gap;
+            row.end = row.end + gap
+        }
+        h.rows[h.n - 1].gap = gap;
+        // A ramp down to it, at one side, now and then, where it touches.
+        if (gap <= 0.0 && prev.kind != ROW_TOWER && !towering && hill_rand() < 0.25) {
+            side: f32 = 1.0;
+            if (hill_rand() < 0.5) side = -1.0;
+            x: f32 = side * (HILL_HALF - RAMP_WIDTH * 0.5);
+            run: f32 = (row_top(prev, x) - row_top(row, x)) / RAMP_SLOPE;
+            if (run < row.end - row.start - 2.0 && run > 0.5) h.rows[h.n - 1].ramp = side
+        }
+        h.rows[h.n] = row;
+        h.n = h.n + 1;
+        d = row.end
+    }
+    // The headland at the bottom, from the last row's end, and the sea past
+    // its cliff.
+    prev: Row = h.rows[h.n - 1];
+    headland: Row = lower_onto(prev, flat_row(), hill_between(1.0, 1.4));
+    headland.start = d;
+    headland.end = d + HEADLAND_LENGTH;
+    h.rows[h.n] = headland;
+    sea: Row = flat_row();
+    sea.kind = ROW_SEA;
+    sea.start = headland.end;
+    sea.end = headland.end + 5000.0;
+    sea.top[0] = headland.top[0] - FINISH_CLIFF;
+    h.rows[h.n + 1] = sea;
+    h.n = h.n + 2;
+    h.finish = sea.start;
+    h.sea = sea.top[0]
+}
+
+// The stage's ground (see stage.l8): flat at 0, or a lip at d `at` from
+// `high` down to 0; one block across.
+tag tumbledown
+hill_lay_out_stage(high: f32, at: f32) {
+    h: *Hill = hill;
+    a: Row = flat_row();
+    a.start = -1000.0;
+    a.end = 100000.0;
+    h.rows[0] = a;
+    h.n = 1;
+    h.finish = 100000.0;
+    h.sea = -1000.0;
+    if (high <= 0.0) return;
+    h.rows[0].end = at;
+    h.rows[0].top[0] = high;
+    b: Row = flat_row();
+    b.start = at;
+    b.end = 100000.0;
+    h.rows[1] = b;
+    h.n = 2
+}
+
+// ---- heights ----
+// The row d is in (its top, or the gap after it); the first for anything
+// before it, the last (the sea) past it.
+tag tumbledown
+row_at(d: f32): int {
+    h: *Hill = hill;
+    for k in 0..h.n - 1 {
+        if (d < h.rows[k + 1].start) return k
+    }
+    h.n - 1
+}
+
+// The bank on the left: past a strip SIDE_GAP wide, SIDE_DROP below the
+// outermost block (so that each row's outer block shows its side face
+// down to the next), the grassy hillside rises (as skate's course's banks
+// do). On the right, the rock wall, WALL_HIGH over the outermost block and
+// WALL_WIDE; past it the cliff to the sea.
+const SIDE_GAP: f32 = 0.8;
+
+const SIDE_DROP: f32 = 0.6;
+
+const WALL_HIGH: f32 = 0.5;
+
+const WALL_WIDE: f32 = 0.4;
+
+// The bank's rise alone, on the left.
+hill_bank_rise(x: f32): f32 {
+    if (hill_flat || x > 0.0) return 0.0;
+    e: f32 = -x - HILL_HALF - SIDE_GAP;
+    if (e <= 0.0) return 0.0;
+    3.2 * smoothstepf(0.0, 5.0, e) + 0.12 * e
+}
+
+// The ground's height at (x, d).
+tag tumbledown
+hill_height_d(x: f32, d: f32): f32 {
+    h: *Hill = hill;
+    k: int = row_at(d);
+    row: Row = h.rows[k];
+    if (row.kind == ROW_SEA) return row.top[0];
+    g: f32 = row_top(row, x);
+    if (hill_flat) return g;
+    // Past the run's edges: the strip and bank on the left; on the right,
+    // the wall, and past it the sea.
+    if (x < -HILL_HALF) return g - SIDE_DROP + hill_bank_rise(x);
+    if (x > HILL_HALF + WALL_WIDE) return h.sea;
+    if (x > HILL_HALF) return g + WALL_HIGH;
+    // In a gap, the sea, down between the pillars.
+    if (d >= row.end && k < h.n - 1) return h.sea;
+    // Up a ramp to a tower, at the end of the row before it.
+    if (k < h.n - 1 && h.rows[k + 1].kind == ROW_TOWER) {
+        t: Row = h.rows[k + 1];
+        if (x >= t.edge[t.tower] && x <= t.edge[t.tower + 1]) g = maxf(g, t.top[t.tower] - UP_SLOPE * (row.end - d))
+    }
+    // Down a ramp from the row above.
+    if (k > 0) {
+        up: Row = h.rows[k - 1];
+        if (up.ramp != 0.0 && up.gap <= 0.0 && on_ramp(up, x)) g = maxf(g, row_top(up,
+            x) - RAMP_SLOPE * (d - row.start))
+    }
+    g
+}
+
+on_ramp(row: Row, x: f32): bool {
+    if (row.ramp > 0.0) return x >= HILL_HALF - RAMP_WIDTH;
+    x <= -HILL_HALF + RAMP_WIDTH
+}
+
+// The same at a place in the world (z = -d).
+tag tumbledown
+hill_height(x: f32, z: f32): f32 {
+    hill_height_d(x, -z)
+}
+
+tag tumbledown
+hill_normal(x: f32, z: f32): V3 {
+    e: f32 = 0.05;
+    hx: f32 = (hill_height(x + e, z) - hill_height(x - e, z)) / (2.0 * e);
+    hz: f32 = (hill_height(x, z + e) - hill_height(x, z - e)) / (2.0 * e);
+    v_norm(v3(-hx, 1.0, -hz))
+}
+
+// Whether (x, d) is the sea (past the headland's cliff, or off the
+// right-hand cliff).
+tag tumbledown
+in_sea(x: f32, d: f32): bool {
+    if (hill_flat) return false;
+    hill.rows[row_at(d)].kind == ROW_SEA || x > HILL_HALF + WALL_WIDE
+}
+
+// Whether a lip is near ahead of (x, d) along (dx, dd) (a unit way across
+// the ground): within `reach`, the ground falls away by more than half a
+// metre.
+tag tumbledown
+lip_ahead(
+    x: f32,
+    d: f32,
+    dx: f32,
+    dd: f32,
+    reach: f32
+): bool {
+    here: f32 = hill_height_d(x, d);
+    s: f32 = 0.1;
+    while (s <= reach + 0.001) {
+        if (hill_height_d(x + dx * s, d + dd * s) < here - 0.5) return true;
+        s = s + 0.1
+    }
+    false
+}
+
+// How far down the hill the end of the row d is in is.
+tag tumbledown
+row_end_d(d: f32): f32 {
+    k: int = row_at(d);
+    if (k >= hill.n - 1) return 100000.0;
+    hill.rows[k].end
+}
+
+// The drop at x off row k's end: onto the next row (across its gap, if it
+// has one), or into the sea.
+tag tumbledown
+edge_drop(k: int, x: f32): f32 {
+    if (k >= hill.n - 1) return 0.0;
+    row_top(hill.rows[k], x) - row_top(hill.rows[k + 1], x)
+}
+
+// Whether he cleared a gap, flying from d0 to land at d1 on a row's top:
+// a gap's far side is between them, and he did not come down in a gap.
+tag tumbledown
+gap_cleared(d0: f32, d1: f32): bool {
+    h: *Hill = hill;
+    k: int = row_at(d1);
+    if (d1 >= h.rows[k].end && k < h.n - 1) return false;
+    for i in 0..h.n - 1 {
+        r: Row = h.rows[i];
+        if (r.gap > 0.0 && r.end >= d0 - 0.3 && r.end + r.gap <= d1) return true
+    }
+    false
+}
+
+// ---- building ----
+// The colors: grey rock, its strata a little lighter and darker; bare tops
+// the lightest thing on the hill, their lips lighter still; turf; the sea.
+rock_color: V3 = V3 { x: 0.5, y: 0.44, z: 0.38 };
+
+bare_color: V3 = V3 { x: 0.6, y: 0.57, z: 0.52 };
+
+lip_color: V3 = V3 { x: 0.76, y: 0.72, z: 0.64 };
+
+turf_color: V3 = V3 { x: 0.4, y: 0.52, z: 0.28 };
+
+meadow_color: V3 = V3 { x: 0.45, y: 0.62, z: 0.3 };
+
+bank_grass_color: V3 = V3 { x: 0.34, y: 0.52, z: 0.27 };
+
+tumbledown_sea_color: V3 = V3 { x: 0.2, y: 0.42, z: 0.5 };
+
+gap_water_color: V3 = V3 { x: 0.16, y: 0.34, z: 0.4 };
+
+leaf_color: V3 = V3 { x: 0.24, y: 0.48, z: 0.2 };
+
+bark_color: V3 = V3 { x: 0.36, y: 0.27, z: 0.2 };
+
+// Material codes, as the world's shader reads them (see render.l8).
+const MAT_STONE_TOP: f32 = 0.0;
+
+const MAT_GRASS: f32 = 1.0;
+
+const MAT_WATER: f32 = 2.0;
+
+const MAT_FACE: f32 = 6.0;
+
+const MAT_LEAF: f32 = 9.0;
+
+// The hill's meshes, each in pieces down the hill (see HillPieces): the
+// ground (grass, water), which casts no shadow (its shape shows in its
+// shading), and what stands (rock, trees), which does.
+const HILL_PIECES: int = MAX_ROWS + 4;
+
+tag tumbledown
+type HillPieces = {
+    // Each piece's first vertex and count, and the stretch of d it covers.
+    first: []int;
+    count: []int;
+    d0: []f32;
+    d1: []f32;
+    n: int
+}
+
+tag tumbledown
+new_pieces(): *HillPieces@new {
+    new HillPieces {
+        first: new int[HILL_PIECES](0),
+        count: new int[HILL_PIECES](0),
+        d0: new f32[HILL_PIECES](0.0),
+        d1: new f32[HILL_PIECES](0.0),
+        n: 0
+    }
+}
+
+tag tumbledown
+ground_pieces: *HillPieces = new_pieces();
+
+tag tumbledown
+solid_pieces: *HillPieces = new_pieces();
+
+// (HILL_PIECES is enough for any hill: a piece of each for each row, and
+// a few more. Were it not, what is past it would go undrawn: counted in
+// pieces_dropped, which main.l8 says on the terminal.)
+tag tumbledown
+pieces_dropped: int = 0;
+
+tag tumbledown
+piece_begin(
+    p: *HillPieces,
+    m: *Mesh,
+    d0: f32,
+    d1: f32
+) {
+    if (p.n >= HILL_PIECES) {
+        pieces_dropped = pieces_dropped + 1;
+        return
+    }
+    p.first[p.n] = m.n;
+    p.d0[p.n] = d0;
+    p.d1[p.n] = d1
+}
+
+tag tumbledown
+piece_end(p: *HillPieces, m: *Mesh) {
+    if (p.n >= HILL_PIECES) return;
+    p.count[p.n] = m.n - p.first[p.n];
+    p.n = p.n + 1
+}
+
+// The bank's grid across, out from its strip: a metre at a time up the
+// bank, then coarse out past it, where the hillside goes on rising.
+const BANK_CELLS: int = 7;
+
+const OUTER_CELLS: int = 4;
+
+const OUTER_CELL: f32 = 5.0;
+
+const SIDE_CELLS: int = BANK_CELLS + OUTER_CELLS;
+
+// How far out from the strip step i of the bank's grid is.
+bank_out(i: int): f32 {
+    if (i <= BANK_CELLS) return i as f32;
+    BANK_CELLS as f32 + (i - BANK_CELLS) as f32 * OUTER_CELL
+}
+
+block_m: []f32 = new f32[16](0.0);
+
+up_n: V3 = V3 { x: 0.0, y: 1.0, z: 0.0 };
+
+// Build the hill into ground and solid (each cleared first).
+tag tumbledown
+hill_build(ground: *Mesh, solid: *Mesh) {
+    mesh_clear(ground);
+    mesh_clear(solid);
+    ground_pieces.n = 0;
+    solid_pieces.n = 0;
+    sea_piece = -1;
+    h: *Hill = hill;
+    for k in 0..h.n {
+        row: Row = h.rows[k];
+        if (row.kind != ROW_SEA) {
+            d0: f32 = maxf(row.start, -60.0);
+            d1: f32 = row.end + row.gap;
+            if (hill_flat) d1 = minf(d1, 300.0);
+            next: Row = row;
+            if (k < h.n - 1) next = h.rows[k + 1];
+            piece_begin(ground_pieces, ground, d0, d1);
+            if (!hill_flat) build_banks(ground, row, d0, row.end, d1);
+            if (row.gap > 0.0) build_gap_water(ground, row);
+            piece_end(ground_pieces, ground);
+            piece_begin(solid_pieces, solid, d0, d1 + 6.0);
+            build_row(solid, row, k, d0, next);
+            if (!hill_flat) {
+                build_wall(solid, row, d0);
+                build_trees(solid, row, k);
+                if (k > 0) build_boulders(solid, k - 1, row)
+            }
+            piece_end(solid_pieces, solid)
+        }
+    }
+    if (!hill_flat) {
+        // Behind the start, the hill goes on up; the sea, and its stacks,
+        // are seen from everywhere.
+        piece_begin(ground_pieces, ground, HILL_START - 40.0, HILL_START);
+        build_back(ground);
+        piece_end(ground_pieces, ground);
+        sea_piece = ground_pieces.n;
+        piece_begin(ground_pieces, ground, -100000.0, 100000.0);
+        build_sea(ground);
+        piece_end(ground_pieces, ground);
+        piece_begin(solid_pieces, solid, -100000.0, 100000.0);
+        build_stacks(solid);
+        piece_end(solid_pieces, solid)
+    }
+}
+
+// Whether each block is built as one box (L8_PROFILE=strata: see main.l8).
+tag tumbledown
+hill_one_box: bool = false;
+
+// Which of the ground's pieces is the sea (or -1): drawn last of the hill,
+// where nothing else is (see render.l8), as it is the biggest thing.
+tag tumbledown
+sea_piece: int = -1;
+
+// How far across the stage's ground reaches (see stage.l8).
+const STAGE_HALF: f32 = 4.5;
+
+// The rounding of a block's edges, weathered.
+const ROCK_ROUND: f32 = 0.12;
+
+// A row's blocks, each rock with a top of turf or bare rock and a lighter
+// lip where it drops; and its ramps.
+build_row(
+    m: *Mesh,
+    row: Row,
+    k: int,
+    d0: f32,
+    next: Row
+) {
+    end: f32 = row.end;
+    if (hill_flat) {
+        end = minf(end, 300.0);
+        for i in 0..row.n {
+            top: f32 = row.top[i];
+            put_block(m, -STAGE_HALF, STAGE_HALF, top - 5.0, top, d0, end, rock_color);
+            put_top(m, -STAGE_HALF, STAGE_HALF, top, d0, end, v3(0.36, 0.54, 0.3),
+                MAT_GRASS, 0.08)
+        }
+        return
+    }
+    // Each block a pillar of rock down to the sea; where the row drops (to
+    // a gap or the next row), its edge broken into columns, each a little
+    // lower than the last (see put_lip).
+    bottom: f32 = hill.sea - 1.0;
+    lip: bool = k < hill.n - 1;
+    for i in 0..row.n {
+        x0: f32 = row.edge[i];
+        x1: f32 = row.edge[i + 1];
+        top: f32 = row.top[i];
+        main_end: f32 = end;
+        if (lip) main_end = end - LIP_DEEP;
+        if (hill_one_box) main_end = end;
+        put_block(m, x0, x1, bottom, top, d0, main_end, rock_color);
+        turf: bool = row.kind == ROW_FLAT || hill_rand() < TURF_SHARE;
+        if (turf) {
+            c: V3 = turf_color;
+            if (row.kind == ROW_FLAT) c = meadow_color;
+            put_turf(m, x0, x1, top, d0, main_end, c)
+        }
+        if (lip && !hill_one_box) put_lip(m, x0, x1, bottom, top, main_end, end)
+    }
+    if (row.ramp != 0.0 && k < hill.n - 1) build_ramp(m, row, next);
+    if (k < hill.n - 1 && next.kind == ROW_TOWER) build_ramp_up(m, row, next)
+}
+
+// How deep a lip's columns are, how wide each (the columns' seams in the
+// shader are as far apart), how deep the front ones, and how much lower
+// than the top they may be. (He runs on as if they were level with the
+// top: the front ones are under him for a few hundredths of a second.)
+const LIP_DEEP: f32 = 0.7;
+
+const LIP_FRONT: f32 = 0.3;
+
+const COLUMN: f32 = 0.9;
+
+const LIP_LOWER: f32 = 0.42;
+
+// How many blocks' tops are turf, and how far in from their edges it
+// stops (a rim of rock round it).
+const TURF_SHARE: f32 = 0.2;
+
+const TURF_INSET: f32 = 0.25;
+
+// A block's lip, x0..x1 across, d0..d1 down the hill: a row of columns
+// COLUMN wide, from the sea up to a little under the top, and in front of
+// each a lower one LIP_FRONT deep (each its own height, and set back a
+// little or not, so that the edge is broken), their tops the lip's
+// lighter rock.
+put_lip(
+    m: *Mesh,
+    x0: f32,
+    x1: f32,
+    bottom: f32,
+    top: f32,
+    d0: f32,
+    d1: f32
+) {
+    n: int = maxi_h(((x1 - x0) / COLUMN + 0.5) as int, 1);
+    w: f32 = (x1 - x0) / n as f32;
+    for i in 0..n {
+        a: f32 = x0 + w * i as f32 + 0.015;
+        b: f32 = a + w - 0.03;
+        front: f32 = d1 - hill_between(0.0, 0.12);
+        mid: f32 = front - LIP_FRONT;
+        put_lip_column(m, a, b, bottom, top - hill_between(0.03, 0.1), d0, mid);
+        put_lip_column(m, a, b, bottom, top - hill_between(0.15, LIP_LOWER), mid + 0.02,
+            front)
+    }
+}
+
+// A column of the rock, x0..x1 across, d0..d1 down the hill, from bottom
+// to high: its top the lip's color, its front and sides. (Its back is
+// against the block, or the column behind.)
+put_lip_column(
+    m: *Mesh,
+    x0: f32,
+    x1: f32,
+    bottom: f32,
+    high: f32,
+    d0: f32,
+    d1: f32
+) {
+    z0: f32 = -d0;
+    z1: f32 = -d1;
+    put_quad(m, v3(x0, high, z0), v3(x1, high, z0), v3(x1, high, z1), v3(x0, high,
+        z1), up_n, lip_color, MAT_STONE_TOP);
+    put_quad(m, v3(x0, high, z1), v3(x1, high, z1), v3(x1, bottom, z1), v3(x0, bottom,
+        z1), v3(0.0, 0.0, -1.0), rock_color, MAT_FACE);
+    put_quad(m, v3(x0, high, z0), v3(x0, high, z1), v3(x0, bottom, z1), v3(x0, bottom,
+        z0), v3(-1.0, 0.0, 0.0), rock_color, MAT_FACE);
+    put_quad(m, v3(x1, high, z1), v3(x1, high, z0), v3(x1, bottom, z0), v3(x1, bottom,
+        z1), v3(1.0, 0.0, 0.0), rock_color, MAT_FACE)
+}
+
+maxi_h(a: int, b: int): int {
+    if (a > b) return a;
+    b
+}
+
+// A block's top: a quad of its color over all but `inset` of the top's
+// edges (the rock's rounded rim shows round it).
+put_top(
+    m: *Mesh,
+    x0: f32,
+    x1: f32,
+    top: f32,
+    d0: f32,
+    d1: f32,
+    c: V3,
+    mat: f32,
+    inset: f32
+) {
+    y: f32 = top + 0.006;
+    put_quad(m, v3(x0 + inset, y, -(d0 + inset)), v3(x1 - inset, y, -(d0 + inset)),
+        v3(x1 - inset, y, -(d1 - inset)), v3(x0 + inset, y, -(d1 - inset)), up_n,
+        c, mat)
+}
+
+// A block of rock, x0..x1 across, from bottom to top, d0..d1 down the
+// hill: its four sides in color c, its top (the top's color) with its
+// edges rounded off by ROCK_ROUND. (No bottom: it stands in the sea.)
+put_block(
+    m: *Mesh,
+    x0: f32,
+    x1: f32,
+    bottom: f32,
+    top: f32,
+    d0: f32,
+    d1: f32,
+    c: V3
+) {
+    r: f32 = minf(ROCK_ROUND, minf(x1 - x0, d1 - d0) * 0.25);
+    z0: f32 = -d0;
+    z1: f32 = -d1;
+    y: f32 = top - r;
+    a0: f32 = x0 + r;
+    a1: f32 = x1 - r;
+    b0: f32 = z0 - r;
+    b1: f32 = z1 + r;
+    put_quad(m, v3(x0, y, z1), v3(x1, y, z1), v3(x1, bottom, z1), v3(x0, bottom, z1),
+        v3(0.0, 0.0, -1.0), c, MAT_FACE);
+    put_quad(m, v3(x1, y, z0), v3(x0, y, z0), v3(x0, bottom, z0), v3(x1, bottom, z0),
+        v3(0.0, 0.0, 1.0), c, MAT_FACE);
+    put_quad(m, v3(x0, y, z0), v3(x0, y, z1), v3(x0, bottom, z1), v3(x0, bottom, z0),
+        v3(-1.0, 0.0, 0.0), c, MAT_FACE);
+    put_quad(m, v3(x1, y, z1), v3(x1, y, z0), v3(x1, bottom, z0), v3(x1, bottom, z1),
+        v3(1.0, 0.0, 0.0), c, MAT_FACE);
+    // (The rounding: each side's strip from its top edge in to the top,
+    // mitred at the corners, its normals from the side's to straight up.)
+    put_quad_n(m, v3(a0, top, b1), v3(a1, top, b1), v3(x1, y, z1), v3(x0, y, z1),
+        up_n, up_n, v3(0.0, 0.0, -1.0), v3(0.0, 0.0, -1.0), bare_color, MAT_STONE_TOP);
+    put_quad_n(m, v3(a1, top, b0), v3(a0, top, b0), v3(x0, y, z0), v3(x1, y, z0),
+        up_n, up_n, v3(0.0, 0.0, 1.0), v3(0.0, 0.0, 1.0), bare_color, MAT_STONE_TOP);
+    put_quad_n(m, v3(a0, top, b0), v3(a0, top, b1), v3(x0, y, z1), v3(x0, y, z0),
+        up_n, up_n, v3(-1.0, 0.0, 0.0), v3(-1.0, 0.0, 0.0), bare_color, MAT_STONE_TOP);
+    put_quad_n(m, v3(a1, top, b1), v3(a1, top, b0), v3(x1, y, z0), v3(x1, y, z1),
+        up_n, up_n, v3(1.0, 0.0, 0.0), v3(1.0, 0.0, 0.0), bare_color, MAT_STONE_TOP);
+    put_quad(m, v3(a0, top, b0), v3(a1, top, b0), v3(a1, top, b1), v3(a0, top, b1),
+        up_n, bare_color, MAT_STONE_TOP)
+}
+
+// Turf on a block, x0..x1 across, d0..d1 down the hill: a low mound in
+// from its edges by TURF_INSET, its sides sloping down to the rock.
+put_turf(
+    m: *Mesh,
+    x0: f32,
+    x1: f32,
+    top: f32,
+    d0: f32,
+    d1: f32,
+    c: V3
+) {
+    e: f32 = TURF_INSET;
+    t: f32 = TURF_INSET + 0.12;
+    if (x1 - x0 < 2.0 * t + 0.2 || d1 - d0 < 2.0 * t + 0.2) return;
+    y0: f32 = top + 0.006;
+    y1: f32 = top + 0.07;
+    z0: f32 = -d0;
+    z1: f32 = -d1;
+    put_quad(m, v3(x0 + t, y1, z0 - t), v3(x1 - t, y1, z0 - t), v3(x1 - t, y1, z1 + t),
+        v3(x0 + t, y1, z1 + t), up_n, c, MAT_GRASS);
+    put_quad_n(m, v3(x0 + t, y1, z1 + t), v3(x1 - t, y1, z1 + t), v3(x1 - e, y0, z1 + e),
+        v3(x0 + e, y0, z1 + e), up_n, up_n, turf_side_n_z, turf_side_n_z, c, MAT_GRASS);
+    put_quad_n(m, v3(x1 - t, y1, z0 - t), v3(x0 + t, y1, z0 - t), v3(x0 + e, y0, z0 - e),
+        v3(x1 - e, y0, z0 - e), up_n, up_n, turf_side_p_z, turf_side_p_z, c, MAT_GRASS);
+    put_quad_n(m, v3(x0 + t, y1, z0 - t), v3(x0 + t, y1, z1 + t), v3(x0 + e, y0, z1 + e),
+        v3(x0 + e, y0, z0 - e), up_n, up_n, turf_side_n_x, turf_side_n_x, c, MAT_GRASS);
+    put_quad_n(m, v3(x1 - t, y1, z1 + t), v3(x1 - t, y1, z0 - t), v3(x1 - e, y0, z0 - e),
+        v3(x1 - e, y0, z1 + e), up_n, up_n, turf_side_p_x, turf_side_p_x, c, MAT_GRASS)
+}
+
+turf_side_n_z: V3 = V3 { x: 0.0, y: 0.85, z: -0.53 };
+
+turf_side_p_z: V3 = V3 { x: 0.0, y: 0.85, z: 0.53 };
+
+turf_side_n_x: V3 = V3 { x: -0.53, y: 0.85, z: 0.0 };
+
+turf_side_p_x: V3 = V3 { x: 0.53, y: 0.85, z: 0.0 };
+
+// A plain box of rock: its four sides and its top.
+put_plain_box(
+    m: *Mesh,
+    x0: f32,
+    x1: f32,
+    y0: f32,
+    y1: f32,
+    d0: f32,
+    d1: f32,
+    c: V3
+) {
+    z0: f32 = -d0;
+    z1: f32 = -d1;
+    put_quad(m, v3(x0, y1, z0), v3(x1, y1, z0), v3(x1, y1, z1), v3(x0, y1, z1), up_n,
+        c, MAT_FACE);
+    put_quad(m, v3(x0, y1, z1), v3(x1, y1, z1), v3(x1, y0, z1), v3(x0, y0, z1), v3(0.0,
+        0.0, -1.0), c, MAT_FACE);
+    put_quad(m, v3(x1, y1, z0), v3(x0, y1, z0), v3(x0, y0, z0), v3(x1, y0, z0), v3(0.0,
+        0.0, 1.0), c, MAT_FACE);
+    put_quad(m, v3(x0, y1, z0), v3(x0, y1, z1), v3(x0, y0, z1), v3(x0, y0, z0), v3(-1.0,
+        0.0, 0.0), c, MAT_FACE);
+    put_quad(m, v3(x1, y1, z1), v3(x1, y1, z0), v3(x1, y0, z0), v3(x1, y0, z1), v3(1.0,
+        0.0, 0.0), c, MAT_FACE)
+}
+
+// The rock wall along the run's right edge, beside a row (not over the gap
+// after it, where the water shows), about WALL_HIGH over its outer block:
+// columns of the rock, each a little higher or lower than the last, their
+// outer faces the cliff down to the sea.
+build_wall(m: *Mesh, row: Row, d0: f32) {
+    top: f32 = row_top(row, HILL_HALF);
+    a: f32 = d0;
+    high: f32 = top + WALL_HIGH;
+    while (a < row.end - 0.3) {
+        b: f32 = minf(a + hill_between(0.5, 0.9), row.end);
+        high = clampf(high + hill_between(-0.12, 0.12), top + 0.25, top + 0.7);
+        x0: f32 = HILL_HALF + 0.02;
+        x1: f32 = HILL_HALF + WALL_WIDE;
+        z0: f32 = -a;
+        z1: f32 = -(b - 0.025);
+        low: f32 = top - 0.4;
+        put_quad(m, v3(x0, high, z0), v3(x1, high, z0), v3(x1, high, z1), v3(x0, high,
+            z1), up_n, bare_color, MAT_STONE_TOP);
+        put_quad(m, v3(x0, high, z1), v3(x1, high, z1), v3(x1, low, z1), v3(x0, low,
+            z1), v3(0.0, 0.0, -1.0), rock_color, MAT_FACE);
+        put_quad(m, v3(x1, high, z0), v3(x0, high, z0), v3(x0, low, z0), v3(x1, low,
+            z0), v3(0.0, 0.0, 1.0), rock_color, MAT_FACE);
+        put_quad(m, v3(x0, high, z0), v3(x0, high, z1), v3(x0, low, z1), v3(x0, low,
+            z0), v3(-1.0, 0.0, 0.0), rock_color, MAT_FACE);
+        put_quad(m, v3(x1, high, z1), v3(x1, high, z0), v3(x1, hill.sea - 1.0, z0),
+            v3(x1, hill.sea - 1.0, z1), v3(1.0, 0.0, 0.0), rock_color, MAT_FACE);
+        a = b
+    }
+}
+
+// A ramp down from a row's end into the next, at its side.
+build_ramp(m: *Mesh, row: Row, next: Row) {
+    x0: f32 = HILL_HALF - RAMP_WIDTH;
+    x1: f32 = HILL_HALF;
+    if (row.ramp < 0.0) {
+        x0 = -HILL_HALF;
+        x1 = -HILL_HALF + RAMP_WIDTH
+    }
+    xm: f32 = (x0 + x1) * 0.5;
+    high: f32 = row_top(row, xm);
+    low: f32 = row_top(next, xm);
+    run: f32 = (high - low) / RAMP_SLOPE;
+    z0: f32 = -next.start;
+    z1: f32 = -(next.start + run);
+    slope_n: V3 = v_norm(v3(0.0, 1.0, -RAMP_SLOPE));
+    put_quad(m, v3(x0, high, z0), v3(x1, high, z0), v3(x1, low + 0.005, z1), v3(x0,
+        low + 0.005, z1), slope_n, bare_color, MAT_STONE_TOP);
+    for x in [x0, x1] {
+        n: V3 = v3(1.0, 0.0, 0.0);
+        if (x == x0) n = v3(-1.0, 0.0, 0.0);
+        put(m, v3(x, high, z0), n, rock_color, MAT_FACE);
+        put(m, v3(x, low, z1), n, rock_color, MAT_FACE);
+        put(m, v3(x, low, z0), n, rock_color, MAT_FACE)
+    }
+}
+
+// The ramp up to a tower, at the end of the row before it, as wide as the
+// tower.
+build_ramp_up(m: *Mesh, row: Row, tower: Row) {
+    x0: f32 = tower.edge[tower.tower] + 0.02;
+    x1: f32 = tower.edge[tower.tower + 1] - 0.02;
+    high: f32 = tower.top[tower.tower];
+    low: f32 = minf(row_top(row, x0), row_top(row, x1));
+    run: f32 = (high - low) / UP_SLOPE;
+    z0: f32 = -(row.end - run);
+    z1: f32 = -row.end;
+    slope_n: V3 = v_norm(v3(0.0, 1.0, UP_SLOPE));
+    put_quad(m, v3(x0, low + 0.02, z0), v3(x1, low + 0.02, z0), v3(x1, high, z1),
+        v3(x0, high, z1), slope_n, bare_color, MAT_STONE_TOP);
+    for x in [x0, x1] {
+        n: V3 = v3(1.0, 0.0, 0.0);
+        if (x == x0) n = v3(-1.0, 0.0, 0.0);
+        put(m, v3(x, low, z0), n, rock_color, MAT_FACE);
+        put(m, v3(x, high, z1), n, rock_color, MAT_FACE);
+        put(m, v3(x, low, z1), n, rock_color, MAT_FACE)
+    }
+}
+
+// A gap's floor: the sea, down between the pillars, across the run.
+build_gap_water(m: *Mesh, row: Row) {
+    a: f32 = -HILL_HALF;
+    b: f32 = HILL_HALF;
+    y: f32 = hill.sea;
+    put_quad(m, v3(a, y, -row.end), v3(b, y, -row.end), v3(b, y, -(row.end + row.gap)),
+        v3(a, y, -(row.end + row.gap)), up_n, gap_water_color, MAT_WATER)
+}
+
+// The bank on the left of a row, from d0 to its end (and over the gap
+// after it, at its height, to d1): its strip, then the hillside rising;
+// with a face down to the next row's at d1, and down into the gap at the
+// run's edge.
+build_banks(
+    m: *Mesh,
+    row: Row,
+    d0: f32,
+    end: f32,
+    d1: f32
+) {
+    top: f32 = row_top(row, -HILL_HALF);
+    base: f32 = top - SIDE_DROP;
+    x0: f32 = -HILL_HALF;
+    x1: f32 = -(HILL_HALF + SIDE_GAP);
+    put_quad(m, v3(x0, base, -d0), v3(x1, base, -d0), v3(x1, base, -d1), v3(x0, base,
+        -d1), up_n, bank_grass_color, MAT_GRASS);
+    for i in 0..SIDE_CELLS {
+        xa: f32 = x1 - bank_out(i);
+        xb: f32 = x1 - bank_out(i + 1);
+        ya: f32 = base + hill_bank_rise(xa);
+        yb: f32 = base + hill_bank_rise(xb);
+        na: V3 = bank_normal(xa);
+        nb: V3 = bank_normal(xb);
+        put_quad_n(m, v3(xa, ya, -d0), v3(xb, yb, -d0), v3(xb, yb, -d1), v3(xa, ya,
+            -d1), na, nb, nb, na, bank_grass_color, MAT_GRASS)
+    }
+    // (At the headland's end, the land's end: a face down to the sea,
+    // under the bank and the land out past it.)
+    if (d1 >= hill.finish - 0.01) {
+        for i in 0..SIDE_CELLS {
+            xa: f32 = x1 - bank_out(i);
+            xb: f32 = x1 - bank_out(i + 1);
+            put_quad(m, v3(xb, base + hill_bank_rise(xb), -d1), v3(xa, base + hill_bank_rise(xa),
+                -d1), v3(xa, hill.sea - 1.0, -d1), v3(xb, hill.sea - 1.0, -d1), v3(0.0,
+                0.0, -1.0), rock_color, MAT_FACE)
+        }
+        put_quad(m, v3(x1, base, -d1), v3(x0, base, -d1), v3(x0, hill.sea - 1.0, -d1),
+            v3(x1, hill.sea - 1.0, -d1), v3(0.0, 0.0, -1.0), rock_color, MAT_FACE);
+        xe: f32 = x1 - bank_out(SIDE_CELLS);
+        ye: f32 = base + hill_bank_rise(xe);
+        put_quad(m, v3(xe - LAND_OUT, ye + LAND_OUT * 0.06, -d1), v3(xe, ye, -d1),
+            v3(xe, hill.sea - 1.0, -d1), v3(xe - LAND_OUT, hill.sea - 1.0, -d1), v3(0.0,
+            0.0, -1.0), rock_color, MAT_FACE)
+    }
+    // (And on out, the land: seen from the sea, at the dive.)
+    xo: f32 = x1 - bank_out(SIDE_CELLS);
+    yo: f32 = base + hill_bank_rise(xo);
+    put_quad(m, v3(xo, yo, -d0), v3(xo - LAND_OUT, yo + LAND_OUT * 0.06, -d0), v3(xo - LAND_OUT,
+        yo + LAND_OUT * 0.06, -d1), v3(xo, yo, -d1), bank_normal(xo), bank_grass_color,
+        MAT_GRASS);
+    if (d1 > end) put_quad(m, v3(x0, base, -end), v3(x0, base, -d1), v3(x0, hill.sea - 1.0,
+        -d1), v3(x0, hill.sea - 1.0, -end), v3(1.0, 0.0, 0.0), rock_color, MAT_FACE);
+    // Down to the next row's strip, across the strip and bank.
+    put_quad(m, v3(x0, base, -d1), v3(x1 - bank_out(SIDE_CELLS), base, -d1), v3(x1 - bank_out(SIDE_CELLS),
+        base - 6.0, -d1), v3(x0, base - 6.0, -d1), v3(0.0, 0.0, -1.0), rock_color,
+        MAT_FACE)
+}
+
+// How far the land goes on out past the bank.
+const LAND_OUT: f32 = 400.0;
+
+bank_normal(x: f32): V3 {
+    e: f32 = 0.05;
+    v_norm(v3(-(hill_bank_rise(x + e) - hill_bank_rise(x - e)) / (2.0 * e), 1.0, 0.0))
+}
+
+// The sea: one flat plane, from far back to the horizon, the far side of
+// the run's right cliff and past the headland.
+build_sea(m: *Mesh) {
+    y: f32 = hill.sea;
+    far: f32 = 3000.0;
+    c: V3 = tumbledown_sea_color;
+    put_quad(m, v3(HILL_HALF + WALL_WIDE, y, 200.0), v3(far, y, 200.0), v3(far, y,
+        -far), v3(HILL_HALF + WALL_WIDE, y, -far), up_n, c, MAT_WATER);
+    put_quad(m, v3(-far, y, -hill.finish), v3(HILL_HALF + WALL_WIDE, y, -hill.finish),
+        v3(HILL_HALF + WALL_WIDE, y, -far), v3(-far, y, -far), up_n, c, MAT_WATER)
+}
+
+// Sea stacks off the coast, two to four every 25 m, so that the distance
+// reads: thin pillars of the rock, a little lower than the run beside them.
+build_stacks(m: *Mesh) {
+    d: f32 = 15.0;
+    while (d < hill.finish) {
+        count: int = 2 + (hill_rand() * 2.99) as int;
+        for _i in 0..count {
+            at: f32 = d + hill_between(-8.0, 8.0);
+            x: f32 = HILL_HALF + WALL_WIDE + hill_between(6.0, 15.0);
+            wide: f32 = hill_between(1.5, 2.5);
+            top: f32 = maxf(row_top(hill.rows[row_at(at)], HILL_HALF) - hill_between(0.5,
+                4.0), hill.sea + 2.0);
+            put_block(m, x - wide * 0.5, x + wide * 0.5, hill.sea - 1.0, top, at - wide * 0.5,
+                at + wide * 0.5, v_scale(rock_color, hill_between(0.92, 1.05)))
+        }
+        d = d + 25.0
+    }
+}
+
+// Rocks at the foot of a drop of 1.5 m or more (off row k onto `next`):
+// two to four, along the lower row's back edge, at its sides, out of his
+// way, so that the drop has a size.
+build_boulders(m: *Mesh, k: int, next: Row) {
+    if (next.kind == ROW_SEA) return;
+    count: int = 2 + (hill_rand() * 1.99) as int;
+    for i in 0..count {
+        side: f32 = 1.0;
+        if (i % 2 == 0) side = -1.0;
+        x: f32 = side * hill_between(HILL_HALF * 0.45, HILL_HALF - 0.8);
+        if (edge_drop(k, x) >= 1.5) {
+            size: f32 = hill_between(0.5, 1.2);
+            d: f32 = next.start + hill_between(0.4, 1.4);
+            y: f32 = row_top(next, x);
+            put_block(m, x - size * 0.6, x + size * 0.6, y - 0.1, y + size * 0.8,
+                d - size * 0.5, d + size * 0.5, v_scale(rock_color, hill_between(0.9,
+                1.1)))
+        }
+    }
+}
+
+tree_m: []f32 = new f32[16](0.0);
+
+// A tree on the hillside beside some rows (the side away from the sea),
+// and a few beside the landings under towers and the meadow at the top, as
+// blocky as he is.
+build_trees(m: *Mesh, row: Row, k: int) {
+    count: int = 0;
+    if (k % 3 == 0) count = 1;
+    if (row.kind == ROW_FLAT) count = 3;
+    for _t in 0..count {
+        x: f32 = -(HILL_HALF + SIDE_GAP + hill_between(1.0, 4.0));
+        d: f32 = lerpf(row.start, row.end, 0.15 + 0.7 * hill_rand());
+        y: f32 = row_top(row, x) - SIDE_DROP + hill_bank_rise(x);
+        put_tree(m, x, d, y, 0.7 + 0.5 * hill_rand())
+    }
+}
+
+// A tree standing at (x, d) on ground at y.
+put_tree(
+    m: *Mesh,
+    x: f32,
+    d: f32,
+    y: f32,
+    size: f32
+) {
+    mat_identity(tree_m);
+    mat_translate(tree_m, v3(x, y + 0.9 * size, -d));
+    put_column(m, tree_m, v3(0.16 * size, 0.95 * size, 0.16 * size), 0.08 * size,
+        0.0, 0.0, bark_color, MAT_FACE);
+    shade: f32 = 0.85 + 0.3 * hill_rand();
+    mat_identity(tree_m);
+    mat_translate(tree_m, v3(x, y + 2.6 * size, -d));
+    put_rounded_box(m, tree_m, v3(1.2 * size, 1.0 * size, 1.2 * size), 0.8 * size,
+        0.0, 1, v_scale(leaf_color, shade), MAT_LEAF)
+}
+
+// Behind the start, the hill rising on.
+build_back(m: *Mesh) {
+    top: f32 = hill.rows[0].top[0];
+    for r in 0..8 {
+        a: f32 = HILL_START - 40.0 + r as f32 * 5.0;
+        b: f32 = a + 5.0;
+        ya: f32 = top + (HILL_START - a) * 0.5;
+        yb: f32 = top + (HILL_START - b) * 0.5;
+        put_quad(m, v3(-60.0, ya, -a), v3(HILL_HALF + WALL_WIDE, ya, -a), v3(HILL_HALF + WALL_WIDE,
+            yb, -b), v3(-60.0, yb, -b), v3(0.0, 0.9, 0.44), bank_grass_color, MAT_GRASS)
+    }
+}

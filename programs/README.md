@@ -8,6 +8,8 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `gl/` | `gl.l8`, `core.l8` | `gl` | OpenGL bindings; `gl.l8` adds GLX/X11, `core.l8` is platform-independent |
 | `x11/` | `x.l8` | `x11` | X11 types and bindings |
 | `skate/` | `math.l8` | `skate_math` | Deterministic scalar math, vectors and column-major matrices; imports libm for square root and floor |
+| `blockmesh/` | `blockmesh.l8` | `blockmesh` | Triangle meshes of soft blocks for a renderer: the vertex (position, normal, color, material code), rounded boxes, columns with flat or rounded ends, and drums; reports vertices built past a mesh's room |
+| `blockguy/` | `blockguy.l8` | `blockguy` | The block guy of the games: his measures, his mesh with a bone on every vertex (rigid skinning), joints with a person's limits, a pose type whose legs reach their feet by two-bone IK (or stand on a foot pinned by its toe, the heel lifting as it must), the pose made into one matrix per bone, and the GLSL #defines a shader skinning him needs; imports skate math, blockmesh and builder |
 | `freetype/` | `ft.l8` | `freetype` | Font loading, glyph atlases, and text vertices |
 | `files/` | `files.l8` | `files` | Atomic replacement of private saved files, and whole-file reads, on native Linux; reports open, read, write, close, rename and cleanup failures ([README](files/README.md)) |
 | `base64/` | `base64.l8` | `base64` | Padded RFC 4648 Base64 encoding of binary data; native and Wasm |
@@ -16,6 +18,7 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `deflate/` | `deflate.l8` | `deflate` | DEFLATE, zlib and gzip decoding, DEFLATE encoding, CRC-32 and Adler-32; native and Wasm ([README](deflate/README.md)) |
 | `archive/` | `archive.l8` | `archive` | Zip and tar reading from memory; imports deflate; native and Wasm ([README](archive/README.md)) |
 | `builder/` | `builder.l8` | `builder` | A growing byte slice for text or data of unknown size; native and Wasm ([README](builder/README.md)) |
+| `env/` | `env.l8` | `env` | Environment variables as settings, by name: whether one is set, its value, as a number, a whole number, numbers by commas, or one of a list of words; reading a number out of text; native and Wasm |
 | `folio/` | `folio.l8` | `folio` | Documents for reading software (Bibles, commentaries, books, dictionaries): text records in compressed blocks with an index of their divisions, written and read a part at a time; imports deflate and builder; native and Wasm ([README](folio/README.md)) |
 | `sword_folio/` | `sword_folio.l8` | `sword_folio` | SWORD modules made into folios a part at a time: a commentary's chapters (its verse labels followed), a dictionary's entries, a book's parts; imports sword, folio and builder; native and Wasm ([README](sword_folio/README.md)) |
 | `sword/` | `sword.l8` | `sword` | CrossWire SWORD modules read from their packages: Bibles, commentaries, dictionaries and books, their verse numbering and markup as rich text; imports deflate, archive and builder; native and Wasm ([README](sword/README.md)) |
@@ -28,6 +31,7 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `profile-explorer/` | `profile-explorer.l8` | — | X11/OpenGL/FreeType timeline viewer for Chrome trace JSON and `perf script` output |
 | `cad/` | `main.l8` | — | CAD viewer drawn by its own renderer: a handheld and its dock, their boards, cases and 3D, step by step how they go together, and how to order them ([README](cad/README.md)) |
 | `recipes/` | `main.l8` | — | Recipe book drawn by its own renderer: say what is in the kitchen and the recipes rank by it, with what a serving gives ([README](recipes/README.md)) |
+| `tumbledown/` | `main.l8` | `tumbledown` | A running game: the block guy runs down a hillside of stone terraces and jumps off the ledges, with skate's thumbs and rules for tricks; native and a page ([README](tumbledown/README.md)) |
 | `lemma/` | `main.l8` | `lemma` | A puzzle game made of real proofs: each level a theorem, proved by tapping and picking moves a small kernel checks ([README](lemma/README.md)) |
 | `bible/` | `ios/app.l8`, `android/main.l8`, `web/main.l8` | — | Smooth Bible: a Bible reader whose app is core, drawn by a skin each for iPhone and iPad (UIKit), Android and the web, with study, notes, plans, listening and the original languages ([README](bible/README.md)) |
 | `better/` | `main.l8`, `ios.l8`, `android.l8` | — | Runs, rides and walks recorded and logged, drawn by its own renderer, in a page or as a native iPhone or Android app; the phone's location measures distance, speed and climbing, and where you went is never kept ([README](better/README.md)) |

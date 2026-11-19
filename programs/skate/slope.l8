@@ -58,6 +58,18 @@ const CARVE_LIMIT: f32 = 1.35;
 
 const STEER_RATE: f32 = 2.2;
 
+// How quickly his turning follows the steering (a spring, critically
+// damped: half way in an eighth of a second), and the most a turn pulls
+// him round (m/s/s, his speed times how fast he turns): as much as
+// leaning 50 degrees into it holds him up against SLOPE_G (16 tan 50).
+const STEER_OMEGA: f32 = 14.0;
+
+const GRIP_ACCEL: f32 = 19.0;
+
+// How quickly what he feels on the ground settles (/s): the ground's
+// heights are a little rough from one step to the next.
+const FELT_EASE: f32 = 25.0;
+
 // How far either side of straight down the hill the steering thumb at the
 // end of its track aims him.
 const AIM_MAX: f32 = 1.2;
@@ -216,6 +228,7 @@ step_course(m: *Mover, keys: *Keys, dt: f32) {
     }
     if (m.grinding) step_course_grind(m, dt) else if (m.air) step_course_air(m, keys,
         dt) else step_course_ground(m, keys, dt);
+    if (m.air || m.grinding) m.felt_on = false;
     // The run is over past the finish line; in a park, when its time is up.
     if (!m.finished && (!park && -m.z >= course_finish || park && m.run_t >= PARK_TIME)) {
         m.finished = true;
@@ -311,19 +324,51 @@ predict_air(m: *Mover): f32 {
 // lands it sketchy.
 //
 // Flipping and spinning share him: a trick's flips and spins together must
-// fit the air, each taking its share of his fastest turning.
+// fit the air, each taking its share of his fastest turning. They are one
+// turning of him, begun and ended together (see trick_share).
 start_trick(m: *Mover, nf: int, nh: int) {
     if (!m.air) return;
     m.trick_set = true;
-    air: f32 = predict_air(m);
-    t: f32 = maxf(air - FIT_MARGIN, 0.05);
-    fit: f32 = maxf(trick_fit(nf, nh, air), 1.0);
+    m.trick_d = trick_time(nf, nh, predict_air(m));
+    m.trick_t = 0.0;
+    m.flip_from = m.flip;
+    m.spin_from = m.spin;
     m.flip_goal = m.flip + nf as f32 * TAU;
-    m.flip_w = maxf(absi(nf) as f32 * TAU / t / fit, FLIP_MIN);
     // To the right is clockwise seen from above.
     m.spin_goal = m.spin - nh as f32 * PI;
-    m.spin_w = maxf(absi(nh) as f32 * PI / t / fit, SPIN_MIN)
+    // (How fast each turns, on the whole: for copies of him elsewhere, see
+    // together.l8.)
+    m.flip_w = 0.0;
+    m.spin_w = 0.0;
+    if (m.trick_d > 0.0) {
+        m.flip_w = absi(nf) as f32 * TAU / m.trick_d;
+        m.spin_w = absi(nh) as f32 * PI / m.trick_d
+    }
 }
+
+// How long a trick of nf flips and nh half turns takes to turn, in an air
+// `air` long: as long as fits the air (longer, if it is too big for it),
+// but no longer than its bigger part, flips or spins, would take at its
+// least rate (see FLIP_MIN). (0 if it has no turning.)
+trick_time(nf: int, nh: int, air: f32): f32 {
+    t: f32 = maxf(air - FIT_MARGIN, 0.05);
+    fit: f32 = maxf(trick_fit(nf, nh, air), 1.0);
+    minf(t * fit, maxf(absi(nf) as f32 * TAU / FLIP_MIN, absi(nh) as f32 * PI / SPIN_MIN))
+}
+
+// How much of a trick's turning is done `u` of the way through its time
+// (0 to 1): at an even pace, then slowing to rest over the last
+// TRICK_SETTLE of it, as he opens up for the landing. (The pace is
+// 1 / (1 - TRICK_SETTLE / 2) of the trick's mean, so that it is done on
+// time; the slowing is a smoothstep's fall, whose sum is v - v^3 + v^4 / 2
+// that far into it.)
+trick_share(u: f32): f32 {
+    even: f32 = 1.0 - TRICK_SETTLE;
+    v: f32 = clampf((u - even) / TRICK_SETTLE, 0.0, 1.0);
+    (minf(clampf(u, 0.0, 1.0), even) + TRICK_SETTLE * (v - v * v * v + 0.5 * v * v * v * v)) / (1.0 - 0.5 * TRICK_SETTLE)
+}
+
+const TRICK_SETTLE: f32 = 0.3;
 
 // How much of the trick he went for he has turned, 0 to 1 (all of it, if
 // it has no turning).
@@ -398,6 +443,8 @@ take_off(m: *Mover) {
     m.spin = 0.0;
     m.spin_w = 0.0;
     m.spin_goal = 0.0;
+    m.trick_d = 0.0;
+    m.trick_t = 0.0;
     // Off a kicker, a pipe's wall, a cliff, or anything else; and how he
     // stood.
     m.air_from = takeoff_feature(m.prev.x, -m.prev.z);
@@ -446,14 +493,27 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
     if (keys.stick_on && park) want = keys.stick_x * STEER_RATE else if (keys.stick_on) want = clampf((keys.stick_x * AIM_MAX - m.carve) * 3.5,
         -STEER_RATE, STEER_RATE) else if (park) want = axis * STEER_RATE else if (axis != 0.0) want = clampf((axis * AIM_MAX - m.carve) * 3.5,
         -STEER_RATE, STEER_RATE);
-    m.carve_w = lerpf(m.carve_w, want, ease(8.0, dt));
+    // He turns no harder than leaning his most into the turn holds him up
+    // at the speed he goes (see GRIP_ACCEL; and pose.l8, where he leans as
+    // his turning and the ground have it). His turning eases in and out
+    // smoothly, so that his lean does.
+    grip: f32 = GRIP_ACCEL / maxf(m.speed, 0.1);
+    want = clampf(want, -grip, grip);
+    spring_step(&m.carve_w, &m.carve_wv, want, Spring { omega: STEER_OMEGA, damping: 1.0 },
+        dt);
     m.carve = m.carve + m.carve_w * dt;
     // Up a bank, heading out, he is turned back in, harder than he can
-    // steer out.
+    // steer out; but with his steering, no harder than the wheels grip
+    // (see GRIP_ACCEL), the bank's slope helping.
     if (!park) {
         e: f32 = 0.1;
         gx: f32 = (course_bank(m.x + e) - course_bank(m.x - e)) / (2.0 * e);
-        if (m.carve * signf(m.x) > -0.25) m.carve = m.carve - gx * BANK_PULL * dt
+        if (m.carve * signf(m.x) > -0.25) {
+            pull: f32 = -gx * BANK_PULL;
+            most: f32 = (GRIP_ACCEL + SLOPE_G * absf(gx) / sqrtf(1.0 + gx * gx)) / maxf(m.speed,
+                0.1) - maxf(m.carve_w * signf(pull), 0.0);
+            m.carve = m.carve + signf(pull) * minf(absf(pull), maxf(most, 0.0)) * dt
+        }
     } else if (park_out(m.x, m.z) > bowl_top() - 0.1) {
         // Out of the bowl, on its deck, he turns back in to drop in again.
         n: V3 = park_normal(m.x, m.z);
@@ -481,9 +541,18 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
     a: f32 = -SLOPE_G * rise / (1.0 + rise * rise) - ROLL_FRICTION * SLOPE_G - AIR_DRAG * m.speed * m.speed - TURN_DRAG * absf(m.turn_rate) * m.speed;
     // (A lesson finishes part way down the hill, with more of it ahead: he
     // pulls up short there.)
-    if (m.finished && in_tutorial()) a = a - LESSON_BRAKE else if (m.finished && !(park && on_wall)) a = a - BRAKE else if (park && m.speed < PARK_CRUISE && !on_wall) a = a + PARK_PUSH else if (m.speed < PUSH_SPEED && !on_wall) a = a + SLOPE_PUSH;
-    if (behind_pace > 0.0 && !on_wall) a = a + PACE_PUSH * minf(behind_pace / PACE_FAR,
-        1.0);
+    m.pushing = false;
+    if (m.finished && in_tutorial()) a = a - LESSON_BRAKE else if (m.finished && !(park && on_wall)) a = a - BRAKE else if (park && m.speed < PARK_CRUISE && !on_wall) {
+        a = a + PARK_PUSH;
+        m.pushing = true
+    } else if (m.speed < PUSH_SPEED && !on_wall) {
+        a = a + SLOPE_PUSH;
+        m.pushing = true
+    }
+    if (behind_pace > 0.0 && !on_wall) {
+        a = a + PACE_PUSH * minf(behind_pace / PACE_FAR, 1.0);
+        m.pushing = true
+    }
     // In a halfpipe he pumps, keeping up his speed.
     if (!m.finished && in_pipe(-m.z)) a = a + maxf(0.0, PIPE_PUMP - m.speed) * 1.5;
     m.speed = clampf(m.speed + a * dt, 0.0, TOP_SPEED);
@@ -510,7 +579,13 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
     fall: f32 = m.y + m.vy * dt - 0.5 * SLOPE_G * dt * dt;
     if (h >= fall - 0.002) {
         m.vy = (h - m.y) / dt;
-        m.y = h
+        m.y = h;
+        // (What he feels: see Mover.felt.)
+        vel: V3 = v3(m.vx, m.vy, m.vz);
+        if (m.felt_on) m.felt = v_lerp(m.felt, v_scale(v_sub(vel, m.felt_vel), 1.0 / dt),
+            ease(FELT_EASE, dt)) else m.felt = v3(0.0, 0.0, 0.0);
+        m.felt_vel = vel;
+        m.felt_on = true
     } else {
         m.y = fall;
         m.vy = m.vy - SLOPE_G * dt;
@@ -537,16 +612,6 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
     try_course_rail(m)
 }
 
-// Toward a whole number of turns, at a rate.
-turn_toward(
-    a: f32,
-    goal: f32,
-    w: f32,
-    dt: f32
-): f32 {
-    a + clampf(goal - a, -w * dt, w * dt)
-}
-
 step_course_air(m: *Mover, keys: *Keys, dt: f32) {
     // Grabbing, he turns slower.
     grabbing: bool = keys.style_held || m.pad_grab && keys.pad_held;
@@ -555,8 +620,17 @@ step_course_air(m: *Mover, keys: *Keys, dt: f32) {
         m.grab_t = m.grab_t + dt;
         slow = GRAB_SLOW
     }
-    m.flip = turn_toward(m.flip, m.flip_goal, m.flip_w * slow, dt);
-    m.spin = turn_toward(m.spin, m.spin_goal, m.spin_w * slow, dt);
+    if (m.trick_d > 0.0) {
+        m.trick_t = m.trick_t + dt * slow;
+        if (m.trick_t >= m.trick_d) {
+            m.flip = m.flip_goal;
+            m.spin = m.spin_goal
+        } else {
+            k: f32 = trick_share(m.trick_t / m.trick_d);
+            m.flip = lerpf(m.flip_from, m.flip_goal, k);
+            m.spin = lerpf(m.spin_from, m.spin_goal, k)
+        }
+    }
     // (He flies at the air's pace; he turns, and grabs, at his own.)
     flown: f32 = dt * air_pace();
     m.x = m.x + m.vx * flown;
@@ -614,6 +688,8 @@ land_tricks(m: *Mover, on_rail: bool) {
     m.spin_w = 0.0;
     m.flip_goal = 0.0;
     m.spin_goal = 0.0;
+    m.trick_d = 0.0;
+    m.trick_t = 0.0;
     m.grab_t = 0.0;
     m.pad_grab = false
 }

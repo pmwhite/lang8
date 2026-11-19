@@ -1,0 +1,793 @@
+tag tumbledown;
+
+use_tag skate_math, skate;
+
+// Running down the hill, by a few rules (skate's, on foot: see
+// programs/skate/slope.l8):
+//
+// - He goes where the stick (the left thumb, or the arrows) points, the
+//   way the camera looks being away: see move_on. A little way out he
+//   walks, half way he jogs, all the way he runs (RUN_SPEED on a shelf,
+//   faster down a ramp). He turns toward it, quickly when slow, and slows
+//   to turn round. Let go, he slows to a stop and stands.
+// - The trick pad (or Space) held, he gathers, running lower, aiming a
+//   trick: flips forward or back, half turns either way. Let go, he jumps
+//   into it: a jump on a shelf, a kick-off within KICK_REACH of a lip.
+//   Running off a lip without it, he drops; let go just after, he still
+//   kicks.
+// - The trick fits the air: he turns as fast as he must to finish just
+//   before he lands, and no faster than he can.
+// - In the air the pad (or X) held tucks him: he turns TUCK_TURN times as
+//   fast, so a trick too big for the air can still finish.
+// - Landing upright with the trick done is clean (see score.l8); crooked
+//   is a stumble, and scores nothing. Down a drop of HARD_DROP or more he
+//   lands deep, slowed for a moment, and of ROLL_DROP or more he rolls,
+//   head over heels, and runs on. He never falls.
+const RUN_G: f32 = 16.0;
+
+// Physics steps at 120 Hz, as skate's (STEP_DT, in its mover.l8).
+const RUN_SPEED: f32 = 3.4;
+
+// Down a ramp he goes faster, up to this; steering hard across, slower by
+// as much as this.
+const RAMP_SPEED: f32 = 4.5;
+
+const RUN_ACCEL: f32 = 3.0;
+
+const RUN_DECEL: f32 = 5.0;
+
+// Past the finish he slows to a stop.
+const FINISH_DECEL: f32 = 2.0;
+
+// How fast he turns toward where the stick points at the most, standing
+// and running (rad/s); and how much of its pull is too little to move
+// him.
+const TURN_STANDING: f32 = 9.0;
+
+const TURN_RUNNING: f32 = 3.0;
+
+const MOVE_DEAD: f32 = 0.12;
+
+// How fast he turns for how far he is from facing the stick's way (1/s),
+// and how quickly his turning takes that up (1/s): together a turn of 90
+// degrees in about 0.45 s, settling without going past (damping about
+// 0.75).
+const TURN_GAIN: f32 = 9.0;
+
+const TURN_EASE: f32 = 20.0;
+
+// What moves him this step (set by main.l8 from the stick or the arrows,
+// by the pilot, or by the stage): whether anything does, which way (a
+// heading, as carve), and how hard (0 to 1).
+tag tumbledown
+move_on: bool = false;
+
+tag tumbledown
+move_dir: f32 = 0.0;
+
+tag tumbledown
+move_amount: f32 = 0.0;
+
+// The speed for a pull of the stick: a walk a little way out, a jog half
+// way, a run all the way (the gait's walk, jog and run: see gait_rows).
+tag tumbledown
+move_speed(a: f32): f32 {
+    if (a <= MOVE_DEAD) return 0.0;
+    if (a < 0.35) return lerpf(0.8, 1.4, (a - MOVE_DEAD) / (0.35 - MOVE_DEAD));
+    if (a < 0.6) return lerpf(1.4, 2.2, (a - 0.35) / 0.25);
+    lerpf(2.2, RUN_SPEED, minf((a - 0.6) / 0.35, 1.0))
+}
+
+// A jump's speed up, and a kick-off's (and the kick's speed forward), and
+// how near a lip a kick-off is; and how long after running off a lip a
+// let go still kicks.
+const JUMP_SPEED: f32 = 5.0;
+
+const KICK_SPEED: f32 = 5.6;
+
+const KICK_FORWARD: f32 = 0.6;
+
+const KICK_REACH: f32 = 0.7;
+
+const LATE_KICK: f32 = 0.2;
+
+// How fast he turns, radians a second: at the most and the least; and how
+// long before landing a trick should be done.
+const RUN_FLIP_MAX: f32 = 11.0;
+
+const RUN_SPIN_MAX: f32 = 14.0;
+
+const RUN_FLIP_MIN: f32 = 6.0;
+
+const RUN_SPIN_MIN: f32 = 8.0;
+
+const RUN_FIT_MARGIN: f32 = 0.18;
+
+const TUCK_TURN: f32 = 1.35;
+
+// How near upright (or lined up) a landing must be, in radians.
+const RUN_LAND_TOL: f32 = 0.55;
+
+// Down a drop of these (m: the ground he left less the ground he lands
+// on, so that a jump's own height counts for nothing), he lands hard, and
+// rolls. (Judged by the speed he really falls at, every jump would land
+// hard and every kick-off roll.)
+const HARD_DROP: f32 = 2.3;
+
+const ROLL_DROP: f32 = 3.0;
+
+// Landing hard, he goes on at HARD_KEEP of his speed, back to full over
+// HARD_BACK. Rolling, he goes at ROLL_SPEED for ROLL_TIME.
+const HARD_KEEP: f32 = 0.6;
+
+const HARD_BACK: f32 = 0.6;
+
+const ROLL_TIME: f32 = 0.6;
+
+const ROLL_SPEED: f32 = 3.0;
+
+// How far the ground may fall away under him, more than he would fall,
+// in a step, and he still keeps to it.
+const STAY_DOWN: f32 = 0.03;
+
+// How near the rock wall on the sea's side he may run.
+const WALL_ROOM: f32 = 0.3;
+
+// A press of the pad this soon after landing (or in the air) is a tuck's,
+// not a gather's: held on the ground it does nothing, and let go, nothing.
+const TUCK_GRACE: f32 = 0.15;
+
+// How fast he slows running into a wall (m/s2).
+const WALL_STOP: f32 = 8.0;
+
+// A step up he runs into higher than this is a wall: he turns along it.
+const STEP_UP: f32 = 0.35;
+
+// How a landing went.
+const LAND_SOFT: int = 0;
+
+const LAND_HARD: int = 1;
+
+const LAND_ROLL: int = 2;
+
+const LAND_STUMBLE: int = 3;
+
+// How he took off: running off (a drop), a jump, or a kick-off.
+const TAKEOFF_DROP: int = 0;
+
+const TAKEOFF_JUMP: int = 1;
+
+const TAKEOFF_KICK: int = 2;
+
+tag tumbledown
+type Runner = {
+    x: f32;
+    y: f32;
+    z: f32;
+    prev: V3;
+    // Which way he heads across the hill (0 straight down, as skate's
+    // carve), how fast that turns, and his heading's turning; his speed
+    // along the ground.
+    carve: f32;
+    carve_w: f32;
+    turn_rate: f32;
+    speed: f32;
+    vx: f32;
+    vz: f32;
+    vy: f32;
+    air: bool;
+    air_time: f32;
+    // How long this air will be, as foreseen when he took off (or let go
+    // into a trick).
+    air_total: f32;
+    // Where he will land, as foreseen with air_total: the ground's height
+    // there.
+    air_land_y: f32;
+    takeoff: int;
+    // The ground's height where he left it, and how far down the hill.
+    takeoff_y: f32;
+    takeoff_d: f32;
+    // His flip and spin so far, how fast they turn, and where they end.
+    flip: f32;
+    flip_w: f32;
+    flip_goal: f32;
+    spin: f32;
+    spin_w: f32;
+    spin_goal: f32;
+    trick_set: bool;
+    // How long he has tucked this air; whether the pad, pressed in the
+    // air, is a tuck.
+    tuck_t: f32;
+    pad_tuck: bool;
+    tucking: bool;
+    // Gathering on the pad: the trick aimed at, and eased, for his
+    // wind-up.
+    winding: bool;
+    aim_flips: int;
+    aim_halves: int;
+    wind_x: f32;
+    wind_y: f32;
+    // Whether he has been touched into running; the run's time; the
+    // finish.
+    started: bool;
+    run_t: f32;
+    finished: bool;
+    finish_t: f32;
+    // The latest landing: how fast he fell, how it went, and since when;
+    // and since the latest takeoff.
+    land_fall: f32;
+    landing: int;
+    since_land: f32;
+    since_takeoff: f32;
+    // The latest bump into a wall, since when.
+    since_bonk: f32;
+    // The first of the hits (see score.l8) that this air, or the latest,
+    // scored.
+    hits_from: int;
+    // In the sea: the run is over (since finish_t). Where he went in, for
+    // the splash.
+    in_water: bool;
+    splash_at: V3;
+    // How long since he came down in a gap's water and climbed out onto
+    // the next row (99: not lately), and where.
+    dunk_t: f32;
+    dunk_at: V3;
+    // The run over, a tap asks to go again: main.l8 starts it all over
+    // (see restart there: the camera, the pose and the pilot too).
+    again: bool;
+    ground_n: V3
+}
+
+tag tumbledown
+new_runner(): *Runner@new {
+    new Runner {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        prev: v3(0.0, 0.0, 0.0),
+        carve: 0.0,
+        carve_w: 0.0,
+        turn_rate: 0.0,
+        speed: 0.0,
+        vx: 0.0,
+        vz: 0.0,
+        vy: 0.0,
+        air: false,
+        air_time: 0.0,
+        air_total: 0.0,
+        air_land_y: 0.0,
+        takeoff: TAKEOFF_DROP,
+        takeoff_y: 0.0,
+        takeoff_d: 0.0,
+        flip: 0.0,
+        flip_w: 0.0,
+        flip_goal: 0.0,
+        spin: 0.0,
+        spin_w: 0.0,
+        spin_goal: 0.0,
+        trick_set: false,
+        tuck_t: 0.0,
+        pad_tuck: false,
+        tucking: false,
+        winding: false,
+        aim_flips: 0,
+        aim_halves: 0,
+        wind_x: 0.0,
+        wind_y: 0.0,
+        started: false,
+        run_t: 0.0,
+        finished: false,
+        finish_t: 0.0,
+        land_fall: 0.0,
+        landing: LAND_SOFT,
+        since_land: 10.0,
+        since_takeoff: 10.0,
+        since_bonk: 10.0,
+        hits_from: 0,
+        in_water: false,
+        splash_at: v3(0.0, 0.0, 0.0),
+        dunk_t: 99.0,
+        dunk_at: v3(0.0, 0.0, 0.0),
+        again: false,
+        ground_n: v3(0.0, 1.0, 0.0)
+    }
+}
+
+// A runner as new, for starting over from.
+fresh_runner: *Runner = new_runner();
+
+// Where a run starts: standing at the top, toward the sea's side, facing
+// down.
+const START_X: f32 = 2.5;
+
+const START_D: f32 = -4.0;
+
+tag tumbledown
+runner_start(r: *Runner) {
+    r.* = fresh_runner.*;
+    // (Toward the sea's side, so that the coast is in sight from the start.)
+    r.x = START_X;
+    r.z = -START_D;
+    r.y = hill_height(r.x, r.z);
+    r.prev = v3(r.x, r.y, r.z);
+    score_clear()
+}
+
+// The way across the ground a carve heads.
+tag tumbledown
+run_dir(c: f32): V3 {
+    v3(sinf(c), 0.0, -cosf(c))
+}
+
+// The ground's rise along d at (x, z), per metre across the ground.
+run_rise(x: f32, z: f32, d: V3): f32 {
+    e: f32 = 0.1;
+    (hill_height(x + d.x * e, z + d.z * e) - hill_height(x - d.x * e, z - d.z * e)) / (2.0 * e)
+}
+
+run_key_axis(keys: *Keys, pos: int, neg: int): f32 {
+    a: f32 = 0.0;
+    if (keys.held[pos]) a = a + 1.0;
+    if (keys.held[neg]) a = a - 1.0;
+    a
+}
+
+run_trunc(a: f32): int {
+    if (a < 0.0) return -floorf(-a) as int;
+    floorf(a) as int
+}
+
+// The trick the pad aims at: flips forward, half turns to the right.
+tag tumbledown
+run_aimed_flips(keys: *Keys): int {
+    clamp_int(run_trunc(keys.aim_y), -3, 3)
+}
+
+tag tumbledown
+run_aimed_halves(keys: *Keys): int {
+    clamp_int(run_trunc(keys.aim_x), -6, 6)
+}
+
+// Whether any key or thumb has done anything this step.
+touched(keys: *Keys): bool {
+    keys.pad_press || keys.pad_held || keys.stick_on || keys.held[0] || keys.held[1] || keys.held[2] || keys.held[3] || keys.style || move_on && move_amount > MOVE_DEAD
+}
+
+// A step of the run.
+tag tumbledown
+step_runner(r: *Runner, keys: *Keys, dt: f32) {
+    r.prev = v3(r.x, r.y, r.z);
+    r.since_land = r.since_land + dt;
+    r.since_takeoff = r.since_takeoff + dt;
+    r.since_bonk = r.since_bonk + dt;
+    if (!r.started && touched(keys)) r.started = true;
+    if (r.started) r.run_t = r.run_t + dt;
+    if (r.finished) r.finish_t = r.finish_t + dt;
+    r.dunk_t = r.dunk_t + dt;
+    if (r.air) r.air_time = r.air_time + dt else r.air_time = 0.0;
+    // The pad pressed in the air (or just after landing) is a tuck;
+    // otherwise he gathers, aiming.
+    if (keys.pad_press) {
+        keys.pad_press = false;
+        r.pad_tuck = r.air || r.since_land < TUCK_GRACE
+    }
+    r.winding = (keys.pad_held || keys.pad_release) && !r.pad_tuck && r.started;
+    if (r.winding) {
+        r.aim_flips = run_aimed_flips(keys);
+        r.aim_halves = run_aimed_halves(keys)
+    }
+    wx: f32 = 0.0;
+    wy: f32 = 0.0;
+    if (r.winding) {
+        wx = clampf(r.aim_halves as f32 * 0.5, -1.0, 1.0);
+        wy = clampf(r.aim_flips as f32, -1.0, 1.0)
+    }
+    r.wind_x = lerpf(r.wind_x, wx, ease(12.0, dt));
+    r.wind_y = lerpf(r.wind_y, wy, ease(12.0, dt));
+    if (keys.pad_release) {
+        keys.pad_release = false;
+        if (r.pad_tuck) r.pad_tuck = false else if (r.finished) {
+            // (In the sea, as on the ground: tapping goes again.)
+            if (r.finish_t > 2.0 && (!r.air || r.in_water)) {
+                r.again = true;
+                return
+            }
+        } else release_jump(r);
+        r.winding = false
+    }
+    r.tucking = r.air && (keys.style_held || r.pad_tuck && keys.pad_held);
+    if (r.in_water) {
+        // In the sea, the run over: he sinks out of sight.
+        r.y = hill.sea - minf(r.finish_t * 2.5, 1.6);
+        r.speed = 0.0;
+        tick_score(dt);
+        return
+    }
+    if (r.air) step_air(r, dt) else step_ground(r, dt);
+    // (A run with the sea at its end finishes in it: see dive. Else, past
+    // the finish line.)
+    if (!r.finished && hill.sea < -999.0 && -r.z >= hill.finish) {
+        r.finished = true;
+        r.finish_t = 0.0
+    }
+    tick_score(dt)
+}
+
+// Letting go of the pad: a jump into the trick aimed at, or (just off a
+// lip) a late kick.
+release_jump(r: *Runner) {
+    if (r.air) {
+        if (r.air_time < LATE_KICK && r.takeoff == TAKEOFF_DROP) {
+            r.vy = maxf(r.vy, 0.0) + KICK_SPEED;
+            forward_by(r, KICK_FORWARD);
+            r.takeoff = TAKEOFF_KICK
+        } else {
+            // Too late to kick: as much of the trick as the air left can
+            // hold, at his fastest turning (half turns given up first, then
+            // flips); or, if none of it, nothing.
+            nf: int = r.aim_flips;
+            nh: int = r.aim_halves;
+            air: f32 = foresee_air(r);
+            while ((nf != 0 || nh != 0) && run_trick_fit(nf, nh, air) > 1.0) {
+                if (nh != 0) nh = nh - signi_r(nh) else nf = nf - signi_r(nf)
+            }
+            if (nf != 0 || nh != 0) start_trick(r, nf, nh);
+            return
+        }
+    } else {
+        d: V3 = run_dir(r.carve);
+        if (lip_ahead(r.x, -r.z, d.x, -d.z, KICK_REACH)) {
+            r.vy = maxf(r.vy, 0.0) + KICK_SPEED;
+            r.speed = r.speed + KICK_FORWARD;
+            take_off(r, TAKEOFF_KICK)
+        } else {
+            r.vy = maxf(r.vy, 0.0) + JUMP_SPEED;
+            take_off(r, TAKEOFF_JUMP)
+        }
+    }
+    start_trick(r, r.aim_flips, r.aim_halves)
+}
+
+// In the air, faster forward by as much.
+forward_by(r: *Runner, more: f32) {
+    sp: f32 = sqrtf(r.vx * r.vx + r.vz * r.vz);
+    if (sp < 0.01) return;
+    k: f32 = (sp + more) / sp;
+    r.vx = r.vx * k;
+    r.vz = r.vz * k
+}
+
+take_off(r: *Runner, how: int) {
+    r.air = true;
+    r.air_time = 0.0;
+    r.since_takeoff = 0.0;
+    r.hits_from = score.n;
+    r.takeoff = how;
+    r.takeoff_y = hill_height(r.prev.x, r.prev.z);
+    r.takeoff_d = -r.prev.z;
+    r.trick_set = false;
+    r.tuck_t = 0.0;
+    r.flip = 0.0;
+    r.flip_w = 0.0;
+    r.flip_goal = 0.0;
+    r.spin = 0.0;
+    r.spin_w = 0.0;
+    r.spin_goal = 0.0;
+    d: V3 = run_dir(r.carve);
+    r.vx = d.x * r.speed;
+    r.vz = d.z * r.speed;
+    r.air_total = foresee_air(r)
+}
+
+// How long until he comes down, flying as he is; and, setting air_land_y,
+// the ground's height where he will.
+tag tumbledown
+foresee_air(r: *Runner): f32 {
+    h: f32 = 1.0 / 60.0;
+    x: f32 = r.x;
+    y: f32 = r.y;
+    z: f32 = r.z;
+    vy: f32 = r.vy;
+    t: f32 = 0.0;
+    k: int = 0;
+    while (k < 400) {
+        vy = vy - RUN_G * h;
+        x = x + r.vx * h;
+        z = z + r.vz * h;
+        y = y + vy * h;
+        t = t + h;
+        if (y <= hill_height(x, z)) k = 400 else k = k + 1
+    }
+    r.air_land_y = hill_height(x, z);
+    t
+}
+
+// Into the air with nf flips (forward) and nh half turns (to the right),
+// fitted to the air he has, as skate's start_trick: he turns as fast as he
+// must to finish just before he lands, no faster than he can (without
+// tucking), and a trick's flips and spins share his fastest turning.
+start_trick(r: *Runner, nf: int, nh: int) {
+    if (!r.air) return;
+    r.trick_set = true;
+    air: f32 = foresee_air(r);
+    r.air_total = r.air_time + air;
+    t: f32 = maxf(air - RUN_FIT_MARGIN, 0.05);
+    fit: f32 = maxf(run_trick_fit(nf, nh, air), 1.0);
+    r.flip_goal = r.flip + nf as f32 * TAU;
+    r.flip_w = maxf(absi_r(nf) as f32 * TAU / t / fit, RUN_FLIP_MIN);
+    // (To the right is clockwise seen from above.)
+    r.spin_goal = r.spin - nh as f32 * PI;
+    r.spin_w = maxf(absi_r(nh) as f32 * PI / t / fit, RUN_SPIN_MIN)
+}
+
+// How much of an air t long a trick needs, of what he can turn in it
+// untucked: over 1, it is too big.
+tag tumbledown
+run_trick_fit(nf: int, nh: int, t: f32): f32 {
+    tt: f32 = t - RUN_FIT_MARGIN;
+    if (nf == 0 && nh == 0) return 0.0;
+    if (tt <= 0.05) return 9.99;
+    (absi_r(nf) as f32 * TAU / RUN_FLIP_MAX + absi_r(nh) as f32 * PI / RUN_SPIN_MAX) / tt
+}
+
+// How much of the trick he went for he has turned, 0 to 1.
+tag tumbledown
+run_trick_turned(r: *Runner): f32 {
+    goal: f32 = absf(r.flip_goal) + absf(r.spin_goal);
+    if (goal < 0.001) return 1.0;
+    clampf((absf(r.flip) + absf(r.spin)) / goal, 0.0, 1.0)
+}
+
+clamp_int(a: int, lo: int, hi: int): int {
+    if (a < lo) return lo;
+    if (a > hi) return hi;
+    a
+}
+
+signi_r(a: int): int {
+    if (a < 0) return -1;
+    if (a > 0) return 1;
+    0
+}
+
+absi_r(a: int): int {
+    if (a < 0) return -a;
+    a
+}
+
+turn_to(
+    a: f32,
+    goal: f32,
+    w: f32,
+    dt: f32
+): f32 {
+    a + clampf(goal - a, -w * dt, w * dt)
+}
+
+// The speed he runs at, here and now (see the rules), the stick pulled by
+// `amount`, `off` (rad) away from the way he faces.
+cruise(
+    r: *Runner,
+    d: V3,
+    amount: f32,
+    off: f32
+): f32 {
+    if (!r.started) return 0.0;
+    rise: f32 = run_rise(r.x, r.z, d);
+    v: f32 = move_speed(amount);
+    v = v + clampf(-rise * 2.0, 0.0, RAMP_SPEED - RUN_SPEED) * v / RUN_SPEED;
+    // (Turning round, he slows to turn.)
+    v = v * clampf(cosf(off), 0.15, 1.0);
+    // Getting over a stumble he is slower for a moment; landing hard, he
+    // stops; rolling, he rolls at its own pace.
+    if (r.landing == LAND_STUMBLE) v = v * lerpf(0.7, 1.0, smoothstepf(0.2, 1.0, r.since_land));
+    if (r.landing == LAND_HARD) v = v * lerpf(HARD_KEEP, 1.0, smoothstepf(0.0, HARD_BACK,
+        r.since_land));
+    if (r.landing == LAND_ROLL && r.since_land < ROLL_TIME) v = ROLL_SPEED;
+    // (On the stage, the motion's own speed, but for landing.)
+    if (stage_speed > 0.0 && r.started && (r.landing == LAND_SOFT || r.landing == LAND_STUMBLE || r.since_land > 0.6)) v = stage_speed;
+    v
+}
+
+step_ground(r: *Runner, dt: f32) {
+    // Turning toward where the stick points: faster the slower he goes.
+    c0: f32 = r.carve;
+    amount: f32 = 0.0;
+    off: f32 = 0.0;
+    goal_w: f32 = 0.0;
+    if (r.started && move_on && move_amount > MOVE_DEAD) {
+        amount = minf(move_amount, 1.0);
+        off = wrap_angle(move_dir - r.carve);
+        most: f32 = lerpf(TURN_STANDING, TURN_RUNNING, clampf(r.speed / RUN_SPEED,
+            0.0, 1.0));
+        goal_w = clampf(off * TURN_GAIN, -most, most)
+    }
+    r.carve_w = lerpf(r.carve_w, goal_w, ease(TURN_EASE, dt));
+    r.carve = wrap_angle(r.carve + r.carve_w * dt);
+    r.turn_rate = wrap_angle(c0 - r.carve) / dt;
+    d: V3 = run_dir(r.carve);
+    target: f32 = cruise(r, d, amount, off);
+    if (r.finished) r.speed = maxf(r.speed - FINISH_DECEL * dt, 0.0) else if (r.speed < target) r.speed = minf(r.speed + RUN_ACCEL * dt,
+        target) else r.speed = maxf(r.speed - RUN_DECEL * dt, target);
+    // A step up too high to run up is a wall: he turns along it, slowed.
+    ahead_x: f32 = r.x + d.x * 0.3;
+    ahead_z: f32 = r.z + d.z * 0.3;
+    if (hill_height(ahead_x, ahead_z) > r.y + STEP_UP && r.speed > 0.1) {
+        g: V3 = v3(hill_height(ahead_x + 0.05, ahead_z) - hill_height(ahead_x - 0.05,
+            ahead_z), 0.0, hill_height(ahead_x, ahead_z + 0.05) - hill_height(ahead_x,
+            ahead_z - 0.05));
+        n: V3 = v_norm(g);
+        // (Along the wall, whichever way is nearer the way he went, slowed
+        // once, the first time he meets it; straight into it, he slows to
+        // a stop where he is.)
+        if (v_len(v_reject(d, n)) < 0.2) {
+            r.speed = maxf(r.speed - WALL_STOP * dt, 0.0);
+            d = v3(0.0, 0.0, 0.0)
+        } else {
+            along: V3 = v_norm(v_reject(d, n));
+            r.carve = atan2f(along.x, -along.z);
+            r.carve_w = 0.0;
+            d = run_dir(r.carve);
+            if (r.since_bonk > 0.5) r.speed = r.speed * 0.5
+        }
+        r.since_bonk = 0.0
+    }
+    // (At the run's sides, the sea wall and the hillside's far reach: run
+    // into at an angle, he turns along it; straight at it, he slows to a
+    // stop.)
+    x: f32 = r.x + d.x * r.speed * dt;
+    if (x > HILL_HALF - WALL_ROOM && d.x > 0.0 || x < -HILL_HALF - 6.0 && d.x < 0.0) {
+        if (absf(d.z) < 0.2) r.speed = maxf(r.speed - WALL_STOP * dt, 0.0) else {
+            r.carve = atan2f(0.0, -signf(d.z));
+            r.carve_w = 0.0;
+            r.speed = maxf(r.speed - WALL_STOP * dt, minf(r.speed, target * absf(d.z)));
+            d = run_dir(r.carve)
+        }
+        x = r.x
+    }
+    r.x = clampf(x, -HILL_HALF - 6.0, HILL_HALF - WALL_ROOM);
+    // (Not back past the top of the hill.)
+    r.z = minf(r.z + d.z * r.speed * dt, -(HILL_START + 0.5));
+    r.vx = d.x * r.speed;
+    r.vz = d.z * r.speed;
+    r.ground_n = hill_normal(r.x, r.z);
+    // He stays on the ground unless it falls away faster than he would
+    // (by more than a little: over the top of a ramp, or onto a stair, he
+    // runs on down it).
+    h: f32 = hill_height(r.x, r.z);
+    fall: f32 = r.y + r.vy * dt - 0.5 * RUN_G * dt * dt;
+    if (h >= fall - STAY_DOWN) {
+        r.vy = (h - r.y) / dt;
+        r.y = h
+    } else {
+        r.y = fall;
+        r.vy = minf(r.vy - RUN_G * dt, 0.0);
+        take_off(r, TAKEOFF_DROP)
+    }
+}
+
+step_air(r: *Runner, dt: f32) {
+    rate: f32 = 1.0;
+    if (r.tucking) {
+        r.tuck_t = r.tuck_t + dt;
+        rate = TUCK_TURN
+    }
+    r.flip = turn_to(r.flip, r.flip_goal, r.flip_w * rate, dt);
+    r.spin = turn_to(r.spin, r.spin_goal, r.spin_w * rate, dt);
+    r.x = clampf(r.x + r.vx * dt, -HILL_HALF - 6.0, HILL_HALF + 30.0);
+    r.z = r.z + r.vz * dt;
+    r.vy = r.vy - RUN_G * dt;
+    r.y = r.y + r.vy * dt;
+    h: f32 = hill_height(r.x, r.z);
+    if (r.y <= h) land(r, h)
+}
+
+// Into the sea: the trick and the drop scored, if the trick is done (no
+// roll, nor stumble, in water); if not, a splash, and the drop alone. The
+// run is over.
+dive(r: *Runner, h: f32) {
+    flips: f32 = floorf(r.flip / TAU + 0.5);
+    halves: f32 = floorf(r.spin / PI + 0.5);
+    done: bool = absf(r.flip_goal - r.flip) < RUN_LAND_TOL && absf(r.spin_goal - r.spin) < RUN_LAND_TOL;
+    if (done) judge_trick(flips as int, -halves as int, r.tuck_t / maxf(r.air_time,
+        0.01), r.air_time) else judge_splash();
+    judge_drop(r.takeoff_y - h);
+    r.land_fall = -r.vy;
+    r.landing = LAND_SOFT;
+    r.since_land = 0.0;
+    r.air = false;
+    r.in_water = true;
+    r.splash_at = v3(r.x, h, r.z);
+    r.y = h;
+    r.vy = 0.0;
+    r.speed = 0.0;
+    r.finished = true;
+    r.finish_t = 0.0;
+    r.trick_set = false;
+    r.pad_tuck = false;
+    r.tucking = false
+}
+
+// Come down in the water of the gap after row k (short of the next row:
+// running straight off a lip always clears it, but not turned far to the
+// side): a splash, and he is on the next row at once, a stumble, slowed.
+climb_out(r: *Runner, k: int) {
+    next: Row = hill.rows[k + 1];
+    r.dunk_t = 0.0;
+    r.dunk_at = v3(r.x, hill.sea, r.z);
+    judge_splash();
+    r.z = -(next.start + 0.4);
+    r.y = row_top(next, r.x);
+    r.landing = LAND_STUMBLE;
+    r.land_fall = 0.0;
+    r.since_land = 0.0;
+    r.air = false;
+    r.vy = 0.0;
+    r.speed = ROLL_SPEED;
+    r.flip = 0.0;
+    r.flip_w = 0.0;
+    r.flip_goal = 0.0;
+    r.spin = 0.0;
+    r.spin_w = 0.0;
+    r.spin_goal = 0.0;
+    r.trick_set = false;
+    r.pad_tuck = false;
+    r.tucking = false;
+    r.ground_n = hill_normal(r.x, r.z)
+}
+
+// Coming down: judged (see score.l8), then running on.
+land(r: *Runner, h: f32) {
+    if (in_sea(r.x, -r.z)) {
+        dive(r, h);
+        return
+    }
+    k: int = row_at(-r.z);
+    if (!hill_flat && k < hill.n - 1 && -r.z >= hill.rows[k].end) {
+        climb_out(r, k);
+        return
+    }
+    fall: f32 = -r.vy;
+    flips: f32 = floorf(r.flip / TAU + 0.5);
+    halves: f32 = floorf(r.spin / PI + 0.5);
+    clean: bool = absf(r.flip - flips * TAU) < RUN_LAND_TOL && absf(r.spin - halves * PI) < RUN_LAND_TOL && absf(r.flip_goal - r.flip) < RUN_LAND_TOL && absf(r.spin_goal - r.spin) < RUN_LAND_TOL;
+    if (clean) {
+        // (A spin to the right turns him clockwise, the negative way.)
+        judge_trick(flips as int, -halves as int, r.tuck_t / maxf(r.air_time, 0.01),
+            r.air_time);
+        judge_drop(r.takeoff_y - h);
+        if (gap_cleared(r.takeoff_d, -r.z)) judge_gap()
+    } else judge_stumble(floorf(r.flip_goal / TAU + 0.5) as int, -floorf(r.spin_goal / PI + 0.5) as int);
+    r.landing = LAND_SOFT;
+    down: f32 = r.takeoff_y - h;
+    if (down >= HARD_DROP) r.landing = LAND_HARD;
+    if (down >= ROLL_DROP) r.landing = LAND_ROLL;
+    if (!clean) r.landing = LAND_STUMBLE;
+    r.land_fall = fall;
+    r.since_land = 0.0;
+    r.air = false;
+    r.y = h;
+    // His speed carries on along the ground, the way he was going (a half
+    // turn lands him facing back down the hill: he turns round as he
+    // lands).
+    v: V3 = v3(r.vx, 0.0, r.vz);
+    sp: f32 = v_len(v);
+    if (sp > 0.1) r.carve = atan2f(v.x / sp, -v.z / sp);
+    r.carve_w = 0.0;
+    r.speed = sp;
+    if (r.landing == LAND_HARD) r.speed = sp * HARD_KEEP;
+    if (r.landing == LAND_ROLL) r.speed = ROLL_SPEED;
+    if (r.landing == LAND_STUMBLE) r.speed = sp * 0.7;
+    // (Down a slope, he goes on down it.)
+    r.vy = run_rise(r.x, r.z, run_dir(r.carve)) * r.speed;
+    r.flip = 0.0;
+    r.flip_w = 0.0;
+    r.flip_goal = 0.0;
+    r.spin = 0.0;
+    r.spin_w = 0.0;
+    r.spin_goal = 0.0;
+    r.trick_set = false;
+    r.pad_tuck = false;
+    r.tucking = false;
+    r.ground_n = hill_normal(r.x, r.z)
+}

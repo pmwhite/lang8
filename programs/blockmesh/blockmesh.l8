@@ -1,0 +1,462 @@
+tag blockmesh_internal;
+
+use_tag skate_math;
+
+import "../skate/math.l8";
+
+// Triangles of soft blocks, for a renderer to upload and draw: rounded
+// boxes and drums, and the flat quads they are made of. A vertex is
+// VERTEX_FLOATS floats: its position, its normal (whose length a renderer
+// may read as how open the sky is over it, for ambient occlusion: 1 for
+// most), its color, and a material code, which only the renderer drawing
+// the mesh gives a meaning. Every three vertices are a triangle.
+//
+// A mesh holds as many vertices as it was made for. What is put past that
+// is not kept, but counted (mesh_dropped), so that its builder can report
+// how many it needed rather than draw part of what it built.
+tag blockmesh
+const VERTEX_FLOATS: int = 10;
+
+tag blockmesh
+type Mesh = {
+    data: []f32;
+    // The vertices kept, and those put past the mesh's room.
+    n: int;
+    dropped: int
+}
+
+tag blockmesh
+new_mesh(capacity: int): *Mesh@new {
+    new Mesh { data: new f32[capacity * VERTEX_FLOATS](0.0), n: 0, dropped: 0 }
+}
+
+// Empty, to be built again.
+tag blockmesh
+mesh_clear(m: *Mesh) {
+    m.n = 0;
+    m.dropped = 0
+}
+
+// How many vertices the mesh has room for.
+tag blockmesh
+mesh_capacity(m: *Mesh): int {
+    len(m.data) / VERTEX_FLOATS
+}
+
+// How many vertices were put past its room since it was last cleared (0
+// if all of them fit).
+tag blockmesh
+mesh_dropped(m: *Mesh): int {
+    m.dropped
+}
+
+// One corner of a triangle.
+tag blockmesh
+put(
+    m: *Mesh,
+    p: V3,
+    n: V3,
+    c: V3,
+    mat: f32
+) {
+    i: int = m.n * VERTEX_FLOATS;
+    if (i + VERTEX_FLOATS > len(m.data)) {
+        m.dropped = m.dropped + 1;
+        return
+    }
+    m.data[i] = p.x;
+    m.data[i + 1] = p.y;
+    m.data[i + 2] = p.z;
+    m.data[i + 3] = n.x;
+    m.data[i + 4] = n.y;
+    m.data[i + 5] = n.z;
+    m.data[i + 6] = c.x;
+    m.data[i + 7] = c.y;
+    m.data[i + 8] = c.z;
+    m.data[i + 9] = mat;
+    m.n = m.n + 1
+}
+
+// A flat quad a b c d (in order around it).
+tag blockmesh
+put_quad(
+    m: *Mesh,
+    a: V3,
+    b: V3,
+    c: V3,
+    d: V3,
+    n: V3,
+    col: V3,
+    mat: f32
+) {
+    put(m, a, n, col, mat);
+    put(m, b, n, col, mat);
+    put(m, c, n, col, mat);
+    put(m, a, n, col, mat);
+    put(m, c, n, col, mat);
+    put(m, d, n, col, mat)
+}
+
+// A quad with a normal at each corner.
+tag blockmesh
+put_quad_n(
+    m: *Mesh,
+    a: V3,
+    b: V3,
+    c: V3,
+    d: V3,
+    na: V3,
+    nb: V3,
+    nc: V3,
+    nd: V3,
+    col: V3,
+    mat: f32
+) {
+    put(m, a, na, col, mat);
+    put(m, b, nb, col, mat);
+    put(m, c, nc, col, mat);
+    put(m, a, na, col, mat);
+    put(m, c, nc, col, mat);
+    put(m, d, nd, col, mat)
+}
+
+// ---- rounded boxes ----
+// Samples along one axis of a box's face, in [-1, 1]: bands of `band` steps
+// over the rounded edges and a step either side of the middle.
+box_samples(
+    out: []f32,
+    half: f32,
+    r: f32,
+    band: int
+): int {
+    c: f32 = (half - r) / half;
+    if (c < 0.0) c = 0.0;
+    n: int = 0;
+    for i in 0..band + 1 {
+        out[n] = -1.0 + (1.0 - c) * i as f32 / band as f32;
+        n = n + 1
+    }
+    if (c > 0.0) {
+        out[n] = 0.0;
+        n = n + 1;
+        for i in 0..band + 1 {
+            out[n] = c + (1.0 - c) * i as f32 / band as f32;
+            n = n + 1
+        }
+    } else {
+        for i in 1..band + 1 {
+            out[n] = (1.0 - c) * i as f32 / band as f32;
+            n = n + 1
+        }
+    }
+    n
+}
+
+box_point(
+    q: V3,
+    half: V3,
+    r: f32,
+    bulge: f32,
+    out_n: *V3
+): V3 {
+    p: V3 = v3(q.x * half.x, q.y * half.y, q.z * half.z);
+    inner: V3 = v3(clampf(p.x, -(half.x - r), half.x - r), clampf(p.y, -(half.y - r),
+        half.y - r), clampf(p.z, -(half.z - r), half.z - r));
+    n: V3 = v_norm(v_sub(p, inner));
+    // Faces puff out toward their middles.
+    puff: f32 = (1.0 - q.x * q.x * absf(q.x)) * (1.0 - q.y * q.y * absf(q.y)) * (1.0 - q.z * q.z * absf(q.z));
+    out_n.* = n;
+    v_madd(inner, n, r + bulge * puff * 4.0)
+}
+
+box_su: []f32 = new f32[64](0.0);
+
+box_sv: []f32 = new f32[64](0.0);
+
+// A rounded box of half sizes `half` and corner radius r, puffed out by
+// bulge, placed by the matrix xf.
+tag blockmesh
+put_rounded_box(
+    m: *Mesh,
+    xf: []f32,
+    half: V3,
+    r: f32,
+    bulge: f32,
+    band: int,
+    col: V3,
+    mat: f32
+) {
+    for axis in 0..3 {
+        for side in 0..2 {
+            s: f32 = 1.0;
+            if (side == 0) s = -1.0;
+            // Axes u and v across the face.
+            hu: f32 = half.y;
+            hv: f32 = half.z;
+            if (axis == 1) {
+                hu = half.z;
+                hv = half.x
+            }
+            if (axis == 2) {
+                hu = half.x;
+                hv = half.y
+            }
+            nu: int = box_samples(box_su, hu, r, band);
+            nv: int = box_samples(box_sv, hv, r, band);
+            for i in 0..nu - 1 {
+                for j in 0..nv - 1 {
+                    a: V3 = face_q(axis, s, box_su[i], box_sv[j]);
+                    b: V3 = face_q(axis, s, box_su[i + 1], box_sv[j]);
+                    c: V3 = face_q(axis, s, box_su[i + 1], box_sv[j + 1]);
+                    d: V3 = face_q(axis, s, box_su[i], box_sv[j + 1]);
+                    na: V3 = v3(0.0, 1.0, 0.0);
+                    nb: V3 = na;
+                    nc: V3 = na;
+                    nd: V3 = na;
+                    pa: V3 = box_point(a, half, r, bulge, &na);
+                    pb: V3 = box_point(b, half, r, bulge, &nb);
+                    pc: V3 = box_point(c, half, r, bulge, &nc);
+                    pd: V3 = box_point(d, half, r, bulge, &nd);
+                    put_quad_n(m, mat_point(xf, pa), mat_point(xf, pb), mat_point(xf,
+                        pc), mat_point(xf, pd), v_norm(mat_vector(xf, na)), v_norm(mat_vector(xf,
+                        nb)), v_norm(mat_vector(xf, nc)), v_norm(mat_vector(xf, nd)),
+                        col, mat)
+                }
+            }
+        }
+    }
+}
+
+face_q(
+    axis: int,
+    s: f32,
+    u: f32,
+    v: f32
+): V3 {
+    if (axis == 0) return v3(s, u, v);
+    if (axis == 1) return v3(v, s, u);
+    v3(u, v, s)
+}
+
+// ---- drums ----
+// How many steps each of a drum's rounded rims takes.
+const DRUM_RIM_STEPS: int = 2;
+
+// The outline a drum is turned from, as (along its axis, out from it)
+// points and their normals: from the middle of one end out to its rim,
+// round the rim, along the side, round the other rim, and in to the middle
+// of the other end.
+drum_along: []f32 = new f32[2 * DRUM_RIM_STEPS + 4](0.0);
+
+drum_out: []f32 = new f32[2 * DRUM_RIM_STEPS + 4](0.0);
+
+drum_n_along: []f32 = new f32[2 * DRUM_RIM_STEPS + 4](0.0);
+
+drum_n_out: []f32 = new f32[2 * DRUM_RIM_STEPS + 4](0.0);
+
+drum_outline(
+    k: int,
+    along: f32,
+    out: f32,
+    n_along: f32,
+    n_out: f32
+) {
+    drum_along[k] = along;
+    drum_out[k] = out;
+    drum_n_along[k] = n_along;
+    drum_n_out[k] = n_out
+}
+
+// A drum: a cylinder with flat ends, its rims rounded by `rim`, about the
+// x axis of the matrix xf (through its origin), `radius` round and
+// 2 half_width long, in `sides` flat sides.
+tag blockmesh
+put_drum(
+    m: *Mesh,
+    xf: []f32,
+    radius: f32,
+    half_width: f32,
+    rim: f32,
+    sides: int,
+    col: V3,
+    mat: f32
+) {
+    e: f32 = minf(rim, minf(radius, half_width));
+    k: int = 0;
+    drum_outline(k, -half_width, 0.0, -1.0, 0.0);
+    k = k + 1;
+    for step in 0..DRUM_RIM_STEPS + 1 {
+        a: f32 = PI - PI * 0.5 * step as f32 / DRUM_RIM_STEPS as f32;
+        drum_outline(k, -half_width + e + e * cosf(a), radius - e + e * sinf(a), cosf(a),
+            sinf(a));
+        k = k + 1
+    }
+    for step in 0..DRUM_RIM_STEPS + 1 {
+        a: f32 = PI * 0.5 - PI * 0.5 * step as f32 / DRUM_RIM_STEPS as f32;
+        drum_outline(k, half_width - e + e * cosf(a), radius - e + e * sinf(a), cosf(a),
+            sinf(a));
+        k = k + 1
+    }
+    drum_outline(k, half_width, 0.0, 1.0, 0.0);
+    k = k + 1;
+    for i in 0..sides {
+        a0: f32 = TAU * i as f32 / sides as f32;
+        a1: f32 = TAU * (i + 1) as f32 / sides as f32;
+        for j in 0..k - 1 put_quad_n(m, drum_point(xf, j, a0), drum_point(xf, j + 1,
+            a0), drum_point(xf, j + 1, a1), drum_point(xf, j, a1), drum_normal(xf,
+            j, a0), drum_normal(xf, j + 1, a0), drum_normal(xf, j + 1, a1), drum_normal(xf,
+            j, a1), col, mat)
+    }
+}
+
+drum_point(xf: []f32, j: int, a: f32): V3 {
+    mat_point(xf, v3(drum_along[j], drum_out[j] * cosf(a), drum_out[j] * sinf(a)))
+}
+
+drum_normal(xf: []f32, j: int, a: f32): V3 {
+    v_norm(mat_vector(xf, v3(drum_n_along[j], drum_n_out[j] * cosf(a), drum_n_out[j] * sinf(a))))
+}
+
+// ---- columns ----
+// How many steps a column's rounded corners and ends take.
+const COLUMN_STEPS: int = 2;
+
+const COLUMN_OUTLINE: int = 4 * (COLUMN_STEPS + 1);
+
+// The rings a column is made of, bottom to top: each how far in from the
+// column's outline, at what height, and its normal's parts out from the
+// outline and up.
+const COLUMN_RINGS: int = 2 * (COLUMN_STEPS + 1);
+
+column_in: []f32 = new f32[COLUMN_RINGS](0.0);
+
+column_y: []f32 = new f32[COLUMN_RINGS](0.0);
+
+column_n_out: []f32 = new f32[COLUMN_RINGS](0.0);
+
+column_n_up: []f32 = new f32[COLUMN_RINGS](0.0);
+
+// A column: a box whose four upright edges are rounded by `r`, its ends
+// each flat (an end radius of 0) or rounded (by as much as its thinner
+// half); its middle at
+// the origin of xf, its half sizes `half`. A flat end is where it meets
+// another piece edge to edge, as a limb's two pieces do at a joint: no
+// groove shows between them, as rounded ends would leave.
+tag blockmesh
+put_column(
+    m: *Mesh,
+    xf: []f32,
+    half: V3,
+    r: f32,
+    bottom_r: f32,
+    top_r: f32,
+    col: V3,
+    mat: f32
+) {
+    corner: f32 = minf(r, minf(half.x, half.z));
+    rings: int = 0;
+    thinnest: f32 = minf(half.x, half.z);
+    rings = column_end(rings, -half.y, minf(bottom_r, thinnest), -1.0);
+    rings = column_end(rings, half.y, minf(top_r, thinnest), 1.0);
+    // (column_end puts the bottom's rings from its tip up; the top's from
+    // its side up to its tip, by reading them backward: see column_end.)
+    for k in 0..COLUMN_OUTLINE {
+        k1: int = (k + 1) % COLUMN_OUTLINE;
+        for j in 0..rings - 1 put_quad_n(m, column_point(xf, half, corner, k, j),
+            column_point(xf, half, corner, k1, j), column_point(xf, half, corner,
+            k1, j + 1), column_point(xf, half, corner, k, j + 1), column_normal(xf,
+            k, j), column_normal(xf, k1, j), column_normal(xf, k1, j + 1), column_normal(xf,
+            k, j + 1), col, mat);
+        // The ends' flat middles.
+        for e in 0..2 {
+            j: int = 0;
+            if (e == 1) j = rings - 1;
+            c: V3 = mat_point(xf, v3(0.0, column_y[j], 0.0));
+            n: V3 = v_norm(mat_vector(xf, v3(0.0, column_n_up[j], 0.0)));
+            put(m, c, n, col, mat);
+            put(m, column_point(xf, half, corner, k, j), n, col, mat);
+            put(m, column_point(xf, half, corner, k1, j), n, col, mat)
+        }
+    }
+}
+
+// An end's rings at height y, rounded by end_r (or flat), `way` 1 for the
+// top (its rings toward its tip) and -1 for the bottom; after the first
+// `rings`. Returns how many there are now.
+column_end(
+    rings: int,
+    y: f32,
+    end_r: f32,
+    way: f32
+): int {
+    n: int = rings;
+    steps: int = COLUMN_STEPS;
+    if (end_r <= 0.0) steps = 0;
+    for i in 0..steps + 1 {
+        // From the end's tip (a = 90 degrees) round to its side (0); the
+        // top's backward, so that they go up.
+        k: int = i;
+        if (way > 0.0) k = steps - i;
+        a: f32 = PI * 0.5 * (steps - k) as f32 / maxf(steps as f32, 1.0);
+        if (steps == 0) a = PI * 0.5;
+        column_in[n] = end_r * (1.0 - cosf(a));
+        column_y[n] = y - way * end_r * (1.0 - sinf(a));
+        column_n_out[n] = cosf(a);
+        column_n_up[n] = way * sinf(a);
+        if (steps == 0) {
+            // (A flat end: a ring at its edge, the sides' normal and the
+            // end's both: see the end's middle in put_column.)
+            column_n_out[n] = 1.0;
+            column_n_up[n] = way
+        }
+        n = n + 1
+    }
+    n
+}
+
+// The outline's point k: round the corner k / (COLUMN_STEPS + 1), its
+// angle and the corner's middle.
+column_corner_angle(k: int): f32 {
+    c: int = k / (COLUMN_STEPS + 1);
+    i: int = k % (COLUMN_STEPS + 1);
+    PI * 0.5 * (c as f32 + i as f32 / COLUMN_STEPS as f32)
+}
+
+column_corner_sign_x(k: int): f32 {
+    c: int = k / (COLUMN_STEPS + 1);
+    if (c == 1 || c == 2) return -1.0;
+    1.0
+}
+
+column_corner_sign_z(k: int): f32 {
+    c: int = k / (COLUMN_STEPS + 1);
+    if (c >= 2) return -1.0;
+    1.0
+}
+
+column_point(
+    xf: []f32,
+    half: V3,
+    corner: f32,
+    k: int,
+    j: int
+): V3 {
+    a: f32 = column_corner_angle(k);
+    // (Inset past the corners' round, an end's outline is a smaller box
+    // with square corners.)
+    round: f32 = maxf(corner - column_in[j], 0.0);
+    middle: f32 = maxf(corner, column_in[j]);
+    x: f32 = column_corner_sign_x(k) * (half.x - middle) + round * cosf(a);
+    z: f32 = column_corner_sign_z(k) * (half.z - middle) + round * sinf(a);
+    mat_point(xf, v3(x, column_y[j], z))
+}
+
+column_normal(xf: []f32, k: int, j: int): V3 {
+    a: f32 = column_corner_angle(k);
+    out: f32 = column_n_out[j];
+    up: f32 = column_n_up[j];
+    // (A flat end's ring is the sides': the end's own normal is its
+    // middle's.)
+    if (out >= 1.0) up = 0.0;
+    v_norm(mat_vector(xf, v3(out * cosf(a), up, out * sinf(a))))
+}
