@@ -21,6 +21,7 @@ type Anim = {
     // When he last felt the ground (see feel_ground), and how far the
     // board rolls under him (rad, about the way he goes).
     felt_t: f32;
+    felt_along: f32;
     roll: f32;
     grind: f32;
     grab: f32;
@@ -66,12 +67,15 @@ type Anim = {
     // from that still, easing off: when the mover's change at once (as he
     // lands, takes off, or gets on or off a rail), he goes on from where he
     // was. Whether he was on the ground, and whether this air is up a
-    // halfpipe's wall (he comes back down it switch: see update_anim).
+    // halfpipe's wall (he comes back down it switch: see update_anim). And
+    // the way his flip turns about, kept while he flips (see set_tumble).
     face_was: f32;
     face_off: f32;
     flip_was: f32;
     flip_off: f32;
     state_was: int;
+    flip_axis: V3;
+    flip_axis_known: bool;
     vert_air: bool;
     // In the air his middle flies on an arc (see keep_on_arc): where it was
     // from the mover at the arc's start (and when in the air that was), and
@@ -87,7 +91,9 @@ type Anim = {
 
 new_anim(yaw: f32, y: f32): *Anim@new {
     new Anim {
-        yaw: yaw,
+        // (He rides sideways: square to the way he heads, as update_anim
+        // keeps him.)
+        yaw: yaw - PI * 0.5,
         up: v3(0.0, 1.0, 0.0),
         y: y,
         air: 0.0,
@@ -97,6 +103,7 @@ new_anim(yaw: f32, y: f32): *Anim@new {
         board_up: v3(0.0, 1.0, 0.0),
         lean: 0.0,
         felt_t: -1.0,
+        felt_along: 0.0,
         roll: 0.0,
         grind: 0.0,
         grab: 0.0,
@@ -129,6 +136,8 @@ new_anim(yaw: f32, y: f32): *Anim@new {
         flip_was: 0.0,
         flip_off: 0.0,
         state_was: -1,
+        flip_axis: v3(1.0, 0.0, 0.0),
+        flip_axis_known: false,
         vert_air: false,
         arc_from: v3(0.0, 0.0, 0.0),
         arc_start: 0.0,
@@ -306,13 +315,19 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
         a.push_w = 1.0
     } else a.push_w = lerpf(a.push_w, pt, ease(4.0, dt));
     a.push_in = lerpf(a.push_in, pt, ease(8.0, dt));
-    if (m.air) a.planted = false;
+    // (Nor does a push go on over an air.)
+    if (m.air) {
+        a.planted = false;
+        a.push_seen = PUSH_STROKE
+    }
     if (a.push_w > 0.01) a.push_t = a.push_t + dt else {
         a.push_t = 0.0;
         a.planted = false;
         a.plant_done = false
     }
     if (m.bonk > 0.0) {
+        // (A bonk in the air turns his flight: his arc begins afresh.)
+        if (m.air) a.arc_known = false;
         a.squash_v = a.squash_v - minf(m.bonk, 6.0) * 0.12;
         m.bonk = 0.0
     }
@@ -336,6 +351,7 @@ update_anim(a: *Anim, m: *Mover, dt: f32) {
         a.yaw = a.yaw + PI
     }
     if (state != 1) a.vert_air = false;
+    if (state != 1 && absf(m.flip + a.flip_off) < 0.001) a.flip_axis_known = false;
     if (!(m.air && a.vert_air)) a.board_yaw = approach_angle(a.board_yaw, by, ease(14.0,
         dt));
     // The board tilts with the ground under him; level in the air.
@@ -388,7 +404,15 @@ feel_ground(a: *Anim, m: *Mover) {
     n: V3 = a.board_up;
     if (!m.air && !m.grinding) {
         side: V3 = v_cross(Y_AXIS, yaw_dir(m.heading));
-        if (m.felt_on) feel = v_add(v3(0.0, SLOPE_G, 0.0), m.felt) else {
+        if (m.felt_on) {
+            // (How he is hurried on along his way, smoothed more: pushing,
+            // the mover speeds him up and leaves off from step to step.)
+            way: V3 = yaw_dir(m.heading);
+            a.felt_along = lerpf(a.felt_along, v_dot(m.felt, way), ease(ALONG_EASE,
+                dt));
+            feel = v_madd(v_add(v3(0.0, SLOPE_G, 0.0), m.felt), way, a.felt_along - v_dot(m.felt,
+                way))
+        } else {
             // (Riding with others, and on the stage, he is not stepped here:
             // only his turning is known, its pull toward his side, and the
             // ground, which he is taken to be square to.)
@@ -435,6 +459,9 @@ const BEARS_LEAST: f32 = 0.6;
 
 const UP_EASE: f32 = 40.0;
 
+// (How quickly what hurries him on along his way settles, /s.)
+const ALONG_EASE: f32 = 6.0;
+
 const BALANCE_H: f32 = 0.65;
 
 const BOARD_ROLL: f32 = 0.3;
@@ -458,9 +485,15 @@ tumbling: bool = false;
 set_tumble(m: *Mover, a: *Anim, origin: V3) {
     tumbling = absf(m.flip + a.flip_off) > 0.001;
     if (!tumbling) return;
-    travel: V3 = v3(m.vx, 0.0, m.vz);
-    if (v_len(travel) < 0.1) travel = yaw_dir(m.heading);
-    axis: V3 = v_norm(v_cross(Y_AXIS, travel));
+    // (Across the way he flew as the flip began, kept: a bounce off the
+    // fence turns his flight, not his flip.)
+    if (!a.flip_axis_known) {
+        travel: V3 = v3(m.vx, 0.0, m.vz);
+        if (v_len(travel) < 0.1) travel = yaw_dir(m.heading);
+        a.flip_axis = v_norm(v_cross(Y_AXIS, travel));
+        a.flip_axis_known = true
+    }
+    axis: V3 = a.flip_axis;
     pivot: V3 = v_madd(origin, a.up, 0.5);
     mat_identity(tumble_m);
     mat_translate(tumble_m, pivot);
@@ -541,6 +574,10 @@ pose_guy(
     // along the ground: see feel_ground.)
     n: V3 = a.board_up;
     contact: V3 = v_madd(feet, v_madd(a.up, n, -v_dot(a.up, n)), -BALANCE_H);
+    // (On the ground there, which curves away from the plane it is out
+    // along: up a bank, say.)
+    if (!m.air && !m.grinding) contact.y = contact.y + (course_height(contact.x, contact.z) - course_height(feet.x,
+        feet.z)) * (1.0 - a.air);
     origin: V3 = v_madd(contact, n, DECK_TOP);
     // Riding switch, he faces the other way round. (And he goes on from how
     // he faced: see face_off.)
@@ -568,7 +605,7 @@ pose_guy(
     if (!m.air) let_go = 0.0;
     mv = mix_move(mv, move_grab(st, air), minf(a.grab, 1.0) * let_go);
     // (Snapping into it over a few frames.)
-    pop: f32 = smoothstepf(0.0, 0.06, m.since_hop) * (1.0 - smoothstepf(0.12, 0.25,
+    pop: f32 = smoothstepf(0.0, 0.1, m.since_hop) * (1.0 - smoothstepf(0.14, 0.27,
         m.since_hop));
     mv = mix_move(mv, move_pop(m, st, mv), pop);
     mv = mix_move(mv, move_land(mv, a.land_fall), clampf(a.absorb, 0.0, 1.0));
@@ -797,14 +834,14 @@ push_feet(a: *Anim, st: Sides, p: *GuyPose) {
     yaw: f32 = PUSH_FOOT_YAW * st.lead_x * DEG;
     // (His hips turn as far as his body: so that the pushing leg, planted
     // toward the tail, reaches out behind them, not in front.)
-    p.hips_yaw = lerpf(p.hips_yaw, 1.0, w);
+    p.hips_yaw = lerpf(p.hips_yaw, 1.0, a.push_in);
     // (Planting, he dips and leans a little into it.)
     phase0: f32 = push_phase(a);
     dip: f32 = 0.0;
     if (a.planted || phase0 >= PUSH_DOWN && !a.plant_done) dip = sinf(PI * clampf((phase0 - PUSH_DOWN) / 0.15,
         0.0, 1.0));
-    p.body.drop = lerpf(p.body.drop, PUSH_DROP + 0.03 * dip, w);
-    p.body.pitch = p.body.pitch + 6.0 * DEG * dip * w;
+    p.body.drop = lerpf(p.body.drop, PUSH_DROP + 0.03 * dip, a.push_in);
+    p.body.pitch = p.body.pitch + 6.0 * DEG * dip * a.push_in;
     // (Where the toe comes down: a little ahead of the hip, out past the
     // toe edge.)
     hip: V3 = guy_hip(p.body, p.hips_yaw, trail);
@@ -819,6 +856,9 @@ push_feet(a: *Anim, st: Sides, p: *GuyPose) {
         k: f32 = smoothstepf(0.0, PUSH_DOWN, phase);
         foot = v_lerp(deck, ankle_down, k);
         foot.y = foot.y + 0.05 * sinf(k * PI)
+    } else if (!a.plant_done && !a.planted && a.air > 0.3) {
+        // (Nothing is planted in the air: the foot reaches down no further.)
+        foot = ankle_down
     } else if (!a.plant_done) {
         if (!a.planted) {
             a.planted = true;
@@ -831,7 +871,8 @@ push_feet(a: *Anim, st: Sides, p: *GuyPose) {
         if ((pinned.x - hip.x) * st.lead_x < -PUSH_PLANT_BEHIND || v_len(v_sub(foot,
             hip)) > (GUY_THIGH + GUY_SHIN) * PUSH_STRETCH * 0.98) {
             a.planted = false;
-            a.plant_done = true
+            a.plant_done = true;
+            a.lift_at = phase
         } else {
             // (The foot held as its shin has it, toe pointed: see
             // toe_pointed_ankle.)
