@@ -3,7 +3,7 @@
 meter on (see programs/skate/jank.l8), and lay out what it found.
 
     python3 programs/skate/tools/jank.py RUN [--out DIR] [--size WxH]
-        [--least 0.004] [--kink 0.03] [--no-shots]
+        [--least 0.004] [--kink 0.03] [--jitter 0.3] [--no-shots]
 
 RUN is a run as the page keeps it (a file of "version course score name
 steps...", as watch.txt has it), or one sent from a phone to the run
@@ -101,6 +101,7 @@ def main():
     ap.add_argument("--kink", type=float, default=0.03)
     ap.add_argument("--display", default=os.environ.get("DISPLAY"))
     ap.add_argument("--no-shots", action="store_true")
+    ap.add_argument("--jitter", type=float, default=0.0, help="frames each up to so much longer or shorter (0.3: 30%%), as a phone's come")
     ap.add_argument("--top", type=int, default=40, help="incidents to show pictures of")
     a = ap.parse_args()
     if not a.display:
@@ -126,7 +127,7 @@ def main():
         w, h = round(view[0] * k) // 2 * 2, round(view[1] * k) // 2 * 2
     env = dict(os.environ, DISPLAY=a.display, L8_SEED=str(abs(course)), L8_WATCH=watch_path, L8_WATCH_QUIT="1",
                L8_JANK="1", L8_JANK_LEAST=str(a.least), L8_JANK_KINK=str(a.kink), L8_FRAME_DT=str(1 / 60),
-               L8_UNCAPPED="1", L8_WINDOW_W=str(w), L8_WINDOW_H=str(h))
+               L8_UNCAPPED="1", L8_WINDOW_W=str(w), L8_WINDOW_H=str(h), L8_FRAME_JITTER=str(a.jitter))
     if course < 0:
         env["L8_PARK"] = "1"
     if not a.no_shots:
