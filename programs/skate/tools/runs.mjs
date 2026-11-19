@@ -1,7 +1,7 @@
 // The run catcher: where the copy of the skate page on this machine's
 // tailnet sends each run finished on it (see sendRunHome, in
-// web/skate/skate.js), with the jank the game saw, to be looked into
-// (programs/skate/tools/jank.py).
+// web/skate/skate.js), finished or given up, to be watched again (put it
+// in watch.txt where the game runs, or L8_WATCH=file natively).
 //
 //     node programs/skate/tools/runs.mjs [DIR] [PORT]
 //
@@ -46,7 +46,7 @@ const server = http.createServer(async (req, res) => {
     const when = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
     const name = `${when}-c${r.course}-${r.finished === false ? "undone" : r.score}.json`;
     await writeFile(join(dir, name), JSON.stringify(run, null, 1));
-    console.log(`${name}: ${(run.jank ?? []).length} jank lines`);
+    console.log(name);
     return send(res, 200, { kept: name });
   }
   if (req.method === "GET" && path === "/blockguy/runs") {

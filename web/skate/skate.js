@@ -632,16 +632,12 @@ let account = mySecret && keptAccount?.id && keptAccount.id === people.me().id ?
 let gameVersion = stored("skate.rules", 0) || 0;
 
 // The copy of the page on this machine's tailnet, where the game is tried
-// out, has the game watch for jank (see programs/skate/jank.l8) and sends
-// each run finished, with the jank it saw, home to this machine
-// (programs/skate/tools/runs.mjs, at /blockguy/runs), to be looked into
-// (programs/skate/tools/jank.py). The jank said since the run began.
+// out, sends each run, finished or given up, home to this machine
+// (programs/skate/tools/runs.mjs, at /blockguy/runs), to be watched again.
 const trying = location.hostname.endsWith(".ts.net");
-let jankLines = [];
 const sendRunHome = (run) => {
   if (!trying) return;
-  const body = { run, jank: jankLines, device: device(), at: new Date().toISOString(), name: people.me()?.name ?? null };
-  jankLines = [];
+  const body = { run, device: device(), at: new Date().toISOString(), name: people.me()?.name ?? null };
   fetch("/blockguy/runs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
 };
 
@@ -1309,10 +1305,6 @@ const gameSays = (line) => {
   }
   // (A run given up, told of only where the game is tried out: see trying.)
   else if (words[0] === "L8UNDONE") sendRunHome({ version: Number(words[1]), course: Number(words[2]), score: 0, replay: words.slice(4).join(" "), finished: false });
-  else if (words[0] === "L8JANK") {
-    if (words[1] === "run") jankLines = [];
-    else if (jankLines.length < 3000) jankLines.push(line.trim());
-  }
   else if (words[0] === "L8COURSE") {
     placeNow = Number(words[1]);
     if (placeNow === headed) headed = null;
@@ -1856,8 +1848,8 @@ async function main() {
   // (On a page: the game stops for frames while it builds a place, and
   // leaves it to the page to show that it is loading. See L8LOAD.)
   params.set("L8_PAGE", "1");
-  // (Being tried out, it watches for jank: see trying.)
-  if (trying && !params.has("nojank")) params.set("L8_JANK", "1");
+  // (Being tried out, a run given up is sent home too: see trying.)
+  if (trying) params.set("L8_SEND_RUNS", "1");
   // (?diag has the game say how long each stage of a build takes.)
   if (params.has("diag")) params.set("L8_TRACE", "1");
   sys.env = [...params].filter(([k]) => k.startsWith("L8_")).map(([k, v]) => `${k}=${v}`);
