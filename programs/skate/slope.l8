@@ -95,6 +95,12 @@ const CLIMB_SPEED: f32 = 2.0;
 
 const LATE_OLLIE: f32 = 0.15;
 
+// Off the run, on the grass: how much more it holds him back than the
+// run, as a fraction of his weight, and per speed.
+const ROUGH_FRICTION: f32 = 0.12;
+
+const ROUGH_DRAG: f32 = 0.08;
+
 // How fast he turns, radians a second: at the most, and at the least, so
 // that a trick in a big air does not dawdle; and how long before landing
 // a trick should be done.
@@ -188,7 +194,10 @@ carve_dir(c: f32): V3 {
 // The ground's rise along d at (x, z), per unit across the ground.
 rise_along(x: f32, z: f32, d: V3): f32 {
     e: f32 = 0.1;
-    (course_height(x + d.x * e, z + d.z * e) - course_height(x - d.x * e, z - d.z * e)) / (2.0 * e)
+    // (Along the run, a step is as long as it is there: shorter on a
+    // bend's inside. See along_scale.)
+    ez: f32 = e / along_scale(x, -z);
+    (course_height(x + d.x * e, z + d.z * ez) - course_height(x - d.x * e, z - d.z * ez)) / (2.0 * e)
 }
 
 step_course(m: *Mover, keys: *Keys, dt: f32) {
@@ -311,13 +320,23 @@ predict_air(m: *Mover): f32 {
     x: f32 = m.x;
     y: f32 = m.y;
     z: f32 = m.z;
+    vx: f32 = m.vx;
+    vz: f32 = m.vz;
     vy: f32 = m.vy;
     t: f32 = 0.0;
     k: int = 0;
     while (k < 300) {
         vy = vy - SLOPE_G * h;
-        x = x + m.vx * h;
-        z = z + m.vz * h;
+        // (As he flies: round a bend, see step_course_air.)
+        along: f32 = h / along_scale(x, -z);
+        x = x + vx * h;
+        z = z + vz * along;
+        a: f32 = -vz * along * bend_curve(-z);
+        c: f32 = cosf(a);
+        s: f32 = sinf(a);
+        wx: f32 = vx * c + vz * s;
+        vz = vz * c - vx * s;
+        vx = wx;
         y = y + vy * h;
         t = t + h;
         if (y <= course_height(x, z)) k = 300 else k = k + 1
@@ -499,8 +518,12 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
     want: f32 = 0.0;
     axis: f32 = 0.0;
     if (arrows) axis = key_axis(keys, 0, 2);
-    if (keys.stick_on && park) want = keys.stick_x * STEER_RATE else if (keys.stick_on) want = clampf((keys.stick_x * AIM_MAX - m.carve) * 3.5,
-        -STEER_RATE, STEER_RATE) else if (park) want = axis * STEER_RATE else if (axis != 0.0) want = clampf((axis * AIM_MAX - m.carve) * 3.5,
+    // (On a winding run, from the fall line, not from the run, which turns
+    // under him: to stay on it round a bend, he steers round it. See
+    // bend.l8.)
+    fall: f32 = bend_turn(-m.z);
+    if (keys.stick_on && park) want = keys.stick_x * STEER_RATE else if (keys.stick_on) want = clampf((keys.stick_x * AIM_MAX - fall - m.carve) * 3.5,
+        -STEER_RATE, STEER_RATE) else if (park) want = axis * STEER_RATE else if (axis != 0.0) want = clampf((axis * AIM_MAX - fall - m.carve) * 3.5,
         -STEER_RATE, STEER_RATE);
     // He turns no harder than leaning his most into the turn holds him up
     // at the speed he goes (see GRIP_ACCEL; and pose.l8, where he leans as
@@ -541,6 +564,8 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
     // (A lesson finishes part way down the hill, with more of it ahead: he
     // pulls up short there.)
     m.pushing = false;
+    // Off the run, the grass holds him back.
+    if (!park && absf(m.x) > COURSE_HALF + 0.6) a = a - ROUGH_FRICTION * SLOPE_G - ROUGH_DRAG * m.speed;
     if (m.finished && in_tutorial()) a = a - LESSON_BRAKE else if (m.finished && !(park && on_wall)) a = a - BRAKE else if (park && m.speed < PARK_CRUISE && !on_wall) {
         a = a + PARK_PUSH;
         m.pushing = true
@@ -569,6 +594,9 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
         m.speed = m.speed * 0.5;
         d = carve_dir(m.carve)
     }
+    // (Along the run, as far as he goes along it there: further on a
+    // bend's inside.)
+    along: f32 = m.speed * dt / along_scale(m.x, -m.z);
     m.x = m.x + d.x * m.speed * dt;
     // The fence up each bank turns him back: he glances off it, heading in.
     if (!park && absf(m.x) > SIDE_LIMIT) {
@@ -580,7 +608,11 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
             d = carve_dir(m.carve)
         }
     }
-    m.z = m.z + d.z * m.speed * dt;
+    m.z = m.z + d.z * along;
+    // Round a bend, the run turns under him: he holds his way, and so heads
+    // that much the other way across it.
+    m.carve = m.carve + d.z * along * bend_curve(-m.z);
+    d = carve_dir(m.carve);
     m.vx = d.x * m.speed;
     m.vz = d.z * m.speed;
     m.heading = dir_yaw(d);
@@ -599,12 +631,15 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
         m.vy = (h - m.y) / dt;
         m.y = h;
         // (What he feels: see Mover.felt.)
-        vel: V3 = v3(m.vx, m.vy, m.vz);
+        // (As it is, not along the run: going round a bend, he turns, and
+        // it bears him round. See bend.l8.)
+        th: f32 = bend_turn(-m.z);
+        vel: V3 = turn_y(v3(m.vx, m.vy, m.vz), th);
         // (Just down, not yet known: as if the ground bore him square to
         // it.)
-        if (m.felt_on) m.felt = v_lerp(m.felt, v_scale(v_sub(vel, m.felt_vel), 1.0 / dt),
-            ease(FELT_EASE, dt)) else m.felt = v_scale(v_sub(m.ground_n, v3(0.0, 1.0,
-            0.0)), SLOPE_G);
+        if (m.felt_on) m.felt = v_lerp(m.felt, turn_y(v_scale(v_sub(vel, m.felt_vel),
+            1.0 / dt), -th), ease(FELT_EASE, dt)) else m.felt = v_scale(v_sub(m.ground_n,
+            v3(0.0, 1.0, 0.0)), SLOPE_G);
         m.felt_vel = vel;
         m.felt_on = true
     } else {
@@ -699,13 +734,16 @@ step_course_air(m: *Mover, keys: *Keys, dt: f32) {
     }
     // (He flies at the air's pace; he turns, and grabs, at his own.)
     flown: f32 = dt * air_pace();
+    along: f32 = flown / along_scale(m.x, -m.z);
     m.x = m.x + m.vx * flown;
     // (Flying at the fence, he bounces off it, back over the course.)
     if (!park && absf(m.x) > SIDE_LIMIT) {
         m.x = signf(m.x) * SIDE_LIMIT;
         if (m.vx * signf(m.x) > 0.0) m.vx = -m.vx * 0.3
     }
-    m.z = m.z + m.vz * flown;
+    m.z = m.z + m.vz * along;
+    // (Round a bend, he flies straight on, and the run turns under him.)
+    turn_flight(m, -m.vz * along * bend_curve(-m.z));
     m.vy = m.vy - SLOPE_G * flown;
     m.y = m.y + m.vy * flown;
     v: V3 = v3(m.vx, 0.0, m.vz);
@@ -714,6 +752,17 @@ step_course_air(m: *Mover, keys: *Keys, dt: f32) {
     if (m.grinding) return;
     h: f32 = course_height(m.x, m.z);
     if (m.y <= h) course_land(m, h)
+}
+
+// His flight turned by a against the run (as it turns under him, to the
+// right, by a).
+turn_flight(m: *Mover, a: f32) {
+    if (a == 0.0) return;
+    c: f32 = cosf(a);
+    s: f32 = sinf(a);
+    vx: f32 = m.vx * c + m.vz * s;
+    m.vz = m.vz * c - m.vx * s;
+    m.vx = vx
 }
 
 // Whether he came down, at d, short of a gap's landing: in its pit.
@@ -860,7 +909,8 @@ place_on_crail(m: *Mover) {
 step_course_grind(m: *Mover, dt: f32) {
     r: CRail = crails[m.crail];
     run_add(GRIND_POINTS * dt);
-    m.crail_t = m.crail_t + m.speed * dt;
+    // (On a bend, a rail along the run is as long as the run is there.)
+    m.crail_t = m.crail_t + m.speed * dt / along_scale(m.x, -m.z);
     len: f32 = v_len(v_sub(r.b, r.a));
     if (m.crail_t > len) {
         if (r.next >= 0) {
